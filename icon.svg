@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <!-- Takeout box body -->
+  <path d="M24 45 L40 25 L88 25 L104 45 L100 105 L28 105 Z"
+        fill="#D97757" stroke="#B85A3C" stroke-width="2"/>
+
+  <!-- Box fold lines -->
+  <path d="M24 45 L104 45" stroke="#B85A3C" stroke-width="2" fill="none"/>
+
+  <!-- Left fold -->
+  <path d="M40 25 L28 45" stroke="#B85A3C" stroke-width="1.5" fill="none"/>
+
+  <!-- Right fold -->
+  <path d="M88 25 L100 45" stroke="#B85A3C" stroke-width="1.5" fill="none"/>
+
+  <!-- Wire handle -->
+  <path d="M44 25 Q44 8, 64 8 Q84 8, 84 25"
+        stroke="#5C4033" stroke-width="4" fill="none" stroke-linecap="round"/>
+
+  <!-- Highlight on box front -->
+  <path d="M32 50 L36 98 L92 98 L96 50 Z"
+        fill="#E8936F" opacity="0.4"/>
+
+  <!-- Small decorative lines on box -->
+  <path d="M50 60 L78 60" stroke="#B85A3C" stroke-width="2" stroke-linecap="round"/>
+  <path d="M48 72 L80 72" stroke="#B85A3C" stroke-width="2" stroke-linecap="round"/>
+  <path d="M50 84 L78 84" stroke="#B85A3C" stroke-width="2" stroke-linecap="round"/>
+</svg>
