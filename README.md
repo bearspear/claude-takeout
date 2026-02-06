@@ -71,6 +71,7 @@ Creates a comprehensive archive:
 ├── responses_text_only.md       # Combined pure text responses
 ├── full_chat.md                 # Complete conversation (artifacts in code blocks)
 ├── integrated_chat.md           # Markdown artifacts flow seamlessly
+├── integrated_chat.txt          # Plain text version (no markdown formatting)
 ├── code_snippets.md             # All extracted code blocks
 ├── links_and_sources.md         # URLs + web search sources by domain
 ├── original.json                # Original JSON export
@@ -348,12 +349,16 @@ Works with [claude_json_to_md.py](https://github.com/...) for command-line proce
 ## Changelog
 
 ### v1.5.0
+- **Markdown escaping in README** - Response titles with special characters (backticks, asterisks, etc.) are now properly escaped to prevent malformed rendering
+- **Artifact embedding in full_chat.md** - Artifacts from `create_file` tool now embedded as code blocks in `full_chat.md` and included in `code_snippets.md`
+- **Plain text integrated chat** - Generates `integrated_chat.txt` with clean ASCII formatting (no markdown syntax)
 - **Project filename prefix** - Exports from project conversations prefixed with `[Project_Name-project]_`
 - **Full project file download** - Downloads complete project files via API (falls back to truncated view tool results)
 - **Project metadata export** - Saves `project.json` and `docs.json` in ZIP exports
 - **System prompt extraction** - Extracts `prompt_template` field as `prompt_template.md`
 - **Truncated file indicator** - Files from view tool fallback named with `_truncated` suffix
 - **UTF-8 BOM for markdown files** - Ensures browsers correctly render files opened via `file://` URLs
+- **Bash heredoc artifact extraction** - Extracts files created via `bash_tool` with `cat > file << 'EOF'` commands
 - **Mojibake repair** - Fixes UTF-8 encoding corruption with comprehensive character support:
   - Greek letters (α β γ ζ), Cyrillic
   - Box drawing (┌ ─ │ └), geometric shapes (□ ◇ ○)

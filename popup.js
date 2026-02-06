@@ -208,6 +208,21 @@ function extractArtifacts(data) {
             artifacts[filename] = content;
           }
         }
+
+        // Handle bash_tool with heredoc file creation (cat > /path/file << 'EOF')
+        if (block.name === 'bash_tool') {
+          const command = input.command || '';
+          // Match: cat > /path/file.ext << 'EOF' or cat > /path/file.ext << EOF
+          const heredocMatch = command.match(/cat\s+>\s+([^\s]+)\s+<<\s*'?EOF'?\s*\n([\s\S]*?)\nEOF/);
+          if (heredocMatch) {
+            const filepath = heredocMatch[1];
+            const content = heredocMatch[2];
+            const filename = filepath.split('/').pop();
+            if (filename && content) {
+              artifacts[filename] = content;
+            }
+          }
+        }
       }
     }
   }
@@ -789,6 +804,66 @@ function getThinkingSummary(block) {
   return firstLine;
 }
 
+// Convert markdown to plain text (for integrated_chat.txt)
+function markdownToPlainText(markdown) {
+  if (!markdown) return '';
+
+  let text = markdown;
+
+  // Remove BOM if present
+  text = text.replace(/^\uFEFF/, '');
+
+  // Remove HTML comments
+  text = text.replace(/<!--[\s\S]*?-->/g, '');
+
+  // Remove HTML anchor tags but keep content
+  text = text.replace(/<a[^>]*>(.*?)<\/a>/g, '$1');
+  text = text.replace(/<span[^>]*>(.*?)<\/span>/g, '$1');
+  text = text.replace(/<sup[^>]*>(.*?)<\/sup>/g, '');
+
+  // Convert headings to plain text with underlines
+  text = text.replace(/^#{1,6}\s+(.+)$/gm, (match, heading) => {
+    return '\n' + heading.toUpperCase() + '\n' + '='.repeat(Math.min(heading.length, 80)) + '\n';
+  });
+
+  // Remove bold/italic markers
+  text = text.replace(/\*\*\*(.+?)\*\*\*/g, '$1'); // bold+italic
+  text = text.replace(/\*\*(.+?)\*\*/g, '$1');     // bold
+  text = text.replace(/\*(.+?)\*/g, '$1');         // italic
+  text = text.replace(/___(.+?)___/g, '$1');       // bold+italic
+  text = text.replace(/__(.+?)__/g, '$1');         // bold
+  text = text.replace(/_(.+?)_/g, '$1');           // italic
+
+  // Remove inline code backticks
+  text = text.replace(/`([^`]+)`/g, '$1');
+
+  // Convert code blocks to plain text with separators
+  text = text.replace(/```[\w]*\n([\s\S]*?)```/g, (match, code) => {
+    return '\n' + '-'.repeat(80) + '\n' + code.trim() + '\n' + '-'.repeat(80) + '\n';
+  });
+
+  // Convert lists to simple format
+  text = text.replace(/^\s*[-*+]\s+/gm, '  • ');
+  text = text.replace(/^\s*\d+\.\s+/gm, '  ');
+
+  // Convert markdown links to plain text: [text](url) -> text (url)
+  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');
+
+  // Remove blockquote markers
+  text = text.replace(/^>\s?/gm, '');
+
+  // Remove horizontal rules (---, ***, ___)
+  text = text.replace(/^[\-*_]{3,}$/gm, '\n' + '~'.repeat(80) + '\n');
+
+  // Clean up multiple blank lines (more than 2)
+  text = text.replace(/\n{4,}/g, '\n\n\n');
+
+  // Remove leading/trailing whitespace
+  text = text.trim();
+
+  return text;
+}
+
 // ============================================================================
 // Priority 2: Enhanced Export - Zip Archive Support
 // ============================================================================
@@ -848,6 +923,13 @@ function extractFirstHeading(text) {
 
   const firstLine = text.trim().split('\n')[0].substring(0, 50);
   return firstLine || 'response';
+}
+
+// Escape markdown special characters for display in plain text
+function escapeMarkdown(text) {
+  if (!text) return text;
+  // Escape backticks, asterisks, underscores, brackets, and other special chars
+  return text.replace(/([`*_\[\]<>#\\])/g, '\\$1');
 }
 
 // Extract text-only content from a message (no thinking/tools)
@@ -1084,7 +1166,10 @@ function generateCodeSnippets(codeBlocks) {
   ];
 
   codeBlocks.forEach((block, i) => {
-    lines.push(`## Snippet ${i + 1} (${block.lang})`);
+    const header = block.filename
+      ? `## Snippet ${i + 1}: ${block.filename} (${block.lang})`
+      : `## Snippet ${i + 1} (${block.lang})`;
+    lines.push(header);
     lines.push('');
     lines.push(`\`\`\`${block.lang}`);
     lines.push(block.code);
@@ -1217,6 +1302,21 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   const codeBlocks = extractCodeBlocks(allText);
+
+  // Also include artifacts themselves as code blocks
+  for (const [filename, content] of Object.entries(artifacts)) {
+    const ext = filename.split('.').pop().toLowerCase();
+    const langMap = {
+      md: 'markdown', html: 'html', css: 'css', js: 'javascript', jsx: 'jsx',
+      py: 'python', json: 'json', xml: 'xml', txt: 'text', svg: 'svg',
+      ts: 'typescript', java: 'java', c: 'c', cpp: 'cpp', cs: 'csharp',
+      rb: 'ruby', go: 'go', rs: 'rust', swift: 'swift', kt: 'kotlin',
+      sql: 'sql', sh: 'bash', yaml: 'yaml', yml: 'yaml'
+    };
+    const lang = langMap[ext] || 'text';
+    codeBlocks.push({ lang: lang, code: content, filename: filename });
+  }
+
   const urls = extractUrls(allText);
 
   // Generate response files
@@ -1474,7 +1574,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   addFileWithBOM(folder, 'full_chat.md', convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking }));
-  addFileWithBOM(folder, 'integrated_chat.md', convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking }));
+  const integratedChatMd = convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking });
+  addFileWithBOM(folder, 'integrated_chat.md', integratedChatMd);
+  folder.file('integrated_chat.txt', markdownToPlainText(integratedChatMd));
   folder.file('original.json', JSON.stringify(data, null, 2));
 
   // Generate README.md
@@ -1492,6 +1594,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     '- [meta.md](meta.md) *(statistics, metadata, word counts)*',
     '- [full_chat.md](full_chat.md) *(complete conversation with embedded artifacts)*',
     '- [integrated_chat.md](integrated_chat.md) *(markdown artifacts flow seamlessly)*',
+    '- [integrated_chat.txt](integrated_chat.txt) *(plain text version, no markdown formatting)*',
     '- [original.json](original.json) *(original export)*',
     '',
     '---',
@@ -1526,7 +1629,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   for (const rf of responseFiles) {
-    const display = rf.heading.length > 50 ? rf.heading.substring(0, 47) + '...' : rf.heading;
+    const truncated = rf.heading.length > 50 ? rf.heading.substring(0, 47) + '...' : rf.heading;
+    const display = escapeMarkdown(truncated);
     readmeLines.push(`- ${display}: [text](responses/${rf.pure}) | [full](responses/${rf.full})`);
   }
 
@@ -1797,11 +1901,38 @@ function convertToMarkdown(data, options = {}) {
             const path = input.path || '';
             const filename = path.split('/').pop();
             const desc = input.description || '';
-            lines.push('```plaintext');
-            lines.push(`Creating artifact: ${filename}`);
-            if (desc) lines.push(`Description: ${desc}`);
-            lines.push('```');
-            lines.push('');
+            const fileText = input.file_text || '';
+
+            if (embedArtifacts && fileText) {
+              // Embed the actual artifact content
+              const ext = filename.split('.').pop().toLowerCase();
+
+              // Seamless embedding for markdown files
+              if (seamlessMd && ext === 'md') {
+                lines.push(`\n---\n\n**📄 ${filename}**\n`);
+                lines.push(fileText);
+                lines.push('\n---\n');
+              } else {
+                const langMap = {
+                  md: 'markdown', html: 'html', css: 'css', js: 'javascript', jsx: 'jsx',
+                  py: 'python', json: 'json', xml: 'xml', txt: '', svg: 'svg'
+                };
+                const lang = langMap[ext] || '';
+                const fence = getCodeFence(fileText);
+                lines.push(`\n**Artifact: ${filename}**\n`);
+                lines.push(`${fence}${lang}`);
+                lines.push(fileText);
+                lines.push(fence);
+              }
+              lines.push('');
+            } else {
+              // Just show metadata
+              lines.push('```plaintext');
+              lines.push(`Creating artifact: ${filename}`);
+              if (desc) lines.push(`Description: ${desc}`);
+              lines.push('```');
+              lines.push('');
+            }
 
           } else if (toolName === 'present_files') {
             // Present files - embed or reference artifacts

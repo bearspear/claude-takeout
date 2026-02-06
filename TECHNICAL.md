@@ -780,6 +780,7 @@ conversation_claude-chat.zip
 ├── responses_text_only.md <- Pure text responses (no thinking/tools)
 ├── full_chat.md           <- Complete conversation
 ├── integrated_chat.md     <- Markdown artifacts inline (no code blocks)
+├── integrated_chat.txt    <- Plain text version (no markdown formatting)
 ├── code_snippets.md       <- Extracted code blocks
 ├── links_and_sources.md   <- URLs and web sources by domain
 ├── original.json          <- Raw API response
