@@ -74,6 +74,7 @@ Creates a comprehensive archive:
 ├── integrated_chat.txt          # Plain text version (no markdown formatting)
 ├── code_snippets.md             # All extracted code blocks
 ├── links_and_sources.md         # URLs + web search sources by domain
+├── errors.txt                   # Export errors (only if failures occurred)
 ├── original.json                # Original JSON export
 ├── responses/
 │   ├── 001_title_response.md       # Pure text response
@@ -349,9 +350,13 @@ Works with [claude_json_to_md.py](https://github.com/...) for command-line proce
 ## Changelog
 
 ### v1.5.0
+- **Presented files download** - Files created via bash/Python scripts and presented to user are now downloaded and included in artefacts folder
+- **Error logging** - Failed file extractions now logged to `errors.txt` in ZIP exports with detailed error messages
 - **Markdown escaping in README** - Response titles with special characters (backticks, asterisks, etc.) are now properly escaped to prevent malformed rendering
 - **Artifact embedding in full_chat.md** - Artifacts from `create_file` tool now embedded as code blocks in `full_chat.md` and included in `code_snippets.md`
 - **Plain text integrated chat** - Generates `integrated_chat.txt` with clean ASCII formatting (no markdown syntax)
+- **Blob file path normalization** - Files with special characters (semicolons, parentheses, commas, periods) now correctly extracted from view tool fallback when API returns 404
+- **Sanitized path fallback for API** - When downloading files via wiggle endpoint, also tries sanitized path (underscores for special chars)
 - **Project filename prefix** - Exports from project conversations prefixed with `[Project_Name-project]_`
 - **Full project file download** - Downloads complete project files via API (falls back to truncated view tool results)
 - **Project metadata export** - Saves `project.json` and `docs.json` in ZIP exports

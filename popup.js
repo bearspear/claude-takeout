@@ -235,13 +235,19 @@ function extractArtifacts(data) {
 function extractTextAttachments(data) {
   const attachments = {};
   const idToFilename = {};  // Maps attachment id to final filename
-  const messages = data.chat_messages || [];
+  const messages = getMessageChain(data);  // Use ordered message chain
   let unnamedCounter = 1;
+  let promptNum = 0;
 
   // Binary file extensions that should be changed to .txt when we only have extracted text
   const binaryExtensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', '.ppt', '.pptx', '.odt', '.ods', '.odp', '.rtf'];
 
   for (const msg of messages) {
+    // Track prompt number (only increment for human messages)
+    if (msg.sender === 'human') {
+      promptNum++;
+    }
+
     for (const att of (msg.attachments || [])) {
       let filename = att.file_name || '';
       const content = att.extracted_content || '';
@@ -263,6 +269,10 @@ function extractTextAttachments(data) {
         const base = filename.substring(0, filename.lastIndexOf('.'));
         filename = `${base}.txt`;
       }
+
+      // Prefix with prompt number for grouping (p01_, p02_, etc.)
+      const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
+      filename = promptPrefix + filename;
 
       // Handle duplicate filenames by adding a suffix
       let finalName = filename;
@@ -358,13 +368,26 @@ function generateSources(sources) {
 // Extract uploaded file metadata from messages (PDFs, images, CSVs, etc. in files_v2)
 function extractUploadedFiles(data, organizationId = null) {
   const files = [];
-  const messages = data.chat_messages || [];
+  const messages = getMessageChain(data);  // Use ordered message chain
+  let promptNum = 0;
 
   for (const msg of messages) {
+    // Track prompt number (only increment for human messages)
+    if (msg.sender === 'human') {
+      promptNum++;
+    }
+
+    // Process files_v2 array (newer format)
     for (const file of (msg.files_v2 || [])) {
       if (file.success && file.file_name) {
+        // Prefix filename with prompt number for grouping (p01_, p02_, etc.)
+        const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
+        const prefixedFilename = promptPrefix + file.file_name;
+
         const fileInfo = {
-          filename: file.file_name,
+          filename: prefixedFilename,
+          originalFilename: file.file_name,  // Keep original for API calls
+          promptNum: promptNum,
           uuid: file.file_uuid || '',
           kind: file.file_kind || 'unknown',
           createdAt: file.created_at || '',
@@ -388,6 +411,86 @@ function extractUploadedFiles(data, organizationId = null) {
         }
 
         files.push(fileInfo);
+      }
+    }
+
+    // Process files array (older format)
+    for (const file of (msg.files || [])) {
+      if (!file.success) continue;
+
+      // Get filename: from path (blob) or file_name (document)
+      let originalFilename = '';
+      if (file.path) {
+        originalFilename = file.path.split('/').pop();
+      } else if (file.file_name) {
+        originalFilename = file.file_name;
+      } else {
+        continue; // No filename available
+      }
+
+      const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
+      const prefixedFilename = promptPrefix + originalFilename;
+
+      const fileInfo = {
+        filename: prefixedFilename,
+        originalFilename: originalFilename,
+        promptNum: promptNum,
+        uuid: file.file_uuid || '',
+        kind: file.file_kind || 'unknown',
+        createdAt: file.created_at || '',
+        path: file.path || ''
+      };
+
+      // Mark blob files for potential JSON fallback extraction
+      if (file.file_kind === 'blob') {
+        fileInfo.isBlob = true;
+      }
+
+      // Get URL for documents (PDFs)
+      if (file.document_asset?.url) {
+        fileInfo.url = file.document_asset.url;
+        fileInfo.pageCount = file.document_asset.page_count;
+      }
+
+      // Get URL for images
+      if (file.image_asset?.url) {
+        fileInfo.url = file.image_asset.url;
+      }
+
+      files.push(fileInfo);
+    }
+  }
+
+  return files;
+}
+
+// Extract presented files from present_files tool results
+// These are files created by Claude (via bash/Python) and presented to the user
+function extractPresentedFiles(data) {
+  const files = [];
+  const seen = new Set();  // Deduplicate by path
+  const messages = data.chat_messages || [];
+
+  for (const msg of messages) {
+    for (const item of (msg.content || [])) {
+      // Look for tool_result from present_files
+      if (item.type === 'tool_result' && item.name === 'present_files') {
+        for (const content of (item.content || [])) {
+          if (content.type === 'local_resource' && content.file_path) {
+            const path = content.file_path;
+            if (seen.has(path)) continue;
+            seen.add(path);
+
+            const filename = path.split('/').pop();
+            files.push({
+              filename: filename,
+              path: path,
+              uuid: content.uuid || '',
+              mimeType: content.mime_type || '',
+              name: content.name || ''
+            });
+          }
+        }
       }
     }
   }
@@ -488,10 +591,25 @@ async function fetchProjectDocs(data, organizationId) {
   }
 }
 
+// Normalize a file path for comparison (handles various sanitization patterns)
+function normalizePathForComparison(path) {
+  if (!path) return '';
+  // Strip to just alphanumerics for comparison - this handles all sanitization variations
+  // Claude may replace spaces, periods, semicolons, etc. with underscores in different ways
+  return path
+    .replace(/[^a-zA-Z0-9]/g, '')  // Remove ALL non-alphanumerics
+    .toLowerCase();
+}
+
 // Extract blob file content from view tool results in the conversation
 // Blob files are ephemeral and can't be downloaded, but their content appears in tool results
+// Returns { content, filename } where filename is the sanitized name from view tool
 function extractBlobContent(data, blobPath) {
   const messages = data.chat_messages || [];
+  const normalizedBlobPath = normalizePathForComparison(blobPath);
+  // Also extract just the filename part for looser matching
+  const blobFilename = blobPath.split('/').pop();
+  const normalizedFilename = normalizePathForComparison(blobFilename);
 
   for (const msg of messages) {
     for (const item of (msg.content || [])) {
@@ -501,8 +619,16 @@ function extractBlobContent(data, blobPath) {
           if (content.type === 'text' && content.text) {
             // Check if this tool result is for our file
             // The text starts with "Here's the content of {path} with line numbers:"
+            // Try multiple matching strategies
+            const normalizedText = normalizePathForComparison(content.text.substring(0, 500));
+
             if (content.text.includes(blobPath) ||
-                content.text.includes(blobPath.replace(/ /g, '_'))) {
+                normalizedText.includes(normalizedBlobPath) ||
+                normalizedText.includes(normalizedFilename)) {
+              // Extract the sanitized filename from the view tool header
+              const headerMatch = content.text.match(/^Here's the content of ([^\s]+) with line numbers:/);
+              const viewFilename = headerMatch ? headerMatch[1].split('/').pop() : blobFilename;
+
               // Extract the actual content (skip the header line and line numbers)
               const lines = content.text.split('\n');
               // Find where the actual content starts (after "Here's the content of...")
@@ -520,7 +646,10 @@ function extractBlobContent(data, blobPath) {
                 return match ? match[1] : line;
               });
               // Apply mojibake fix to repair encoding issues
-              return fixMojibake(contentLines.join('\n'));
+              return {
+                content: fixMojibake(contentLines.join('\n')),
+                filename: viewFilename
+              };
             }
           }
         }
@@ -588,8 +717,31 @@ async function fetchUploadedFile(url, fileUuid = null, orgId = null, conversatio
 
   // Wiggle endpoint using conversation ID and file path (works for blobs too!)
   if (orgId && conversationId && filePath) {
-    const encodedPath = encodeURIComponent(filePath);
+    // encodeURIComponent doesn't encode parentheses, but the wiggle endpoint requires them encoded
+    const encodedPath = encodeURIComponent(filePath)
+      .replace(/\(/g, '%28')
+      .replace(/\)/g, '%29');
     urlsToTry.push(`https://claude.ai/api/organizations/${orgId}/conversations/${conversationId}/wiggle/download-file?path=${encodedPath}`);
+
+    // Also try with sanitized path (Claude converts special chars to underscores)
+    // Example: "Source_Strange world of the moon; an e - Firsoff, V. A. (Valdemar Axel),.pdf.md"
+    //       → "Source_Strange_world_of_the_moon__an_e_-_Firsoff__V__A___Valdemar_Axel___pdf.md"
+    const filename = filePath.split('/').pop();
+    const dir = filePath.substring(0, filePath.length - filename.length);
+    // Replace all special chars (except - and final .ext) with underscore
+    // Keep the last .ext intact
+    const lastDotIdx = filename.lastIndexOf('.');
+    const hasExt = lastDotIdx > 0;
+    const basename = hasExt ? filename.substring(0, lastDotIdx) : filename;
+    const ext = hasExt ? filename.substring(lastDotIdx) : '';
+    // Sanitize basename: replace any non-alphanumeric (except _ and -) with _
+    const sanitizedBasename = basename.replace(/[^a-zA-Z0-9_\-]/g, '_');
+    const sanitizedFilename = sanitizedBasename + ext;
+    const sanitizedPath = dir + sanitizedFilename;
+    if (sanitizedPath !== filePath) {
+      const encodedSanitized = encodeURIComponent(sanitizedPath);
+      urlsToTry.push(`https://claude.ai/api/organizations/${orgId}/conversations/${conversationId}/wiggle/download-file?path=${encodedSanitized}`);
+    }
   }
 
   // Fallback URLs using file UUID if available
@@ -1096,13 +1248,25 @@ function generatePrompts(messages, responseFiles, attachmentIdMap = {}) {
       lines.push('');
     }
 
-    // Check for uploaded files (PDFs, images)
-    const uploads = (msg.files_v2 || []).filter(f => f.success && f.file_name);
-    if (uploads.length > 0) {
+    // Check for uploaded files (PDFs, images) - both files_v2 and files arrays
+    const uploadsV2 = (msg.files_v2 || []).filter(f => f.success && f.file_name);
+    const uploadsOld = (msg.files || []).filter(f => f.success && (f.path || f.file_name));
+    if (uploadsV2.length > 0 || uploadsOld.length > 0) {
       lines.push('**Uploaded Files:**');
-      for (const file of uploads) {
+      // files_v2 format
+      for (const file of uploadsV2) {
         const pageInfo = file.document_asset?.page_count ? ` (${file.document_asset.page_count} pages)` : '';
-        lines.push(`- [${file.file_name}](uploads/${encodeURIComponent(file.file_name)})${pageInfo}`);
+        const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
+        const prefixedName = promptPrefix + file.file_name;
+        lines.push(`- [${file.file_name}](uploads/${encodeURIComponent(prefixedName)})${pageInfo}`);
+      }
+      // files format (older) - get filename from path or file_name
+      for (const file of uploadsOld) {
+        const filename = file.path ? file.path.split('/').pop() : file.file_name;
+        const pageInfo = file.document_asset?.page_count ? ` (${file.document_asset.page_count} pages)` : '';
+        const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
+        const prefixedName = promptPrefix + filename;
+        lines.push(`- [${filename}](uploads/${encodeURIComponent(prefixedName)})${pageInfo}`);
       }
       lines.push('');
     }
@@ -1267,6 +1431,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   const artifacts = extractArtifacts(data);
   const { attachments: textAttachments, idToFilename: attachmentIdMap } = extractTextAttachments(data);
   const uploadedFiles = extractUploadedFiles(data, organizationId);
+  const presentedFiles = extractPresentedFiles(data);
   const webSources = extractWebSources(data);
 
   // Fetch project files: try API first (full files), fall back to view tool results (truncated)
@@ -1462,9 +1627,34 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     responseFiles.push({ pure: pureFilename, full: fullFilename, heading, type: 'response' });
   }
 
-  // Add artifacts
+  // Add artifacts from JSON (create_file, artifacts tool, heredoc)
   for (const [filename, content] of Object.entries(artifacts)) {
     addFileWithBOM(folder, `artefacts/${filename}`, content);
+  }
+
+  // Download and add presented files (files created via bash/Python and presented to user)
+  // Only download if not already in artifacts
+  const presentedFilesFailed = [];
+  for (let i = 0; i < presentedFiles.length; i++) {
+    const file = presentedFiles[i];
+    // Skip if already in artifacts
+    if (artifacts[file.filename]) continue;
+
+    if (onProgress) {
+      onProgress(15 + Math.floor((i / presentedFiles.length) * 5), 100, `Downloading: ${file.filename}`);
+    }
+
+    try {
+      const conversationId = data.uuid;
+      const blob = await fetchUploadedFile(null, file.uuid, organizationId, conversationId, file.path);
+      const text = await blob.text();
+      addFileWithBOM(folder, `artefacts/${file.filename}`, text);
+      // Also add to artifacts map for README generation
+      artifacts[file.filename] = text;
+    } catch (err) {
+      console.error(`Failed to download presented file ${file.filename}:`, err);
+      presentedFilesFailed.push({ filename: file.filename, error: err.message, path: file.path });
+    }
   }
 
   // Add text attachments (pasted files)
@@ -1543,10 +1733,14 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       } catch (apiErr) {
         // API failed - try JSON fallback for blob files
         if (file.isBlob && file.path) {
-          const content = extractBlobContent(data, file.path);
-          if (content) {
-            folder.file(`uploads/${finalName}`, content);
-            downloadedFiles.push({ name: finalName, fromJson: true });
+          const result = extractBlobContent(data, file.path);
+          if (result && result.content) {
+            // Use the sanitized filename from view tool, but keep prompt prefix
+            const promptPrefix = `p${String(file.promptNum).padStart(2, '0')}_`;
+            const baseName = result.filename || file.originalFilename || finalName;
+            const savedName = baseName.startsWith('p') && baseName[3] === '_' ? baseName : promptPrefix + baseName;
+            folder.file(`uploads/${savedName}`, result.content);
+            downloadedFiles.push({ name: savedName, fromJson: true });
           } else {
             throw new Error(`API failed (${apiErr.message}) and content not found in JSON`);
           }
@@ -1716,6 +1910,36 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   addFileWithBOM(folder, 'README.md', readmeLines.join('\n'));
+
+  // Write errors to error.txt if any failures occurred
+  const allFailures = [...failedFiles, ...presentedFilesFailed];
+  if (allFailures.length > 0) {
+    const errorLines = [
+      '# Export Errors',
+      '',
+      `Export date: ${new Date().toISOString()}`,
+      `Conversation: ${data.name || 'Untitled'}`,
+      ''
+    ];
+    if (failedFiles.length > 0) {
+      errorLines.push(`## Failed Uploads (${failedFiles.length})`, '');
+      for (const { filename, error } of failedFiles) {
+        errorLines.push(`### ${filename}`);
+        errorLines.push(`- Error: ${error}`);
+        errorLines.push('');
+      }
+    }
+    if (presentedFilesFailed.length > 0) {
+      errorLines.push(`## Failed Presented Files (${presentedFilesFailed.length})`, '');
+      for (const { filename, error, path } of presentedFilesFailed) {
+        errorLines.push(`### ${filename}`);
+        errorLines.push(`- Error: ${error}`);
+        errorLines.push(`- Path: ${path || 'none'}`);
+        errorLines.push('');
+      }
+    }
+    folder.file('errors.txt', errorLines.join('\n'));
+  }
 
   return { messages, artifacts, textAttachments, uploadedFiles: downloadedFiles, failedFiles, codeBlocks, urls, responseFiles };
 }
