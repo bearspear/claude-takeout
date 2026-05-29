@@ -192,6 +192,8 @@ When exporting conversations from Claude Projects, the extension provides compre
 - `[My_Research-project]_conversation_name.md`
 - `[My_Research-project]_conversation_name_claude-chat.zip`
 
+The prefix is applied on every export path (single MD / Embedded MD / ZIP / JSON and the bulk equivalents). When the page-side fetch only returns `project_uuid` without the nested `project.name`, the extension transparently resolves the name from the `/projects/<uuid>` endpoint before generating the filename.
+
 **Project Metadata** (ZIP exports):
 - `project/project.json` - Full project metadata from API
 - `project/prompt_template.md` - System prompt/instructions extracted as markdown
@@ -348,6 +350,11 @@ See [TECHNICAL.md](TECHNICAL.md) for a comprehensive technical writeup covering:
 Works with [claude_json_to_md.py](https://github.com/...) for command-line processing of exported JSON files.
 
 ## Changelog
+
+### v1.5.1
+- **Reliable project prefix on every export path** - `[Project_Name-project]_` is now applied to single MD/Embedded MD/ZIP/JSON exports and to all four bulk export paths, not just the ones whose captured payload happened to include `project.name`. When the page-side fetch only returns `project_uuid`, the extension resolves the name from `/api/organizations/<orgId>/projects/<projectUuid>` before generating the filename.
+- **Structured error report with recovery hints** - `ExportErrorCollector` produces a categorized `errors.txt` (errors + warnings, HTTP status, URLs tried, fallback results, troubleshooting guide) when any file extraction fails.
+- **Warning status state** - Popup and sidebar now show a distinct amber warning state for partial-success exports (e.g. ZIP succeeded but one upload couldn't be downloaded).
 
 ### v1.5.0
 - **Presented files download** - Files created via bash/Python scripts and presented to user are now downloaded and included in artefacts folder
