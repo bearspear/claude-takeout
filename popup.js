@@ -4,6 +4,227 @@ let conversationData = null;
 let orgId = null;
 
 // ============================================================================
+// Error Collector: Structured error tracking for comprehensive error reporting
+// ============================================================================
+
+class ExportErrorCollector {
+  constructor(conversationName, conversationUuid) {
+    this.conversationName = conversationName || 'Untitled';
+    this.conversationUuid = conversationUuid || 'unknown';
+    this.errors = [];
+    this.warnings = [];
+  }
+
+  addError(type, filename, error, details = {}) {
+    this.errors.push({
+      type,
+      severity: 'error',
+      filename,
+      error: error?.message || String(error),
+      details: {
+        uuid: details.uuid || null,
+        path: details.path || null,
+        urlsTried: details.urlsTried || [],
+        httpStatus: details.httpStatus || null,
+        fallbackAttempted: details.fallbackAttempted || false,
+        fallbackResult: details.fallbackResult || null,
+        rawError: details.rawError || null
+      },
+      recovery: this._getRecoveryHint(type, details)
+    });
+  }
+
+  addWarning(type, filename, message, details = {}) {
+    this.warnings.push({
+      type,
+      severity: 'warning',
+      filename,
+      error: message,
+      details: {
+        uuid: details.uuid || null,
+        path: details.path || null,
+        note: details.note || null
+      },
+      recovery: this._getRecoveryHint(type, details)
+    });
+  }
+
+  _getRecoveryHint(type, details) {
+    const httpStatus = details.httpStatus;
+
+    switch (type) {
+      case 'upload':
+        if (httpStatus === 404) {
+          return 'File may have expired or been deleted. If recently uploaded, re-upload to Claude and re-export. For blob files, check original.json for content in "view" tool results.';
+        } else if (httpStatus === 403) {
+          return 'Session may have expired. Refresh claude.ai, ensure you are logged in, and retry the export.';
+        } else if (details.fallbackAttempted && !details.fallbackResult) {
+          return 'API download failed and content was not found in conversation JSON. The file may need to be re-uploaded to Claude.';
+        }
+        return 'Check original.json for file content in tool_result blocks. Re-upload the file if needed.';
+
+      case 'presented_file':
+        return 'This file was created by Claude (via bash/Python) but could not be downloaded. Check original.json for the file content in tool results.';
+
+      case 'project_doc':
+        if (details.truncated) {
+          return 'Full file could not be fetched from API. Partial content was saved from conversation (may be truncated by Claude\'s view tool).';
+        }
+        return 'Project document could not be fetched. Check if you have access to the project and try re-exporting.';
+
+      case 'project_metadata':
+        return 'Project metadata could not be fetched. The conversation may not be associated with an active project.';
+
+      default:
+        return 'Check original.json for the raw conversation data that may contain this content.';
+    }
+  }
+
+  hasErrors() {
+    return this.errors.length > 0;
+  }
+
+  hasWarnings() {
+    return this.warnings.length > 0;
+  }
+
+  hasAny() {
+    return this.hasErrors() || this.hasWarnings();
+  }
+
+  generateErrorReport() {
+    if (!this.hasAny()) return null;
+
+    const lines = [
+      '# Export Errors Report',
+      '',
+      `**Export Date:** ${new Date().toISOString()}`,
+      `**Conversation:** ${this.conversationName}`,
+      `**UUID:** ${this.conversationUuid}`,
+      '',
+      '---',
+      '',
+      '## Summary',
+      ''
+    ];
+
+    // Summary counts by type
+    const errorsByType = {};
+    const warningsByType = {};
+
+    for (const err of this.errors) {
+      errorsByType[err.type] = (errorsByType[err.type] || 0) + 1;
+    }
+    for (const warn of this.warnings) {
+      warningsByType[warn.type] = (warningsByType[warn.type] || 0) + 1;
+    }
+
+    if (this.errors.length > 0) {
+      lines.push(`**Errors:** ${this.errors.length} total`);
+      for (const [type, count] of Object.entries(errorsByType)) {
+        lines.push(`- ${count} ${type.replace(/_/g, ' ')} failure${count > 1 ? 's' : ''}`);
+      }
+    }
+
+    if (this.warnings.length > 0) {
+      lines.push(`**Warnings:** ${this.warnings.length} total`);
+      for (const [type, count] of Object.entries(warningsByType)) {
+        lines.push(`- ${count} ${type.replace(/_/g, ' ')} warning${count > 1 ? 's' : ''}`);
+      }
+    }
+
+    // Detailed errors
+    if (this.errors.length > 0) {
+      lines.push('', '---', '', '## Errors', '');
+
+      for (const err of this.errors) {
+        lines.push(`### ${err.filename}`);
+        lines.push('');
+        lines.push(`- **Type:** ${err.type.replace(/_/g, ' ')}`);
+        lines.push(`- **Error:** ${err.error}`);
+
+        if (err.details.uuid) {
+          lines.push(`- **UUID:** ${err.details.uuid}`);
+        }
+        if (err.details.path) {
+          lines.push(`- **Path:** ${err.details.path}`);
+        }
+        if (err.details.httpStatus) {
+          lines.push(`- **HTTP Status:** ${err.details.httpStatus}`);
+        }
+
+        if (err.details.urlsTried && err.details.urlsTried.length > 0) {
+          lines.push('');
+          lines.push('**URLs Tried:**');
+          for (let i = 0; i < err.details.urlsTried.length; i++) {
+            const urlInfo = err.details.urlsTried[i];
+            const status = urlInfo.status ? ` → ${urlInfo.status}` : ' → failed';
+            lines.push(`${i + 1}. \`${urlInfo.url}\`${status}`);
+          }
+        }
+
+        if (err.details.fallbackAttempted) {
+          lines.push('');
+          lines.push(`**Fallback Attempted:** Yes`);
+          lines.push(`**Fallback Result:** ${err.details.fallbackResult || 'Content not found in JSON'}`);
+        }
+
+        lines.push('');
+        lines.push(`**Recovery:** ${err.recovery}`);
+        lines.push('');
+      }
+    }
+
+    // Detailed warnings
+    if (this.warnings.length > 0) {
+      lines.push('---', '', '## Warnings', '');
+
+      for (const warn of this.warnings) {
+        lines.push(`### ${warn.filename}`);
+        lines.push('');
+        lines.push(`- **Type:** ${warn.type.replace(/_/g, ' ')}`);
+        lines.push(`- **Message:** ${warn.error}`);
+
+        if (warn.details.note) {
+          lines.push(`- **Note:** ${warn.details.note}`);
+        }
+
+        lines.push('');
+        lines.push(`**Recovery:** ${warn.recovery}`);
+        lines.push('');
+      }
+    }
+
+    // Troubleshooting guide
+    lines.push('---', '', '## Troubleshooting Guide', '');
+    lines.push('### Common HTTP Status Codes');
+    lines.push('');
+    lines.push('| Status | Meaning | Solution |');
+    lines.push('|--------|---------|----------|');
+    lines.push('| 404 | File not found | File expired or deleted. Re-upload if needed. |');
+    lines.push('| 403 | Forbidden | Session expired. Refresh claude.ai and retry. |');
+    lines.push('| 401 | Unauthorized | Not logged in. Sign in to claude.ai and retry. |');
+    lines.push('| 500 | Server error | Claude API issue. Wait and retry later. |');
+    lines.push('');
+    lines.push('### Manual Recovery Steps');
+    lines.push('');
+    lines.push('1. **Check original.json:** Open the file and search for the filename. Content may exist in `tool_result` blocks.');
+    lines.push('2. **Search for "view" tool results:** Blob file contents appear after Claude reads them.');
+    lines.push('3. **Re-upload files:** If files expired, upload them to a new conversation.');
+    lines.push('4. **Check project access:** Ensure you have access to the Claude Project.');
+    lines.push('');
+    lines.push('### Debugging Tips (for code fixes)');
+    lines.push('');
+    lines.push('- URLs tried are listed above - check if the path encoding is correct');
+    lines.push('- Compare working vs failing files to identify patterns');
+    lines.push('- Check browser console for additional error details');
+    lines.push('- File UUID and path can help identify API endpoint issues');
+
+    return lines.join('\n');
+  }
+}
+
+// ============================================================================
 // Mojibake Fix: Repair UTF-8 text corrupted via CP1252 misinterpretation
 // ============================================================================
 
@@ -499,14 +720,39 @@ function extractPresentedFiles(data) {
 }
 
 // Fetch project metadata and documents list from API
-// Returns { files: array of { uuid, filename, content }, docsJson: raw docs API response, projectJson: raw project API response }
+// Returns { files, docsJson, projectJson, failures, metadataError }
+// Ensure data.project.name is populated. The page-side fetch intercepted by
+// injected.js often returns only project_uuid (no nested project.name), so for
+// project conversations we resolve the name from the projects endpoint and
+// patch data.project in place. Idempotent.
+async function ensureProjectName(data, organizationId) {
+  if (!data || data.project?.name) return data;
+  const projectUuid = data.project_uuid || data.project?.uuid;
+  if (!projectUuid || !organizationId) return data;
+  try {
+    const url = `https://claude.ai/api/organizations/${organizationId}/projects/${projectUuid}`;
+    const response = await fetch(url, { credentials: 'include' });
+    if (response.ok) {
+      const json = await response.json();
+      if (json?.name) {
+        data.project = { ...(data.project || {}), uuid: projectUuid, name: json.name };
+      }
+    }
+  } catch (e) {
+    console.log('ensureProjectName: failed to resolve project name:', e.message);
+  }
+  return data;
+}
+
 async function fetchProjectDocs(data, organizationId) {
   const projectUuid = data.project_uuid || data.project?.uuid;
   if (!projectUuid || !organizationId) {
-    return { files: [], docsJson: null, projectJson: null };
+    return { files: [], docsJson: null, projectJson: null, failures: [], metadataError: null };
   }
 
   let projectJson = null;
+  let metadataError = null;
+  const failures = [];  // Track failed doc fetches
 
   try {
     // Fetch project metadata
@@ -516,9 +762,23 @@ async function fetchProjectDocs(data, organizationId) {
       projectJson = await projectResponse.json();
       console.log(`Fetched project metadata: ${projectJson.name || projectUuid}`);
     } else {
+      metadataError = {
+        type: 'project_metadata',
+        error: `HTTP ${projectResponse.status}`,
+        httpStatus: projectResponse.status,
+        url: projectUrl,
+        projectUuid
+      };
       console.log(`Failed to fetch project metadata: ${projectResponse.status}`);
     }
   } catch (e) {
+    metadataError = {
+      type: 'project_metadata',
+      error: e.message,
+      httpStatus: null,
+      url: `https://claude.ai/api/organizations/${organizationId}/projects/${projectUuid}`,
+      projectUuid
+    };
     console.log(`Error fetching project metadata: ${e.message}`);
   }
 
@@ -528,12 +788,19 @@ async function fetchProjectDocs(data, organizationId) {
     const listResponse = await fetch(listUrl, { credentials: 'include' });
     if (!listResponse.ok) {
       console.log(`Failed to fetch project docs list: ${listResponse.status}`);
-      return { files: [], docsJson: null, projectJson };
+      failures.push({
+        filename: 'docs list',
+        error: `HTTP ${listResponse.status}`,
+        httpStatus: listResponse.status,
+        uuid: null,
+        urlsTried: [{ url: listUrl, status: `HTTP ${listResponse.status}` }]
+      });
+      return { files: [], docsJson: null, projectJson, failures, metadataError };
     }
 
     const docs = await listResponse.json();
     if (!Array.isArray(docs) || docs.length === 0) {
-      return { files: [], docsJson: docs, projectJson };
+      return { files: [], docsJson: docs, projectJson, failures: [], metadataError };
     }
 
     console.log(`Found ${docs.length} project docs`);
@@ -546,6 +813,7 @@ async function fetchProjectDocs(data, organizationId) {
 
       // Check if content is already in the docs list response
       let content = doc.content || doc.text || doc.body || null;
+      const urlsTried = [];
 
       // If not in list response, try fetching from content endpoints
       if (!content) {
@@ -565,9 +833,13 @@ async function fetchProjectDocs(data, organizationId) {
               } else {
                 content = await response.text();
               }
+              urlsTried.push({ url, status: 'OK' });
               break;
+            } else {
+              urlsTried.push({ url, status: `HTTP ${response.status}` });
             }
           } catch (e) {
+            urlsTried.push({ url, status: null, error: e.message });
             console.log(`Failed to fetch ${url}: ${e.message}`);
           }
         }
@@ -581,13 +853,27 @@ async function fetchProjectDocs(data, organizationId) {
         });
       } else {
         console.log(`Could not fetch content for doc: ${filename}`);
+        failures.push({
+          filename,
+          error: 'Could not fetch content from any endpoint',
+          httpStatus: urlsTried.find(u => u.status?.startsWith('HTTP'))?.status?.replace('HTTP ', '') || null,
+          uuid: docUuid,
+          urlsTried
+        });
       }
     }
 
-    return { files: projectFiles, docsJson: docs, projectJson };
+    return { files: projectFiles, docsJson: docs, projectJson, failures, metadataError };
   } catch (e) {
     console.error('Error fetching project docs:', e);
-    return { files: [], docsJson: null, projectJson };
+    failures.push({
+      filename: 'project docs',
+      error: e.message,
+      httpStatus: null,
+      uuid: null,
+      urlsTried: []
+    });
+    return { files: [], docsJson: null, projectJson, failures, metadataError };
   }
 }
 
@@ -704,10 +990,23 @@ function extractProjectFiles(data) {
   return projectFiles;
 }
 
+// Custom error class for file fetch failures with detailed context
+class FileFetchError extends Error {
+  constructor(message, details = {}) {
+    super(message);
+    this.name = 'FileFetchError';
+    this.urlsTried = details.urlsTried || [];
+    this.httpStatus = details.httpStatus || null;
+    this.uuid = details.uuid || null;
+    this.path = details.path || null;
+  }
+}
+
 // Fetch a file from Claude's API with fallback URLs
-// Returns { blob, fromApi: true } or throws if all API attempts fail
+// Returns blob on success, throws FileFetchError with detailed context on failure
 async function fetchUploadedFile(url, fileUuid = null, orgId = null, conversationId = null, filePath = null) {
   const urlsToTry = [];
+  const urlResults = [];  // Track {url, status, error} for each attempt
 
   // Primary URL (if provided and not empty)
   if (url) {
@@ -753,10 +1052,12 @@ async function fetchUploadedFile(url, fileUuid = null, orgId = null, conversatio
   }
 
   if (urlsToTry.length === 0) {
-    throw new Error('No URL or path available to fetch file');
+    throw new FileFetchError('No URL or path available to fetch file', {
+      uuid: fileUuid,
+      path: filePath
+    });
   }
 
-  let lastError = null;
   let lastStatus = null;
   for (const tryUrl of urlsToTry) {
     try {
@@ -769,13 +1070,21 @@ async function fetchUploadedFile(url, fileUuid = null, orgId = null, conversatio
         return await response.blob();
       }
       lastStatus = response.status;
-      lastError = new Error(`HTTP ${response.status}`);
+      urlResults.push({ url: tryUrl, status: `HTTP ${response.status}`, error: null });
     } catch (err) {
-      lastError = err;
+      urlResults.push({ url: tryUrl, status: null, error: err.message });
     }
   }
 
-  throw new Error(`Failed to fetch file (${lastStatus || lastError?.message || 'unknown error'}). Tried ${urlsToTry.length} URLs.`);
+  throw new FileFetchError(
+    `Failed to fetch file (${lastStatus ? `HTTP ${lastStatus}` : 'network error'})`,
+    {
+      urlsTried: urlResults,
+      httpStatus: lastStatus,
+      uuid: fileUuid,
+      path: filePath
+    }
+  );
 }
 
 // Get syntax highlighting language from filename extension
@@ -1434,6 +1743,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   const presentedFiles = extractPresentedFiles(data);
   const webSources = extractWebSources(data);
 
+  // Initialize error collector for comprehensive error tracking
+  const errorCollector = new ExportErrorCollector(data.name, data.uuid);
+
   // Fetch project files: try API first (full files), fall back to view tool results (truncated)
   let projectFiles = {};
   let projectFilesFromApi = false;
@@ -1441,9 +1753,35 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   let projectMetadataJson = null;
   if (data.project_uuid || data.project?.uuid) {
     if (onProgress) onProgress('Fetching project files...');
-    const { files: apiDocs, docsJson, projectJson } = await fetchProjectDocs(data, organizationId);
+    const { files: apiDocs, docsJson, projectJson, failures: projectFailures, metadataError } = await fetchProjectDocs(data, organizationId);
     projectDocsJson = docsJson;
     projectMetadataJson = projectJson;
+
+    // Patch data.project.name if it wasn't populated by the original fetch,
+    // so the project prefix is applied to the export filename.
+    if (projectJson?.name && !data.project?.name) {
+      const projectUuid = data.project_uuid || data.project?.uuid;
+      data.project = { ...(data.project || {}), uuid: projectUuid, name: projectJson.name };
+    }
+
+    // Track project metadata errors
+    if (metadataError) {
+      errorCollector.addWarning('project_metadata', 'project metadata', metadataError.error, {
+        uuid: metadataError.projectUuid,
+        httpStatus: metadataError.httpStatus,
+        note: 'Project metadata could not be fetched; project.json will not be included'
+      });
+    }
+
+    // Track project doc failures
+    for (const failure of projectFailures) {
+      errorCollector.addError('project_doc', failure.filename, failure.error, {
+        uuid: failure.uuid,
+        httpStatus: failure.httpStatus,
+        urlsTried: failure.urlsTried || []
+      });
+    }
+
     if (apiDocs.length > 0) {
       projectFilesFromApi = true;
       for (const doc of apiDocs) {
@@ -1455,6 +1793,15 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // Fall back to extracted view tool results if API didn't return files
   if (Object.keys(projectFiles).length === 0) {
     projectFiles = extractProjectFiles(data);
+    // Add warnings for truncated project files (extracted from JSON, not full API response)
+    if (Object.keys(projectFiles).length > 0) {
+      for (const filename of Object.keys(projectFiles)) {
+        errorCollector.addWarning('project_doc', filename, 'Full file could not be fetched; content extracted from conversation (may be truncated)', {
+          truncated: true,
+          note: 'Content was extracted from view tool results in the conversation JSON'
+        });
+      }
+    }
   }
 
   // Collect all text for extraction
@@ -1634,7 +1981,6 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   // Download and add presented files (files created via bash/Python and presented to user)
   // Only download if not already in artifacts
-  const presentedFilesFailed = [];
   for (let i = 0; i < presentedFiles.length; i++) {
     const file = presentedFiles[i];
     // Skip if already in artifacts
@@ -1653,7 +1999,12 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       artifacts[file.filename] = text;
     } catch (err) {
       console.error(`Failed to download presented file ${file.filename}:`, err);
-      presentedFilesFailed.push({ filename: file.filename, error: err.message, path: file.path });
+      errorCollector.addError('presented_file', file.filename, err.message, {
+        uuid: file.uuid,
+        path: file.path,
+        urlsTried: err.urlsTried || [],
+        httpStatus: err.httpStatus || null
+      });
     }
   }
 
@@ -1696,7 +2047,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   // Fetch and add uploaded files (PDFs, images, etc.)
   const downloadedFiles = [];
-  const failedFiles = [];
+  const failedFiles = [];  // Keep for README.md backward compatibility
   const usedUploadNames = new Set();
 
   for (let i = 0; i < uploadedFiles.length; i++) {
@@ -1718,6 +2069,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
     try {
       const conversationId = data.uuid;
+      let fallbackAttempted = false;
+      let fallbackResult = null;
 
       // Try API download first (works for all file types including blobs via wiggle endpoint)
       try {
@@ -1733,8 +2086,10 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       } catch (apiErr) {
         // API failed - try JSON fallback for blob files
         if (file.isBlob && file.path) {
+          fallbackAttempted = true;
           const result = extractBlobContent(data, file.path);
           if (result && result.content) {
+            fallbackResult = 'Content recovered from JSON';
             // Use the sanitized filename from view tool, but keep prompt prefix
             const promptPrefix = `p${String(file.promptNum).padStart(2, '0')}_`;
             const baseName = result.filename || file.originalFilename || finalName;
@@ -1742,7 +2097,20 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
             folder.file(`uploads/${savedName}`, result.content);
             downloadedFiles.push({ name: savedName, fromJson: true });
           } else {
-            throw new Error(`API failed (${apiErr.message}) and content not found in JSON`);
+            fallbackResult = 'Content not found in JSON';
+            // Create enhanced error with all context
+            const enhancedErr = new FileFetchError(
+              `API failed (${apiErr.message}) and content not found in JSON`,
+              {
+                urlsTried: apiErr.urlsTried || [],
+                httpStatus: apiErr.httpStatus || null,
+                uuid: file.uuid,
+                path: file.path
+              }
+            );
+            enhancedErr.fallbackAttempted = true;
+            enhancedErr.fallbackResult = fallbackResult;
+            throw enhancedErr;
           }
         } else {
           throw apiErr;
@@ -1750,7 +2118,22 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       }
     } catch (err) {
       console.error(`Failed to process ${file.filename}:`, err);
-      failedFiles.push({ filename: file.filename, error: `${err.message} | UUID: ${file.uuid || 'none'} | Path: ${file.path || 'none'}` });
+
+      // Add to error collector with full context
+      errorCollector.addError('upload', file.filename, err.message, {
+        uuid: file.uuid,
+        path: file.path,
+        urlsTried: err.urlsTried || [],
+        httpStatus: err.httpStatus || null,
+        fallbackAttempted: err.fallbackAttempted || false,
+        fallbackResult: err.fallbackResult || null
+      });
+
+      // Also track in failedFiles for README.md backward compatibility
+      failedFiles.push({
+        filename: file.filename,
+        error: err.message
+      });
     }
   }
 
@@ -1911,37 +2294,15 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   addFileWithBOM(folder, 'README.md', readmeLines.join('\n'));
 
-  // Write errors to error.txt if any failures occurred
-  const allFailures = [...failedFiles, ...presentedFilesFailed];
-  if (allFailures.length > 0) {
-    const errorLines = [
-      '# Export Errors',
-      '',
-      `Export date: ${new Date().toISOString()}`,
-      `Conversation: ${data.name || 'Untitled'}`,
-      ''
-    ];
-    if (failedFiles.length > 0) {
-      errorLines.push(`## Failed Uploads (${failedFiles.length})`, '');
-      for (const { filename, error } of failedFiles) {
-        errorLines.push(`### ${filename}`);
-        errorLines.push(`- Error: ${error}`);
-        errorLines.push('');
-      }
+  // Write comprehensive errors report if any failures occurred
+  if (errorCollector.hasAny()) {
+    const errorReport = errorCollector.generateErrorReport();
+    if (errorReport) {
+      folder.file('errors.txt', errorReport);
     }
-    if (presentedFilesFailed.length > 0) {
-      errorLines.push(`## Failed Presented Files (${presentedFilesFailed.length})`, '');
-      for (const { filename, error, path } of presentedFilesFailed) {
-        errorLines.push(`### ${filename}`);
-        errorLines.push(`- Error: ${error}`);
-        errorLines.push(`- Path: ${path || 'none'}`);
-        errorLines.push('');
-      }
-    }
-    folder.file('errors.txt', errorLines.join('\n'));
   }
 
-  return { messages, artifacts, textAttachments, uploadedFiles: downloadedFiles, failedFiles, codeBlocks, urls, responseFiles };
+  return { messages, artifacts, textAttachments, uploadedFiles: downloadedFiles, failedFiles, errorCollector, codeBlocks, urls, responseFiles };
 }
 
 // Create full zip export with progress callback
@@ -1983,7 +2344,13 @@ async function createZipExport(data, onProgress = null) {
 
   report(100, 100, 'Complete!');
 
-  return { responseCount: result.responseFiles.length, artifactCount: Object.keys(result.artifacts).length };
+  return {
+    responseCount: result.responseFiles.length,
+    artifactCount: Object.keys(result.artifacts).length,
+    errorCount: result.errorCollector?.errors?.length || 0,
+    warningCount: result.errorCollector?.warnings?.length || 0,
+    hasErrors: result.errorCollector?.hasAny() || false
+  };
 }
 
 // ============================================================================
@@ -2537,6 +2904,7 @@ async function bulkExport(format) {
         }
 
         const data = result.data;
+        await ensureProjectName(data, orgId);
         let content, filename;
         const projectPrefix = data.project?.name ? `[${safeFilename(data.project.name)}-project]_` : '';
 
@@ -2608,7 +2976,9 @@ async function bulkExportZip() {
     const megaZip = new JSZip();
     const indexEntries = [];
     let exported = 0;
-    let errors = [];
+    let errors = [];  // Conversation-level errors (failed to fetch/process entire conversation)
+    let totalFileErrors = 0;  // File-level errors across all conversations
+    let totalFileWarnings = 0;  // File-level warnings across all conversations
 
     for (const conv of conversations) {
       try {
@@ -2625,6 +2995,7 @@ async function bulkExportZip() {
         }
 
         const data = result.data;
+        await ensureProjectName(data, orgId);
         const projectPrefix = data.project?.name ? `[${safeFilename(data.project.name)}-project]_` : '';
         const folderName = `${projectPrefix}${safeFilename(data.name || conv.uuid)}`;
         const folder = megaZip.folder(folderName);
@@ -2632,13 +3003,21 @@ async function bulkExportZip() {
         // Use shared helper to populate the folder (same structure as individual zip)
         const folderResult = await populateConversationFolder(folder, data, null, orgId);
 
+        // Track file-level errors/warnings
+        if (folderResult.errorCollector) {
+          totalFileErrors += folderResult.errorCollector.errors?.length || 0;
+          totalFileWarnings += folderResult.errorCollector.warnings?.length || 0;
+        }
+
         // Add to index
         indexEntries.push({
           name: data.name || 'Untitled',
           folder: folderName,
           messages: folderResult.messages.length,
           created: data.created_at ? formatTimestamp(data.created_at) : '',
-          uuid: data.uuid
+          uuid: data.uuid,
+          fileErrors: folderResult.errorCollector?.errors?.length || 0,
+          fileWarnings: folderResult.errorCollector?.warnings?.length || 0
         });
 
         exported++;
@@ -2659,19 +3038,32 @@ async function bulkExportZip() {
       '',
       `**Exported:** ${formatTimestamp(new Date().toISOString())}`,
       `**Total Conversations:** ${exported}`,
+    ];
+
+    // Add summary of file-level issues
+    if (totalFileErrors > 0 || totalFileWarnings > 0) {
+      const issueParts = [];
+      if (totalFileErrors > 0) issueParts.push(`${totalFileErrors} file error${totalFileErrors > 1 ? 's' : ''}`);
+      if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
+      indexLines.push(`**Issues:** ${issueParts.join(', ')} (see errors.txt in affected folders)`);
+    }
+
+    indexLines.push(
       '',
       '## Conversations',
       '',
-      '| # | Conversation | Messages | Created |',
-      '|---|--------------|----------|---------|'
-    ];
+      '| # | Conversation | Messages | Created | Issues |',
+      '|---|--------------|----------|---------|--------|'
+    );
 
     indexEntries.forEach((entry, i) => {
-      indexLines.push(`| ${i + 1} | [${entry.name}](${entry.folder}/README.md) | ${entry.messages} | ${entry.created} |`);
+      const issueCount = (entry.fileErrors || 0) + (entry.fileWarnings || 0);
+      const issueStr = issueCount > 0 ? `${issueCount}` : '-';
+      indexLines.push(`| ${i + 1} | [${entry.name}](${entry.folder}/README.md) | ${entry.messages} | ${entry.created} | ${issueStr} |`);
     });
 
     if (errors.length > 0) {
-      indexLines.push('', '## Errors', '');
+      indexLines.push('', '## Failed Conversations', '');
       errors.forEach(err => indexLines.push(`- ${err}`));
     }
 
@@ -2693,10 +3085,26 @@ async function bulkExportZip() {
 
       hideProgress();
 
-      if (errors.length > 0) {
+      // Determine status based on errors
+      const hasConvErrors = errors.length > 0;
+      const hasFileIssues = totalFileErrors > 0 || totalFileWarnings > 0;
+
+      if (hasConvErrors) {
+        // Conversation-level failures (couldn't fetch/process entire conversations)
         status.className = 'status error';
-        status.textContent = `Exported ${exported}/${total} to mega-zip. ${errors.length} failed.`;
+        let msg = `Exported ${exported}/${total} to mega-zip. ${errors.length} conversation${errors.length > 1 ? 's' : ''} failed.`;
+        if (hasFileIssues) {
+          msg += ` Also ${totalFileErrors} file error${totalFileErrors !== 1 ? 's' : ''}.`;
+        }
+        status.textContent = msg;
         console.error('Export errors:', errors);
+      } else if (hasFileIssues) {
+        // File-level issues but all conversations exported
+        const issueParts = [];
+        if (totalFileErrors > 0) issueParts.push(`${totalFileErrors} file error${totalFileErrors > 1 ? 's' : ''}`);
+        if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
+        status.className = 'status warning';
+        status.textContent = `Exported ${exported} conversations - ${issueParts.join(', ')}. See errors.txt`;
       } else {
         status.className = 'status ready';
         status.textContent = `Exported ${exported} conversations to mega-zip!`;
@@ -2710,10 +3118,11 @@ async function bulkExportZip() {
 }
 
 // Event listeners with settings-aware filenames
-document.getElementById('exportMd').addEventListener('click', () => {
+document.getElementById('exportMd').addEventListener('click', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
   try {
+    await ensureProjectName(conversationData, orgId);
     const md = convertToMarkdown(conversationData, { includeThinking: settings.includeThinking });
     const filename = generateFilename(conversationData.name, 'md', conversationData.project?.name);
     download(md, filename, 'text/markdown');
@@ -2726,10 +3135,11 @@ document.getElementById('exportMd').addEventListener('click', () => {
   }
 });
 
-document.getElementById('exportMdEmbed').addEventListener('click', () => {
+document.getElementById('exportMdEmbed').addEventListener('click', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
   try {
+    await ensureProjectName(conversationData, orgId);
     const md = convertToMarkdown(conversationData, {
       embedArtifacts: true,
       includeThinking: settings.includeThinking
@@ -2757,13 +3167,24 @@ document.getElementById('exportZip').addEventListener('click', async () => {
     status.className = 'status waiting';
     status.textContent = 'Creating zip archive...';
 
+    await ensureProjectName(conversationData, orgId);
     const result = await createZipExport(conversationData, (step, total, message) => {
       showProgress(step, total, message);
     });
 
     hideProgress();
-    status.className = 'status ready';
-    status.textContent = `Exported zip (${result.responseCount} responses, ${result.artifactCount} artifacts)`;
+
+    // Show success with error/warning indicator if applicable
+    if (result.hasErrors) {
+      const errorParts = [];
+      if (result.errorCount > 0) errorParts.push(`${result.errorCount} error${result.errorCount > 1 ? 's' : ''}`);
+      if (result.warningCount > 0) errorParts.push(`${result.warningCount} warning${result.warningCount > 1 ? 's' : ''}`);
+      status.className = 'status warning';
+      status.textContent = `Exported zip (${result.responseCount} responses) - ${errorParts.join(', ')}. See errors.txt`;
+    } else {
+      status.className = 'status ready';
+      status.textContent = `Exported zip (${result.responseCount} responses, ${result.artifactCount} artifacts)`;
+    }
   } catch (e) {
     hideProgress();
     console.error('Zip export error:', e);
@@ -2772,10 +3193,11 @@ document.getElementById('exportZip').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('exportJson').addEventListener('click', () => {
+document.getElementById('exportJson').addEventListener('click', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
   try {
+    await ensureProjectName(conversationData, orgId);
     const json = JSON.stringify(conversationData, null, 2);
     const filename = generateFilename(conversationData.name, 'json', conversationData.project?.name);
     download(json, filename, 'application/json');

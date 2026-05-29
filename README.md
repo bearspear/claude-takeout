@@ -74,7 +74,7 @@ Creates a comprehensive archive:
 ├── integrated_chat.txt          # Plain text version (no markdown formatting)
 ├── code_snippets.md             # All extracted code blocks
 ├── links_and_sources.md         # URLs + web search sources by domain
-├── errors.txt                   # Export errors (only if failures occurred)
+├── errors.txt                   # Detailed error report with recovery hints (only if failures occurred)
 ├── original.json                # Original JSON export
 ├── responses/
 │   ├── 001_title_response.md       # Pure text response
@@ -351,7 +351,12 @@ Works with [claude_json_to_md.py](https://github.com/...) for command-line proce
 
 ### v1.5.0
 - **Presented files download** - Files created via bash/Python scripts and presented to user are now downloaded and included in artefacts folder
-- **Error logging** - Failed file extractions now logged to `errors.txt` in ZIP exports with detailed error messages
+- **Comprehensive error reporting** - Failed file extractions logged to `errors.txt` with:
+  - Detailed error messages and HTTP status codes
+  - All URLs attempted for each failed file
+  - Recovery hints for manual fixing
+  - Troubleshooting guide with common solutions
+  - Warnings for truncated project files
 - **Markdown escaping in README** - Response titles with special characters (backticks, asterisks, etc.) are now properly escaped to prevent malformed rendering
 - **Artifact embedding in full_chat.md** - Artifacts from `create_file` tool now embedded as code blocks in `full_chat.md` and included in `code_snippets.md`
 - **Plain text integrated chat** - Generates `integrated_chat.txt` with clean ASCII formatting (no markdown syntax)
