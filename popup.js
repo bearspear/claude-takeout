@@ -75,6 +75,12 @@ class ExportErrorCollector {
       case 'project_metadata':
         return 'Project metadata could not be fetched. The conversation may not be associated with an active project.';
 
+      case 'str_replace_failed':
+        return 'A str_replace edit could not be applied during artifact reconstruction. The earlier version of the artifact (and any other successful edits) is still preserved in artefacts/<name>_vN.<ext> snapshots. Inspect original.json to recover the missed edit if needed.';
+
+      case 'artifact_basename_collision':
+        return 'Two distinct paths in the conversation produced files with the same basename. The second was saved under a numbered suffix (e.g. foo_2.html) to avoid silent overwrite. Both artifacts and all their versions are preserved in artefacts/.';
+
       default:
         return 'Check original.json for the raw conversation data that may contain this content.';
     }
@@ -361,9 +367,25 @@ function getMessageChain(data) {
 }
 
 // Extract artifacts from create_file tool calls
-function extractArtifacts(data) {
+// Extract artifacts with per-turn versioning. Walks the message chain in
+// chronological order maintaining per-artifact state, replays str_replace
+// edits against the running content, and snapshots each artifact at the end
+// of every assistant turn in which it changed.
+//
+// For artifacts that were never edited (single create_file / artifacts create
+// / heredoc with no follow-up): only the unversioned filename is emitted.
+//
+// For artifacts that were edited (any combination of create_file, str_replace,
+// rewrite, artifacts update): each post-turn snapshot is emitted as
+// <base>_vN<ext>, and the final state is additionally emitted under the
+// unversioned <base><ext> so downstream lookups (present_files embedding,
+// external tooling) still resolve to the latest content.
+//
+// Failed or ambiguous str_replace operations (no match, or multiple matches)
+// are skipped and recorded in errorCollector when one is supplied.
+function extractArtifacts(data, errorCollector = null) {
   const artifacts = {};
-  const messages = data.chat_messages || [];
+  const messages = getMessageChain(data);
 
   // Map content types to file extensions
   const typeToExt = {
@@ -392,59 +414,172 @@ function extractArtifacts(data) {
     'image/svg+xml': '.svg'
   };
 
+  // Per-artifact state. Keyed by full path (for create_file / str_replace /
+  // rewrite / bash heredoc) or `artifact:<id-or-title>` (for the artifacts
+  // tool). Each entry tracks current content, the basename to write under,
+  // a list of post-turn snapshots, and whether the current turn edited it.
+  const state = {};
+
+  const basenameOf = (p) => (p || '').split('/').pop();
+  const splitExt = (name) => {
+    const dot = name.lastIndexOf('.');
+    return dot > 0
+      ? { base: name.substring(0, dot), ext: name.substring(dot) }
+      : { base: name, ext: '' };
+  };
+
+  function setContent(key, content, basename) {
+    if (!state[key]) {
+      state[key] = { current: content, basename, versions: [], editedThisTurn: true };
+    } else {
+      state[key].current = content;
+      state[key].editedThisTurn = true;
+    }
+  }
+
+  function applyStrReplace(path, oldStr, newStr) {
+    const s = state[path];
+    if (!s) return { ok: false, reason: 'no prior create_file for this path' };
+    if (!oldStr) return { ok: false, reason: 'empty old_str' };
+
+    // Count occurrences of oldStr in current content. The real str_replace
+    // tool requires uniqueness; mirror that here.
+    let count = 0;
+    let idx = s.current.indexOf(oldStr);
+    const firstIdx = idx;
+    while (idx !== -1) {
+      count++;
+      if (count > 1) break;
+      idx = s.current.indexOf(oldStr, idx + 1);
+    }
+
+    if (count === 0) return { ok: false, reason: 'old_str not found in current state' };
+    if (count > 1) return { ok: false, reason: 'old_str matches multiple times (ambiguous)' };
+
+    s.current = s.current.slice(0, firstIdx) + newStr + s.current.slice(firstIdx + oldStr.length);
+    s.editedThisTurn = true;
+    return { ok: true };
+  }
+
   for (const msg of messages) {
     for (const block of (msg.content || [])) {
-      if (block.type === 'tool_use') {
-        const input = block.input || {};
+      if (block.type !== 'tool_use') continue;
+      const input = block.input || {};
 
-        // Handle create_file tool
-        if (block.name === 'create_file') {
-          const path = input.path || '';
-          const fileText = input.file_text || '';
-
-          if (path && fileText) {
-            const filename = path.split('/').pop();
-            artifacts[filename] = fileText;
+      if (block.name === 'create_file') {
+        const path = input.path || '';
+        const fileText = input.file_text || '';
+        if (path && fileText) {
+          setContent(path, fileText, basenameOf(path));
+        }
+      } else if (block.name === 'str_replace') {
+        const path = input.path || '';
+        const oldStr = input.old_str || '';
+        const newStr = input.new_str != null ? input.new_str : '';
+        if (path) {
+          const result = applyStrReplace(path, oldStr, newStr);
+          if (!result.ok && errorCollector) {
+            errorCollector.addWarning(
+              'str_replace_failed',
+              basenameOf(path),
+              `str_replace skipped: ${result.reason}`,
+              { path, note: 'The replacement could not be applied; the exported artifact may be missing this edit.' }
+            );
           }
         }
-
-        // Handle artifacts tool (command: create/update)
-        if (block.name === 'artifacts' && (input.command === 'create' || input.command === 'update')) {
-          const content = input.content || '';
-          const id = input.id || '';
-          const title = input.title || '';
-          const type = input.type || 'text/plain';
-
-          if (content && (id || title)) {
-            // Determine extension from type
-            let ext = typeToExt[type] || '.txt';
-
-            // Use title if available, otherwise id
-            let baseName = title || id;
-            // Sanitize filename
-            baseName = baseName.replace(/[^a-zA-Z0-9_\-\s]/g, '').replace(/\s+/g, '_').substring(0, 60);
-
-            // Add extension if not already present
-            const filename = baseName.endsWith(ext) ? baseName : baseName + ext;
-            artifacts[filename] = content;
-          }
+      } else if (block.name === 'rewrite' || block.name === 'create_or_overwrite') {
+        const path = input.path || '';
+        const fileText = input.file_text || input.content || '';
+        if (path && fileText) {
+          setContent(path, fileText, basenameOf(path));
         }
+      } else if (block.name === 'artifacts' && (input.command === 'create' || input.command === 'update')) {
+        const content = input.content || '';
+        const id = input.id || '';
+        const title = input.title || '';
+        const type = input.type || 'text/plain';
 
-        // Handle bash_tool with heredoc file creation (cat > /path/file << 'EOF')
-        if (block.name === 'bash_tool') {
-          const command = input.command || '';
-          // Match: cat > /path/file.ext << 'EOF' or cat > /path/file.ext << EOF
-          const heredocMatch = command.match(/cat\s+>\s+([^\s]+)\s+<<\s*'?EOF'?\s*\n([\s\S]*?)\nEOF/);
-          if (heredocMatch) {
-            const filepath = heredocMatch[1];
-            const content = heredocMatch[2];
-            const filename = filepath.split('/').pop();
-            if (filename && content) {
-              artifacts[filename] = content;
-            }
+        if (content && (id || title)) {
+          const ext = typeToExt[type] || '.txt';
+          let baseName = (title || id).replace(/[^a-zA-Z0-9_\-\s]/g, '').replace(/\s+/g, '_').substring(0, 60);
+          const filename = baseName.endsWith(ext) ? baseName : baseName + ext;
+          const key = `artifact:${id || title}`;
+          setContent(key, content, filename);
+        }
+      } else if (block.name === 'bash_tool') {
+        const command = input.command || '';
+        const heredocMatch = command.match(/cat\s+>\s+([^\s]+)\s+<<\s*'?EOF'?\s*\n([\s\S]*?)\nEOF/);
+        if (heredocMatch) {
+          const filepath = heredocMatch[1];
+          const content = heredocMatch[2];
+          const filename = basenameOf(filepath);
+          if (filename && content) {
+            setContent(filepath, content, filename);
           }
         }
       }
+    }
+
+    // End-of-turn snapshot: any artifact edited during this assistant message
+    // gets a new version. We also snapshot on human turns (no-op normally,
+    // but defensive in case tool_use appears under a non-assistant sender).
+    if (msg.sender === 'assistant' || msg.sender === 'human') {
+      for (const key of Object.keys(state)) {
+        const s = state[key];
+        if (s.editedThisTurn) {
+          s.versions.push(s.current);
+          s.editedThisTurn = false;
+        }
+      }
+    }
+  }
+
+  // Safety net: if the very last operation wasn't followed by an end-of-turn
+  // sweep (shouldn't happen with a normal message chain, but be defensive),
+  // capture the final state.
+  for (const key of Object.keys(state)) {
+    const s = state[key];
+    if (s.editedThisTurn) {
+      s.versions.push(s.current);
+      s.editedThisTurn = false;
+    }
+  }
+
+  // Final emission. Track basename collisions across distinct artifact keys
+  // (e.g. /home/claude/foo.html and /mnt/user-data/outputs/foo.html) so the
+  // later writer doesn't silently clobber the earlier one.
+  const usedBasenames = {};
+
+  for (const key of Object.keys(state)) {
+    const s = state[key];
+    let { base, ext } = splitExt(s.basename);
+
+    // Disambiguate if another artifact already claimed this basename.
+    let outBase = base;
+    let collision = 0;
+    while (usedBasenames[outBase + ext]) {
+      collision++;
+      outBase = `${base}_${collision + 1}`;
+    }
+    usedBasenames[outBase + ext] = true;
+    if (collision > 0 && errorCollector) {
+      errorCollector.addWarning(
+        'artifact_basename_collision',
+        `${outBase}${ext}`,
+        `Two distinct paths produced files with the same basename "${base}${ext}". This artifact was renamed to "${outBase}${ext}" to avoid overwriting.`,
+        { path: key, note: 'Check that both artifacts are intended; the renamed copy still preserves all versions.' }
+      );
+    }
+
+    if (s.versions.length <= 1) {
+      // No edits — just emit the single content under the unversioned name.
+      artifacts[`${outBase}${ext}`] = s.versions[0] != null ? s.versions[0] : s.current;
+    } else {
+      // Emit each per-turn version and the unversioned final.
+      for (let i = 0; i < s.versions.length; i++) {
+        artifacts[`${outBase}_v${i + 1}${ext}`] = s.versions[i];
+      }
+      artifacts[`${outBase}${ext}`] = s.versions[s.versions.length - 1];
     }
   }
 
@@ -1737,14 +1872,15 @@ function generateLinksAndSources(urls, webSources) {
 async function populateConversationFolder(folder, data, onProgress = null, organizationId = null) {
   const title = data.name || 'Claude Conversation';
   const messages = getMessageChain(data);
-  const artifacts = extractArtifacts(data);
+
+  // Initialize error collector for comprehensive error tracking
+  const errorCollector = new ExportErrorCollector(data.name, data.uuid);
+
+  const artifacts = extractArtifacts(data, errorCollector);
   const { attachments: textAttachments, idToFilename: attachmentIdMap } = extractTextAttachments(data);
   const uploadedFiles = extractUploadedFiles(data, organizationId);
   const presentedFiles = extractPresentedFiles(data);
   const webSources = extractWebSources(data);
-
-  // Initialize error collector for comprehensive error tracking
-  const errorCollector = new ExportErrorCollector(data.name, data.uuid);
 
   // Fetch project files: try API first (full files), fall back to view tool results (truncated)
   let projectFiles = {};
