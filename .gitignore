@@ -1,0 +1,17 @@
+# macOS
+.DS_Store
+
+# Claude Code local-only permission allowlist (not shared with the repo)
+.claude/
+
+# Stray transcripts that have ended up in this folder over time
+transcript.en.vtt
+transcript.txt
+
+# Python bytecode (in case the companion CLIs are used in-place)
+__pycache__/
+*.pyc
+
+# Editor swap files
+*.swp
+*~

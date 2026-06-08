@@ -81,6 +81,9 @@ class ExportErrorCollector {
       case 'artifact_basename_collision':
         return 'Two distinct paths in the conversation produced files with the same basename. The second was saved under a numbered suffix (e.g. foo_2.html) to avoid silent overwrite. Both artifacts and all their versions are preserved in artefacts/.';
 
+      case 'artifact_opaque_mutation':
+        return 'A bash_tool command modified an artifact in a way the exporter cannot replay declaratively (it\'s not a create_file, str_replace, or heredoc). The exporter never attempts to interpret bash scripts; the companion CLI does. To reconstruct this artifact: run `python3 replay_bash.py <this-export-folder>` (ships alongside the extension). It walks every bash_tool command in chronological order with per-command confirmation, replays them in a sandboxed tmpdir, and writes the resulting artifact back into artefacts/.';
+
       default:
         return 'Check original.json for the raw conversation data that may contain this content.';
     }
@@ -214,10 +217,15 @@ class ExportErrorCollector {
     lines.push('');
     lines.push('### Manual Recovery Steps');
     lines.push('');
-    lines.push('1. **Check original.json:** Open the file and search for the filename. Content may exist in `tool_result` blocks.');
-    lines.push('2. **Search for "view" tool results:** Blob file contents appear after Claude reads them.');
-    lines.push('3. **Re-upload files:** If files expired, upload them to a new conversation.');
-    lines.push('4. **Check project access:** Ensure you have access to the Claude Project.');
+    lines.push('1. **For `artifact_opaque_mutation` warnings — run the replay CLI:**');
+    lines.push('   ```');
+    lines.push('   python3 replay_bash.py /path/to/this/export/folder');
+    lines.push('   ```');
+    lines.push('   The CLI sets up a sandboxed tmpdir, replays every bash_tool command in chronological order with per-command confirmation, and writes the resulting artifact back into artefacts/. Use `--all` to skip prompts on trusted conversations, `--dry-run` to preview.');
+    lines.push('2. **Check original.json:** Open the file and search for the filename. Content may exist in `tool_result` blocks.');
+    lines.push('3. **Search for "view" tool results:** Blob file contents appear after Claude reads them.');
+    lines.push('4. **Re-upload files:** If files expired, upload them to a new conversation.');
+    lines.push('5. **Check project access:** Ensure you have access to the Claude Project.');
     lines.push('');
     lines.push('### Debugging Tips (for code fixes)');
     lines.push('');
@@ -322,6 +330,77 @@ function addFileWithBOM(folder, path, content) {
   } else {
     folder.file(path, content);
   }
+}
+
+// ============================================================================
+// Upload inlining: rewrite sandbox-path references in text artifacts to
+// self-contained base64 data URIs.
+// ============================================================================
+
+// Map common image/media extensions to MIME types for data URI generation.
+function inferMimeFromFilename(filename) {
+  const ext = ((filename || '').toLowerCase().split('.').pop()) || '';
+  const map = {
+    png: 'image/png',
+    jpg: 'image/jpeg', jpeg: 'image/jpeg', jfif: 'image/jpeg', pjpeg: 'image/jpeg',
+    gif: 'image/gif',
+    svg: 'image/svg+xml',
+    webp: 'image/webp',
+    bmp: 'image/bmp',
+    ico: 'image/x-icon',
+    avif: 'image/avif',
+    tiff: 'image/tiff', tif: 'image/tiff',
+    pdf: 'application/pdf',
+    mp4: 'video/mp4', webm: 'video/webm', mov: 'video/quicktime',
+    mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', flac: 'audio/flac'
+  };
+  return map[ext] || 'application/octet-stream';
+}
+
+// Convert a Blob to a base64 string. Chunks the byte array so
+// String.fromCharCode doesn't blow the call stack on large uploads.
+async function blobToBase64(blob) {
+  const buf = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+// File extensions for which we attempt sandbox-path -> base64 inlining.
+const INLINEABLE_ARTIFACT_EXTENSIONS = new Set([
+  'html', 'htm', 'css', 'js', 'svg', 'md', 'xml'
+]);
+
+function isInlineableArtifact(filename) {
+  const ext = ((filename || '').toLowerCase().split('.').pop()) || '';
+  return INLINEABLE_ARTIFACT_EXTENSIONS.has(ext);
+}
+
+// Replace every occurrence of each sandbox path (e.g.
+// /mnt/user-data/uploads/foo.png) in `content` with its base64 data URI.
+// Returns { content, replacements } where replacements is the total count
+// across all sandbox paths.
+function inlineSandboxPaths(content, uploadDataUris) {
+  if (!content || !uploadDataUris) return { content: content || '', replacements: 0 };
+  let result = content;
+  let total = 0;
+  // Sort longest path first to avoid the case where one sandbox path is a
+  // prefix of another (defensive — sandbox paths usually share /mnt/...
+  // but the basename uniqueness makes this rare).
+  const paths = Object.keys(uploadDataUris).sort((a, b) => b.length - a.length);
+  for (const path of paths) {
+    const dataUri = uploadDataUris[path];
+    if (!path || !dataUri) continue;
+    if (!result.includes(path)) continue;
+    const parts = result.split(path);
+    total += parts.length - 1;
+    result = parts.join(dataUri);
+  }
+  return { content: result, replacements: total };
 }
 
 // ============================================================================
@@ -584,6 +663,167 @@ function extractArtifacts(data, errorCollector = null) {
   }
 
   return artifacts;
+}
+
+// Detect and apply Claude's standard "encode upload to base64 and substitute
+// a placeholder in an artifact" recipe.
+//
+// Claude's go-to pattern when asked to embed an image into self-contained HTML
+// is to run two bash_tool Python scripts:
+//
+//   # Step 1 — encode the upload, stash the data URI to a temp file
+//   data = open('/mnt/user-data/uploads/X.png','rb').read()
+//   b64  = base64.b64encode(data).decode()
+//   uri  = "data:image/png;base64," + b64
+//   open('img_uri.txt','w').write(uri)
+//
+//   # Step 2 — substitute the placeholder in the artifact
+//   uri  = open('img_uri.txt').read().strip()
+//   html = open('booklet.html').read()
+//   html = html.replace('__IMG_URI__', uri)
+//   open('booklet.html','w').write(html)
+//
+// extractArtifacts cannot replay this because the substitution is hidden inside
+// arbitrary bash. This function pattern-matches both steps against bash_tool
+// commands in the message chain, then performs the substitution in JS using the
+// already-downloaded upload bytes (uploadDataUris[sandboxPath]).
+//
+// The match is intentionally narrow. Any unrecognized bash mutation against a
+// tracked artifact path emits an `artifact_opaque_mutation` warning so the
+// user is told reconstruction may be incomplete rather than silently shipping
+// stale content.
+// Detect bash_tool commands that mutate a tracked artifact in a way the
+// declarative replay (create_file / str_replace / rewrite / heredoc) can't
+// reconstruct. Emits one `artifact_opaque_mutation` warning per distinct
+// command, pointing the user at `replay_bash.py` for recovery.
+//
+// We deliberately do NOT try to replay bash scripts here. The companion CLI
+// `replay_bash.py` runs the actual scripts in a sandboxed tmpdir with full
+// shell + Python coverage; the extension's job is to flag what it can't
+// handle, not to second-guess it. See docs/WASM_REPLAY_APPROACH.md for the
+// architectural reasoning.
+function detectOpaqueMutations(data, errorCollector) {
+  const messages = getMessageChain(data);
+  const basenameOf = (p) => (p || '').split('/').pop();
+
+  // Known artifact sandbox paths from create_file / str_replace / heredoc.
+  const knownArtifactPaths = new Set();
+  for (const msg of messages) {
+    for (const block of (msg.content || [])) {
+      if (block.type !== 'tool_use') continue;
+      const input = block.input || {};
+      if ((block.name === 'create_file' || block.name === 'str_replace'
+           || block.name === 'rewrite' || block.name === 'create_or_overwrite')
+          && input.path) {
+        knownArtifactPaths.add(input.path);
+      }
+      if (block.name === 'bash_tool') {
+        const cmd = input.command || '';
+        const m = cmd.match(/cat\s+>\s+(\S+)\s+<<\s*'?EOF'?\s*\n[\s\S]*?\nEOF/);
+        if (m) knownArtifactPaths.add(m[1]);
+      }
+    }
+  }
+
+  const opaqueMutations = [];
+
+  // Walk messages and classify each bash_tool command. We flag any command
+  // that writes to a tracked artifact and isn't a heredoc create (those are
+  // handled declaratively by extractArtifacts).
+  //
+  // An artifact may be referenced several ways:
+  //   • Full sandbox path:   open('/home/claude/booklet/foo.html','w')
+  //   • Just the basename:   `cd <dir> && open('foo.html','w')`
+  //   • Via a variable:      f='foo.html'; open(f,'w').write(...)
+  // We pre-scan for `<var> = '<literal>'` bindings whose literal matches
+  // either a full path or the basename of a known artifact, then look for
+  // write-back patterns that reference the path, the basename, or any such
+  // aliasing variable.
+  for (let mi = 0; mi < messages.length; mi++) {
+    const msg = messages[mi];
+    for (let bi = 0; bi < (msg.content || []).length; bi++) {
+      const block = msg.content[bi];
+      if (block.type !== 'tool_use' || block.name !== 'bash_tool') continue;
+      const command = (block.input && block.input.command) || '';
+      if (!command) continue;
+
+      // Skip heredoc creates — extractArtifacts already handled those.
+      if (/cat\s+>\s+\S+\s+<<\s*'?EOF'?/.test(command)) continue;
+
+      // Map variable name -> the artifact path it aliases (path or basename).
+      const varToArtifact = {};
+      const varBindingRe = /(?:^|[\s;])\s*(\w+)\s*=\s*(['"])((?:\\.|(?!\2).)*)\2/g;
+      let vbm;
+      while ((vbm = varBindingRe.exec(command)) !== null) {
+        const varName = vbm[1];
+        const value = vbm[3];
+        for (const ap of knownArtifactPaths) {
+          if (value === ap || value === basenameOf(ap)) {
+            varToArtifact[varName] = ap;
+            break;
+          }
+        }
+      }
+
+      for (const ap of knownArtifactPaths) {
+        const basename = basenameOf(ap);
+        const escapedPath = ap.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const escapedBase = basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const aliasVars = Object.keys(varToArtifact).filter(v => varToArtifact[v] === ap);
+
+        const referenced =
+          command.includes(ap) ||
+          command.includes(basename) ||
+          aliasVars.length > 0;
+        if (!referenced) continue;
+
+        // Write-back patterns. Python literal-string open() accepts the
+        // full path or the basename; the variable form accepts any
+        // aliasing variable name.
+        const pyOpenStrRe = new RegExp(
+          "open\\(\\s*['\"](?:" + escapedPath + "|" + escapedBase + ")['\"]\\s*,\\s*['\"][wa][b]?\\+?['\"]\\s*\\)"
+        );
+        const pyOpenVarRe = aliasVars.length > 0
+          ? new RegExp(
+              "open\\(\\s*(?:" + aliasVars.map(v => '\\b' + v + '\\b').join('|') + ")\\s*,\\s*['\"][wa][b]?\\+?['\"]\\s*\\)"
+            )
+          : null;
+        // Shell redirects and sed -i, against full path or basename.
+        const shellRe = new RegExp(
+          "(?:>>?\\s*['\"]?(?:" + escapedPath + "|" + escapedBase + ")['\"]?)" +
+          "|(?:sed\\s+-i[^\\n]*\\s(?:" + escapedPath + "|" + escapedBase + "))"
+        );
+
+        if (pyOpenStrRe.test(command) ||
+            (pyOpenVarRe && pyOpenVarRe.test(command)) ||
+            shellRe.test(command)) {
+          opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command });
+          break;
+        }
+      }
+    }
+  }
+
+  // Surface every distinct opaque mutation as an `artifact_opaque_mutation`
+  // warning. De-dupe by (basename, command) so the same script appearing
+  // twice doesn't get listed twice. The recovery hint points users at the
+  // companion `replay_bash.py` CLI.
+  const seenCommands = new Set();
+  for (const om of opaqueMutations) {
+    const key = basenameOf(om.artifactPath) + '|' + om.command;
+    if (seenCommands.has(key)) continue;
+    seenCommands.add(key);
+    if (errorCollector) {
+      errorCollector.addWarning(
+        'artifact_opaque_mutation',
+        basenameOf(om.artifactPath),
+        `A bash_tool command modified ${basenameOf(om.artifactPath)} in a way the exporter cannot replay declaratively (it's not a create_file, str_replace, or heredoc). The exported artifact may differ from what Claude actually produced. Use replay_bash.py to reconstruct.`,
+        { path: om.artifactPath, note: 'Run: python3 replay_bash.py <this-export-folder>' }
+      );
+    }
+  }
+
+  return { opaqueMutations };
 }
 
 // Extract text attachments from messages (pasted files with extracted_content)
@@ -2185,6 +2425,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   const downloadedFiles = [];
   const failedFiles = [];  // Keep for README.md backward compatibility
   const usedUploadNames = new Set();
+  // sandboxPath -> "data:<mime>;base64,..." for inlining into text artifacts.
+  const uploadDataUris = {};
 
   for (let i = 0; i < uploadedFiles.length; i++) {
     const file = uploadedFiles[i];
@@ -2219,6 +2461,30 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         );
         folder.file(`uploads/${finalName}`, blob);
         downloadedFiles.push({ name: finalName, fromJson: false });
+        // Also build a data URI keyed by sandbox path so we can inline this
+        // upload into any text artifact that references it. Best-effort —
+        // failures here don't block the export.
+        //
+        // The older `files` array format doesn't carry an explicit path, so
+        // we synthesize one from the conventional sandbox location
+        // /mnt/user-data/uploads/<original filename>. We always register that
+        // synthesized key, plus file.path when present (newer files_v2 entries
+        // carry it). Both point at the same data URI.
+        try {
+          const b64 = await blobToBase64(blob);
+          const mime = (blob.type && blob.type !== '' && blob.type !== 'application/octet-stream')
+            ? blob.type
+            : inferMimeFromFilename(file.filename);
+          const dataUri = `data:${mime};base64,${b64}`;
+          if (file.path) {
+            uploadDataUris[file.path] = dataUri;
+          }
+          if (file.originalFilename) {
+            uploadDataUris[`/mnt/user-data/uploads/${file.originalFilename}`] = dataUri;
+          }
+        } catch (encErr) {
+          console.warn(`Could not build data URI for ${file.filename}:`, encErr.message);
+        }
       } catch (apiErr) {
         // API failed - try JSON fallback for blob files
         if (file.isBlob && file.path) {
@@ -2270,6 +2536,31 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         filename: file.filename,
         error: err.message
       });
+    }
+  }
+
+  // Flag any bash_tool command that mutates a tracked artifact in a way the
+  // declarative replay can't reconstruct. Emits `artifact_opaque_mutation`
+  // warnings in errors.txt pointing the user at the companion replay_bash.py
+  // CLI for safe sandboxed recovery. See docs/WASM_REPLAY_APPROACH.md for
+  // why we don't try to interpret bash scripts in the extension.
+  detectOpaqueMutations(data, errorCollector);
+
+  // Self-contained HTML pass: rewrite sandbox-path references (e.g.
+  // /mnt/user-data/uploads/foo.png) in text-based artifacts as base64 data
+  // URIs, then re-write those entries into the zip. We deliberately keep the
+  // artifacts map itself un-substituted so downstream consumers (code_snippets,
+  // full_chat embedded markdown) aren't bloated with giant base64 strings —
+  // only the on-disk artifact files become self-contained.
+  if (Object.keys(uploadDataUris).length > 0) {
+    for (const [filename, content] of Object.entries(artifacts)) {
+      if (!isInlineableArtifact(filename)) continue;
+      const { content: substituted, replacements } = inlineSandboxPaths(content, uploadDataUris);
+      if (replacements > 0) {
+        // folder.file() with the same path overwrites the existing entry.
+        addFileWithBOM(folder, `artefacts/${filename}`, substituted);
+        console.log(`[Claude Takeout] Inlined ${replacements} upload reference(s) in artefacts/${filename}`);
+      }
     }
   }
 

@@ -345,11 +345,27 @@ See [TECHNICAL.md](TECHNICAL.md) for a comprehensive technical writeup covering:
 - Web search sources and citation processing
 - API endpoints and authentication
 
-## Companion Script
+## Companion CLIs
 
-Works with [claude_json_to_md.py](https://github.com/...) for command-line processing of exported JSON files.
+Two stdlib-only Python 3 scripts ship with the extension:
+
+| Tool | Purpose |
+|---|---|
+| `extract_artifacts.py` | Offline reconstruction of every artifact version from `original.json`. Byte-identical output to the extension's `extractArtifacts`. Useful when you only have the JSON, or for validating exports via `diff -r`. |
+| `replay_bash.py` | Post-export recovery: replays Claude's `bash_tool` commands in a sandboxed tmpdir, with per-command confirmation, to reconstruct artifacts the extension flagged as `artifact_opaque_mutation`. |
+
+See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.5.2
+
+- **Per-turn artifact versioning + `str_replace` replay** - `extractArtifacts` now walks the message chain in chronological order, replays `str_replace` edits against running content, and snapshots each artifact at the end of every assistant turn in which it changed. Edited artifacts get `<base>_v1<ext>` … `<base>_vN<ext>` plus the unversioned final. Fixes the "artifacts frozen at v1" data-loss bug.
+- **`extract_artifacts.py` companion** - stdlib-only Python 3 port of `extractArtifacts` for offline reconstruction; byte-identical output.
+- **`replay_bash.py` recovery CLI** - sandboxed post-export replay of `bash_tool` commands. Handles every case the extension can't reconstruct declaratively (Python heredocs that mutate artifacts, `sed -i`, `awk`, multi-step pipelines). Per-command confirmation, timeout, `--dry-run` / `--all` modes.
+- **`artifact_opaque_mutation` warning** - any `bash_tool` command that mutates a tracked artifact path is now flagged in `errors.txt` with the exact recovery command. Variable bindings (`f='foo.html'; open(f,'w')`) are detected as artifact references.
+- **Sandbox-path → base64 inlining** - any artifact reference to `/mnt/user-data/uploads/<filename>` is automatically rewritten as a `data:` URI in the on-disk export, producing self-contained HTML for the common case.
+- **`docs/WASM_REPLAY_APPROACH.md`** - architecture record evaluating Pyodide-in-the-extension as an alternative to the post-export CLI.
 
 ### v1.5.1
 - **Reliable project prefix on every export path** - `[Project_Name-project]_` is now applied to single MD/Embedded MD/ZIP/JSON exports and to all four bulk export paths, not just the ones whose captured payload happened to include `project.name`. When the page-side fetch only returns `project_uuid`, the extension resolves the name from `/api/organizations/<orgId>/projects/<projectUuid>` before generating the filename.
