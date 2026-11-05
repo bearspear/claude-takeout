@@ -230,6 +230,15 @@ test('real exports: JS and Python artifacts match', { skip: exportDir ? false : 
   }
 });
 
+test('the manifest version is not behind the newest changelog entry', () => {
+  const manifest = JSON.parse(fs.readFileSync(path.join(REPO, 'manifest.json'), 'utf8'));
+  const readme = fs.readFileSync(path.join(REPO, 'README.md'), 'utf8');
+  const parts = (v) => v.split('.').map(Number);
+  const compare = (a, b) => { for (let i = 0; i < 3; i++) { const d = (parts(a)[i] || 0) - (parts(b)[i] || 0); if (d) return d; } return 0; };
+  const newest = readme.match(/^### v(\d+\.\d+(?:\.\d+)?)$/m)[1];
+  assert.ok(compare(manifest.version, newest) >= 0, `manifest ${manifest.version}, changelog ${newest}`);
+});
+
 test('nothing in the repo uses a name Chrome reserves', () => {
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

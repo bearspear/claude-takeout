@@ -15,7 +15,7 @@ For deeper dives, two companion docs live alongside this one:
 - **GitHub:** `bearspear/claude-takeout` (push remote: `git@github.com-personal:bearspear/claude-takeout.git`).
 - **Branch convention:** one branch per change, merged through a PR by the owner. Commit and push only with the owner's OK. Commit as `bearspear`; the repo's local git config is set for that.
 - **Working dir on this machine:** `/Users/mbehringer/Downloads/claude-takeout`.
-- **Manifest version drift:** `manifest.json` declares `1.3`. The README changelog has reached `v1.5.2`. Bump the manifest when shipping a release; don't bump it casually mid-development.
+- **Versions:** `manifest.json` must not fall behind the newest README changelog entry, and a test enforces that. A PR adding a new changelog version bumps the manifest too. Tag releases `v<version>` on `main`.
 
 ---
 
@@ -308,7 +308,6 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
   - Use HEREDOC for the `-m` arg to preserve formatting.
 - **No automatic pushes.** Commit freely; only push when the user explicitly says so.
 - **No mass `git add .`** — stage the specific tracked files plus any new files that genuinely belong to the project. Never accidentally commit `.claude/`, transcripts, or `.DS_Store`.
-- **Manifest version stays at 1.3 in working tree** until a release is cut. README changelog has its own version cadence.
 - **Tests:** run `sh tests/run.sh` before committing. See `tests/README.md`. Never put real conversations or exports in the repo, because they're private; add a synthetic case to `tests/fixtures/conversation.json` instead. Mocks have missed real claude.ai behavior here, so also export a real conversation for anything touching fetching or capture. `extract_artifacts.py` and the `validate-export` skill at `~/.claude/skills/validate-export/SKILL.md` must stay in sync with `popup.js`.
 - **No `_`-prefixed files or folders:** Chrome refuses to load an extension containing one, including `__pycache__`. Run Python with `-B`, and never import these scripts without `sys.dont_write_bytecode = True`.
 - **Syntax check after every edit:** `node --check popup.js`. Catches most copy/paste mistakes without launching Chrome.
@@ -341,7 +340,7 @@ If you make significant changes to any of those, update both `TECHNICAL.md` and 
 | Adjust the ZIP layout | `populateConversationFolder`. README's "ZIP Archive" section is the user-facing contract — update it too. |
 | Add a setting | Add to `defaultSettings`, `loadSettings`, `applySettings`, `popup.html` settings drawer markup, optional `sidepanel.html` markup, and the change handler block. |
 | Add a keyboard shortcut | The `keydown` switch and the `<span class="shortcut">` markup in the relevant button. |
-| Bump README's changelog | Add a `### v1.5.x` section at the top of the changelog. Don't bump `manifest.json` unless cutting a release. |
+| Bump README's changelog | Add a `### v<next>` section at the top of the changelog, and bump `manifest.json` in the same PR. |
 
 ---
 
