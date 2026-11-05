@@ -207,6 +207,38 @@ test('project files are saved as raw bytes, and a shortfall warns', async () => 
   assert.match(written['README.md'], /project\/files\/Paper\.pdf/);
 });
 
+test('mega-ZIP stores project files once and every chat links to them', async () => {
+  const downloads = [];
+  const respond = (url) => {
+    if (/\/projects\/P$/.test(url)) return { ok: true, status: 200, json: async () => ({ name: 'My Project', files_count: 2 }) };
+    if (/\/projects\/P\/docs$/.test(url)) return { ok: true, status: 200, json: async () => [] };
+    if (/\/projects\/P\/files$/.test(url)) return { ok: true, status: 200, json: async () => [{ file_uuid: 'f1', file_name: 'Paper.pdf' }, { file_uuid: 'f2', file_name: 'Lost.pdf' }] };
+    if (/\/files\/f1\/contents$/.test(url)) { downloads.push(url); return { ok: true, status: 200, blob: async () => ({ marker: 1 }) }; }
+    return { ok: false, status: 404 };
+  };
+  const popup = loadPopup({ fetch: async (url) => respond(url) });
+  const root = {};
+  const folderFor = (written) => ({ file: (name, content) => { written[name] = content; } });
+  popup.sandbox.__shared = { root: folderFor(root), byUuid: new Map(), usedDirs: new Set() };
+  const chats = [{}, {}];
+  const results = [];
+  for (const [i, written] of chats.entries()) {
+    popup.sandbox.__folder = folderFor(written);
+    popup.sandbox.__data = Object.assign(oneMessage([{ type: 'text', text: 'hi' }]), { uuid: `c${i}`, name: 'n', project_uuid: 'P' });
+    results.push(await vm.runInContext("populateConversationFolder(__folder, __data, null, 'org', __shared)", popup.sandbox));
+  }
+  assert.strictEqual(downloads.length, 1);
+  assert.ok('projects/My_Project/files/Paper.pdf' in root);
+  assert.ok('projects/My_Project/files.json' in root);
+  for (const [i, written] of chats.entries()) {
+    assert.ok(!Object.keys(written).some((name) => name.startsWith('project/files')), 'no per-chat copy');
+    assert.match(written['README.md'], /\.\.\/projects\/My_Project\/files\/Paper\.pdf/);
+    assert.match(written['meta.md'], /\*\*Project Files\*\* \| 1/);
+    assert.deepStrictEqual(Array.from(results[i].errorCollector.errors).map((e) => e.filename), ['Lost.pdf'], 'each chat reports the failure');
+    assert.ok(!Array.from(results[i].errorCollector.warnings).some((w) => /reports 2 item/.test(w.error)));
+  }
+});
+
 test('fixture: JS and Python artifacts match', () => {
   const data = loadFixture();
   const python = pythonArtifacts(data);

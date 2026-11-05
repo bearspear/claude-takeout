@@ -198,6 +198,7 @@ The prefix is applied on every export path (single MD / Embedded MD / ZIP / JSON
 - `project/docs.json` - Document list metadata
 
 **Project Documents**: Full project files are downloaded via API when available. Falls back to extracting viewed portions from conversation if API fails.
+- Uploaded knowledge files: `project/files/` in a single-chat ZIP, or the shared `projects/<project>/files/` in a mega-ZIP
 - Full files: `project/filename.md`
 - Truncated files (from view tool): `project/filename_truncated.md`
 
@@ -352,6 +353,10 @@ Two stdlib-only Python 3 scripts ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.5.10
+
+- **Smaller mega-ZIPs for projects** - Each project's knowledge files are stored once in a `projects/` folder and linked from each chat's `README.md`, instead of being copied into every chat. Moving a chat folder elsewhere leaves those files behind. Single-chat ZIPs are unchanged.
 
 ### v1.5.9
 
