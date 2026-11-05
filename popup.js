@@ -1395,6 +1395,34 @@ async function fetchProjectDocs(data, organizationId) {
   }
 }
 
+// List a project's knowledge files. Uploads such as PDFs appear here rather than
+// under /docs. Returns { files, failure }.
+async function fetchProjectFileList(projectUuid, organizationId) {
+  const url = `https://claude.ai/api/organizations/${organizationId}/projects/${projectUuid}/files`;
+  try {
+    const response = await fetch(url, { credentials: 'include' });
+    if (!response.ok) {
+      return {
+        files: [],
+        failure: {
+          filename: 'project files list',
+          error: `HTTP ${response.status}`,
+          httpStatus: response.status,
+          uuid: null,
+          urlsTried: [{ url, status: `HTTP ${response.status}` }]
+        }
+      };
+    }
+    const files = await response.json();
+    return { files: Array.isArray(files) ? files : [], failure: null };
+  } catch (e) {
+    return {
+      files: [],
+      failure: { filename: 'project files list', error: e.message, httpStatus: null, uuid: null, urlsTried: [{ url, status: null, error: e.message }] }
+    };
+  }
+}
+
 // Normalize a file path for comparison (handles various sanitization patterns)
 function normalizePathForComparison(path) {
   if (!path) return '';
@@ -1945,7 +1973,7 @@ function extractResponseTextOnly(msg, artifacts) {
 }
 
 // Generate meta.md content
-function generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments = {}, projectFiles = {}, uploadedFiles = [], webSources = [], failedUploadCount = 0) {
+function generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments = {}, projectFiles = {}, uploadedFiles = [], webSources = [], failedUploadCount = 0, projectUploadCount = 0) {
   const title = data.name || 'Claude Conversation';
   const promptCount = messages.filter(m => m.sender === 'human').length;
   const responseCount = messages.filter(m => m.sender === 'assistant').length;
@@ -2013,7 +2041,7 @@ function generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachmen
     `| **Responses** | ${responseCount} |`,
     `| **Artifacts** | ${Object.keys(artifacts).length} |`,
     `| **Text Attachments** | ${Object.keys(textAttachments).length} |`,
-    `| **Project Files** | ${Object.keys(projectFiles).length} |`,
+    `| **Project Files** | ${Object.keys(projectFiles).length + projectUploadCount} |`,
     `| **Uploaded Files** | ${uploadedFiles.length}${failedUploadCount > 0 ? ` (${failedUploadCount} failed)` : ''} |`,
     `| **Code Blocks** | ${codeBlocks.length} |`,
     `| **Links** | ${urls.length} |`,
@@ -2293,6 +2321,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   let projectFilesFromApi = false;
   let projectDocsJson = null;
   let projectMetadataJson = null;
+  const projectUploads = [];  // Names saved under project/files/
   if (data.project_uuid || data.project?.uuid) {
     if (onProgress) onProgress('Fetching project files...');
     const { files: apiDocs, docsJson, projectJson, failures: projectFailures, metadataError } = await fetchProjectDocs(data, organizationId);
@@ -2331,9 +2360,63 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       }
       console.log(`Fetched ${apiDocs.length} project files from API`);
     }
+
+    // Download knowledge files. Project files are fetched for every chat in the
+    // project, because each export folder has to stand alone.
+    const projectUuid = data.project_uuid || data.project?.uuid;
+    const { files: knowledgeFiles, failure: listFailure } = await fetchProjectFileList(projectUuid, organizationId);
+    if (listFailure) {
+      errorCollector.addError('project_doc', listFailure.filename, listFailure.error, {
+        httpStatus: listFailure.httpStatus,
+        urlsTried: listFailure.urlsTried
+      });
+    }
+    if (knowledgeFiles.length > 0) {
+      folder.file('project/files.json', JSON.stringify(knowledgeFiles, null, 2));
+    }
+    const usedNames = new Set();
+    for (let i = 0; i < knowledgeFiles.length; i++) {
+      const file = knowledgeFiles[i];
+      const uuid = file.file_uuid || file.uuid;
+      const name = (file.file_name || `file_${uuid}`).normalize('NFC').replace(/[\\/]/g, '_');
+      const dot = name.lastIndexOf('.');
+      const base = dot > 0 ? name.substring(0, dot) : name;
+      const ext = dot > 0 ? name.substring(dot) : '';
+      let finalName = name;
+      for (let n = 2; usedNames.has(finalName.toLowerCase()); n++) {
+        finalName = `${base}_${n}${ext}`;
+      }
+      usedNames.add(finalName.toLowerCase());
+
+      if (onProgress) {
+        onProgress(10 + Math.floor((i / knowledgeFiles.length) * 5), 100, `Downloading: ${finalName}`);
+      }
+      try {
+        const blob = await fetchUploadedFile(null, uuid, organizationId, data.uuid, file.path || null);
+        folder.file(`project/files/${finalName}`, blob);
+        projectUploads.push(finalName);
+      } catch (err) {
+        console.error(`Failed to download project file ${finalName}:`, err);
+        errorCollector.addError('project_doc', finalName, err.message, {
+          uuid,
+          httpStatus: err.httpStatus || null,
+          urlsTried: err.urlsTried || []
+        });
+      }
+    }
+
+    // The project's own counts catch anything these lists no longer return.
+    const expected = (projectJson?.docs_count || 0) + (projectJson?.files_count || 0);
+    const received = (Array.isArray(docsJson) ? docsJson.length : 0) + knowledgeFiles.length;
+    if (expected > received) {
+      errorCollector.addWarning('project_doc', 'project contents', `The project reports ${expected} item(s), but the export found ${received}.`, {
+        uuid: projectUuid,
+        note: 'Some project content may be missing, or claude.ai may have changed where it stores project files.'
+      });
+    }
   }
   // Fall back to extracted view tool results if API didn't return files
-  if (Object.keys(projectFiles).length === 0) {
+  if (Object.keys(projectFiles).length === 0 && projectUploads.length === 0) {
     projectFiles = extractProjectFiles(data);
     // Add warnings for truncated project files (extracted from JSON, not full API response)
     if (Object.keys(projectFiles).length > 0) {
@@ -2754,7 +2837,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   // Generate all markdown files (with BOM for proper browser encoding)
-  addFileWithBOM(folder, 'meta.md', generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments, projectFiles, downloadedFiles, webSources, failedFiles.length));
+  addFileWithBOM(folder, 'meta.md', generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments, projectFiles, downloadedFiles, webSources, failedFiles.length, projectUploads.length));
   addFileWithBOM(folder, 'prompts.md', generatePrompts(messages, responseFiles, attachmentIdMap));
   addFileWithBOM(folder, 'responses_text_only.md', generateResponsesTextOnly(messages, artifacts));
 
@@ -2849,7 +2932,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   // Add project files section
-  const hasProjectContent = Object.keys(projectFiles).length > 0 || projectMetadataJson || projectDocsJson;
+  const hasProjectContent = Object.keys(projectFiles).length > 0 || projectMetadataJson || projectDocsJson || projectUploads.length > 0;
   if (hasProjectContent) {
     readmeLines.push('');
     readmeLines.push('---');
@@ -2869,6 +2952,15 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
 
     // Add project files
+    if (projectUploads.length > 0) {
+      readmeLines.push('');
+      readmeLines.push(`### Files (${projectUploads.length})`);
+      readmeLines.push('');
+      for (const name of [...projectUploads].sort()) {
+        readmeLines.push(`- [${name}](project/files/${encodeURIComponent(name)})`);
+      }
+    }
+
     if (Object.keys(projectFiles).length > 0) {
       readmeLines.push('');
       readmeLines.push(`### Documents (${Object.keys(projectFiles).length})`);
