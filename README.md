@@ -358,6 +358,13 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.5.3
+
+- **Side panel follows the selected chat** - The panel now updates when you select another chat or switch tabs. Previously it stayed on the chat it opened with, and its export buttons exported that old chat.
+- **Chats load by ID** - claude.ai now loads chats over an RPC stream that the fetch interceptor can't read, so the extension fetches the chat in the tab URL itself. Single-chat exports fetch it again first, so they include the latest messages, and report an error rather than export an older copy. Export is disabled while a chat loads and on pages that aren't a chat.
+- **Open tabs keep working after an extension reload** - The panel injects its content script into a tab that doesn't have one, so the tab no longer needs reloading. Load failures now show the real error rather than "Refresh page to capture data."
+- **Active org** - The `lastActiveOrg` cookie now decides which organization requests go to, ahead of any captured or stored ID.
+
 ### v1.5.2
 
 - **Per-turn artifact versioning + `str_replace` replay** - `extractArtifacts` now walks the message chain in chronological order, replays `str_replace` edits against running content, and snapshots each artifact at the end of every assistant turn in which it changed. Edited artifacts get `<base>_v1<ext>` … `<base>_vN<ext>` plus the unversioned final. Fixes the "artifacts frozen at v1" data-loss bug.

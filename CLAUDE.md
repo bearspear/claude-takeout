@@ -108,6 +108,10 @@ When adding code: keep the banner-comment section structure and put helpers near
 ```
 
 - **First-load gotcha:** the page-side fetch the extension intercepts only fires when the user opens a conversation *after* the extension is installed. That's why the UI tells users to refresh the page once.
+- **Conversation capture no longer works on claude.ai (seen 2026-11-05):** the page loads chats over `/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/StreamTimeline`, so `injected.js` gets org IDs and lists but no conversation JSON. The diagram above shows the original design.
+- **Selected chat comes from the tab URL:** `requestData` matches `/chat/<uuid>` and always fetches that chat over REST through `content.js`'s `fetchConversation`. Each single-chat handler calls `loadConversationForExport` to fetch again, and fails rather than export an older copy. `tabs.onActivated` and `tabs.onUpdated` trigger `scheduleRefresh`, which waits while an export's progress bar is showing.
+- **`sendToTab` injects `content.js` on a connection error:** a tab open across an extension install or reload has no working content script, which used to show as "Refresh page to capture data."
+- **Org ID comes from the `lastActiveOrg` cookie first:** `content.js`'s `getActiveOrgId`, then the captured ID, then the stored one.
 - **Bulk export bypasses interception:** it calls the API directly via `content.js`'s `fetchConversation`, which appends `?tree=True&rendering_mode=messages&render_all_tools=true` to get the fully-rendered payload (including nested `project.name`, which the page-side fetch often omits).
 - **`ensureProjectName(data, orgId)`** is the bridge: for single exports whose captured payload only has `project_uuid`, it re-fetches `/api/organizations/<orgId>/projects/<projectUuid>` and patches `data.project = { uuid, name }` before filename generation. Called at the top of every single-export click handler and at the start of each iteration in both bulk paths.
 
