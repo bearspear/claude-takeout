@@ -86,9 +86,9 @@ class ExportErrorCollector {
 
       case 'artifact_opaque_mutation':
         if (details.toolName === 'Bash') {
-          return 'A Bash command modified an artifact in a way the exporter cannot replay declaratively. replay_bash.py does not cover the Bash tool, because its commands can use paths the CLI does not rewrite. The exported artifact stops at the last declarative edit, and the command is in original.json.';
+          return 'A Bash command modified an artifact in a way the exporter cannot replay declaratively. replay_bash.py does not cover the Bash tool yet. The exported artifact stops at the last declarative edit, and the command is in original.json.';
         }
-        return 'A bash_tool command modified an artifact in a way the exporter cannot replay declaratively (it\'s not a create_file, str_replace, or heredoc). The exporter never attempts to interpret bash scripts; the companion CLI does. To reconstruct this artifact: run `python3 replay_bash.py <this-export-folder>` (ships alongside the extension). It walks every bash_tool command in chronological order with per-command confirmation, replays them in a sandboxed tmpdir, and writes the resulting artifact back into artefacts/.';
+        return 'A bash_tool command modified an artifact in a way the exporter cannot replay declaratively (it\'s not a create_file, str_replace, or heredoc). The exporter never attempts to interpret bash scripts; the companion CLI does. To reconstruct this artifact: run `python3 replay_bash.py <this-export-folder>` (ships alongside the extension). It replays each bash_tool command in conversation order with per-command confirmation, in a tmpdir isolated by the OS on macOS, saves the originals, and writes the result into artefacts/. These commands come from the conversation, so review them first with --dry-run.';
 
       default:
         return 'Check original.json for the raw conversation data that may contain this content.';
@@ -227,7 +227,7 @@ class ExportErrorCollector {
     lines.push('   ```');
     lines.push('   python3 replay_bash.py /path/to/this/export/folder');
     lines.push('   ```');
-    lines.push('   The CLI sets up a sandboxed tmpdir, replays every bash_tool command in chronological order with per-command confirmation, and writes the resulting artifact back into artefacts/. Use `--all` to skip prompts on trusted conversations, `--dry-run` to preview.');
+    lines.push('   The CLI replays each bash_tool command in conversation order with per-command confirmation, in a tmpdir isolated by the OS on macOS, and writes the result into artefacts/ after saving the originals. Run `--dry-run` first to read the commands.');
     lines.push('2. **Check original.json:** Open the file and search for the filename. Content may exist in `tool_result` blocks.');
     lines.push('3. **Search for "view" tool results:** Blob file contents appear after Claude reads them.');
     lines.push('4. **Re-upload files:** If files expired, upload them to a new conversation.');
@@ -752,7 +752,7 @@ function extractArtifacts(data, errorCollector = null) {
 // command, pointing the user at `replay_bash.py` for recovery.
 //
 // We deliberately do NOT try to replay bash scripts here. The companion CLI
-// `replay_bash.py` runs the actual scripts in a sandboxed tmpdir with full
+// `replay_bash.py` runs the actual scripts in an isolated tmpdir with full
 // shell + Python coverage; the extension's job is to flag what it can't
 // handle, not to second-guess it. See docs/WASM_REPLAY_APPROACH.md for the
 // architectural reasoning.
@@ -2695,7 +2695,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // Flag any bash_tool command that mutates a tracked artifact in a way the
   // declarative replay can't reconstruct. Emits `artifact_opaque_mutation`
   // warnings in errors.txt pointing the user at the companion replay_bash.py
-  // CLI for safe sandboxed recovery. See docs/WASM_REPLAY_APPROACH.md for
+  // CLI for recovery. See docs/WASM_REPLAY_APPROACH.md for
   // why we don't try to interpret bash scripts in the extension.
   detectOpaqueMutations(data, errorCollector);
 

@@ -352,11 +352,17 @@ Two stdlib-only Python 3 scripts ship with the extension:
 | Tool | Purpose |
 |---|---|
 | `extract_artifacts.py` | Offline reconstruction of every artifact version from `original.json`. Byte-identical output to the extension's `extractArtifacts`. Useful when you only have the JSON, or for validating exports via `diff -r`. |
-| `replay_bash.py` | Post-export recovery: replays Claude's `bash_tool` commands in a sandboxed tmpdir, with per-command confirmation, to reconstruct artifacts the extension flagged as `artifact_opaque_mutation`. |
+| `replay_bash.py` | Post-export recovery: replays Claude's `bash_tool` commands in a tmpdir, under an OS sandbox on macOS, with per-command confirmation, to reconstruct artifacts the extension flagged as `artifact_opaque_mutation`. |
 
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.5.5
+
+- **`replay_bash.py` is now isolated** - Earlier versions called it sandboxed, but commands ran with your full permissions and network. On macOS, commands now run under a deny-by-default `sandbox-exec` profile. Without it the tool refuses to run unless you pass `--no-isolation`, which can't be combined with `--all`.
+- **Safer replay** - Commands get a minimal environment, conversation paths can't escape the tmpdir, symlinks can't pull in outside files, and prompts show control characters safely and say when a command is cut off. Originals are saved to `artefacts_before_replay/`.
+- **Correct replay** - File edits and scripts now run in conversation order, commands start in `/home/claude`, bare `/home/claude` and `/tmp` paths are rewritten, and artifacts sharing a basename no longer overwrite each other.
 
 ### v1.5.4
 

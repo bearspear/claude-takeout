@@ -15,22 +15,33 @@ Python. For each conversation:
 
   1. Reconstruct the pre-bash declarative state (create_file + str_replace
      replay) for every artifact.
-  2. Set up a sandboxed tmpdir matching Claude's sandbox layout
-     (/home/claude/..., /mnt/user-data/uploads/...).
-  3. Walk every bash_tool command in chronological order; for each, prompt
-     the user, then run it with path rewriting and a timeout.
+  2. Set up a tmpdir matching Claude's sandbox layout (/home/claude/...,
+     /mnt/user-data/uploads/...).
+  3. Walk the conversation in order, applying file edits and running each
+     approved bash_tool command with path rewriting and a timeout.
   4. Read the resulting artifacts back from the tmpdir and overwrite the
      export's artefacts/<basename> + highest _vN snapshot when changed.
 
-The tool prompts before each command, shows the command verbatim, runs in a
-freshly-created tmpdir, applies a timeout, and never executes anything you
-haven't approved. --all skips per-command prompts; --dry-run prints without
-running; --no-write replays but skips the artifact sync.
+Treat these commands as untrusted. A conversation can contain anything,
+including text shaped by prompt injection in a web page Claude read.
+
+On macOS each command runs under sandbox-exec with a deny-by-default profile:
+no network, no writes outside the tmpdir, no reads from home, other temp
+directories or external volumes, and no talking to other apps. Commands get a
+minimal environment, so your tokens aren't passed to them. Without
+sandbox-exec the tool refuses to run unless you pass --no-isolation, in which
+case commands run with your full permissions and every one must be approved.
+
+Isolation limits what a command can reach, not what it writes. Its output
+still lands in the export's artefacts/, so review results before opening
+them. --all skips prompts; --dry-run prints without running; --no-write
+replays but skips the artifact sync.
 
 Usage:
   replay_bash.py /path/to/export-folder
   replay_bash.py /path/to/export-folder --all
   replay_bash.py /path/to/export-folder --dry-run
+  replay_bash.py /path/to/export-folder --no-isolation
 """
 
 from __future__ import annotations
@@ -40,6 +51,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -48,8 +60,18 @@ from pathlib import Path
 from typing import Optional
 
 PROMPT_PREFIX_RE = re.compile(r"^p\d+_")
-SANDBOX_ROOTS = ("/home/claude/", "/mnt/user-data/")
+SANDBOX_ROOTS = ("/home/claude", "/mnt/user-data", "/tmp")
 SEED_SUBDIRS = ("home/claude", "mnt/user-data/uploads", "mnt/user-data/outputs", "tmp")
+# A sandbox root as a whole path component: matches /tmp and /tmp/x, but not
+# /tmpfoo or /var/tmp.
+SANDBOX_ROOT_RE = re.compile(
+    r"(?<![\w./-])(" + "|".join(re.escape(r) for r in SANDBOX_ROOTS) + r")(?![\w.-])"
+)
+HEREDOC_RE = re.compile(r"cat\s+>\s+(\S+)\s+<<\s*'?EOF'?\s*\n(.*?)\nEOF", re.DOTALL)
+# Display only: stops text in a conversation from driving your terminal.
+CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+UTF8_BOM = b"\xef\xbb\xbf"
+BACKUP_DIRNAME = "artefacts_before_replay"
 
 
 # ============================================================================
@@ -102,11 +124,7 @@ def declarative_state(data: dict) -> dict[str, str]:
                     state[p] = t
             elif name == "bash_tool":
                 # bash_tool heredoc creates: cat > /path << 'EOF' ... EOF
-                cmd = inp.get("command", "")
-                hm = re.search(
-                    r"cat\s+>\s+(\S+)\s+<<\s*'?EOF'?\s*\n(.*?)\nEOF",
-                    cmd, re.DOTALL,
-                )
+                hm = HEREDOC_RE.search(inp.get("command", ""))
                 if hm:
                     state[hm.group(1)] = hm.group(2)
     return state
@@ -120,23 +138,51 @@ class BashCmd:
     description: str
 
 
-def bash_commands(data: dict) -> list[BashCmd]:
-    out: list[BashCmd] = []
+@dataclass
+class Step:
+    """One change in conversation order. Exactly one of write, replace or bash
+    is set."""
+    path: str = ""
+    write: Optional[str] = None
+    replace: Optional[tuple[str, str]] = None
+    bash: Optional[BashCmd] = None
+
+
+def replay_steps(data: dict) -> list[Step]:
+    """File edits and bash commands in conversation order. Order matters: a
+    later str_replace must apply on top of what an earlier script produced."""
+    steps: list[Step] = []
     for mi, msg in enumerate(message_chain(data)):
         for bi, block in enumerate(msg.get("content") or []):
-            if block.get("type") != "tool_use" or block.get("name") != "bash_tool":
+            if block.get("type") != "tool_use":
                 continue
+            name = block.get("name")
             inp = block.get("input") or {}
-            cmd = inp.get("command") or ""
-            if not cmd:
-                continue
-            out.append(BashCmd(
-                msg_idx=mi,
-                block_idx=bi,
-                command=cmd,
-                description=(inp.get("description") or "").strip(),
-            ))
-    return out
+            if name == "create_file":
+                if inp.get("path") and inp.get("file_text"):
+                    steps.append(Step(path=inp["path"], write=inp["file_text"]))
+            elif name == "str_replace":
+                if inp.get("path") and inp.get("old_str"):
+                    steps.append(Step(
+                        path=inp["path"],
+                        replace=(inp["old_str"], inp.get("new_str", "") or ""),
+                    ))
+            elif name in ("rewrite", "create_or_overwrite"):
+                text = inp.get("file_text") or inp.get("content")
+                if inp.get("path") and text:
+                    steps.append(Step(path=inp["path"], write=text))
+            elif name == "bash_tool" and inp.get("command"):
+                # Keep a heredoc's file even if the user skips the command.
+                hm = HEREDOC_RE.search(inp["command"])
+                if hm:
+                    steps.append(Step(path=hm.group(1), write=hm.group(2)))
+                steps.append(Step(bash=BashCmd(
+                    msg_idx=mi,
+                    block_idx=bi,
+                    command=inp["command"],
+                    description=(inp.get("description") or "").strip(),
+                )))
+    return steps
 
 
 # ============================================================================
@@ -193,58 +239,161 @@ def find_uploads(export_dir: Path, data: dict) -> list[Upload]:
 # Sandbox setup
 # ============================================================================
 
-def setup_sandbox(td: Path, state: dict[str, str], uploads: list[Upload]) -> None:
+def sandbox_path(td: Path, path: str) -> Optional[Path]:
+    """Map a conversation path into the tmpdir, or None if it's outside the
+    sandbox roots. Conversation paths are untrusted, so this rejects `..` and
+    symlinks that lead out of the tmpdir."""
+    if not SANDBOX_ROOT_RE.match(path):
+        return None
+    local = (td / path.lstrip("/")).resolve()
+    return local if local.is_relative_to(td.resolve()) else None
+
+
+def setup_sandbox(td: Path, uploads: list[Upload]) -> None:
     for sub in SEED_SUBDIRS:
         (td / sub).mkdir(parents=True, exist_ok=True)
-    for path, content in state.items():
-        if not any(path.startswith(root) for root in SANDBOX_ROOTS):
-            continue
-        local = td / path.lstrip("/")
-        local.parent.mkdir(parents=True, exist_ok=True)
-        local.write_text(content, encoding="utf-8")
     for up in uploads:
         for sp in up.sandbox_paths:
-            local = td / sp.lstrip("/")
+            local = sandbox_path(td, sp)
+            if local is None:
+                print(f"  skipped upload with unsafe path: {clean(sp)}")
+                continue
             local.parent.mkdir(parents=True, exist_ok=True)
             if not local.exists():
                 shutil.copy(up.local_path, local)
 
 
+def apply_edit(td: Path, step: Step) -> bool:
+    """Apply a create_file or str_replace step to the tmpdir. Returns False if
+    it couldn't be applied."""
+    local = sandbox_path(td, step.path)
+    if local is None:
+        return False
+    if step.write is not None:
+        local.parent.mkdir(parents=True, exist_ok=True)
+        local.write_text(step.write, encoding="utf-8")
+        return True
+    if not local.is_file():
+        return False
+    old, new = step.replace
+    try:
+        current = local.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return False
+    if current.count(old) != 1:
+        return False
+    local.write_text(current.replace(old, new, 1), encoding="utf-8")
+    return True
+
+
 def rewrite_paths(cmd: str, sandbox_root: Path) -> str:
-    rewritten = cmd
-    for root in SANDBOX_ROOTS:
-        rewritten = rewritten.replace(root, f"{sandbox_root}{root}")
-    return rewritten
+    return SANDBOX_ROOT_RE.sub(lambda m: f"{sandbox_root}{m.group(1)}", cmd)
+
+
+def sandbox_profile(td: Path) -> str:
+    """Deny-by-default sandbox-exec profile. Commands can read system files and
+    the tmpdir, and write only to the tmpdir. Network and Mach services are
+    denied, which also blocks the clipboard and launching other apps."""
+    readable = [str(td)]
+    prefix = os.path.realpath(sys.prefix)
+    if prefix.startswith("/Users/"):
+        # A Python installed under home, so scripts can still run.
+        readable.append(prefix)
+    allow_read = "\n".join(f'(allow file-read* (subpath "{p}"))' for p in readable)
+    return f"""(version 1)
+(deny default)
+(allow process-exec process-fork)
+(allow signal (target same-sandbox))
+(allow sysctl-read)
+(allow file-read-metadata)
+(allow file-read*)
+(deny file-read* (subpath "/Users") (subpath "/Volumes")
+      (subpath "/private/var/folders") (subpath "/private/tmp"))
+{allow_read}
+(allow file-write* (subpath "{td}"))
+(allow file-write* (literal "/dev/null") (literal "/dev/zero"))
+"""
+
+
+def command_env(td: Path) -> dict[str, str]:
+    """Minimal environment, so API keys and tokens never reach a command."""
+    return {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(td / "home/claude"),
+        "TMPDIR": str(td / "tmp"),
+        "LANG": "en_US.UTF-8",
+    }
+
+
+def run_command(command: str, td: Path, timeout: int, isolate: bool) -> tuple[Optional[int], str, str]:
+    """Run one command in its own process group. Returns (returncode, stdout,
+    stderr); returncode is None on timeout."""
+    argv = ["bash", "-c", command]
+    if isolate:
+        argv = ["sandbox-exec", "-p", sandbox_profile(td)] + argv
+    proc = subprocess.Popen(
+        argv,
+        cwd=str(td / "home/claude"),
+        env=command_env(td),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return proc.returncode, stdout, stderr
+    except subprocess.TimeoutExpired:
+        return None, "", ""
+    finally:
+        # Background children would otherwise outlive the command.
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+        proc.wait()
 
 
 # ============================================================================
 # Prompt UI
 # ============================================================================
 
+def clean(s: str) -> str:
+    """Make conversation text safe to print: control characters shown as `?`."""
+    return CONTROL_CHARS_RE.sub("?", s)
+
+
 def truncate(s: str, n: int = 180) -> str:
-    s = s.replace("\n", " ").strip()
+    s = clean(s).replace("\n", " ").strip()
     if len(s) <= n:
         return s
     return s[: n - 1] + "…"
 
 
-def confirm(cmd: BashCmd, total: int, index: int) -> str:
+def confirm(cmd: BashCmd, total: int, index: int, allow_all: bool = True) -> str:
     """Return one of: 'y', 'n', 'A' (all-yes), 'q' (quit), 's' (show full)."""
     desc = f" — {cmd.description}" if cmd.description else ""
-    print(f"\n[{index}/{total}] msg {cmd.msg_idx}, block {cmd.block_idx}{desc}")
+    print(f"\n[{index}/{total}] msg {cmd.msg_idx}, block {cmd.block_idx}{clean(desc)}")
     print(f"  $ {truncate(cmd.command, 200)}")
+    if len(cmd.command) > 200:
+        print(f"  (showing 200 of {len(cmd.command):,} characters; use [s] before approving)")
     while True:
-        answer = input("  Run? [y]es / [n]o / [A]ll / [s]how full / [q]uit: ").strip()
+        try:
+            answer = input(f"  Run? [y]es / [n]o / {'[A]ll / ' if allow_all else ''}[s]how full / [q]uit: ").strip()
+        except EOFError:
+            return "q"
         if not answer:
             answer = "n"
         a = answer[0].lower() if answer != "A" else "A"
         if a in ("y", "n", "q"):
             return a
-        if answer == "A":
+        if answer == "A" and allow_all:
             return "A"
         if a == "s":
             print("--- full command ---")
-            print(cmd.command)
+            print(clean(cmd.command))
             print("--- end ---")
             continue
         print("  (please answer y/n/A/s/q)")
@@ -273,6 +422,39 @@ def find_highest_versioned_key(folder: Path, basename: str) -> Optional[Path]:
     return best[1] if best else None
 
 
+def artifact_filenames(state: dict[str, str]) -> dict[str, str]:
+    """Filename under artefacts/ for each path, using the exporter's rule for
+    two paths with one basename: the later one becomes <base>_2<ext>."""
+    names: dict[str, str] = {}
+    used: set[str] = set()
+    for path in state:
+        name = path.rsplit("/", 1)[-1]
+        base, dot, ext = name.rpartition(".")
+        if not dot or not base:
+            base, dot, ext = name, "", ""
+        candidate = name
+        n = 1
+        while candidate in used:
+            n += 1
+            candidate = f"{base}_{n}{dot}{ext}"
+        used.add(candidate)
+        names[path] = candidate
+    return names
+
+
+def write_artifact(target: Path, content: str, backup_dir: Path) -> None:
+    """Replace an artifact, keeping the exporter's BOM on files that have one.
+    The first replay's original goes to backup_dir, because a partly failed
+    replay can produce something worse than the export it replaces."""
+    original = target.read_bytes()
+    backup_dir.mkdir(exist_ok=True)
+    backup = backup_dir / target.name
+    if not backup.exists():
+        backup.write_bytes(original)
+    bom = UTF8_BOM if original.startswith(UTF8_BOM) else b""
+    target.write_bytes(bom + content.encode("utf-8"))
+
+
 def sync_back(
     td: Path,
     state: dict[str, str],
@@ -280,14 +462,19 @@ def sync_back(
     write_changes: bool,
 ) -> list[tuple[str, int, int, Optional[Path]]]:
     """Compare each tracked artifact in the sandbox against its pre-bash state;
-    write changes into artefacts/<basename> and the highest _vN snapshot."""
+    write changes into artefacts/<name> and the highest _vN snapshot."""
     artefacts_dir = export_dir / "artefacts"
     if not artefacts_dir.is_dir():
         return []
+    backup_dir = export_dir / BACKUP_DIRNAME
+    filenames = artifact_filenames(state)
     summary: list[tuple[str, int, int, Optional[Path]]] = []
     for path, pre_content in state.items():
-        sandbox_file = td / path.lstrip("/")
-        if not sandbox_file.is_file():
+        sandbox_file = sandbox_path(td, path)
+        # A symlink could point this read at a file the command itself can't
+        # see, and it would land in the export. sandbox_path resolves links, so
+        # check the unresolved path too.
+        if sandbox_file is None or (td / path.lstrip("/")).is_symlink() or not sandbox_file.is_file():
             continue
         try:
             post_content = sandbox_file.read_text(encoding="utf-8")
@@ -295,16 +482,16 @@ def sync_back(
             continue
         if post_content == pre_content:
             continue
-        basename = sandbox_file.name
+        basename = filenames[path]
         target = artefacts_dir / basename
         if not target.exists():
             continue
         versioned = find_highest_versioned_key(artefacts_dir, basename)
         summary.append((basename, len(pre_content), len(post_content), versioned))
         if write_changes:
-            target.write_text(post_content, encoding="utf-8")
+            write_artifact(target, post_content, backup_dir)
             if versioned is not None:
-                versioned.write_text(post_content, encoding="utf-8")
+                write_artifact(versioned, post_content, backup_dir)
     return summary
 
 
@@ -325,7 +512,11 @@ def main(argv: list[str]) -> int:
     )
     ap.add_argument("export_dir", help="Path to an unzipped Claude Takeout export folder")
     ap.add_argument("--all", action="store_true",
-                    help="Skip per-command confirmation; run every bash_tool")
+                    help="Skip per-command confirmation; run every bash_tool. "
+                         "Not allowed with --no-isolation")
+    ap.add_argument("--no-isolation", action="store_true",
+                    help="Run commands WITHOUT an OS sandbox, with your full "
+                         "permissions and network. Each must be approved")
     ap.add_argument("--dry-run", action="store_true",
                     help="Print every command without running anything")
     ap.add_argument("--no-write", action="store_true",
@@ -342,20 +533,41 @@ def main(argv: list[str]) -> int:
         print(f"error: {json_path} not found", file=sys.stderr)
         return 2
 
-    data = json.loads(json_path.read_text(encoding="utf-8"))
+    if args.all and args.no_isolation:
+        print("error: --all can't be combined with --no-isolation", file=sys.stderr)
+        return 2
+
+    has_sandbox = shutil.which("sandbox-exec") is not None
+    if not (args.dry_run or has_sandbox or args.no_isolation):
+        print(
+            "error: sandbox-exec isn't available, so commands can't be isolated.\n"
+            "Use --dry-run to read them. --no-isolation runs them with your full\n"
+            "permissions and network, so use it only after reviewing them.",
+            file=sys.stderr,
+        )
+        return 2
+    isolate = has_sandbox and not args.no_isolation
+
+    data = json.loads(json_path.read_text(encoding="utf-8-sig"))
     state = declarative_state(data)
-    cmds = bash_commands(data)
+    steps = replay_steps(data)
+    cmds = [s.bash for s in steps if s.bash]
     uploads = find_uploads(export_dir, data)
 
     print(f"Export:    {export_dir}")
     print(f"Artifacts: {len(state)} from declarative replay")
     print(f"Uploads:   {len(uploads)} found in uploads/")
     print(f"Bash:      {len(cmds)} bash_tool command(s) in chronological order")
+    if not args.dry_run:
+        if isolate:
+            print("Isolation: sandbox-exec (no network, writes only to the tmpdir)")
+        else:
+            print("Isolation: NONE. Commands run with your full permissions and network.")
     if args.dry_run:
         print()
         print("DRY RUN — commands that would be replayed (in order):")
         for i, c in enumerate(cmds, 1):
-            desc = f" — {c.description}" if c.description else ""
+            desc = f" — {clean(c.description)}" if c.description else ""
             print(f"  [{i}/{len(cmds)}]{desc}")
             print(f"    $ {truncate(c.command, 200)}")
         return 0
@@ -365,23 +577,29 @@ def main(argv: list[str]) -> int:
         return 0
 
     with tempfile.TemporaryDirectory(prefix="claude-replay-") as td_str:
-        td = Path(td_str)
-        setup_sandbox(td, state, uploads)
+        td = Path(td_str).resolve()
+        setup_sandbox(td, uploads)
         if not args.quiet:
             print(f"Sandbox:   {td}")
 
         ran = 0
         skipped = 0
         failed = 0
+        edits_failed = 0
         all_yes = args.all
-        quit_early = False
-        for i, c in enumerate(cmds, 1):
-            if quit_early:
-                break
+        total = len(cmds)
+        i = 0
+        for step in steps:
+            if step.bash is None:
+                if not apply_edit(td, step):
+                    edits_failed += 1
+                continue
+
+            c = step.bash
+            i += 1
             if not all_yes:
-                ans = confirm(c, len(cmds), i)
+                ans = confirm(c, total, i, allow_all=isolate)
                 if ans == "q":
-                    quit_early = True
                     break
                 if ans == "n":
                     skipped += 1
@@ -389,33 +607,25 @@ def main(argv: list[str]) -> int:
                 if ans == "A":
                     all_yes = True
             elif not args.quiet:
-                desc = f" — {c.description}" if c.description else ""
-                print(f"\n[{i}/{len(cmds)}] msg {c.msg_idx}, block {c.block_idx}{desc}")
+                desc = f" — {clean(c.description)}" if c.description else ""
+                print(f"\n[{i}/{total}] msg {c.msg_idx}, block {c.block_idx}{desc}")
                 print(f"  $ {truncate(c.command, 200)}")
 
-            rewritten = rewrite_paths(c.command, td)
-            try:
-                proc = subprocess.run(
-                    ["bash", "-c", rewritten],
-                    cwd=str(td),
-                    capture_output=True,
-                    text=True,
-                    timeout=args.timeout,
-                )
-                if proc.returncode == 0:
-                    ran += 1
-                    if not args.quiet and proc.stdout.strip():
-                        line = proc.stdout.strip().splitlines()[0]
-                        print(f"  ✓ {truncate(line, 200)}")
-                else:
-                    failed += 1
-                    if not args.quiet:
-                        err = (proc.stderr or proc.stdout).strip().splitlines()
-                        first = err[0] if err else f"exit {proc.returncode}"
-                        print(f"  ✗ exit {proc.returncode}: {truncate(first, 200)}")
-            except subprocess.TimeoutExpired:
+            returncode, stdout, stderr = run_command(rewrite_paths(c.command, td), td, args.timeout, isolate)
+            if returncode is None:
                 failed += 1
                 print(f"  ✗ timeout after {args.timeout}s")
+            elif returncode == 0:
+                ran += 1
+                if not args.quiet and stdout.strip():
+                    print(f"  ✓ {truncate(stdout.strip().splitlines()[0], 200)}")
+            else:
+                failed += 1
+                if not args.quiet:
+                    err = (stderr or stdout).strip().splitlines()
+                    # The last line names the error; a traceback's first doesn't.
+                    last = err[-1] if err else f"exit {returncode}"
+                    print(f"  ✗ exit {returncode}: {truncate(last, 200)}")
 
         sync = sync_back(td, state, export_dir, write_changes=not args.no_write)
 
@@ -424,12 +634,19 @@ def main(argv: list[str]) -> int:
     print(f"Commands ran:    {ran}")
     print(f"Commands skipped:{skipped}")
     print(f"Commands failed: {failed}")
+    if edits_failed:
+        print(f"Edits not applied: {edits_failed}")
     if sync:
         verb = "Would update" if args.no_write else "Updated"
         print(f"\n{verb} {len(sync)} artifact(s):")
         for basename, before, after, versioned in sync:
             v = f" + {versioned.name}" if versioned else ""
             print(f"  {basename}: {before:,} → {after:,} chars{v}")
+        if not args.no_write:
+            print(f"\nOriginals saved in {BACKUP_DIRNAME}/.")
+        if failed or skipped or edits_failed:
+            print("WARNING: replay was incomplete, so these results may be wrong or")
+            print("worse than the originals. Compare them before keeping them.")
     else:
         print("\nNo artifact changed during replay.")
     if args.no_write:
