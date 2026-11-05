@@ -184,6 +184,29 @@ test('a downloaded presented file clears its replay warnings', async () => {
   assert.strictEqual(Array.from(output.errorCollector.warnings).filter((w) => w.type === 'str_replace_failed').length, 0);
 });
 
+test('project files are saved as raw bytes, and a shortfall warns', async () => {
+  const bytes = { marker: 'raw-blob' };
+  const respond = (url) => {
+    if (/\/projects\/P$/.test(url)) return { ok: true, status: 200, json: async () => ({ name: 'P', docs_count: 0, files_count: 3 }) };
+    if (/\/projects\/P\/docs$/.test(url)) return { ok: true, status: 200, json: async () => [] };
+    if (/\/projects\/P\/files$/.test(url)) return { ok: true, status: 200, json: async () => [{ file_uuid: 'f1', file_name: 'Paper.pdf' }, { file_uuid: 'f2', file_name: 'paper.PDF' }] };
+    if (/\/files\/f1\/contents$/.test(url)) return { ok: true, status: 200, blob: async () => bytes };
+    return { ok: false, status: 404 };
+  };
+  const popup = loadPopup({ fetch: async (url) => respond(url) });
+  const written = {};
+  popup.sandbox.__folder = { file: (name, content) => { written[name] = content; } };
+  popup.sandbox.__data = Object.assign(oneMessage([{ type: 'text', text: 'hi' }]), { uuid: 'c1', name: 'n', project_uuid: 'P' });
+  const output = await vm.runInContext("populateConversationFolder(__folder, __data, null, 'org')", popup.sandbox);
+  assert.strictEqual(written['project/files/Paper.pdf'], bytes);
+  assert.ok('project/files.json' in written);
+  const errors = Array.from(output.errorCollector.errors).map((e) => e.filename);
+  assert.deepStrictEqual(errors, ['paper_2.PDF']);
+  assert.ok(Array.from(output.errorCollector.warnings).some((w) => /reports 3 item/.test(w.error)));
+  assert.match(written['meta.md'], /\*\*Project Files\*\* \| 1/);
+  assert.match(written['README.md'], /project\/files\/Paper\.pdf/);
+});
+
 test('fixture: JS and Python artifacts match', () => {
   const data = loadFixture();
   const python = pythonArtifacts(data);

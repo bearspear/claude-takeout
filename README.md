@@ -358,6 +358,11 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.5.7
+
+- **Project files exported** - Files added to a project's knowledge, such as PDFs, are now saved to `project/files/` with their metadata in `project/files.json`. They were missing with no warning, because claude.ai lists them outside `/docs`.
+- **Missing project content is reported** - `errors.txt` now warns if a project reports more items than the export found.
+
 ### v1.5.6
 
 - **Failed tool calls no longer change artifacts** - A `create_file`, `str_replace`, `Write` or `Edit` that failed in the conversation was still replayed, so an artifact could contain an edit that never happened, or content the tool had rejected. They're now skipped, in `extract_artifacts.py` and `replay_bash.py` too. Re-export chats that relied on this.

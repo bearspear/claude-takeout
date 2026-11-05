@@ -223,7 +223,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 ├── responses/<NNN>_<title>_response.full.md  (thinking/tools/embedded)
 ├── artefacts/<base>(_vN)?<ext>               (versioning — see §6)
 ├── attachments/p01_<filename>, p02_<filename>, ...  (prompt-numbered)
-├── project/project.json, prompt_template.md, docs.json, <doc>.md
+├── project/project.json, prompt_template.md, docs.json, files.json, <doc>.md, files/<name>
 └── uploads/p01_<filename>, p02_<filename>, ...
 ```
 
@@ -249,7 +249,8 @@ All called with `credentials: 'include'` so the user's existing Claude session a
 | `GET /api/organizations/<orgId>/chat_conversations` | `content.js` `fetchAllConversations` | Bulk export conversation list. |
 | `GET /api/organizations/<orgId>/chat_conversations/<convUuid>?tree=True&rendering_mode=messages&render_all_tools=true` | `content.js` `fetchConversation` | Bulk-mode full conversation re-fetch with project metadata included. |
 | `GET /api/organizations/<orgId>/projects/<projectUuid>` | `popup.js` `ensureProjectName` + `fetchProjectDocs` | Project metadata, especially `name`. |
-| `GET /api/organizations/<orgId>/projects/<projectUuid>/docs` | `fetchProjectDocs` | List of project documents. |
+| `GET /api/organizations/<orgId>/projects/<projectUuid>/docs` | `fetchProjectDocs` | List of project documents. Empty for uploaded knowledge files. |
+| `GET /api/organizations/<orgId>/projects/<projectUuid>/files` | `fetchProjectFileList` | Project knowledge files such as PDFs, downloaded through `/files/<uuid>/contents`. |
 | `GET /api/organizations/<orgId>/projects/<projectUuid>/docs/<docUuid>/content` | `fetchProjectDocs` | Full document content (falls back to `/docs/<docUuid>`). |
 | `GET /api/organizations/<orgId>/files/<fileUuid>/...` (multiple URL patterns) | `fetchUploadedFile` | PDF/image/etc. blobs. Tries several path shapes including a sanitized-path fallback when the wiggle endpoint 404s. |
 
