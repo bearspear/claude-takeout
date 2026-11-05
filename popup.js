@@ -3204,7 +3204,9 @@ function safeFilename(name) {
 }
 
 // Update UI based on data availability
-function updateUI(data, org) {
+// preserveStatus leaves the status pill alone, so a refresh that was deferred
+// until an export finished doesn't overwrite that export's result message.
+function updateUI(data, org, { preserveStatus = false } = {}) {
   const status = document.getElementById('status');
   const info = document.getElementById('info');
   const exportMd = document.getElementById('exportMd');
@@ -3224,8 +3226,10 @@ function updateUI(data, org) {
     const artifactCount = Object.keys(artifacts).length;
     const title = data.name || 'Untitled';
 
-    status.className = 'status ready';
-    status.textContent = 'Ready to export!';
+    if (!preserveStatus) {
+      status.className = 'status ready';
+      status.textContent = 'Ready to export!';
+    }
     const artifactInfo = artifactCount > 0 ? `, ${artifactCount} artifacts` : '';
     info.textContent = `Current: "${title}" (${msgCount} messages${artifactInfo})`;
 
@@ -3234,8 +3238,12 @@ function updateUI(data, org) {
     exportZip.disabled = false;
     exportJson.disabled = false;
   } else {
-    status.className = 'status waiting';
-    status.textContent = org ? 'Navigate to a conversation to export current.' : 'Refresh page to capture data.';
+    // Drop the old conversation so nothing can export it by mistake.
+    conversationData = null;
+    if (!preserveStatus) {
+      status.className = 'status waiting';
+      status.textContent = org ? 'Navigate to a conversation to export current.' : 'Refresh page to capture data.';
+    }
     info.textContent = org ? `Org ID: ${org.substring(0, 8)}...` : '';
     exportMd.disabled = true;
     exportMdEmbed.disabled = true;
@@ -3257,33 +3265,165 @@ function showProgress(current, total, text) {
 
 function hideProgress() {
   document.getElementById('progress').style.display = 'none';
+  if (refreshDeferred) {
+    refreshDeferred = false;
+    requestData({ preserveStatus: true });
+  }
 }
 
-// Request data from content script
-async function requestData() {
+// ============================================================================
+// Keeping the UI on the selected conversation
+// ============================================================================
+
+const REFRESH_DEBOUNCE_MS = 150;
+let refreshTimer = null;
+let refreshDeferred = false;
+let latestRefreshId = 0;
+
+// Returns the conversation UUID from a claude.ai/chat/<uuid> URL, or null.
+function getChatIdFromUrl(url) {
+  try {
+    const match = new URL(url).pathname.match(/\/chat\/([0-9a-f-]{36})(?:\/|$)/i);
+    return match ? match[1].toLowerCase() : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// chrome.tabs.sendMessage as a promise. Resolves with { connectionError } when
+// nothing in the tab is listening.
+function sendOnce(tabId, message) {
+  return new Promise((resolve) => {
+    chrome.tabs.sendMessage(tabId, message, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({ connectionError: chrome.runtime.lastError.message });
+        return;
+      }
+      resolve(response || {});
+    });
+  });
+}
+
+// Message a tab, injecting content.js if it isn't there. A tab that was open
+// when the extension was installed or reloaded has no working content script.
+async function sendToTab(tabId, message) {
+  const response = await sendOnce(tabId, message);
+  if (!response.connectionError) return response;
+
+  try {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+  } catch (e) {
+    return { connectionError: e.message };
+  }
+  return sendOnce(tabId, message);
+}
+
+// Load the conversation for the active tab. The tab URL decides which chat is
+// selected, and the REST API supplies its data. claude.ai loads chats over its
+// StreamTimeline RPC, which injected.js can't read, so a captured payload may be
+// for another chat or an old copy of this one.
+async function requestData({ preserveStatus = false } = {}) {
+  const refreshId = ++latestRefreshId;
+  const isStale = () => refreshId !== latestRefreshId;
+  const status = document.getElementById('status');
+  const uiOptions = { preserveStatus };
+  const setStatus = (className, text) => {
+    if (preserveStatus) return;
+    status.className = className;
+    status.textContent = text;
+  };
+
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (isStale()) return;
 
-    if (!tab.url.includes('claude.ai')) {
-      const status = document.getElementById('status');
-      status.className = 'status error';
-      status.textContent = 'Please navigate to claude.ai';
+    // tab.url is undefined for sites outside the extension's host permissions.
+    const url = tab?.url || '';
+    if (!url.includes('claude.ai')) {
+      updateUI(null, null, uiOptions);
+      setStatus('status error', 'Please navigate to claude.ai');
       return;
     }
 
-    chrome.tabs.sendMessage(tab.id, { action: 'getConversationData' }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.log('Error:', chrome.runtime.lastError);
-        updateUI(null, null);
-        return;
-      }
-      updateUI(response?.data, response?.orgId);
-    });
+    const response = await sendToTab(tab.id, { action: 'getOrgId' });
+    if (isStale()) return;
+
+    if (response.connectionError) {
+      console.log('Error:', response.connectionError);
+      updateUI(null, null, uiOptions);
+      setStatus('status error', `Can't reach this tab: ${response.connectionError}`);
+      return;
+    }
+
+    const org = response.orgId;
+    const chatId = getChatIdFromUrl(url);
+
+    if (!chatId) {
+      updateUI(null, org, uiOptions);
+      return;
+    }
+
+    // Export stays disabled until a different chat has loaded.
+    if (conversationData?.uuid !== chatId) {
+      updateUI(null, org, uiOptions);
+      setStatus('status waiting', 'Loading selected conversation...');
+    }
+
+    const result = await sendToTab(tab.id, { action: 'fetchConversation', conversationId: chatId, orgId: org });
+    if (isStale()) return;
+
+    if (result.data?.chat_messages) {
+      updateUI(result.data, org, uiOptions);
+    } else {
+      setStatus('status error', `Could not load this conversation: ${result.error || result.connectionError || 'no data returned'}`);
+    }
   } catch (e) {
     console.error(e);
-    updateUI(null, null);
+    if (!isStale()) {
+      updateUI(null, null, uiOptions);
+      setStatus('status error', `Could not load this conversation: ${e.message}`);
+    }
   }
 }
+
+// Fetch the selected chat for an export, so it includes messages added since
+// the panel last loaded it. Throws rather than exporting an older copy.
+async function loadConversationForExport() {
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const chatId = getChatIdFromUrl(tab?.url || '');
+  if (!chatId) throw new Error('No conversation selected.');
+
+  const result = await sendToTab(tab.id, { action: 'fetchConversation', conversationId: chatId, orgId });
+  if (!result.data?.chat_messages) {
+    throw new Error(`Could not load the latest copy: ${result.error || result.connectionError || 'no data returned'}`);
+  }
+
+  latestRefreshId++;
+  updateUI(result.data, orgId, { preserveStatus: true });
+  return result.data;
+}
+
+// Coalesce bursts of tab events. An export shows the progress bar
+// while it runs, so wait for it to finish rather than change chats underneath it.
+function scheduleRefresh() {
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    if (document.getElementById('progress').style.display === 'block') {
+      refreshDeferred = true;
+      return;
+    }
+    requestData();
+  }, REFRESH_DEBOUNCE_MS);
+}
+
+// The side panel stays open across chat and tab changes, so it has to follow them.
+chrome.tabs.onActivated.addListener(() => scheduleRefresh());
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (tab.active && (changeInfo.url || changeInfo.status === 'complete')) {
+    scheduleRefresh();
+  }
+});
 
 // Bulk export
 async function bulkExport(format) {
@@ -3549,9 +3689,10 @@ document.getElementById('exportMd').addEventListener('click', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
   try {
-    await ensureProjectName(conversationData, orgId);
-    const md = convertToMarkdown(conversationData, { includeThinking: settings.includeThinking });
-    const filename = generateFilename(conversationData.name, 'md', conversationData.project?.name);
+    const data = await loadConversationForExport();
+    await ensureProjectName(data, orgId);
+    const md = convertToMarkdown(data, { includeThinking: settings.includeThinking });
+    const filename = generateFilename(data.name, 'md', data.project?.name);
     download(md, filename, 'text/markdown');
     status.className = 'status ready';
     status.textContent = 'Markdown exported successfully!';
@@ -3566,13 +3707,14 @@ document.getElementById('exportMdEmbed').addEventListener('click', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
   try {
-    await ensureProjectName(conversationData, orgId);
-    const md = convertToMarkdown(conversationData, {
+    const data = await loadConversationForExport();
+    await ensureProjectName(data, orgId);
+    const md = convertToMarkdown(data, {
       embedArtifacts: true,
       includeThinking: settings.includeThinking
     });
-    const baseName = safeFilename(conversationData.name);
-    const filename = generateFilename(baseName + '_embedded', 'md', conversationData.project?.name);
+    const baseName = safeFilename(data.name);
+    const filename = generateFilename(baseName + '_embedded', 'md', data.project?.name);
     download(md, filename, 'text/markdown');
     status.className = 'status ready';
     status.textContent = 'Embedded markdown exported successfully!';
@@ -3594,8 +3736,9 @@ document.getElementById('exportZip').addEventListener('click', async () => {
     status.className = 'status waiting';
     status.textContent = 'Creating zip archive...';
 
-    await ensureProjectName(conversationData, orgId);
-    const result = await createZipExport(conversationData, (step, total, message) => {
+    const data = await loadConversationForExport();
+    await ensureProjectName(data, orgId);
+    const result = await createZipExport(data, (step, total, message) => {
       showProgress(step, total, message);
     });
 
@@ -3624,9 +3767,10 @@ document.getElementById('exportJson').addEventListener('click', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
   try {
-    await ensureProjectName(conversationData, orgId);
-    const json = JSON.stringify(conversationData, null, 2);
-    const filename = generateFilename(conversationData.name, 'json', conversationData.project?.name);
+    const data = await loadConversationForExport();
+    await ensureProjectName(data, orgId);
+    const json = JSON.stringify(data, null, 2);
+    const filename = generateFilename(data.name, 'json', data.project?.name);
     download(json, filename, 'application/json');
     status.className = 'status ready';
     status.textContent = 'JSON exported successfully!';

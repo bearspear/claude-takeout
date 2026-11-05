@@ -29,6 +29,14 @@
     }
   });
 
+  // The org claude.ai is using right now. The captured ID can be missing if the
+  // page's first requests beat the interceptor, and the stored one can be from
+  // another org, so the cookie comes first.
+  function getActiveOrgId() {
+    const match = document.cookie.match(/(?:^|;\s*)lastActiveOrg=([0-9a-f-]{36})/i);
+    return match ? match[1] : null;
+  }
+
   // Fetch a single conversation
   async function fetchConversation(orgId, conversationId) {
     const url = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${conversationId}?tree=True&rendering_mode=messages&render_all_tools=true`;
@@ -68,7 +76,7 @@
       chrome.storage.local.get(['conversationData', 'orgId'], (result) => {
         sendResponse({
           data: conversationData || result.conversationData,
-          orgId: orgId || result.orgId
+          orgId: getActiveOrgId() || orgId || result.orgId
         });
       });
       return true;
@@ -76,7 +84,7 @@
 
     if (request.action === 'getOrgId') {
       chrome.storage.local.get(['orgId'], (result) => {
-        sendResponse({ orgId: orgId || result.orgId });
+        sendResponse({ orgId: getActiveOrgId() || orgId || result.orgId });
       });
       return true;
     }
@@ -88,7 +96,7 @@
 
     if (request.action === 'fetchAllConversations') {
       chrome.storage.local.get(['orgId'], async (result) => {
-        const id = orgId || result.orgId || request.orgId;
+        const id = getActiveOrgId() || orgId || result.orgId || request.orgId;
         if (!id) {
           sendResponse({ error: 'No org ID available. Refresh the page first.' });
           return;
@@ -105,7 +113,7 @@
 
     if (request.action === 'fetchConversation') {
       chrome.storage.local.get(['orgId'], async (result) => {
-        const id = orgId || result.orgId || request.orgId;
+        const id = getActiveOrgId() || orgId || result.orgId || request.orgId;
         if (!id) {
           sendResponse({ error: 'No org ID available.' });
           return;
