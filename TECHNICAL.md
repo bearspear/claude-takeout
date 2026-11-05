@@ -1,5 +1,7 @@
 # Claude Takeout - Technical Documentation
 
+> **Outdated on data capture:** claude.ai no longer loads conversations through requests the extension can read, so conversation capture was removed. Conversations now come from the REST API, and `injected.js` only provides an org ID fallback. See `CLAUDE.md` for the current design.
+
 This document provides a comprehensive technical writeup of how Claude Takeout extracts and processes conversation data from Claude.ai.
 
 ## Table of Contents

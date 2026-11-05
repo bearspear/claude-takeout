@@ -262,6 +262,48 @@ const tests = {
     assert.strictEqual(e.status(), 'Exported zip');
   },
 
+  'Refresh reloads the chat in place': async () => {
+    const e = makeEnv();
+    await sleep(SETTLE);
+    let reloaded = 0;
+    let closed = 0;
+    e.chrome.tabs.reload = async () => { reloaded++; };
+    vm.runInContext('window', e.ctx).close = () => { closed++; };
+    e.server[A] = conv(A, 'Chat A refreshed');
+    e.el('refresh').handlers.click();
+    await sleep(SETTLE);
+    assert.strictEqual(e.current()?.name, 'Chat A refreshed');
+    assert.strictEqual(reloaded, 0, 'must not reload the tab');
+    assert.strictEqual(closed, 0, 'must not close the panel');
+  },
+
+  'content.js clears the old cached conversation': async () => {
+    const removed = [];
+    const w = { addEventListener() {}, location: {} };
+    vm.runInNewContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), {
+      window: w, console: { log() {} }, setTimeout,
+      document: { createElement: () => ({}), head: { appendChild() {} }, cookie: '' },
+      chrome: {
+        runtime: { getURL: (p) => p, onMessage: { addListener() {} } },
+        storage: { local: { set() {}, remove: (k) => removed.push(k), get() {} } },
+      },
+    });
+    assert.deepStrictEqual(removed, ['conversationData']);
+  },
+
+  'injected.js reports the org ID once and passes responses through': async () => {
+    const posted = [];
+    const response = { marker: true };
+    const w = { fetch: async () => response, postMessage: (m) => posted.push(m) };
+    vm.runInNewContext(fs.readFileSync(path.join(REPO, 'injected.js'), 'utf8'), { window: w });
+    const first = await w.fetch('https://claude.ai/api/organizations/abc-1/chat_conversations/x');
+    await w.fetch({ url: 'https://claude.ai/api/organizations/def-2/other' });
+    assert.strictEqual(first, response);
+    assert.strictEqual(posted.length, 1);
+    assert.strictEqual(posted[0].type, 'CLAUDE_ORG_ID');
+    assert.strictEqual(posted[0].orgId, 'abc-1');
+  },
+
   'content.js uses the active org cookie and sends no capture message': async () => {
     const sent = [], urls = [];
     let onWindowMessage, onMessage;
@@ -279,7 +321,7 @@ const tests = {
           onMessage: { addListener: (f) => { onMessage = f; } },
           sendMessage: (m, cb) => { sent.push(m); cb && cb(); },
         },
-        storage: { local: { set() {}, get: (k, cb) => cb({ orgId: 'stale-org' }) } },
+        storage: { local: { set() {}, remove() {}, get: (k, cb) => cb({ orgId: 'stale-org' }) } },
       },
     };
     vm.runInNewContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), sandbox);
@@ -303,7 +345,7 @@ const tests = {
       fetch: async (u) => { urls.push(u); return { ok: true, json: async () => conv(B, 'Chat B') }; },
       chrome: {
         runtime: { getURL: (p) => p, lastError: null, onMessage: { addListener: (f) => { onMessage = f; } }, sendMessage() {} },
-        storage: { local: { set() {}, get: (k, cb) => cb({ orgId: 'stale-org' }) } },
+        storage: { local: { set() {}, remove() {}, get: (k, cb) => cb({ orgId: 'stale-org' }) } },
       },
     };
     vm.runInNewContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), sandbox);

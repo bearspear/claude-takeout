@@ -27,9 +27,8 @@ If you're a developer working on the codebase, you want `CLAUDE.md` instead. Thi
 ```
 1. Load the extension once    (chrome://extensions → Load unpacked → pick this folder)
 2. Open claude.ai
-3. Hard-refresh the page      (so the extension can capture the conversation data)
-4. Click the extension icon
-5. Pick a format and download
+3. Click the extension icon
+4. Pick a format and download
 ```
 
 For most users: **Export as Zip** is the right default. It gives you everything in one self-contained folder with every artifact, every attachment, every uploaded file, and the raw JSON for recovery.
@@ -381,9 +380,9 @@ Optional: assign a system-wide shortcut to open the extension at `chrome://exten
 
 | Symptom | Cause / fix |
 |---|---|
-| Popup says **"Refresh page to capture data"** | The extension can only intercept fetches that happen after it loads. Hard-refresh claude.ai once and reopen the popup. |
-| Popup says **"Navigate to a conversation to export current"** | You're on claude.ai but not in a specific conversation. Click into a chat first. |
-| Export buttons all greyed out | The extension hasn't captured a conversation yet. Hard-refresh, click into the conversation, reopen the popup. |
+| Popup says **"Sign in to claude.ai and open a chat"** | The extension couldn't find your organization. Sign in and open a chat. |
+| Popup says **"Open a chat to export it"** | You're on claude.ai but not in a specific conversation. Click into a chat first. Export All still works. |
+| Export buttons all greyed out | The selected chat is loading or couldn't be loaded, or you're not on a chat page. The status message says which. |
 | Bulk export feels slow | A ~300 ms gap between conversations is intentional rate-limit hygiene. 100 conversations ≈ 30 seconds. |
 | Some conversations failed in bulk export | Common: deleted conversations, network blips. Re-run; the failures are listed at the end. |
 | ZIP file is enormous | Likely an artifact has the image data embedded as base64 (often after running `replay_bash.py`). This is expected — the artifact is self-contained HTML. |

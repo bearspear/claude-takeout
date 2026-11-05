@@ -29,16 +29,14 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
 ### Export Current Conversation
 
 1. Navigate to a conversation on [claude.ai](https://claude.ai)
-2. **Refresh the page** (required on first use to capture data)
-3. Click the Claude Takeout extension icon
-4. Choose your export format
+2. Click the Claude Takeout extension icon
+3. Choose your export format
 
 ### Export All Conversations
 
 1. Navigate to [claude.ai](https://claude.ai) (any page)
-2. Refresh the page once to capture your organization ID
-3. Click the Claude Takeout extension icon
-4. Choose your bulk export format:
+2. Click the Claude Takeout extension icon
+3. Choose your bulk export format:
    - **Export All (Markdown)** - One `.md` file per conversation
    - **Export All (Embedded)** - One `.md` file per conversation with artifacts inline
    - **Export All (Mega-Zip)** - Single zip containing all conversations
@@ -146,7 +144,7 @@ Each conversation folder has the identical structure to individual ZIP exports.
 | `Alt+E` | Export Embedded |
 | `Alt+Z` | Export as Zip |
 | `Alt+J` | Export Current (JSON) |
-| `Alt+R` | Refresh page |
+| `Alt+R` | Refresh |
 
 *Shortcuts work when the popup or sidebar is open*
 
@@ -276,13 +274,10 @@ ZIP export includes:
 
 ## How It Works
 
-The extension uses two methods to capture data:
+The extension reads the chat in your tab's URL and requests it directly:
 
-1. **Fetch Interception** - Injects a script that hooks into `window.fetch` to capture API responses as they happen
-
-2. **Direct API Calls** - For bulk export, makes authenticated requests to:
-   - `GET /api/organizations/{orgId}/chat_conversations` - List all conversations
-   - `GET /api/organizations/{orgId}/chat_conversations/{id}` - Get full conversation
+- `GET /api/organizations/{orgId}/chat_conversations` - List all conversations
+- `GET /api/organizations/{orgId}/chat_conversations/{id}` - Get full conversation
 
 Your existing session cookies are used for authentication (no API keys needed).
 
@@ -292,7 +287,7 @@ Your existing session cookies are used for authentication (no API keys needed).
 |------|---------|
 | `manifest.json` | Extension configuration (Manifest V3) |
 | `background.js` | Service worker for sidebar panel behavior |
-| `injected.js` | Fetch interceptor (runs in page context) |
+| `injected.js` | Org ID fallback (runs in page context) |
 | `content.js` | Bridge between page and extension |
 | `popup.html` | Extension popup UI |
 | `sidepanel.html` | Sidebar panel UI |
@@ -301,17 +296,17 @@ Your existing session cookies are used for authentication (no API keys needed).
 
 ## Troubleshooting
 
-### "Refresh page to capture data"
-The extension needs to intercept API calls. Refresh the Claude page after installing.
+### "Sign in to claude.ai and open a chat"
+The extension couldn't find your organization. Sign in, then open a chat.
 
-### "Navigate to a conversation to export current"
-You're on Claude but not viewing a specific conversation. Click into a chat.
+### "Open a chat to export it"
+You're on Claude but not viewing a specific conversation. Click into a chat. Export All still works.
+
+### "Can't reach this tab"
+The extension couldn't connect to the page. Reload the Claude tab.
 
 ### Export buttons disabled
-The extension hasn't captured conversation data yet. Try:
-1. Refresh the page
-2. Navigate to a different conversation and back
-3. Check that you're on `claude.ai`
+The selected chat is loading, couldn't be loaded, or you're not on a chat page. Check the status message.
 
 ### Bulk export is slow
 Each conversation requires a separate API request. A 300ms delay is added between requests to avoid rate limiting. For 100 conversations, expect ~30 seconds.
@@ -357,6 +352,12 @@ Two stdlib-only Python 3 scripts ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.5.8
+
+- **Refresh stays put** - Refresh reloads the current chat in place, instead of reloading your tab and closing the popup or panel. The button now just says Refresh.
+- **No refresh needed to start** - The first-use instruction to refresh the page is gone, along with messages that mentioned it.
+- **Dead capture removed** - The extension no longer watches for conversations on the page, which stopped working when claude.ai changed how it loads them. Old cached copies are cleared from storage.
 
 ### v1.5.7
 

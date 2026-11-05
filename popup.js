@@ -3538,7 +3538,7 @@ function updateUI(data, org, { preserveStatus = false } = {}) {
     conversationData = null;
     if (!preserveStatus) {
       status.className = 'status waiting';
-      status.textContent = org ? 'Navigate to a conversation to export current.' : 'Refresh page to capture data.';
+      status.textContent = org ? 'Open a chat to export it.' : 'Sign in to claude.ai and open a chat.';
     }
     info.textContent = org ? `Org ID: ${org.substring(0, 8)}...` : '';
     exportMd.disabled = true;
@@ -3616,8 +3616,7 @@ async function sendToTab(tabId, message) {
 
 // Load the conversation for the active tab. The tab URL decides which chat is
 // selected, and the REST API supplies its data. claude.ai loads chats over its
-// StreamTimeline RPC, which injected.js can't read, so a captured payload may be
-// for another chat or an old copy of this one.
+// StreamTimeline RPC, which the extension can't read.
 async function requestData({ preserveStatus = false } = {}) {
   const refreshId = ++latestRefreshId;
   const isStale = () => refreshId !== latestRefreshId;
@@ -4101,13 +4100,7 @@ document.getElementById('exportAllJson').addEventListener('click', () => {
   bulkExport('json');
 });
 
-document.getElementById('refresh').addEventListener('click', async () => {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tab?.id) {
-    await chrome.tabs.reload(tab.id);
-  }
-  window.close();
-});
+document.getElementById('refresh').addEventListener('click', () => scheduleRefresh());
 
 // ============================================================================
 // Settings Panel

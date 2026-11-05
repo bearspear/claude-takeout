@@ -13,7 +13,7 @@ For deeper dives, two companion docs live alongside this one:
 **Claude Takeout** is a Chrome Manifest V3 extension that exports Claude.ai conversations to Markdown, JSON, or comprehensive ZIP archives — single-conversation or all-conversations-at-once. It runs entirely client-side using your existing Claude session cookies; no API keys, no external servers.
 
 - **GitHub:** `bearspear/claude-takeout` (push remote: `git@github.com-personal:bearspear/claude-takeout.git`).
-- **Branch convention:** `main` only. Commits go straight to `main` after local testing; pushes are gated on explicit user confirmation.
+- **Branch convention:** one branch per change, merged through a PR by the owner. Commit and push only with the owner's OK. Commit as `bearspear`; the repo's local git config is set for that.
 - **Working dir on this machine:** `/Users/mbehringer/Downloads/claude-takeout`.
 - **Manifest version drift:** `manifest.json` declares `1.3`. The README changelog has reached `v1.5.2`. Bump the manifest when shipping a release; don't bump it casually mid-development.
 
@@ -24,12 +24,12 @@ For deeper dives, two companion docs live alongside this one:
 | File | Role | Notes |
 |---|---|---|
 | `manifest.json` | MV3 declaration. | Hosts: `claude.ai/*`. Perms: `activeTab`, `scripting`, `storage`, `sidePanel`. Web-accessible: `injected.js`. |
-| `injected.js` | Page-context fetch interceptor (runs in the page's world). | Monkey-patches `window.fetch`, captures org ID + conversation JSON + conversation list, relays via `window.postMessage`. |
-| `content.js` | Isolated-world bridge (runs at `document_start`). | Injects `injected.js`, listens for postMessages, exposes `getConversationData` / `fetchAllConversations` / `fetchConversation` / `triggerRefresh` to the popup via `chrome.runtime.onMessage`. |
+| `injected.js` | Page-context org ID fallback (runs in the page's world). | Wraps `window.fetch`, reads the org ID from request URLs, relays it via `window.postMessage`. |
+| `content.js` | Isolated-world bridge (runs at `document_start`). | Injects `injected.js`, resolves the org ID, and exposes `getOrgId` / `fetchAllConversations` / `fetchConversation` to the popup via `chrome.runtime.onMessage`. |
 | `background.js` | MV3 service worker. | Only manages side-panel "open on action click" preference. Listens to `chrome.storage.onChanged` for `useSidePanel` to re-apply behavior. |
 | `popup.html` | Popup UI (action click). | Buttons, status pill, settings drawer. Includes `.status.ready` / `.waiting` / `.error` / `.warning` styles. |
 | `sidepanel.html` | Side Panel UI. | Same buttons/handlers as the popup, just a different host. |
-| `popup.js` | **The brain.** ~3,600 lines. All export logic, all conversion, all UI wiring. Same script is loaded by both `popup.html` and `sidepanel.html`. | See §3 below for the internal layout. |
+| `popup.js` | **The brain.** Over 4,000 lines. All export logic, all conversion, all UI wiring. Same script is loaded by both `popup.html` and `sidepanel.html`. | See §3 below for the internal layout. |
 | `jszip.min.js` | ZIP library (vendored). | Used by both single-ZIP and mega-ZIP exports. |
 | `extract_artifacts.py` | Stdlib-only Python port of `extractArtifacts`. | Reconstructs all per-turn artifact versions from `original.json` offline. Byte-identical output to the JS implementation. |
 | `replay_bash.py` | Stdlib-only Python CLI for post-export bash replay. | Reconstruction, isolated by `sandbox-exec` on macOS, of artifacts the declarative replay can't reach (anything Claude mutated via `bash_tool`). See §10 below and `docs/WASM_REPLAY_APPROACH.md`. |
@@ -38,32 +38,32 @@ For deeper dives, two companion docs live alongside this one:
 | `icon16.png` / `icon48.png` / `icon128.png` / `icon.svg` | Extension icons. | |
 | `README.md` / `USAGE.md` / `TECHNICAL.md` | Documentation. | TECHNICAL.md predates v1.5.x and doesn't describe per-turn versioning, `ExportErrorCollector`, or `ensureProjectName`. |
 
-Files that are **not** part of the extension and may sit in the working tree: `transcript.en.vtt`, `transcript.txt` (stray), `.claude/settings.local.json` (Claude Code permission allowlist — local-only, don't commit), `.DS_Store`. No `.gitignore` exists yet; create one if these become noisy.
+Files that are **not** part of the extension and may sit in the working tree: `transcript.en.vtt`, `transcript.txt` (stray), `.claude/settings.local.json` (Claude Code permission allowlist — local-only, don't commit), `.DS_Store`.
 
 ---
 
 ## 3. popup.js internal layout
 
-`popup.js` is one big script with conceptual sections delimited by `// ====` banners. Use these line ranges as a map:
+`popup.js` is one big script with conceptual sections delimited by `// ====` banners. These are listed in file order; search for a function name to find its line.
 
-| Lines | Section | What lives here |
-|---|---|---|
-| 1–225 | `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`. |
-| 227–319 | Mojibake repair + BOM helpers | Builds a UTF-8→CP1252 corruption map covering Latin, Greek, Cyrillic, math, arrows, box drawing, super/subscripts, emojis. `fixMojibake(text)`, `withBOM(text)`, `addFileWithBOM(folder, path, content)`. |
-| 321–~1300 | Extractors and renderers | `getMessageChain`, `extractArtifacts` (per-turn versioning + str_replace replay), `extractTextAttachments`, `extractWebSources`, `extractUploadedFiles`, `extractPresentedFiles`, `extractBlobContent`, `extractProjectFiles`, `getLanguageFromFilename`, `processTextWithCitations`, `formatReferences`, `getLanguageFromType`, `getThinkingSummary`, `markdownToPlainText`. |
-| 1305–~1700 | ZIP/section builders | `extractCodeBlocks`, `extractUrls`, `sanitizeForFilename`, `extractFirstHeading`, `escapeMarkdown`, `extractResponseTextOnly`, `generateMeta`, `generatePrompts`, `generateResponsesTextOnly`, `generateCodeSnippets`, `generateLinksAndSources`. |
-| ~1714–2278 | `populateConversationFolder` | The shared ZIP layout writer used by both single-ZIP and mega-ZIP. Constructs `ExportErrorCollector`, calls all extractors, fetches project docs + uploaded files, writes every file in the folder. |
-| 2279–2324 | `createZipExport` | Wraps `populateConversationFolder` for the single-conversation ZIP path; generates the filename + downloads the blob. |
-| 2326–2400 | Helpers: `formatTimestamp`, `getModelName` | Model name parsing handles `data.model` (e.g. `claude-sonnet-4-5-20250929` → "Claude 4.5 Sonnet") and falls back to `paprika_mode` / thinking-block detection. |
-| 2389–2719 | `convertToMarkdown` | The single-MD / embedded-MD renderer. Walks `getMessageChain`, formats prompts and responses, renders thinking blocks, tool uses (`create_file`, `present_files`, `web_search`, `bash_tool`, `str_replace`, `view`, etc.), citations, and references. Honors `embedArtifacts`, `seamlessMd`, `includeThinking`. |
-| 2720–2748 | `extractTextContent`, `download`, `safeFilename` | Small utilities. |
-| 2749–2829 | `updateUI`, `showProgress`, `hideProgress`, `requestData` | DOM glue. |
-| 2832–3086 | `bulkExport`, `bulkExportZip` | Multi-conversation paths. `bulkExport` downloads one file per conversation (MD/embedded/JSON). `bulkExportZip` builds a single mega-zip with `index.md` + one folder per conversation reusing `populateConversationFolder`. |
-| 3088–3199 | Click handlers + `refresh` | Button → action mapping. Each per-conversation handler calls `ensureProjectName` before generating the filename or starting the ZIP. |
-| 3201–3309 | Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
-| 3311–3347 | Keyboard shortcuts | `Alt+M / E / Z / J / A / R`. |
-| 3349–3404 | `withErrorHandling`, `generateFilename` | Error wrapping + `[<Project>-project]_` prefix + filenameStyle suffix. |
-| 3406–end | Bootstrap | `loadSettings()` then `requestData()`. |
+| Section | What lives here |
+|---|---|
+| `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`. |
+| Mojibake repair + BOM helpers | Builds a UTF-8→CP1252 corruption map covering Latin, Greek, Cyrillic, math, arrows, box drawing, super/subscripts, emojis. `fixMojibake(text)`, `withBOM(text)`, `addFileWithBOM(folder, path, content)`. |
+| Extractors and renderers | `getMessageChain`, `extractArtifacts` (per-turn versioning + str_replace replay), `extractTextAttachments`, `extractWebSources`, `extractUploadedFiles`, `extractPresentedFiles`, `extractBlobContent`, `extractProjectFiles`, `getLanguageFromFilename`, `processTextWithCitations`, `formatReferences`, `getLanguageFromType`, `getThinkingSummary`, `markdownToPlainText`. |
+| ZIP/section builders | `extractCodeBlocks`, `extractUrls`, `sanitizeForFilename`, `extractFirstHeading`, `escapeMarkdown`, `extractResponseTextOnly`, `generateMeta`, `generatePrompts`, `generateResponsesTextOnly`, `generateCodeSnippets`, `generateLinksAndSources`. |
+| `populateConversationFolder` | The shared ZIP layout writer used by both single-ZIP and mega-ZIP. Constructs `ExportErrorCollector`, calls all extractors, fetches project docs + uploaded files, writes every file in the folder. |
+| `createZipExport` | Wraps `populateConversationFolder` for the single-conversation ZIP path; generates the filename + downloads the blob. |
+| Helpers: `formatTimestamp`, `getModelName` | Model name parsing handles `data.model` (e.g. `claude-sonnet-4-5-20250929` → "Claude 4.5 Sonnet") and falls back to `paprika_mode` / thinking-block detection. |
+| `convertToMarkdown` | The single-MD / embedded-MD renderer. Walks `getMessageChain`, formats prompts and responses, renders thinking blocks, tool uses (`create_file`, `present_files`, `web_search`, `bash_tool`, `str_replace`, `view`, etc.), citations, and references. Honors `embedArtifacts`, `seamlessMd`, `includeThinking`. |
+| `extractTextContent`, `download`, `safeFilename` | Small utilities. |
+| `updateUI`, `showProgress`, `hideProgress`, `requestData` | DOM glue. |
+| `bulkExport`, `bulkExportZip` | Multi-conversation paths. `bulkExport` downloads one file per conversation (MD/embedded/JSON). `bulkExportZip` builds a single mega-zip with `index.md` + one folder per conversation reusing `populateConversationFolder`. |
+| Click handlers + `refresh` | Button → action mapping. Each per-conversation handler calls `ensureProjectName` before generating the filename or starting the ZIP. |
+| Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
+| Keyboard shortcuts | `Alt+M / E / Z / J / A / R`. |
+| `withErrorHandling`, `generateFilename` | Error wrapping + `[<Project>-project]_` prefix + filenameStyle suffix. |
+| Bootstrap | `loadSettings()` then `requestData()`. |
 
 When adding code: keep the banner-comment section structure and put helpers near the section that uses them. Do **not** create new files unless adding a non-trivial standalone tool (e.g. a second companion script).
 
@@ -72,49 +72,22 @@ When adding code: keep the banner-comment section structure and put helpers near
 ## 4. Runtime data flow
 
 ```
-            ┌───────────────────────┐
-            │      Claude.ai        │
-            │   (page context)      │
-            └─────────┬─────────────┘
-                      │
-                      │ fetch(...)
-                      ▼
-   ┌──────────────────────────────────────┐
-   │ injected.js                          │
-   │  • monkey-patches window.fetch        │
-   │  • sniffs /organizations/<uuid>/      │
-   │  • sniffs /chat_conversations/<uuid>  │
-   │  • sniffs /chat_conversations (list)  │
-   │  • postMessage(type=..., data=...)    │
-   └──────────────────┬───────────────────┘
-                      │ window.postMessage
-                      ▼
-   ┌──────────────────────────────────────┐
-   │ content.js  (isolated world)         │
-   │  • caches data in chrome.storage      │
-   │  • exposes onMessage handlers for     │
-   │    popup: getConversationData,        │
-   │    fetchAllConversations,             │
-   │    fetchConversation,                 │
-   │    triggerRefresh                     │
-   └──────────────────┬───────────────────┘
-                      │ chrome.runtime.sendMessage / chrome.storage
-                      ▼
-   ┌──────────────────────────────────────┐
-   │ popup.js  (popup or sidepanel)       │
-   │  • reads cached data or refetches     │
-   │  • extracts, transforms, writes        │
-   │  • triggers <a>.download via URL.createObjectURL │
-   └──────────────────────────────────────┘
+   claude.ai page                       popup.js (popup or side panel)
+   ├─ injected.js                       ├─ reads the chat ID from the tab URL
+   │    reads org ID from fetch URLs    ├─ asks content.js for that chat
+   │         │ postMessage              ├─ extracts, transforms, writes
+   │         ▼                          └─ downloads via URL.createObjectURL
+   └─ content.js  ◀── chrome messaging ──┘
+        resolves the org ID
+        calls the claude.ai REST API
 ```
 
-- **First-load gotcha:** the page-side fetch the extension intercepts only fires when the user opens a conversation *after* the extension is installed. That's why the UI tells users to refresh the page once.
-- **Conversation capture no longer works on claude.ai (seen 2026-11-05):** the page loads chats over `/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/StreamTimeline`, so `injected.js` gets org IDs and lists but no conversation JSON. The diagram above shows the original design.
+- **The page itself isn't a data source:** claude.ai loads chats over `/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/StreamTimeline`, which the extension can't read, so conversation data always comes from REST.
 - **Selected chat comes from the tab URL:** `requestData` matches `/chat/<uuid>` and always fetches that chat over REST through `content.js`'s `fetchConversation`. Each single-chat handler calls `loadConversationForExport` to fetch again, and fails rather than export an older copy. `tabs.onActivated` and `tabs.onUpdated` trigger `scheduleRefresh`, which waits while an export's progress bar is showing.
 - **`sendToTab` injects `content.js` on a connection error:** a tab open across an extension install or reload has no working content script, which used to show as "Refresh page to capture data."
 - **Org ID comes from the `lastActiveOrg` cookie first:** `content.js`'s `getActiveOrgId`, then the captured ID, then the stored one.
-- **Bulk export bypasses interception:** it calls the API directly via `content.js`'s `fetchConversation`, which appends `?tree=True&rendering_mode=messages&render_all_tools=true` to get the fully-rendered payload (including nested `project.name`, which the page-side fetch often omits).
-- **`ensureProjectName(data, orgId)`** is the bridge: for single exports whose captured payload only has `project_uuid`, it re-fetches `/api/organizations/<orgId>/projects/<projectUuid>` and patches `data.project = { uuid, name }` before filename generation. Called at the top of every single-export click handler and at the start of each iteration in both bulk paths.
+- **`fetchConversation`** appends `?tree=True&rendering_mode=messages&render_all_tools=true` to get the fully-rendered payload (including nested `project.name`, which the page-side fetch often omits).
+- **`ensureProjectName(data, orgId)`** is the bridge: for payloads that only have `project_uuid`, it re-fetches `/api/organizations/<orgId>/projects/<projectUuid>` and patches `data.project = { uuid, name }` before filename generation. Called at the top of every single-export click handler and at the start of each iteration in both bulk paths.
 
 ---
 
@@ -218,7 +191,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 ├── code_snippets.md           # All ``` blocks extracted (incl. artifacts)
 ├── links_and_sources.md       # URLs + web search sources grouped by domain
 ├── errors.txt                 # Structured error/warning report (omitted if none)
-├── original.json              # Raw API payload as captured
+├── original.json              # Raw API payload as fetched
 ├── responses/<NNN>_<title>_response.md       (pure text)
 ├── responses/<NNN>_<title>_response.full.md  (thinking/tools/embedded)
 ├── artefacts/<base>(_vN)?<ext>               (versioning — see §6)
@@ -264,7 +237,6 @@ If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a
 
 ```jsonc
 {
-  "conversationData": { /* most-recent intercepted conversation */ },
   "orgId": "uuid",
   "exporterSettings": {
     "filenameStyle": "title" | "title_date" | "date_title",
@@ -309,6 +281,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - `project_metadata` — `/projects/<uuid>` 4xx/5xx; `project.json` may be missing.
 - `str_replace_failed` — an edit that succeeded in the conversation couldn't be replayed. Cleared if the file is then downloaded in its final state.
 - `artifact_basename_collision` — two paths produced the same basename; one was renamed.
+- `artifact_opaque_mutation` — a bash command changed an artifact in a way replay can't follow.
 - `delivered_file` — a `SendUserFile` delivery could not be downloaded.
 
 `errors.txt` is built by `generateErrorReport()` and embedded into the ZIP only when `hasAny()` is true. The status pill turns amber (`.status.warning`) when there are warnings but the export still succeeded.
@@ -317,7 +290,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ---
 
-## 11. Encoding rules
+## 12. Encoding rules
 
 - **All `.md` files written to ZIPs get a UTF-8 BOM** (`addFileWithBOM`). Reason: Chrome's `file://` opens markdown as text/plain and infers encoding from the BOM. Without it, em-dashes and umlauts mojibake when opening exports locally.
 - **All text content is run through `fixMojibake`** at extraction time (text attachments, project docs, etc.). Map is built lazily on first use and covers Latin/Greek/Cyrillic/math/box-drawing/arrows/super-sub/emoji ranges.
@@ -326,12 +299,12 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ---
 
-## 12. Conventions
+## 13. Conventions
 
 - **Commit message style** (see `git log`):
   - One-line subject summarizing the user-visible effect.
   - Bullet body describing each significant change.
-  - Co-author trailer: `Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>`.
+  - A `Co-Authored-By` trailer naming the model that did the work.
   - Use HEREDOC for the `-m` arg to preserve formatting.
 - **No automatic pushes.** Commit freely; only push when the user explicitly says so.
 - **No mass `git add .`** — stage the specific tracked files plus any new files that genuinely belong to the project. Never accidentally commit `.claude/`, transcripts, or `.DS_Store`.
@@ -342,27 +315,10 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ---
 
-## 13. Things that recently changed (v1.5.1 → v1.5.2)
-
-If the working tree shows uncommitted changes, expect them to be in one of these clusters — these are the most-recently-touched bits and the most likely places to break.
-
-**v1.5.1 (committed):**
-- `ensureProjectName(data, organizationId)` — resolves `project.name` via `/projects/<uuid>` when the captured payload only has `project_uuid`. Wired into all four single-export click handlers and both bulk export paths.
-- `ExportErrorCollector` — structured `errors.txt` with HTTP status, URLs tried, fallback results, recovery hints, troubleshooting guide.
-- `.status.warning` CSS class in `popup.html` and `sidepanel.html` for partial-success exports.
-
-**v1.5.2 (committed):**
-- `extractArtifacts` rewritten to do per-turn versioning + `str_replace` replay (§6). Fixes the "artifacts frozen at v1" data-loss bug.
-- New warnings: `str_replace_failed`, `artifact_basename_collision`.
-- `extract_artifacts.py` added — stdlib Python 3 port for offline reconstruction.
-
-**Validation skill updated to v3.0.0** at `~/.claude/skills/validate-export/SKILL.md` — knows about version chains, replay invariants, and how to cross-check `str_replace_failed` warnings.
-
----
-
 ## 14. What TECHNICAL.md doesn't cover yet
 
 `TECHNICAL.md` is largely accurate for v1.4 and earlier. It does **not** describe:
+- Current data loading. Its data capture section describes a design that no longer exists (§4).
 - Per-turn artifact versioning (§6).
 - `ExportErrorCollector` / structured `errors.txt` (§10).
 - `ensureProjectName` and the project-prefix fallback (§4).
@@ -377,14 +333,14 @@ If you make significant changes to any of those, update both `TECHNICAL.md` and 
 
 | You want to… | Look at |
 |---|---|
-| Add a new export format | `popup.html` (button) + `popup.js` click handlers (~3088) + a new `generate<Format>` function + bulk path in `bulkExport`. |
-| Render a new tool call inline | `convertToMarkdown` (~2389), in the `tool_use` branch. |
+| Add a new export format | `popup.html` (button) + `popup.js` click handlers + a new `generate<Format>` function + bulk path in `bulkExport`. |
+| Render a new tool call inline | `convertToMarkdown`, in the `tool_use` branch. |
 | Extract a new file type to disk | New `extract<Foo>(data)` function; call site in `populateConversationFolder`; possibly a new folder under the ZIP layout. |
-| Add a new API fetch with retry | Pattern-match `fetchUploadedFile` (~984): primary URL, fallbacks, per-URL `urlsTried`, surface failures via `errorCollector`. |
+| Add a new API fetch with retry | Pattern-match `fetchUploadedFile`: primary URL, fallbacks, per-URL `urlsTried`, surface failures via `errorCollector`. |
 | Change versioning rules for artifacts | `extractArtifacts` (§6). Also update `extract_artifacts.py` to match. Re-run validation against the `Sudden_acid_reflux_in_young_adults` fixture if available locally. |
-| Adjust the ZIP layout | `populateConversationFolder` (~1714). README's "ZIP Archive" section is the user-facing contract — update it too. |
-| Add a setting | Add to `defaultSettings` (~3205), `loadSettings`, `applySettings`, `popup.html` settings drawer markup, optional `sidepanel.html` markup, and the change handler block. |
-| Add a keyboard shortcut | The `keydown` switch (~3315) and the `<span class="shortcut">` markup in the relevant button. |
+| Adjust the ZIP layout | `populateConversationFolder`. README's "ZIP Archive" section is the user-facing contract — update it too. |
+| Add a setting | Add to `defaultSettings`, `loadSettings`, `applySettings`, `popup.html` settings drawer markup, optional `sidepanel.html` markup, and the change handler block. |
+| Add a keyboard shortcut | The `keydown` switch and the `<span class="shortcut">` markup in the relevant button. |
 | Bump README's changelog | Add a `### v1.5.x` section at the top of the changelog. Don't bump `manifest.json` unless cutting a release. |
 
 ---
@@ -405,4 +361,4 @@ A clean diff (or only the unversioned-final equivalent to `_vN`) means the JS ex
 
 ---
 
-*Last updated 2026-06-04. Keep this file accurate — it's the contract a future agent reads before touching anything.*
+*Last updated 2026-11-05. Keep this file accurate — it's the contract a future agent reads before touching anything.*
