@@ -69,9 +69,10 @@ TYPE_TO_EXT = {
     "image/svg+xml": ".svg",
 }
 
-# Matches: cat > /path/file.ext << 'EOF' ... EOF  (and unquoted EOF)
+# Matches: cat > /path/file.ext << DELIM ... DELIM, with any delimiter, quoted
+# or not. Groups: 1 path, 4 body.
 HEREDOC_RE = re.compile(
-    r"cat\s+>\s+(\S+)\s+<<\s*'?EOF'?\s*\n(.*?)\nEOF",
+    r"cat\s+>\s+(\S+)\s+<<-?\s*(['\"]?)(\w+)\2[^\n]*\n(.*?)\n[ \t]*\3[ \t]*(?=\n|\Z)",
     re.DOTALL,
 )
 
@@ -114,6 +115,17 @@ def get_message_chain(data: dict) -> list[dict]:
         uuid = by_uuid[uuid].get("parent_message_uuid")
     chain.reverse()
     return chain
+
+
+def failed_tool_use_ids(messages: list[dict]) -> set[str]:
+    """tool_use ids whose tool_result reported an error. A failed file tool
+    changed nothing, so replaying it would invent an edit."""
+    ids: set[str] = set()
+    for msg in messages:
+        for block in (msg.get("content") or []):
+            if block.get("type") == "tool_result" and block.get("is_error") and block.get("tool_use_id"):
+                ids.add(block["tool_use_id"])
+    return ids
 
 
 def basename_of(p: str) -> str:
@@ -180,6 +192,7 @@ def extract_artifacts(data: dict, warnings: list[Warning]) -> dict[str, str]:
     final state. Single-version artifacts get only the unversioned file.
     """
     messages = get_message_chain(data)
+    failed_ids = failed_tool_use_ids(messages)
     state: dict[str, ArtifactState] = {}
 
     def set_content(key: str, content: str, basename: str) -> None:
@@ -195,6 +208,10 @@ def extract_artifacts(data: dict, warnings: list[Warning]) -> dict[str, str]:
             if block.get("type") != "tool_use":
                 continue
             name = block.get("name")
+            # A failed bash command can still have written its heredoc, so
+            # only file tools are skipped.
+            if block.get("id") in failed_ids and name not in ("bash_tool", "Bash"):
+                continue
             inp = block.get("input") or {}
 
             if name == "create_file":
@@ -255,9 +272,8 @@ def extract_artifacts(data: dict, warnings: list[Warning]) -> dict[str, str]:
 
             elif name in ("bash_tool", "Bash"):
                 command = inp.get("command") or ""
-                m = HEREDOC_RE.search(command)
-                if m:
-                    filepath, content = m.group(1), m.group(2)
+                for m in HEREDOC_RE.finditer(command):
+                    filepath, content = m.group(1).strip("'\""), m.group(4)
                     filename = basename_of(filepath)
                     if filename and content:
                         set_content(filepath, content, filename)

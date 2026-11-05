@@ -67,7 +67,11 @@ SEED_SUBDIRS = ("home/claude", "mnt/user-data/uploads", "mnt/user-data/outputs",
 SANDBOX_ROOT_RE = re.compile(
     r"(?<![\w./-])(" + "|".join(re.escape(r) for r in SANDBOX_ROOTS) + r")(?![\w.-])"
 )
-HEREDOC_RE = re.compile(r"cat\s+>\s+(\S+)\s+<<\s*'?EOF'?\s*\n(.*?)\nEOF", re.DOTALL)
+# cat > path << DELIM ... DELIM, with any delimiter. Groups: 1 path, 4 body.
+HEREDOC_RE = re.compile(
+    r"cat\s+>\s+(\S+)\s+<<-?\s*(['\"]?)(\w+)\2[^\n]*\n(.*?)\n[ \t]*\3[ \t]*(?=\n|\Z)",
+    re.DOTALL,
+)
 # Display only: stops text in a conversation from driving your terminal.
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 UTF8_BOM = b"\xef\xbb\xbf"
@@ -94,15 +98,30 @@ def message_chain(data: dict) -> list[dict]:
     return chain
 
 
+def failed_tool_use_ids(messages: list[dict]) -> set[str]:
+    """tool_use ids whose tool_result reported an error. A failed file tool
+    changed nothing, so it must not be replayed."""
+    ids: set[str] = set()
+    for msg in messages:
+        for block in (msg.get("content") or []):
+            if block.get("type") == "tool_result" and block.get("is_error") and block.get("tool_use_id"):
+                ids.add(block["tool_use_id"])
+    return ids
+
+
 def declarative_state(data: dict) -> dict[str, str]:
     """Pre-bash artifact state: result of replaying create_file / str_replace /
     rewrite tool calls only. Keyed by full sandbox path."""
     state: dict[str, str] = {}
-    for msg in message_chain(data):
+    chain = message_chain(data)
+    failed_ids = failed_tool_use_ids(chain)
+    for msg in chain:
         for block in (msg.get("content") or []):
             if block.get("type") != "tool_use":
                 continue
             name = block.get("name")
+            if block.get("id") in failed_ids and name != "bash_tool":
+                continue
             inp = block.get("input") or {}
             if name == "create_file":
                 p, t = inp.get("path"), inp.get("file_text")
@@ -123,10 +142,9 @@ def declarative_state(data: dict) -> dict[str, str]:
                 if p and t:
                     state[p] = t
             elif name == "bash_tool":
-                # bash_tool heredoc creates: cat > /path << 'EOF' ... EOF
-                hm = HEREDOC_RE.search(inp.get("command", ""))
-                if hm:
-                    state[hm.group(1)] = hm.group(2)
+                for hm in HEREDOC_RE.finditer(inp.get("command", "")):
+                    if hm.group(4):
+                        state[hm.group(1).strip("'\"")] = hm.group(4)
     return state
 
 
@@ -152,11 +170,15 @@ def replay_steps(data: dict) -> list[Step]:
     """File edits and bash commands in conversation order. Order matters: a
     later str_replace must apply on top of what an earlier script produced."""
     steps: list[Step] = []
-    for mi, msg in enumerate(message_chain(data)):
+    chain = message_chain(data)
+    failed_ids = failed_tool_use_ids(chain)
+    for mi, msg in enumerate(chain):
         for bi, block in enumerate(msg.get("content") or []):
             if block.get("type") != "tool_use":
                 continue
             name = block.get("name")
+            if block.get("id") in failed_ids and name != "bash_tool":
+                continue
             inp = block.get("input") or {}
             if name == "create_file":
                 if inp.get("path") and inp.get("file_text"):
@@ -173,9 +195,9 @@ def replay_steps(data: dict) -> list[Step]:
                     steps.append(Step(path=inp["path"], write=text))
             elif name == "bash_tool" and inp.get("command"):
                 # Keep a heredoc's file even if the user skips the command.
-                hm = HEREDOC_RE.search(inp["command"])
-                if hm:
-                    steps.append(Step(path=hm.group(1), write=hm.group(2)))
+                for hm in HEREDOC_RE.finditer(inp["command"]):
+                    if hm.group(4):
+                        steps.append(Step(path=hm.group(1).strip("'\""), write=hm.group(4)))
                 steps.append(Step(bash=BashCmd(
                     msg_idx=mi,
                     block_idx=bi,
