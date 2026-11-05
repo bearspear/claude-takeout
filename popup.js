@@ -1412,6 +1412,40 @@ async function fetchProjectFileList(projectUuid, organizationId) {
   }
 }
 
+// Download a project's knowledge files into `folder` under `basePath`. Returns the
+// saved names and any failures, in the shape the error collector takes.
+async function saveProjectFiles(folder, basePath, files, organizationId, conversationId, onProgress) {
+  const names = [];
+  const failures = [];
+  const usedNames = new Set();
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const uuid = file.file_uuid || file.uuid;
+    const name = (file.file_name || `file_${uuid}`).normalize('NFC').replace(/[\\/]/g, '_');
+    const dot = name.lastIndexOf('.');
+    const base = dot > 0 ? name.substring(0, dot) : name;
+    const ext = dot > 0 ? name.substring(dot) : '';
+    let finalName = name;
+    for (let n = 2; usedNames.has(finalName.toLowerCase()); n++) {
+      finalName = `${base}_${n}${ext}`;
+    }
+    usedNames.add(finalName.toLowerCase());
+
+    if (onProgress) {
+      onProgress(10 + Math.floor((i / files.length) * 5), 100, `Downloading: ${finalName}`);
+    }
+    try {
+      const blob = await fetchUploadedFile(null, uuid, organizationId, conversationId, file.path || null);
+      folder.file(`${basePath}/files/${finalName}`, blob);
+      names.push(finalName);
+    } catch (err) {
+      console.error(`Failed to download project file ${finalName}:`, err);
+      failures.push({ filename: finalName, error: err.message, uuid, httpStatus: err.httpStatus || null, urlsTried: err.urlsTried || [] });
+    }
+  }
+  return { names, failures };
+}
+
 // Normalize a file path for comparison (handles various sanitization patterns)
 function normalizePathForComparison(path) {
   if (!path) return '';
@@ -2292,7 +2326,9 @@ function generateLinksAndSources(urls, webSources) {
 
 // Populate a zip folder with all conversation files
 // Used by both single export and mega-zip export
-async function populateConversationFolder(folder, data, onProgress = null, organizationId = null) {
+// In a mega-ZIP, sharedProjects stores each project's files once at the archive
+// root: { root, byUuid: Map, usedDirs: Set }. Without it, files go in this folder.
+async function populateConversationFolder(folder, data, onProgress = null, organizationId = null, sharedProjects = null) {
   const title = data.name || 'Claude Conversation';
   const messages = getMessageChain(data);
 
@@ -2310,7 +2346,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   let projectFilesFromApi = false;
   let projectDocsJson = null;
   let projectMetadataJson = null;
-  const projectUploads = [];  // Names saved under project/files/
+  let projectUploads = [];  // Names of the project's saved knowledge files
+  let projectFilesPath = 'project/files';  // Where they are, relative to this folder
   if (data.project_uuid || data.project?.uuid) {
     if (onProgress) onProgress('Fetching project files...');
     const { files: apiDocs, docsJson, projectJson, failures: projectFailures, metadataError } = await fetchProjectDocs(data, organizationId);
@@ -2350,53 +2387,50 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       console.log(`Fetched ${apiDocs.length} project files from API`);
     }
 
-    // Download knowledge files. Project files are fetched for every chat in the
-    // project, because each export folder has to stand alone.
+    // Download knowledge files, once per project in a mega-ZIP.
     const projectUuid = data.project_uuid || data.project?.uuid;
-    const { files: knowledgeFiles, failure: listFailure } = await fetchProjectFileList(projectUuid, organizationId);
-    if (listFailure) {
-      errorCollector.addError('project_doc', listFailure.filename, listFailure.error, {
-        httpStatus: listFailure.httpStatus,
-        urlsTried: listFailure.urlsTried
+    let saved = sharedProjects?.byUuid.get(projectUuid);
+    if (saved) {
+      // A shared download that failed is still missing from this chat.
+      projectUploads = saved.names;
+      projectFilesPath = `../projects/${saved.dir}/files`;
+    } else {
+      const { files: knowledgeFiles, failure: listFailure } = await fetchProjectFileList(projectUuid, organizationId);
+      let target = folder;
+      let basePath = 'project';
+      let dir = null;
+      if (sharedProjects && knowledgeFiles.length > 0) {
+        const baseDir = safeFilename(projectJson?.name || data.project?.name || projectUuid);
+        dir = baseDir;
+        for (let n = 2; sharedProjects.usedDirs.has(dir.toLowerCase()); n++) {
+          dir = `${baseDir}_${n}`;
+        }
+        sharedProjects.usedDirs.add(dir.toLowerCase());
+        target = sharedProjects.root;
+        basePath = `projects/${dir}`;
+      }
+      if (knowledgeFiles.length > 0) {
+        target.file(`${basePath}/files.json`, JSON.stringify(knowledgeFiles, null, 2));
+      }
+      const { names, failures } = await saveProjectFiles(target, basePath, knowledgeFiles, organizationId, data.uuid, onProgress);
+      saved = { dir, names, count: knowledgeFiles.length, failures: listFailure ? [listFailure, ...failures] : failures };
+      if (sharedProjects && !listFailure) {
+        sharedProjects.byUuid.set(projectUuid, saved);
+      }
+      projectUploads = names;
+      if (dir) projectFilesPath = `../projects/${dir}/files`;
+    }
+    for (const failure of saved.failures) {
+      errorCollector.addError('project_doc', failure.filename, failure.error, {
+        uuid: failure.uuid,
+        httpStatus: failure.httpStatus,
+        urlsTried: failure.urlsTried || []
       });
-    }
-    if (knowledgeFiles.length > 0) {
-      folder.file('project/files.json', JSON.stringify(knowledgeFiles, null, 2));
-    }
-    const usedNames = new Set();
-    for (let i = 0; i < knowledgeFiles.length; i++) {
-      const file = knowledgeFiles[i];
-      const uuid = file.file_uuid || file.uuid;
-      const name = (file.file_name || `file_${uuid}`).normalize('NFC').replace(/[\\/]/g, '_');
-      const dot = name.lastIndexOf('.');
-      const base = dot > 0 ? name.substring(0, dot) : name;
-      const ext = dot > 0 ? name.substring(dot) : '';
-      let finalName = name;
-      for (let n = 2; usedNames.has(finalName.toLowerCase()); n++) {
-        finalName = `${base}_${n}${ext}`;
-      }
-      usedNames.add(finalName.toLowerCase());
-
-      if (onProgress) {
-        onProgress(10 + Math.floor((i / knowledgeFiles.length) * 5), 100, `Downloading: ${finalName}`);
-      }
-      try {
-        const blob = await fetchUploadedFile(null, uuid, organizationId, data.uuid, file.path || null);
-        folder.file(`project/files/${finalName}`, blob);
-        projectUploads.push(finalName);
-      } catch (err) {
-        console.error(`Failed to download project file ${finalName}:`, err);
-        errorCollector.addError('project_doc', finalName, err.message, {
-          uuid,
-          httpStatus: err.httpStatus || null,
-          urlsTried: err.urlsTried || []
-        });
-      }
     }
 
     // The project's own counts catch anything these lists no longer return.
     const expected = (projectJson?.docs_count || 0) + (projectJson?.files_count || 0);
-    const received = (Array.isArray(docsJson) ? docsJson.length : 0) + knowledgeFiles.length;
+    const received = (Array.isArray(docsJson) ? docsJson.length : 0) + saved.count;
     if (expected > received) {
       errorCollector.addWarning('project_doc', 'project contents', `The project reports ${expected} item(s), but the export found ${received}.`, {
         uuid: projectUuid,
@@ -2946,7 +2980,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       readmeLines.push(`### Files (${projectUploads.length})`);
       readmeLines.push('');
       for (const name of [...projectUploads].sort()) {
-        readmeLines.push(`- [${name}](project/files/${encodeURIComponent(name)})`);
+        readmeLines.push(`- [${name}](${projectFilesPath}/${encodeURIComponent(name)})`);
       }
     }
 
@@ -3830,7 +3864,9 @@ async function bulkExportZip() {
     let errors = [];  // Conversation-level errors (failed to fetch/process entire conversation)
     let totalFileErrors = 0;  // File-level errors across all conversations
     let totalFileWarnings = 0;  // File-level warnings across all conversations
-    const usedFolderNames = new Set();
+    // `projects` holds the shared project files, so no chat may take that name.
+    const usedFolderNames = new Set(['projects']);
+    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set() };
 
     for (const conv of conversations) {
       try {
@@ -3860,7 +3896,7 @@ async function bulkExportZip() {
         const folder = megaZip.folder(folderName);
 
         // Use shared helper to populate the folder (same structure as individual zip)
-        const folderResult = await populateConversationFolder(folder, data, null, orgId);
+        const folderResult = await populateConversationFolder(folder, data, null, orgId, sharedProjects);
 
         // Track file-level errors/warnings
         if (folderResult.errorCollector) {

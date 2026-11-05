@@ -177,7 +177,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 
 ## 7. ZIP export layout
 
-`populateConversationFolder` writes this layout. Both single-ZIP and mega-ZIP use it identically (mega-ZIP nests one folder per conversation under the root + an `index.md`).
+`populateConversationFolder` writes this layout. Both single-ZIP and mega-ZIP use it (mega-ZIP nests one folder per conversation under the root + an `index.md`). The one difference: in a mega-ZIP, project knowledge files go in a shared root `projects/` folder, so those chat folders aren't self-contained.
 
 ```
 [<Project>-project]_<conversation>_claude-chat.zip   (project prefix only when in a project)
@@ -206,6 +206,7 @@ Mega-ZIP only:
 ```
 claude-takeout-<YYYY-MM-DD>.zip
 ├── index.md                   # Master table w/ per-conversation issue counts
+├── projects/<project>/        # files/ and files.json, stored once and linked from each chat's README
 ├── <conversation-folder-1>/   # Same layout as above
 ├── <conversation-folder-2>/
 └── ...

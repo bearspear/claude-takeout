@@ -9,6 +9,7 @@ const bin=Buffer.alloc(4096);for(let i=0;i<bin.length;i++)bin[i]=(i*7+200)&255;b
 const bin2=Buffer.from(bin);bin2[100]=1;
 const sha=b=>crypto.createHash('sha1').update(b).digest('hex');
 const LONG='Hierarchies of being and mathematical structures - Part ';
+const PROJ='a0a0a0a0-0000-4000-8000-000000000001',PF='f0f0f0f0-0000-4000-8000-000000000001';
 const conv=(id,name,extra={})=>({uuid:id,name,model:'claude-x',created_at:'2026-11-05T10:00:00Z',updated_at:'2026-11-05T10:00:00Z',settings:{},current_leaf_message_uuid:'m2-'+id,chat_messages:[
  {uuid:'m1-'+id,parent_message_uuid:null,sender:'human',created_at:'2026-11-05T10:00:00Z',content:[{type:'text',text:'hello '+name}],attachments:[],files:extra.files||[],files_v2:[]},
  {uuid:'m2-'+id,parent_message_uuid:'m1-'+id,sender:'assistant',created_at:'2026-11-05T10:00:01Z',content:extra.content||[{type:'text',text:'reply'}],attachments:[],files:[],files_v2:[]}]});
@@ -18,7 +19,8 @@ const server={
   {type:'tool_result',tool_use_id:'p',name:'present_files',content:[{type:'local_resource',file_path:'/mnt/user-data/outputs/report.pdf',uuid:'',mime_type:'application/pdf',name:'report.pdf'}]},
   {type:'tool_use',id:'s1',name:'SendUserFile',input:{files:['/tmp/out/Minutes.odt']}},{type:'tool_result',tool_use_id:'s1',name:'SendUserFile',content:[{type:'text',text:'ok'}],file_deliveries:[{file_uuid:DEL1,path:'/tmp/out/Minutes.odt'}]},
   {type:'tool_use',id:'s2',name:'SendUserFile',input:{files:['/tmp/out/Minutes.odt']}},{type:'tool_result',tool_use_id:'s2',name:'SendUserFile',content:[{type:'text',text:'ok'}],file_deliveries:[{file_uuid:DEL2,path:'/tmp/out/Minutes.odt'}]}]}),
- [B]:conv(B,LONG+'1'),[C]:conv(C,LONG+'2')};
+ [B]:Object.assign(conv(B,LONG+'1'),{project_uuid:PROJ}),[C]:Object.assign(conv(C,LONG+'2'),{project_uuid:PROJ})};
+let projectDownloads=0;
 (async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'takeout-e2e-'));
  const ctx=await chromium.launchPersistentContext(dir,{headless:false,executablePath:process.env.CHROME_EXE,acceptDownloads:true,args:['--headless=new',`--disable-extensions-except=${EXT}`,`--load-extension=${EXT}`]});
@@ -26,7 +28,11 @@ const server={
  try{
   await ctx.addCookies([{name:'lastActiveOrg',value:ORG,url:'https://claude.ai'}]);
   await ctx.route('https://claude.ai/**',(r)=>{const u=r.request().url();let m;
+   if(u.endsWith(`/files/${PF}/contents`)){projectDownloads++;return r.fulfill({status:200,contentType:'application/pdf',body:bin})}
    if(m=u.match(/\/files\/([0-9a-f-]{36})\/contents$/)){const b={[DEL1]:bin,[DEL2]:bin2,[UP]:bin}[m[1]];return r.fulfill(b?{status:200,contentType:'application/octet-stream',body:b}:{status:404,json:{}})}
+   if(u.endsWith(`/projects/${PROJ}`))return r.fulfill({json:{name:'Shared Project',docs_count:0,files_count:1}});
+   if(u.endsWith(`/projects/${PROJ}/docs`))return r.fulfill({json:[]});
+   if(u.endsWith(`/projects/${PROJ}/files`))return r.fulfill({json:[{file_uuid:PF,file_name:'Paper.pdf'}]});
    if(u.includes('/wiggle/download-file'))return r.fulfill({status:200,contentType:'application/pdf',body:bin});
    if(m=u.match(/chat_conversations\/([0-9a-f-]{36})/))return r.fulfill(server[m[1]]?{json:server[m[1]]}:{status:404,json:{}});
    if(/\/chat_conversations(\?|$)/.test(u))return r.fulfill({json:Object.values(server).map(c=>({uuid:c.uuid,name:c.name,updated_at:c.updated_at}))});
@@ -49,7 +55,11 @@ const server={
   check('files-api upload saved',h('uploads/p01_Uploaded.odt')===sha(bin));
   check('no errors.txt',!Object.keys(f).some(k=>k.endsWith('errors.txt')),Object.keys(f).join());
   [dl]=await Promise.all([panel.waitForEvent('download',{timeout:30000}),panel.click('#exportAllZip')]);
-  const g=await zipFiles(await dl.path());const dirs=new Set(Object.keys(g).map(k=>k.split('/')[0]).filter(k=>!k.endsWith('.md')));
+  const g=await zipFiles(await dl.path());const dirs=new Set(Object.keys(g).map(k=>k.split('/')[0]).filter(k=>!k.endsWith('.md')&&k!=='projects'));
+  const shared=Object.keys(g).filter(k=>k.endsWith('Paper.pdf'));
+  check('project file stored once with intact bytes',shared.length===1&&shared[0]==='projects/Shared_Project/files/Paper.pdf'&&g[shared[0]].split('|')[2]===sha(bin),shared.join());
+  check('project file downloaded once',projectDownloads===1,String(projectDownloads));
+  check('no errors.txt for project chats',!Object.keys(g).some(k=>k.endsWith('errors.txt')));
   check('same-prefix chats get separate folders',dirs.size===3,[...dirs].join(' ; '));console.log('      folders:',[...dirs].join(' ; '));
  }catch(e){failed++;console.log('HARNESS ERROR',e.message)}
  finally{await ctx.close();fs.rmSync(dir,{recursive:true,force:true})}
