@@ -222,7 +222,9 @@ python3 extract_artifacts.py path/to/original.json --errors errors.txt
 
 ### `replay_bash.py`
 
-The recovery tool. Replays every `bash_tool` command from a conversation's `original.json` in a sandboxed tmpdir, so artifacts that Claude mutated via bash/Python scripts get reconstructed.
+The recovery tool. Replays every `bash_tool` command from a conversation's `original.json` in a tmpdir, so artifacts that Claude mutated via bash/Python scripts get reconstructed. It doesn't replay the newer `Bash` tool.
+
+**This runs code from a conversation, so treat it as untrusted.** Commands can include anything Claude was led to write, including text from a web page it read. Read them with `--dry-run` first.
 
 **When to use it:**
 - `errors.txt` shows `artifact_opaque_mutation` warnings.
@@ -234,7 +236,7 @@ The recovery tool. Replays every `bash_tool` command from a conversation's `orig
 # Per-command confirmation (y/n/A/s/q for show-full/quit) — safest mode
 python3 replay_bash.py /path/to/export-folder
 
-# Skip prompts, run every command (trusted conversation)
+# Skip prompts, run every command in the OS sandbox
 python3 replay_bash.py /path/to/export-folder --all
 
 # Show every command without running anything
@@ -248,15 +250,33 @@ python3 replay_bash.py /path/to/export-folder --timeout 60
 
 # Minimal output
 python3 replay_bash.py /path/to/export-folder --all --quiet
+
+# No OS sandbox: full permissions and network, every command prompted
+python3 replay_bash.py /path/to/export-folder --no-isolation
 ```
 
-**Safety boundaries baked in:**
-- Runs everything in a fresh `tempfile.TemporaryDirectory` — nothing outside the sandbox is touched until the final sync-back step.
-- Per-command `y/n/A/s/q` confirmation prompts; default answer is `n`.
-- 30-second per-command timeout (configurable).
-- `--dry-run` shows everything without executing.
-- `--no-write` replays but skips the sync.
-- Failed commands don't stop the chain — Claude's verification scripts can legitimately fail under your local environment without breaking the reconstruction.
+**What protects you:**
+
+| Protection | macOS | Elsewhere |
+|---|---|---|
+| OS sandbox (`sandbox-exec`, deny by default) | Yes | No. The tool refuses to run without `--no-isolation` |
+| No network, clipboard or launching other apps | Yes | No |
+| Writes only inside the tmpdir | Yes | No |
+| No reads from home, other temp directories or external volumes | Yes | No |
+| Minimal environment, so your tokens aren't passed to commands | Yes | Yes |
+| Conversation paths can't escape the tmpdir (`..`, symlinks) | Yes | Yes |
+| Originals saved to `artefacts_before_replay/` before any overwrite | Yes | Yes |
+| Per-command prompt, default `n`, and a 30-second timeout | Yes | Yes |
+
+`/home/claude`, `/mnt/user-data` and `/tmp` are rewritten into the tmpdir, and `~` points there too.
+
+**What it doesn't protect against:**
+- **Bad output.** A command's result still lands in `artefacts/`, so an exported HTML file could contain anything. Check it before opening it.
+- **CPU, memory and disk use** inside the tmpdir, apart from the timeout.
+- **`sandbox-exec` itself.** Apple has deprecated it, though it still works. Treat it as a strong layer, not a guarantee.
+- **`--no-isolation`.** Commands run as you, with your files and network. It can't be combined with `--all`.
+
+**If commands fail:** failures don't stop the chain. Scripts can fail here because a package isn't installed, or because they used paths that only exist on Claude's side, such as `/mnt/skills`. When that happens the result may be wrong or worse than the original, so the tool warns you. Compare against `artefacts_before_replay/` before keeping it.
 
 **What the output tells you:**
 ```
@@ -314,16 +334,18 @@ This is the canonical `replay_bash.py` case. Run it. If the image was uploaded t
 
 ### "I want to archive my whole Claude history"
 
-Use **Export All (Mega-Zip)**. After download, optionally run `replay_bash.py` on each conversation folder that has an `artifact_opaque_mutation` warning. For thousands of conversations a shell loop is fine:
+Use **Export All (Mega-Zip)**. After download, optionally run `replay_bash.py` on each conversation folder that has an `artifact_opaque_mutation` warning. This loop prompts for each command, so you review what runs:
 
 ```bash
 unzip claude-takeout-2026-06-06.zip -d takeout/
 for folder in takeout/*/; do
   if grep -q artifact_opaque_mutation "$folder/errors.txt" 2>/dev/null; then
-    python3 /path/to/claude-takeout/replay_bash.py "$folder" --all --quiet
+    python3 /path/to/claude-takeout/replay_bash.py "$folder"
   fi
 done
 ```
+
+Avoid `--all` across a whole archive: you'd be running every command from every conversation unread.
 
 ---
 

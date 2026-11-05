@@ -15,7 +15,7 @@ We have three plausible answers to the "Claude's `bash_tool` scripts mutate arti
 | Approach | Shipped? | What it does |
 |---|---|---|
 | **Bespoke matchers in `popup.js`** | ❌ Removed (briefly shipped) | JS regex recognizers that translated specific Python idioms into JS substitutions (image base64 encode/replace, artifact-to-artifact splice at marker). Removed once `replay_bash.py` existed — they covered the same cases with worse reliability. |
-| **`replay_bash.py` CLI** | ✅ Yes (canonical) | Stdlib Python script the user runs after export; sets up a sandboxed tmpdir, replays every `bash_tool` command verbatim, syncs results back. |
+| **`replay_bash.py` CLI** | ✅ Yes (canonical) | Stdlib Python script the user runs after export; sets up a tmpdir, isolated by `sandbox-exec` on macOS, replays every `bash_tool` command verbatim, syncs results back. |
 | **Pyodide-in-the-extension** | ❌ No (this document) | Embed a WebAssembly Python runtime in the extension and run Claude's Python scripts inline during export — fully automatic, no second step. |
 
 **Why we did not ship Pyodide:** the CLI already solves the problem with no extension size cost, full subprocess support (`sed -i`, `awk`, multi-step pipelines), and a clear per-command confirmation UX. Pyodide would be more "automatic" but adds ~10 MB of WASM, gives up the ability to replay non-Python bash commands, and intersects awkwardly with Chrome MV3's CSP. The trade did not pencil out *for the kinds of scripts Claude actually writes*.

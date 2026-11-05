@@ -32,7 +32,7 @@ For deeper dives, two companion docs live alongside this one:
 | `popup.js` | **The brain.** ~3,600 lines. All export logic, all conversion, all UI wiring. Same script is loaded by both `popup.html` and `sidepanel.html`. | See §3 below for the internal layout. |
 | `jszip.min.js` | ZIP library (vendored). | Used by both single-ZIP and mega-ZIP exports. |
 | `extract_artifacts.py` | Stdlib-only Python port of `extractArtifacts`. | Reconstructs all per-turn artifact versions from `original.json` offline. Byte-identical output to the JS implementation. |
-| `replay_bash.py` | Stdlib-only Python CLI for post-export bash replay. | Sandboxed reconstruction of artifacts the declarative replay can't reach (anything Claude mutated via `bash_tool`). See §10 below and `docs/WASM_REPLAY_APPROACH.md`. |
+| `replay_bash.py` | Stdlib-only Python CLI for post-export bash replay. | Reconstruction, isolated by `sandbox-exec` on macOS, of artifacts the declarative replay can't reach (anything Claude mutated via `bash_tool`). See §10 below and `docs/WASM_REPLAY_APPROACH.md`. |
 | `docs/WASM_REPLAY_APPROACH.md` | Architecture record. | Comprehensive evaluation of running Pyodide in the extension as an alternative to the CLI. We chose the CLI; this doc explains why and what would change the answer. |
 | `icon16.png` / `icon48.png` / `icon128.png` / `icon.svg` | Extension icons. | |
 | `README.md` / `USAGE.md` / `TECHNICAL.md` | Documentation. | TECHNICAL.md predates v1.5.x and doesn't describe per-turn versioning, `ExportErrorCollector`, or `ensureProjectName`. |
@@ -160,7 +160,7 @@ The user can regenerate a response, producing a tree. `current_leaf_message_uuid
 | `bash_tool` (heredoc) | `command` matching `cat > <path> << 'EOF' ... EOF` | Treated as create_file. |
 | `present_files` | `filepaths[]` | In `convertToMarkdown`, looked up in the `artifacts` map for inline embedding. *Caveat:* with edited artifacts, lookup resolves to the FINAL versioned state, not the state at the moment of presentation. Acceptable trade-off; the per-turn versioned files exist on disk for cases where the precise moment matters. |
 | `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Same replay as `create_file` / `str_replace`. Newer conversations use these names. |
-| `Bash` | `command` | Same as `bash_tool` in the extension. `replay_bash.py` doesn't cover it: paths such as `/tmp/claude-0/...` aren't rewritten, so a replay would touch the real filesystem. |
+| `Bash` | `command` | Same as `bash_tool` in the extension. `replay_bash.py` doesn't cover it yet. |
 | `SendUserFile` | `files[]`; result has `file_deliveries[]` with `file_uuid`, `path` | `extractDeliveredFiles` lists them and `populateConversationFolder` downloads each by UUID into `artefacts/`. |
 | `web_search` | `query` (input) / `content[]` (result) | Renders the query + formatted result list; citations harvested via `processTextWithCitations`. |
 | `view` / `read_file` | `path` | Used by `extractBlobContent` to recover ephemeral upload content from tool_result blocks when the wiggle API 404s. |
@@ -287,7 +287,7 @@ The exporter handles three classes of artifact mutation:
 - **Direct sandbox-path references** in artifact text (e.g. `<img src="/mnt/user-data/uploads/foo.png">`) → rewritten to base64 data URIs in `populateConversationFolder`'s inline-pass (Piece A — pure mechanical substitution, no inference).
 - **Arbitrary `bash_tool` mutations** (Python heredocs that mutate files via `open().write()`, shell `sed -i`, awk pipelines, etc.) → **the extension does not try to replay these.** `detectOpaqueMutations` flags each one with an `artifact_opaque_mutation` warning in `errors.txt` and points the user at `replay_bash.py`.
 
-The CLI does what the extension can't safely do: runs Claude's actual scripts in a sandboxed tmpdir with `/home/claude/…` and `/mnt/user-data/…` path-rewritten to the tmpdir, with per-command confirmation. See `docs/WASM_REPLAY_APPROACH.md` for the architectural reasoning (we briefly shipped JS regex-based recipe matchers, then removed them once the CLI proved more reliable and covered more cases).
+The CLI does what the extension can't safely do: runs Claude's actual scripts in a tmpdir with `/home/claude`, `/mnt/user-data` and `/tmp` path-rewritten into it, with per-command confirmation. Commands are untrusted: `sandbox_profile` applies a deny-by-default `sandbox-exec` profile, `sandbox_path` rejects paths and symlinks leaving the tmpdir, and `command_env` keeps tokens out. Never weaken these without saying so in `USAGE.md`. See `docs/WASM_REPLAY_APPROACH.md` for the architectural reasoning (we briefly shipped JS regex-based recipe matchers, then removed them once the CLI proved more reliable and covered more cases).
 
 If you change the opaque-mutation detector's heuristics: keep them tight. The signal it produces is the only thing pointing users at the CLI, and a missed signal means a silently-incomplete export.
 
