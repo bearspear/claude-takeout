@@ -93,12 +93,12 @@ test('Edit without replace_all rejects an ambiguous match', () => {
   assert.strictEqual(artifacts(data)['x.py'], 'one one');
 });
 
-test('Bash mutations warn and say the CLI does not cover them', () => {
+test('Bash mutations warn and point at the CLI', () => {
   const warnings = collector();
   const data = oneMessage([use('1', 'Bash', { command: "cat > /t/y.md << 'EOF'\nhi\nEOF" }), use('2', 'Bash', { command: "sed -i 's/a/b/' /t/y.md" })]);
   fn('detectOpaqueMutations')(data, warnings);
   assert.strictEqual(warnings.warnings.length, 1);
-  assert.match(warnings.warnings[0].details.note, /does not replay the Bash tool/);
+  assert.match(warnings.warnings[0].details.note, /replay_bash\.py/);
 });
 
 test('a mutation beside a heredoc is still detected', () => {

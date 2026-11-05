@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-replay_bash.py — Replay bash_tool commands from a Claude conversation against
+replay_bash.py — Replay bash commands from a Claude conversation against
 an exported Claude Takeout folder, reconstructing artifacts the extension's
 declarative replay couldn't reach.
 
 The browser extension reconstructs artifacts by replaying create_file and
-str_replace tool calls. Anything Claude does via bash_tool — base64-encode an
+str_replace tool calls. Anything Claude does through bash — base64-encode an
 upload and substitute it into HTML, splice one artifact into another at a
 marker, run a per-line Python regex patch over an array, etc. — is opaque to
 the extension and silently shows up missing in the export.
@@ -18,7 +18,8 @@ Python. For each conversation:
   2. Set up a tmpdir matching Claude's sandbox layout (/home/claude/...,
      /mnt/user-data/uploads/...).
   3. Walk the conversation in order, applying file edits and running each
-     approved bash_tool command with path rewriting and a timeout.
+     approved bash command with path rewriting and a timeout. Both bash_tool
+     and the newer Bash tool are covered.
   4. Read the resulting artifacts back from the tmpdir and overwrite the
      export's artefacts/<basename> + highest _vN snapshot when changed.
 
@@ -60,7 +61,7 @@ from pathlib import Path
 from typing import Optional
 
 PROMPT_PREFIX_RE = re.compile(r"^p\d+_")
-SANDBOX_ROOTS = ("/home/claude", "/mnt/user-data", "/tmp")
+SANDBOX_ROOTS = ("/home/claude", "/mnt/user-data", "/tmp", "/root/.claude")
 SEED_SUBDIRS = ("home/claude", "mnt/user-data/uploads", "mnt/user-data/outputs", "tmp")
 # A sandbox root as a whole path component: matches /tmp and /tmp/x, but not
 # /tmpfoo or /var/tmp.
@@ -74,7 +75,10 @@ HEREDOC_RE = re.compile(
 )
 # Display only: stops text in a conversation from driving your terminal.
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+# Where the Bash tool's sessions keep uploads, as <dir>/<uuid8>-<safe name>.
+SESSION_UPLOADS_RE = re.compile(r"/root/\.claude/uploads/[\w-]+")
 UTF8_BOM = b"\xef\xbb\xbf"
+BASH_TOOLS = ("bash_tool", "Bash")
 BACKUP_DIRNAME = "artefacts_before_replay"
 
 
@@ -120,28 +124,35 @@ def declarative_state(data: dict) -> dict[str, str]:
             if block.get("type") != "tool_use":
                 continue
             name = block.get("name")
-            if block.get("id") in failed_ids and name != "bash_tool":
+            if block.get("id") in failed_ids and name not in BASH_TOOLS:
                 continue
             inp = block.get("input") or {}
             if name == "create_file":
                 p, t = inp.get("path"), inp.get("file_text")
                 if p and t:
                     state[p] = t
-            elif name == "str_replace":
-                p = inp.get("path")
-                old = inp.get("old_str", "")
-                new = inp.get("new_str", "") or ""
+            elif name == "Write":
+                p, t = inp.get("file_path"), inp.get("content")
+                if p and t:
+                    state[p] = t
+            elif name in ("str_replace", "Edit"):
+                is_edit = name == "Edit"
+                p = inp.get("file_path" if is_edit else "path")
+                old = inp.get("old_string" if is_edit else "old_str", "")
+                new = inp.get("new_string" if is_edit else "new_str", "") or ""
                 if not (p and old and p in state):
                     continue
                 cur = state[p]
-                if cur.count(old) == 1:
+                if is_edit and inp.get("replace_all") is True:
+                    state[p] = cur.replace(old, new)
+                elif cur.count(old) == 1:
                     state[p] = cur.replace(old, new, 1)
             elif name in ("rewrite", "create_or_overwrite"):
                 p = inp.get("path")
                 t = inp.get("file_text") or inp.get("content")
                 if p and t:
                     state[p] = t
-            elif name == "bash_tool":
+            elif name in BASH_TOOLS:
                 for hm in HEREDOC_RE.finditer(inp.get("command", "")):
                     if hm.group(4):
                         state[hm.group(1).strip("'\"")] = hm.group(4)
@@ -163,6 +174,7 @@ class Step:
     path: str = ""
     write: Optional[str] = None
     replace: Optional[tuple[str, str]] = None
+    replace_all: bool = False
     bash: Optional[BashCmd] = None
 
 
@@ -177,12 +189,22 @@ def replay_steps(data: dict) -> list[Step]:
             if block.get("type") != "tool_use":
                 continue
             name = block.get("name")
-            if block.get("id") in failed_ids and name != "bash_tool":
+            if block.get("id") in failed_ids and name not in BASH_TOOLS:
                 continue
             inp = block.get("input") or {}
             if name == "create_file":
                 if inp.get("path") and inp.get("file_text"):
                     steps.append(Step(path=inp["path"], write=inp["file_text"]))
+            elif name == "Write":
+                if inp.get("file_path") and inp.get("content"):
+                    steps.append(Step(path=inp["file_path"], write=inp["content"]))
+            elif name == "Edit":
+                if inp.get("file_path") and inp.get("old_string"):
+                    steps.append(Step(
+                        path=inp["file_path"],
+                        replace=(inp["old_string"], inp.get("new_string", "") or ""),
+                        replace_all=inp.get("replace_all") is True,
+                    ))
             elif name == "str_replace":
                 if inp.get("path") and inp.get("old_str"):
                     steps.append(Step(
@@ -193,7 +215,7 @@ def replay_steps(data: dict) -> list[Step]:
                 text = inp.get("file_text") or inp.get("content")
                 if inp.get("path") and text:
                     steps.append(Step(path=inp["path"], write=text))
-            elif name == "bash_tool" and inp.get("command"):
+            elif name in BASH_TOOLS and inp.get("command"):
                 # Keep a heredoc's file even if the user skips the command.
                 for hm in HEREDOC_RE.finditer(inp["command"]):
                     if hm.group(4):
@@ -217,6 +239,7 @@ class Upload:
     original_filename: str
     local_path: Path        # location in the export folder
     sandbox_paths: list[str] = field(default_factory=list)
+    file_uuid: str = ""
 
 
 def find_uploads(export_dir: Path, data: dict) -> list[Upload]:
@@ -225,10 +248,13 @@ def find_uploads(export_dir: Path, data: dict) -> list[Upload]:
         return []
     # Map sandbox-path → original filename via files_v2 / files entries.
     sandbox_lookup: dict[str, str] = {}
+    uuid_lookup: dict[str, str] = {}
     for msg in message_chain(data):
         for f in (msg.get("files_v2") or []) + (msg.get("files") or []):
             name = f.get("file_name")
             sandbox_path = f.get("path")
+            if name and f.get("file_uuid"):
+                uuid_lookup[name] = f["file_uuid"]
             if name and sandbox_path and sandbox_path.startswith("/mnt/user-data/"):
                 sandbox_lookup[name] = sandbox_path
             if name and not sandbox_path:
@@ -253,6 +279,7 @@ def find_uploads(export_dir: Path, data: dict) -> list[Upload]:
             original_filename=original,
             local_path=local,
             sandbox_paths=sandbox_paths,
+            file_uuid=uuid_lookup.get(original, ""),
         ))
     return uploads
 
@@ -269,6 +296,18 @@ def sandbox_path(td: Path, path: str) -> Optional[Path]:
         return None
     local = (td / path.lstrip("/")).resolve()
     return local if local.is_relative_to(td.resolve()) else None
+
+
+def add_session_upload_paths(uploads: list[Upload], commands: list[str]) -> None:
+    """Also place uploads where Bash commands look for them. The directory
+    appears only in the commands, so it's read from there."""
+    dirs = sorted({m for c in commands for m in SESSION_UPLOADS_RE.findall(c)})
+    for up in uploads:
+        if not up.file_uuid:
+            continue
+        safe_name = re.sub(r"[^\w.-]", "_", up.original_filename)
+        for d in dirs:
+            up.sandbox_paths.append(f"{d}/{up.file_uuid[:8]}-{safe_name}")
 
 
 def setup_sandbox(td: Path, uploads: list[Upload]) -> None:
@@ -302,6 +341,11 @@ def apply_edit(td: Path, step: Step) -> bool:
         current = local.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return False
+    if step.replace_all:
+        if old not in current:
+            return False
+        local.write_text(current.replace(old, new), encoding="utf-8")
+        return True
     if current.count(old) != 1:
         return False
     local.write_text(current.replace(old, new, 1), encoding="utf-8")
@@ -523,7 +567,7 @@ def sync_back(
 
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(
-        description="Replay Claude bash_tool scripts against a Claude Takeout export.",
+        description="Replay Claude's bash commands against a Claude Takeout export.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
@@ -534,7 +578,7 @@ def main(argv: list[str]) -> int:
     )
     ap.add_argument("export_dir", help="Path to an unzipped Claude Takeout export folder")
     ap.add_argument("--all", action="store_true",
-                    help="Skip per-command confirmation; run every bash_tool. "
+                    help="Skip per-command confirmation; run every bash command. "
                          "Not allowed with --no-isolation")
     ap.add_argument("--no-isolation", action="store_true",
                     help="Run commands WITHOUT an OS sandbox, with your full "
@@ -575,11 +619,12 @@ def main(argv: list[str]) -> int:
     steps = replay_steps(data)
     cmds = [s.bash for s in steps if s.bash]
     uploads = find_uploads(export_dir, data)
+    add_session_upload_paths(uploads, [c.command for c in cmds])
 
     print(f"Export:    {export_dir}")
     print(f"Artifacts: {len(state)} from declarative replay")
     print(f"Uploads:   {len(uploads)} found in uploads/")
-    print(f"Bash:      {len(cmds)} bash_tool command(s) in chronological order")
+    print(f"Bash:      {len(cmds)} command(s) in chronological order")
     if not args.dry_run:
         if isolate:
             print("Isolation: sandbox-exec (no network, writes only to the tmpdir)")

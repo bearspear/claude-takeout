@@ -221,7 +221,7 @@ python3 extract_artifacts.py path/to/original.json --errors errors.txt
 
 ### `replay_bash.py`
 
-The recovery tool. Replays every `bash_tool` command from a conversation's `original.json` in a tmpdir, so artifacts that Claude mutated via bash/Python scripts get reconstructed. It doesn't replay the newer `Bash` tool.
+The recovery tool. Replays every `bash_tool` and `Bash` command from a conversation's `original.json` in a tmpdir, so artifacts that Claude mutated via bash/Python scripts get reconstructed.
 
 **This runs code from a conversation, so treat it as untrusted.** Commands can include anything Claude was led to write, including text from a web page it read. Read them with `--dry-run` first.
 
@@ -267,7 +267,7 @@ python3 replay_bash.py /path/to/export-folder --no-isolation
 | Originals saved to `artefacts_before_replay/` before any overwrite | Yes | Yes |
 | Per-command prompt, default `n`, and a 30-second timeout | Yes | Yes |
 
-`/home/claude`, `/mnt/user-data` and `/tmp` are rewritten into the tmpdir, and `~` points there too.
+`/home/claude`, `/mnt/user-data`, `/tmp` and `/root/.claude` are rewritten into the tmpdir, and `~` points there too.
 
 **What it doesn't protect against:**
 - **Bad output.** A command's result still lands in `artefacts/`, so an exported HTML file could contain anything. Check it before opening it.
