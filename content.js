@@ -10,18 +10,14 @@
   script.onload = function() { this.remove(); };
   (document.head || document.documentElement).appendChild(script);
 
-  // Store captured data
-  let conversationData = null;
   let orgId = null;
+
+  // Older versions cached a full conversation here, which is no longer used.
+  chrome.storage.local.remove('conversationData');
 
   // Listen for messages from injected script
   window.addEventListener('message', function(event) {
     if (event.source !== window) return;
-
-    if (event.data.type === 'CLAUDE_CONVERSATION_DATA') {
-      conversationData = event.data.data;
-      chrome.storage.local.set({ conversationData: conversationData });
-    }
 
     if (event.data.type === 'CLAUDE_ORG_ID') {
       orgId = event.data.orgId;
@@ -72,26 +68,11 @@
   // Listen for messages from popup
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
-    if (request.action === 'getConversationData') {
-      chrome.storage.local.get(['conversationData', 'orgId'], (result) => {
-        sendResponse({
-          data: conversationData || result.conversationData,
-          orgId: getActiveOrgId() || orgId || result.orgId
-        });
-      });
-      return true;
-    }
-
     if (request.action === 'getOrgId') {
       chrome.storage.local.get(['orgId'], (result) => {
         sendResponse({ orgId: getActiveOrgId() || orgId || result.orgId });
       });
       return true;
-    }
-
-    if (request.action === 'triggerRefresh') {
-      window.location.reload();
-      sendResponse({ status: 'refreshing' });
     }
 
     if (request.action === 'fetchAllConversations') {
