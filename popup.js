@@ -95,6 +95,11 @@ class ExportErrorCollector {
     }
   }
 
+  // Drop warnings of one type for a file, once something has made them moot.
+  clearWarnings(type, filename) {
+    this.warnings = this.warnings.filter((w) => !(w.type === type && w.filename === filename));
+  }
+
   hasErrors() {
     return this.errors.length > 0;
   }
@@ -501,9 +506,33 @@ function isBashTool(name) {
   return name === 'bash_tool' || name === 'Bash';
 }
 
+// `cat > path << DELIM ... DELIM`, with any delimiter, quoted or not. Groups:
+// 1 path, 4 body.
+const HEREDOC_RE = /cat\s+>\s+(\S+)\s+<<-?\s*(['"]?)(\w+)\2[^\n]*\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g;
+const HEREDOC_HEADER_RE = /cat\s+>\s+\S+\s+<<-?\s*['"]?\w+['"]?/g;
+
+function heredocPath(match) {
+  return match[1].replace(/^['"]|['"]$/g, '');
+}
+
+// tool_use ids whose tool_result reported an error. A failed file tool changed
+// nothing, so replaying it would invent an edit that never happened.
+function failedToolUseIds(messages) {
+  const ids = new Set();
+  for (const msg of messages) {
+    for (const block of (msg.content || [])) {
+      if (block.type === 'tool_result' && block.is_error && block.tool_use_id) {
+        ids.add(block.tool_use_id);
+      }
+    }
+  }
+  return ids;
+}
+
 function extractArtifacts(data, errorCollector = null) {
   const artifacts = {};
   const messages = getMessageChain(data);
+  const failedIds = failedToolUseIds(messages);
 
   // Map content types to file extensions
   const typeToExt = {
@@ -589,6 +618,9 @@ function extractArtifacts(data, errorCollector = null) {
   for (const msg of messages) {
     for (const block of (msg.content || [])) {
       if (block.type !== 'tool_use') continue;
+      // A failed bash command can still have written its heredoc, so only file
+      // tools are skipped.
+      if (failedIds.has(block.id) && !isBashTool(block.name)) continue;
       const input = block.input || {};
 
       if (block.name === 'create_file') {
@@ -641,10 +673,9 @@ function extractArtifacts(data, errorCollector = null) {
         }
       } else if (isBashTool(block.name)) {
         const command = input.command || '';
-        const heredocMatch = command.match(/cat\s+>\s+([^\s]+)\s+<<\s*'?EOF'?\s*\n([\s\S]*?)\nEOF/);
-        if (heredocMatch) {
-          const filepath = heredocMatch[1];
-          const content = heredocMatch[2];
+        for (const match of command.matchAll(HEREDOC_RE)) {
+          const filepath = heredocPath(match);
+          const content = match[4];
           const filename = basenameOf(filepath);
           if (filename && content) {
             setContent(filepath, content, filename);
@@ -776,8 +807,9 @@ function detectOpaqueMutations(data, errorCollector) {
       }
       if (isBashTool(block.name)) {
         const cmd = input.command || '';
-        const m = cmd.match(/cat\s+>\s+(\S+)\s+<<\s*'?EOF'?\s*\n[\s\S]*?\nEOF/);
-        if (m) knownArtifactPaths.add(m[1]);
+        for (const match of cmd.matchAll(HEREDOC_RE)) {
+          knownArtifactPaths.add(heredocPath(match));
+        }
       }
     }
   }
@@ -801,11 +833,12 @@ function detectOpaqueMutations(data, errorCollector) {
     for (let bi = 0; bi < (msg.content || []).length; bi++) {
       const block = msg.content[bi];
       if (block.type !== 'tool_use' || !isBashTool(block.name)) continue;
-      const command = (block.input && block.input.command) || '';
-      if (!command) continue;
+      const rawCommand = (block.input && block.input.command) || '';
+      if (!rawCommand) continue;
 
-      // Skip heredoc creates — extractArtifacts already handled those.
-      if (/cat\s+>\s+\S+\s+<<\s*'?EOF'?/.test(command)) continue;
+      // extractArtifacts already handled the heredoc itself, so drop only its
+      // `cat > path <<` line. The rest of the command can still mutate artifacts.
+      const command = rawCommand.replace(HEREDOC_HEADER_RE, '');
 
       // Map variable name -> the artifact path it aliases (path or basename).
       const varToArtifact = {};
@@ -854,7 +887,7 @@ function detectOpaqueMutations(data, errorCollector) {
         if (pyOpenStrRe.test(command) ||
             (pyOpenVarRe && pyOpenVarRe.test(command)) ||
             shellRe.test(command)) {
-          opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command, toolName: block.name });
+          opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command: rawCommand, toolName: block.name });
           break;
         }
       }
@@ -2503,6 +2536,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       const conversationId = data.uuid;
       const blob = await fetchUploadedFile(null, file.uuid, organizationId, conversationId, file.path);
       await addArtefactBlob(folder, artifacts, file.filename, blob);
+      // The download is the file's final state, so edits that couldn't be
+      // replayed against it aren't missing.
+      errorCollector.clearWarnings('str_replace_failed', file.filename);
     } catch (err) {
       console.error(`Failed to download presented file ${file.filename}:`, err);
       errorCollector.addError('presented_file', file.filename, err.message, {

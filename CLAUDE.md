@@ -157,7 +157,7 @@ The user can regenerate a response, producing a tree. `current_leaf_message_uuid
 | `str_replace` | `path`, `old_str`, `new_str` | Replays edit against current state (single-match semantics); emits a `str_replace_failed` warning on 0 or >1 matches. |
 | `rewrite` / `create_or_overwrite` | `path`, `file_text` or `content` | Defensive — overwrites artifact state; emits new version. |
 | `artifacts` (cmd: `create`/`update`) | `id`, `title`, `type`, `content`, `command` | Keyed by `artifact:<id-or-title>`. Filename = sanitized(title or id) + `typeToExt[type]` (fallback `.txt`). |
-| `bash_tool` (heredoc) | `command` matching `cat > <path> << 'EOF' ... EOF` | Treated as create_file. |
+| `bash_tool` (heredoc) | `command` matching `cat > <path> << DELIM ... DELIM`, any delimiter (`HEREDOC_RE`) | Treated as create_file. |
 | `present_files` | `filepaths[]` | In `convertToMarkdown`, looked up in the `artifacts` map for inline embedding. *Caveat:* with edited artifacts, lookup resolves to the FINAL versioned state, not the state at the moment of presentation. Acceptable trade-off; the per-turn versioned files exist on disk for cases where the precise moment matters. |
 | `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Same replay as `create_file` / `str_replace`. Newer conversations use these names. |
 | `Bash` | `command` | Same as `bash_tool` in the extension. `replay_bash.py` doesn't cover it yet. |
@@ -180,7 +180,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 2. Maintain `state[key] = { current, basename, versions: [], editedThisTurn }`. Key is:
    - The full path for `create_file` / `str_replace` / `rewrite` / `bash_tool` heredoc.
    - `artifact:<id-or-title>` for the `artifacts` tool.
-3. For each `tool_use` block, update state:
+3. Skip file tools whose `tool_result` has `is_error`: they changed nothing. Bash commands are never skipped, since a failed one can still have written its heredoc. For each remaining `tool_use` block, update state:
    - `create_file` / `rewrite` / `artifacts create|update` / heredoc → `state[key].current = content; editedThisTurn = true`.
    - `str_replace` → count occurrences of `old_str` in current content. Exactly 1 → replace, mark dirty. 0 → warn `str_replace_failed` ("not found"). >1 → warn `str_replace_failed` ("ambiguous"). This mirrors the real tool's strict semantics.
 4. At the end of each message (assistant or human, defensively), any state entry with `editedThisTurn` gets its `current` pushed onto `versions[]` and the flag cleared.
@@ -305,7 +305,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - `presented_file` — `present_files` blob extraction failed.
 - `project_doc` — project document fetch failed (or only available truncated from view tool results).
 - `project_metadata` — `/projects/<uuid>` 4xx/5xx; `project.json` may be missing.
-- `str_replace_failed` — replay couldn't apply (no/ambiguous match).
+- `str_replace_failed` — an edit that succeeded in the conversation couldn't be replayed. Cleared if the file is then downloaded in its final state.
 - `artifact_basename_collision` — two paths produced the same basename; one was renamed.
 - `delivered_file` — a `SendUserFile` delivery could not be downloaded.
 

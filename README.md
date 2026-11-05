@@ -358,6 +358,12 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.5.6
+
+- **Failed tool calls no longer change artifacts** - A `create_file`, `str_replace`, `Write` or `Edit` that failed in the conversation was still replayed, so an artifact could contain an edit that never happened, or content the tool had rejected. They're now skipped, in `extract_artifacts.py` and `replay_bash.py` too. Re-export chats that relied on this.
+- **All heredocs tracked** - `cat > file << DELIM` now works with any delimiter, not only `EOF`, and with several in one command. `artifact_opaque_mutation` also checks commands that contain a heredoc.
+- **Fewer false `str_replace_failed` warnings** - No warning for edits that really failed, or for files downloaded in their final state.
+
 ### v1.5.5
 
 - **`replay_bash.py` is now isolated** - Earlier versions called it sandboxed, but commands ran with your full permissions and network. On macOS, commands now run under a deny-by-default `sandbox-exec` profile. Without it the tool refuses to run unless you pass `--no-isolation`, which can't be combined with `--all`.
