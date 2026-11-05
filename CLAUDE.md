@@ -159,6 +159,9 @@ The user can regenerate a response, producing a tree. `current_leaf_message_uuid
 | `artifacts` (cmd: `create`/`update`) | `id`, `title`, `type`, `content`, `command` | Keyed by `artifact:<id-or-title>`. Filename = sanitized(title or id) + `typeToExt[type]` (fallback `.txt`). |
 | `bash_tool` (heredoc) | `command` matching `cat > <path> << 'EOF' ... EOF` | Treated as create_file. |
 | `present_files` | `filepaths[]` | In `convertToMarkdown`, looked up in the `artifacts` map for inline embedding. *Caveat:* with edited artifacts, lookup resolves to the FINAL versioned state, not the state at the moment of presentation. Acceptable trade-off; the per-turn versioned files exist on disk for cases where the precise moment matters. |
+| `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Same replay as `create_file` / `str_replace`. Newer conversations use these names. |
+| `Bash` | `command` | Same as `bash_tool` in the extension. `replay_bash.py` doesn't cover it: paths such as `/tmp/claude-0/...` aren't rewritten, so a replay would touch the real filesystem. |
+| `SendUserFile` | `files[]`; result has `file_deliveries[]` with `file_uuid`, `path` | `extractDeliveredFiles` lists them and `populateConversationFolder` downloads each by UUID into `artefacts/`. |
 | `web_search` | `query` (input) / `content[]` (result) | Renders the query + formatted result list; citations harvested via `processTextWithCitations`. |
 | `view` / `read_file` | `path` | Used by `extractBlobContent` to recover ephemeral upload content from tool_result blocks when the wiggle API 404s. |
 | `web_fetch`, `str_replace_based_edit_tool`, etc. | varies | Rendered with sensible fallbacks in `convertToMarkdown`; not all are first-class extractors. |
@@ -304,6 +307,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - `project_metadata` — `/projects/<uuid>` 4xx/5xx; `project.json` may be missing.
 - `str_replace_failed` — replay couldn't apply (no/ambiguous match).
 - `artifact_basename_collision` — two paths produced the same basename; one was renamed.
+- `delivered_file` — a `SendUserFile` delivery could not be downloaded.
 
 `errors.txt` is built by `generateErrorReport()` and embedded into the ZIP only when `hasAny()` is true. The status pill turns amber (`.status.warning`) when there are warnings but the export still succeeded.
 
@@ -315,6 +319,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 - **All `.md` files written to ZIPs get a UTF-8 BOM** (`addFileWithBOM`). Reason: Chrome's `file://` opens markdown as text/plain and infers encoding from the BOM. Without it, em-dashes and umlauts mojibake when opening exports locally.
 - **All text content is run through `fixMojibake`** at extraction time (text attachments, project docs, etc.). Map is built lazily on first use and covers Latin/Greek/Cyrillic/math/box-drawing/arrows/super-sub/emoji ranges.
+- **Never decode a binary file as text:** `addArtefactBlob` keeps raw bytes unless `isTextFile` recognizes the extension. Calling `blob.text()` on a PDF, ODT or ZIP destroys it, and `file` still reports the type because the header survives. Test with `unzip -t` or a real viewer.
 - **Code fences are dynamic:** `getCodeFence(content)` returns ```` ` ```` x4 when content already contains a triple backtick. Apply this whenever you emit a fenced block whose content is user/Claude-supplied.
 
 ---

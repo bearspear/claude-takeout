@@ -55,7 +55,7 @@ class ExportErrorCollector {
     switch (type) {
       case 'upload':
         if (httpStatus === 404) {
-          return 'File may have expired or been deleted. If recently uploaded, re-upload to Claude and re-export. For blob files, check original.json for content in "view" tool results.';
+          return 'Every known download URL returned 404. Check whether the file still opens on claude.ai: if it does, the API may have changed, so report it. If it does not, it was deleted or expired. For blob files, check original.json for content in "view" or "Read" tool results.';
         } else if (httpStatus === 403) {
           return 'Session may have expired. Refresh claude.ai, ensure you are logged in, and retry the export.';
         } else if (details.fallbackAttempted && !details.fallbackResult) {
@@ -65,6 +65,9 @@ class ExportErrorCollector {
 
       case 'presented_file':
         return 'This file was created by Claude (via bash/Python) but could not be downloaded. Check original.json for the file content in tool results.';
+
+      case 'delivered_file':
+        return 'Claude sent this file to you, but it could not be downloaded. Open the conversation on claude.ai and use the download button on the file card.';
 
       case 'project_doc':
         if (details.truncated) {
@@ -82,6 +85,9 @@ class ExportErrorCollector {
         return 'Two distinct paths in the conversation produced files with the same basename. The second was saved under a numbered suffix (e.g. foo_2.html) to avoid silent overwrite. Both artifacts and all their versions are preserved in artefacts/.';
 
       case 'artifact_opaque_mutation':
+        if (details.toolName === 'Bash') {
+          return 'A Bash command modified an artifact in a way the exporter cannot replay declaratively. replay_bash.py does not cover the Bash tool, because its commands can use paths the CLI does not rewrite. The exported artifact stops at the last declarative edit, and the command is in original.json.';
+        }
         return 'A bash_tool command modified an artifact in a way the exporter cannot replay declaratively (it\'s not a create_file, str_replace, or heredoc). The exporter never attempts to interpret bash scripts; the companion CLI does. To reconstruct this artifact: run `python3 replay_bash.py <this-export-folder>` (ships alongside the extension). It walks every bash_tool command in chronological order with per-command confirmation, replays them in a sandboxed tmpdir, and writes the resulting artifact back into artefacts/.';
 
       default:
@@ -217,7 +223,7 @@ class ExportErrorCollector {
     lines.push('');
     lines.push('### Manual Recovery Steps');
     lines.push('');
-    lines.push('1. **For `artifact_opaque_mutation` warnings — run the replay CLI:**');
+    lines.push('1. **For `artifact_opaque_mutation` warnings from `bash_tool` commands — run the replay CLI:**');
     lines.push('   ```');
     lines.push('   python3 replay_bash.py /path/to/this/export/folder');
     lines.push('   ```');
@@ -329,6 +335,33 @@ function addFileWithBOM(folder, path, content) {
     folder.file(path, withBOM(content));
   } else {
     folder.file(path, content);
+  }
+}
+
+// Extensions that are safe to decode as text. Anything else stays as raw bytes,
+// because decoding a PDF, ODT or ZIP as UTF-8 destroys it.
+const TEXT_FILE_EXTENSIONS = new Set([
+  'md', 'markdown', 'txt', 'text', 'log', 'html', 'htm', 'css', 'scss', 'js', 'mjs', 'jsx', 'ts', 'tsx',
+  'json', 'jsonl', 'csv', 'tsv', 'xml', 'svg', 'yaml', 'yml', 'toml', 'ini', 'py', 'sh', 'bash', 'zsh',
+  'sql', 'r', 'rb', 'go', 'rs', 'java', 'kt', 'swift', 'c', 'h', 'cpp', 'hpp', 'cs', 'php', 'tex', 'rst'
+]);
+
+function isTextFile(filename) {
+  const name = filename || '';
+  const dot = name.lastIndexOf('.');
+  return dot > 0 && TEXT_FILE_EXTENSIONS.has(name.substring(dot + 1).toLowerCase());
+}
+
+// Write a downloaded file to artefacts/ and list it in the artifacts map. Binary
+// files are listed with empty content, since the map's text is never used for them.
+async function addArtefactBlob(folder, artifacts, filename, blob) {
+  if (isTextFile(filename)) {
+    const text = await blob.text();
+    addFileWithBOM(folder, `artefacts/${filename}`, text);
+    artifacts[filename] = text;
+  } else {
+    folder.file(`artefacts/${filename}`, blob);
+    artifacts[filename] = '';
   }
 }
 
@@ -462,6 +495,12 @@ function getMessageChain(data) {
 //
 // Failed or ambiguous str_replace operations (no match, or multiple matches)
 // are skipped and recorded in errorCollector when one is supplied.
+// Newer conversations use Bash, Write, Edit and Read where older ones used
+// bash_tool, create_file, str_replace and view.
+function isBashTool(name) {
+  return name === 'bash_tool' || name === 'Bash';
+}
+
 function extractArtifacts(data, errorCollector = null) {
   const artifacts = {};
   const messages = getMessageChain(data);
@@ -516,10 +555,17 @@ function extractArtifacts(data, errorCollector = null) {
     }
   }
 
-  function applyStrReplace(path, oldStr, newStr) {
+  function applyStrReplace(path, oldStr, newStr, replaceAll = false) {
     const s = state[path];
     if (!s) return { ok: false, reason: 'no prior create_file for this path' };
     if (!oldStr) return { ok: false, reason: 'empty old_str' };
+
+    if (replaceAll) {
+      if (!s.current.includes(oldStr)) return { ok: false, reason: 'old_str not found in current state' };
+      s.current = s.current.split(oldStr).join(newStr);
+      s.editedThisTurn = true;
+      return { ok: true };
+    }
 
     // Count occurrences of oldStr in current content. The real str_replace
     // tool requires uniqueness; mirror that here.
@@ -551,12 +597,20 @@ function extractArtifacts(data, errorCollector = null) {
         if (path && fileText) {
           setContent(path, fileText, basenameOf(path));
         }
-      } else if (block.name === 'str_replace') {
-        const path = input.path || '';
-        const oldStr = input.old_str || '';
-        const newStr = input.new_str != null ? input.new_str : '';
+      } else if (block.name === 'Write') {
+        const path = input.file_path || '';
+        const fileText = input.content || '';
+        if (path && fileText) {
+          setContent(path, fileText, basenameOf(path));
+        }
+      } else if (block.name === 'str_replace' || block.name === 'Edit') {
+        const isEdit = block.name === 'Edit';
+        const path = (isEdit ? input.file_path : input.path) || '';
+        const oldStr = (isEdit ? input.old_string : input.old_str) || '';
+        const rawNewStr = isEdit ? input.new_string : input.new_str;
+        const newStr = rawNewStr != null ? rawNewStr : '';
         if (path) {
-          const result = applyStrReplace(path, oldStr, newStr);
+          const result = applyStrReplace(path, oldStr, newStr, isEdit && input.replace_all === true);
           if (!result.ok && errorCollector) {
             errorCollector.addWarning(
               'str_replace_failed',
@@ -585,7 +639,7 @@ function extractArtifacts(data, errorCollector = null) {
           const key = `artifact:${id || title}`;
           setContent(key, content, filename);
         }
-      } else if (block.name === 'bash_tool') {
+      } else if (isBashTool(block.name)) {
         const command = input.command || '';
         const heredocMatch = command.match(/cat\s+>\s+([^\s]+)\s+<<\s*'?EOF'?\s*\n([\s\S]*?)\nEOF/);
         if (heredocMatch) {
@@ -717,7 +771,10 @@ function detectOpaqueMutations(data, errorCollector) {
           && input.path) {
         knownArtifactPaths.add(input.path);
       }
-      if (block.name === 'bash_tool') {
+      if ((block.name === 'Write' || block.name === 'Edit') && input.file_path) {
+        knownArtifactPaths.add(input.file_path);
+      }
+      if (isBashTool(block.name)) {
         const cmd = input.command || '';
         const m = cmd.match(/cat\s+>\s+(\S+)\s+<<\s*'?EOF'?\s*\n[\s\S]*?\nEOF/);
         if (m) knownArtifactPaths.add(m[1]);
@@ -743,7 +800,7 @@ function detectOpaqueMutations(data, errorCollector) {
     const msg = messages[mi];
     for (let bi = 0; bi < (msg.content || []).length; bi++) {
       const block = msg.content[bi];
-      if (block.type !== 'tool_use' || block.name !== 'bash_tool') continue;
+      if (block.type !== 'tool_use' || !isBashTool(block.name)) continue;
       const command = (block.input && block.input.command) || '';
       if (!command) continue;
 
@@ -797,7 +854,7 @@ function detectOpaqueMutations(data, errorCollector) {
         if (pyOpenStrRe.test(command) ||
             (pyOpenVarRe && pyOpenVarRe.test(command)) ||
             shellRe.test(command)) {
-          opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command });
+          opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command, toolName: block.name });
           break;
         }
       }
@@ -817,8 +874,16 @@ function detectOpaqueMutations(data, errorCollector) {
       errorCollector.addWarning(
         'artifact_opaque_mutation',
         basenameOf(om.artifactPath),
-        `A bash_tool command modified ${basenameOf(om.artifactPath)} in a way the exporter cannot replay declaratively (it's not a create_file, str_replace, or heredoc). The exported artifact may differ from what Claude actually produced. Use replay_bash.py to reconstruct.`,
-        { path: om.artifactPath, note: 'Run: python3 replay_bash.py <this-export-folder>' }
+        om.toolName === 'bash_tool'
+          ? `A bash_tool command modified ${basenameOf(om.artifactPath)} in a way the exporter cannot replay declaratively (it's not a create_file, str_replace, or heredoc). The exported artifact may differ from what Claude actually produced. Use replay_bash.py to reconstruct.`
+          : `A Bash command modified ${basenameOf(om.artifactPath)} in a way the exporter cannot replay declaratively. The exported artifact may differ from what Claude actually produced.`,
+        {
+          path: om.artifactPath,
+          toolName: om.toolName,
+          note: om.toolName === 'bash_tool'
+            ? 'Run: python3 replay_bash.py <this-export-folder>'
+            : 'replay_bash.py does not replay the Bash tool yet, so check the command in original.json.'
+        }
       );
     }
   }
@@ -845,7 +910,7 @@ function extractTextAttachments(data) {
     }
 
     for (const att of (msg.attachments || [])) {
-      let filename = att.file_name || '';
+      let filename = (att.file_name || '').normalize('NFC');
       const content = att.extracted_content || '';
       const attId = att.id || '';
 
@@ -978,7 +1043,7 @@ function extractUploadedFiles(data, organizationId = null) {
       if (file.success && file.file_name) {
         // Prefix filename with prompt number for grouping (p01_, p02_, etc.)
         const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
-        const prefixedFilename = promptPrefix + file.file_name;
+        const prefixedFilename = (promptPrefix + file.file_name).normalize('NFC');
 
         const fileInfo = {
           filename: prefixedFilename,
@@ -1025,7 +1090,7 @@ function extractUploadedFiles(data, organizationId = null) {
       }
 
       const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
-      const prefixedFilename = promptPrefix + originalFilename;
+      const prefixedFilename = (promptPrefix + originalFilename).normalize('NFC');
 
       const fileInfo = {
         filename: prefixedFilename,
@@ -1091,6 +1156,51 @@ function extractPresentedFiles(data) {
     }
   }
 
+  return files;
+}
+
+// Extract files Claude sent to the user with SendUserFile. Each delivery has its
+// own file UUID, so a path delivered more than once keeps every copy, as
+// <base>_v1<ext> ... <base>_vN<ext> plus the latest under <base><ext>.
+// takenNames holds filenames already used in artefacts/. Returns
+// [{ filename, uuid, path }].
+function extractDeliveredFiles(data, takenNames = []) {
+  const byPath = new Map();
+  for (const msg of getMessageChain(data)) {
+    for (const item of (msg.content || [])) {
+      for (const delivery of (item.file_deliveries || [])) {
+        if (!delivery.file_uuid || !delivery.path) continue;
+        if (!byPath.has(delivery.path)) byPath.set(delivery.path, []);
+        byPath.get(delivery.path).push(delivery.file_uuid);
+      }
+    }
+  }
+
+  const taken = new Set(takenNames);
+  const files = [];
+  for (const [path, uuids] of byPath) {
+    const name = path.split('/').pop().normalize('NFC');
+    const dot = name.lastIndexOf('.');
+    const base = dot > 0 ? name.substring(0, dot) : name;
+    const ext = dot > 0 ? name.substring(dot) : '';
+
+    // Keep the delivered copy apart from an artifact replayed under this name.
+    let outBase = base;
+    let attempt = 1;
+    while (taken.has(outBase + ext)) {
+      outBase = attempt === 1 ? `${base}_delivered` : `${base}_delivered_${attempt}`;
+      attempt++;
+    }
+    taken.add(outBase + ext);
+
+    if (uuids.length > 1) {
+      uuids.forEach((uuid, i) => {
+        files.push({ filename: `${outBase}_v${i + 1}${ext}`, uuid, path });
+        taken.add(`${outBase}_v${i + 1}${ext}`);
+      });
+    }
+    files.push({ filename: outBase + ext, uuid: uuids[uuids.length - 1], path });
+  }
   return files;
 }
 
@@ -1267,6 +1377,27 @@ function normalizePathForComparison(path) {
 // Returns { content, filename } where filename is the sanitized name from view tool
 function extractBlobContent(data, blobPath) {
   const messages = data.chat_messages || [];
+
+  // Read results don't name the file, so match them through their tool_use.
+  // Skip partial reads, which would save only part of the file as if it were whole.
+  const blobName = blobPath.split('/').pop();
+  for (const msg of messages) {
+    const content = msg.content || [];
+    for (const use of content) {
+      if (use.type !== 'tool_use' || use.name !== 'Read') continue;
+      const input = use.input || {};
+      if (input.offset != null || input.limit != null) continue;
+      if ((input.file_path || '').split('/').pop() !== blobName) continue;
+      const result = content.find((b) => b.type === 'tool_result' && b.tool_use_id === use.id);
+      const text = (result?.content || []).find((c) => c.type === 'text')?.text;
+      if (!text || result.is_error) continue;
+      return {
+        content: fixMojibake(text.split('\n').map((line) => line.replace(/^\s*\d+\t/, '')).join('\n')),
+        filename: blobName
+      };
+    }
+  }
+
   const normalizedBlobPath = normalizePathForComparison(blobPath);
   // Also extract just the filename part for looser matching
   const blobFilename = blobPath.split('/').pop();
@@ -1420,6 +1551,7 @@ async function fetchUploadedFile(url, fileUuid = null, orgId = null, conversatio
 
   // Fallback URLs using file UUID if available
   if (fileUuid && orgId) {
+    urlsToTry.push(`https://claude.ai/api/organizations/${orgId}/files/${fileUuid}/contents`);
     urlsToTry.push(`https://claude.ai/api/${orgId}/files/${fileUuid}/preview`);
     urlsToTry.push(`https://claude.ai/api/${orgId}/files/${fileUuid}/content`);
     urlsToTry.push(`https://claude.ai/api/organizations/${orgId}/files/${fileUuid}/content`);
@@ -1780,7 +1912,7 @@ function extractResponseTextOnly(msg, artifacts) {
 }
 
 // Generate meta.md content
-function generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments = {}, projectFiles = {}, uploadedFiles = [], webSources = []) {
+function generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments = {}, projectFiles = {}, uploadedFiles = [], webSources = [], failedUploadCount = 0) {
   const title = data.name || 'Claude Conversation';
   const promptCount = messages.filter(m => m.sender === 'human').length;
   const responseCount = messages.filter(m => m.sender === 'assistant').length;
@@ -1816,8 +1948,9 @@ function generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachmen
   // Get settings
   const settings = data.settings || {};
   const features = [];
-  if (settings.enabled_web_search) features.push('Web Search');
-  if (settings.preview_feature_uses_artifacts) features.push('Artifacts');
+  const usedWebSearch = messages.some((m) => (m.content || []).some((b) => b.type === 'tool_use' && b.name === 'web_search'));
+  if (usedWebSearch) features.push('Web Search');
+  if (Object.keys(artifacts).length > 0) features.push('Artifacts');
   if (settings.paprika_mode === 'extended') features.push('Extended Thinking');
   else if (settings.paprika_mode === 'normal') features.push('Thinking');
 
@@ -1848,7 +1981,7 @@ function generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachmen
     `| **Artifacts** | ${Object.keys(artifacts).length} |`,
     `| **Text Attachments** | ${Object.keys(textAttachments).length} |`,
     `| **Project Files** | ${Object.keys(projectFiles).length} |`,
-    `| **Uploaded Files** | ${uploadedFiles.length} |`,
+    `| **Uploaded Files** | ${uploadedFiles.length}${failedUploadCount > 0 ? ` (${failedUploadCount} failed)` : ''} |`,
     `| **Code Blocks** | ${codeBlocks.length} |`,
     `| **Links** | ${urls.length} |`,
     `| **Web Sources** | ${webSources.length} |`,
@@ -2268,9 +2401,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
           fullContent.push(`Web Search: ${input.query || ''}`);
           fullContent.push('```');
           fullContent.push('');
-        } else if (toolName === 'create_file') {
-          const filename = (input.path || '').split('/').pop();
-          const fileText = input.file_text || '';
+        } else if (toolName === 'create_file' || toolName === 'Write') {
+          const filename = (input.path || input.file_path || '').split('/').pop();
+          const fileText = input.file_text || input.content || '';
           fullContent.push('```plaintext');
           fullContent.push(`Creating artifact: ${filename}`);
           fullContent.push('```');
@@ -2369,13 +2502,33 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     try {
       const conversationId = data.uuid;
       const blob = await fetchUploadedFile(null, file.uuid, organizationId, conversationId, file.path);
-      const text = await blob.text();
-      addFileWithBOM(folder, `artefacts/${file.filename}`, text);
-      // Also add to artifacts map for README generation
-      artifacts[file.filename] = text;
+      await addArtefactBlob(folder, artifacts, file.filename, blob);
     } catch (err) {
       console.error(`Failed to download presented file ${file.filename}:`, err);
       errorCollector.addError('presented_file', file.filename, err.message, {
+        uuid: file.uuid,
+        path: file.path,
+        urlsTried: err.urlsTried || [],
+        httpStatus: err.httpStatus || null
+      });
+    }
+  }
+
+  // Download files Claude sent with SendUserFile. Their bytes exist only on the
+  // server, so these are fetched by UUID.
+  const deliveredFiles = extractDeliveredFiles(data, Object.keys(artifacts));
+  for (let i = 0; i < deliveredFiles.length; i++) {
+    const file = deliveredFiles[i];
+    if (onProgress) {
+      onProgress(15 + Math.floor((i / deliveredFiles.length) * 5), 100, `Downloading: ${file.filename}`);
+    }
+
+    try {
+      const blob = await fetchUploadedFile(null, file.uuid, organizationId, data.uuid, null);
+      await addArtefactBlob(folder, artifacts, file.filename, blob);
+    } catch (err) {
+      console.error(`Failed to download delivered file ${file.filename}:`, err);
+      errorCollector.addError('delivered_file', file.filename, err.message, {
         uuid: file.uuid,
         path: file.path,
         urlsTried: err.urlsTried || [],
@@ -2565,7 +2718,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   // Generate all markdown files (with BOM for proper browser encoding)
-  addFileWithBOM(folder, 'meta.md', generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments, projectFiles, downloadedFiles, webSources));
+  addFileWithBOM(folder, 'meta.md', generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments, projectFiles, downloadedFiles, webSources, failedFiles.length));
   addFileWithBOM(folder, 'prompts.md', generatePrompts(messages, responseFiles, attachmentIdMap));
   addFileWithBOM(folder, 'responses_text_only.md', generateResponsesTextOnly(messages, artifacts));
 
@@ -2887,6 +3040,21 @@ function convertToMarkdown(data, options = {}) {
       lines.push(timestamp);
       lines.push('');
 
+      // Claude's summary of earlier context, when this turn compacted it.
+      const compactionText = (msg.compaction_summary || [])
+        .map((part) => part.text || '')
+        .join('\n')
+        .trim();
+      if (compactionText) {
+        const fence = getCodeFence(compactionText);
+        lines.push('**Context compaction summary**');
+        lines.push('');
+        lines.push(`${fence}plaintext`);
+        lines.push(compactionText);
+        lines.push(fence);
+        lines.push('');
+      }
+
       const content = msg.content || [];
 
       // Collect all references from this response for footnotes
@@ -2914,12 +3082,12 @@ function convertToMarkdown(data, options = {}) {
           const toolName = block.name || '';
           const input = block.input || {};
 
-          if (toolName === 'create_file') {
+          if (toolName === 'create_file' || toolName === 'Write') {
             // Artifact creation
-            const path = input.path || '';
+            const path = input.path || input.file_path || '';
             const filename = path.split('/').pop();
             const desc = input.description || '';
-            const fileText = input.file_text || '';
+            const fileText = input.file_text || input.content || '';
 
             if (embedArtifacts && fileText) {
               // Embed the actual artifact content
@@ -3546,6 +3714,7 @@ async function bulkExportZip() {
     let errors = [];  // Conversation-level errors (failed to fetch/process entire conversation)
     let totalFileErrors = 0;  // File-level errors across all conversations
     let totalFileWarnings = 0;  // File-level warnings across all conversations
+    const usedFolderNames = new Set();
 
     for (const conv of conversations) {
       try {
@@ -3564,7 +3733,14 @@ async function bulkExportZip() {
         const data = result.data;
         await ensureProjectName(data, orgId);
         const projectPrefix = data.project?.name ? `[${safeFilename(data.project.name)}-project]_` : '';
-        const folderName = `${projectPrefix}${safeFilename(data.name || conv.uuid)}`;
+        const baseFolderName = `${projectPrefix}${safeFilename(data.name || conv.uuid)}`;
+        // Titles can match, or match once cut to length. Compare without case,
+        // because macOS and Windows would merge folders that differ only by case.
+        let folderName = baseFolderName;
+        for (let n = 2; usedFolderNames.has(folderName.toLowerCase()); n++) {
+          folderName = `${baseFolderName}_${n}`;
+        }
+        usedFolderNames.add(folderName.toLowerCase());
         const folder = megaZip.folder(folderName);
 
         // Use shared helper to populate the folder (same structure as individual zip)

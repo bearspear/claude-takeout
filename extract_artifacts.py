@@ -152,6 +152,17 @@ def apply_str_replace(state: ArtifactState, old_str: str, new_str: str) -> tuple
     return True, ""
 
 
+def apply_replace_all(state: ArtifactState, old_str: str, new_str: str) -> tuple[bool, str]:
+    """Apply an Edit call with replace_all set. Returns (ok, reason)."""
+    if not old_str:
+        return False, "empty old_str"
+    if old_str not in state.current:
+        return False, "old_str not found in current state"
+    state.current = state.current.replace(old_str, new_str)
+    state.edited_this_turn = True
+    return True, ""
+
+
 def sanitize_artifact_basename(label: str) -> str:
     """Match the JS regex: keep [a-zA-Z0-9_\\-\\s], collapse whitespace to _,
     trim to 60 chars.
@@ -192,10 +203,18 @@ def extract_artifacts(data: dict, warnings: list[Warning]) -> dict[str, str]:
                 if path and file_text:
                     set_content(path, file_text, basename_of(path))
 
-            elif name == "str_replace":
-                path = inp.get("path") or ""
-                old_str = inp.get("old_str") or ""
-                new_str = inp.get("new_str", "") or ""
+            elif name == "Write":
+                path = inp.get("file_path") or ""
+                file_text = inp.get("content") or ""
+                if path and file_text:
+                    set_content(path, file_text, basename_of(path))
+
+            elif name in ("str_replace", "Edit"):
+                is_edit = name == "Edit"
+                path = inp.get("file_path" if is_edit else "path") or ""
+                old_str = inp.get("old_string" if is_edit else "old_str") or ""
+                new_str = inp.get("new_string" if is_edit else "new_str", "") or ""
+                replace_all = is_edit and inp.get("replace_all") is True
                 if path:
                     s = state.get(path)
                     if s is None:
@@ -206,7 +225,8 @@ def extract_artifacts(data: dict, warnings: list[Warning]) -> dict[str, str]:
                             path=path,
                         ))
                     else:
-                        ok, reason = apply_str_replace(s, old_str, new_str)
+                        apply = apply_replace_all if replace_all else apply_str_replace
+                        ok, reason = apply(s, old_str, new_str)
                         if not ok:
                             warnings.append(Warning(
                                 type="str_replace_failed",
@@ -233,7 +253,7 @@ def extract_artifacts(data: dict, warnings: list[Warning]) -> dict[str, str]:
                     key = f"artifact:{aid or title}"
                     set_content(key, content, filename)
 
-            elif name == "bash_tool":
+            elif name in ("bash_tool", "Bash"):
                 command = inp.get("command") or ""
                 m = HEREDOC_RE.search(command)
                 if m:
