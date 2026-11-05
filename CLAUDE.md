@@ -15,7 +15,7 @@ For deeper dives, two companion docs live alongside this one:
 - **GitHub:** `bearspear/claude-takeout` (push remote: `git@github.com-personal:bearspear/claude-takeout.git`).
 - **Branch convention:** one branch per change, merged through a PR by the owner. Commit and push only with the owner's OK. Commit as `bearspear`; the repo's local git config is set for that.
 - **Working dir on this machine:** `/Users/mbehringer/Downloads/claude-takeout`.
-- **Versions:** `manifest.json` matches the newest README changelog entry at each release, and a test enforces that. Add changelog entries under the next version and bump the manifest when cutting a release, with a `v<version>` tag on `main`.
+- **Versions:** `manifest.json` must not fall behind the newest README changelog entry, and a test enforces that. A PR adding a new changelog version bumps the manifest too. Tag releases `v<version>` on `main`.
 
 ---
 
@@ -340,7 +340,7 @@ If you make significant changes to any of those, update both `TECHNICAL.md` and 
 | Adjust the ZIP layout | `populateConversationFolder`. README's "ZIP Archive" section is the user-facing contract — update it too. |
 | Add a setting | Add to `defaultSettings`, `loadSettings`, `applySettings`, `popup.html` settings drawer markup, optional `sidepanel.html` markup, and the change handler block. |
 | Add a keyboard shortcut | The `keydown` switch and the `<span class="shortcut">` markup in the relevant button. |
-| Bump README's changelog | Add a `### v<next>` section at the top of the changelog. Bump `manifest.json` when cutting a release. |
+| Bump README's changelog | Add a `### v<next>` section at the top of the changelog, and bump `manifest.json` in the same PR. |
 
 ---
 
