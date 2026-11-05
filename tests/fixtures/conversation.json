@@ -1,0 +1,440 @@
+{
+ "uuid": "c0000000-0000-4000-8000-000000000001",
+ "name": "Synthetic fixture",
+ "model": "claude-x",
+ "created_at": "2026-01-01T10:00:00Z",
+ "updated_at": "2026-01-01T11:00:00Z",
+ "settings": {},
+ "current_leaf_message_uuid": "m08",
+ "chat_messages": [
+  {
+   "uuid": "m01",
+   "parent_message_uuid": null,
+   "sender": "human",
+   "created_at": "2026-01-01T10:00:00Z",
+   "content": [
+    {
+     "type": "text",
+     "text": "Make a report."
+    }
+   ],
+   "attachments": [
+    {
+     "file_name": "Gödel.md",
+     "extracted_content": "decomposed name"
+    }
+   ],
+   "files": [],
+   "files_v2": []
+  },
+  {
+   "uuid": "m02",
+   "parent_message_uuid": "m01",
+   "sender": "assistant",
+   "created_at": "2026-01-01T10:00:00Z",
+   "content": [
+    {
+     "type": "text",
+     "text": "Creating it."
+    },
+    {
+     "type": "tool_use",
+     "id": "t01",
+     "name": "create_file",
+     "input": {
+      "path": "/mnt/user-data/outputs/report.html",
+      "file_text": "<p>first draft</p>"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t01",
+     "is_error": false,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    },
+    {
+     "type": "tool_use",
+     "id": "t02",
+     "name": "create_file",
+     "input": {
+      "path": "/home/claude/build.py",
+      "file_text": "value = 1\n"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t02",
+     "is_error": false,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    },
+    {
+     "type": "tool_use",
+     "id": "t03",
+     "name": "str_replace",
+     "input": {
+      "path": "/home/claude/build.py",
+      "old_str": "value = 1",
+      "new_str": "value = 2"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t03",
+     "is_error": false,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    }
+   ],
+   "attachments": [],
+   "files": [],
+   "files_v2": []
+  },
+  {
+   "uuid": "m03",
+   "parent_message_uuid": "m02",
+   "sender": "human",
+   "created_at": "2026-01-01T10:00:00Z",
+   "content": [
+    {
+     "type": "text",
+     "text": "Rewrite it."
+    }
+   ],
+   "attachments": [],
+   "files": [],
+   "files_v2": []
+  },
+  {
+   "uuid": "m04",
+   "parent_message_uuid": "m03",
+   "sender": "assistant",
+   "created_at": "2026-01-01T10:00:00Z",
+   "content": [
+    {
+     "type": "tool_use",
+     "id": "t04",
+     "name": "create_file",
+     "input": {
+      "path": "/mnt/user-data/outputs/report.html",
+      "file_text": "<p>REJECTED CONTENT</p>"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t04",
+     "is_error": true,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "File already exists"
+      }
+     ]
+    },
+    {
+     "type": "tool_use",
+     "id": "t05",
+     "name": "bash_tool",
+     "input": {
+      "command": "rm -f /mnt/user-data/outputs/report.html\ncat > /mnt/user-data/outputs/report.html << 'HTMLEOF'\n<p>second draft old</p>\nHTMLEOF\necho written"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t05",
+     "is_error": false,
+     "name": "bash_tool",
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    },
+    {
+     "type": "tool_use",
+     "id": "t06",
+     "name": "str_replace",
+     "input": {
+      "path": "/home/claude/build.py",
+      "old_str": "value = 2",
+      "new_str": "value = 3 # PHANTOM"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t06",
+     "is_error": true,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "File not found"
+      }
+     ]
+    }
+   ],
+   "attachments": [],
+   "files": [],
+   "files_v2": []
+  },
+  {
+   "uuid": "m05",
+   "parent_message_uuid": "m04",
+   "sender": "human",
+   "created_at": "2026-01-01T10:00:00Z",
+   "content": [
+    {
+     "type": "text",
+     "text": "Fix the wording."
+    }
+   ],
+   "attachments": [],
+   "files": [],
+   "files_v2": []
+  },
+  {
+   "uuid": "m06",
+   "parent_message_uuid": "m05",
+   "sender": "assistant",
+   "created_at": "2026-01-01T10:00:00Z",
+   "content": [
+    {
+     "type": "tool_use",
+     "id": "t07",
+     "name": "str_replace",
+     "input": {
+      "path": "/mnt/user-data/outputs/report.html",
+      "old_str": "second draft old",
+      "new_str": "second draft new"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t07",
+     "is_error": false,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    },
+    {
+     "type": "tool_use",
+     "id": "t08",
+     "name": "Write",
+     "input": {
+      "file_path": "/tmp/work/notes.py",
+      "content": "one one\n"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t08",
+     "is_error": false,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    },
+    {
+     "type": "tool_use",
+     "id": "t09",
+     "name": "Bash",
+     "input": {
+      "command": "cat > /tmp/work/a.txt << 'AAA'\nalpha\nAAA\ncat > /tmp/work/b.txt <<BBB\nbeta\nBBB"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t09",
+     "is_error": false,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    }
+   ],
+   "attachments": [],
+   "files": [],
+   "files_v2": [],
+   "compaction_summary": [
+    {
+     "type": "text",
+     "text": "Earlier context summary."
+    }
+   ]
+  },
+  {
+   "uuid": "m07",
+   "parent_message_uuid": "m06",
+   "sender": "human",
+   "created_at": "2026-01-01T10:00:00Z",
+   "content": [
+    {
+     "type": "text",
+     "text": "Change the notes."
+    }
+   ],
+   "attachments": [],
+   "files": [],
+   "files_v2": []
+  },
+  {
+   "uuid": "m08",
+   "parent_message_uuid": "m07",
+   "sender": "assistant",
+   "created_at": "2026-01-01T10:00:00Z",
+   "content": [
+    {
+     "type": "tool_use",
+     "id": "t10",
+     "name": "Edit",
+     "input": {
+      "file_path": "/tmp/work/notes.py",
+      "old_string": "one",
+      "new_string": "two",
+      "replace_all": true
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t10",
+     "is_error": false,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    },
+    {
+     "type": "tool_use",
+     "id": "t11",
+     "name": "SendUserFile",
+     "input": {
+      "files": [
+       "/tmp/out/Minutes.odt"
+      ]
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t11",
+     "is_error": false,
+     "name": "SendUserFile",
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ],
+     "file_deliveries": [
+      {
+       "file_uuid": "de000000-0000-4000-8000-000000000001",
+       "path": "/tmp/out/Minutes.odt"
+      }
+     ]
+    },
+    {
+     "type": "tool_use",
+     "id": "t12",
+     "name": "SendUserFile",
+     "input": {
+      "files": [
+       "/tmp/out/Minutes.odt",
+       "/tmp/out/report.html"
+      ]
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t12",
+     "is_error": false,
+     "name": "SendUserFile",
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ],
+     "file_deliveries": [
+      {
+       "file_uuid": "de000000-0000-4000-8000-000000000002",
+       "path": "/tmp/out/Minutes.odt"
+      },
+      {
+       "file_uuid": "de000000-0000-4000-8000-000000000003",
+       "path": "/tmp/out/report.html"
+      }
+     ]
+    },
+    {
+     "type": "text",
+     "text": "Done."
+    }
+   ],
+   "attachments": [],
+   "files": [],
+   "files_v2": []
+  },
+  {
+   "uuid": "x01",
+   "parent_message_uuid": "m05",
+   "sender": "assistant",
+   "created_at": "2026-01-01T10:00:00Z",
+   "content": [
+    {
+     "type": "tool_use",
+     "id": "t90",
+     "name": "create_file",
+     "input": {
+      "path": "/home/claude/abandoned.py",
+      "file_text": "off branch"
+     }
+    },
+    {
+     "type": "tool_result",
+     "tool_use_id": "t90",
+     "is_error": false,
+     "name": null,
+     "content": [
+      {
+       "type": "text",
+       "text": "ok"
+      }
+     ]
+    }
+   ],
+   "attachments": [],
+   "files": [],
+   "files_v2": []
+  }
+ ]
+}

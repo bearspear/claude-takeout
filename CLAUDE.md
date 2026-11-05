@@ -33,6 +33,7 @@ For deeper dives, two companion docs live alongside this one:
 | `jszip.min.js` | ZIP library (vendored). | Used by both single-ZIP and mega-ZIP exports. |
 | `extract_artifacts.py` | Stdlib-only Python port of `extractArtifacts`. | Reconstructs all per-turn artifact versions from `original.json` offline. Byte-identical output to the JS implementation. |
 | `replay_bash.py` | Stdlib-only Python CLI for post-export bash replay. | Reconstruction, isolated by `sandbox-exec` on macOS, of artifacts the declarative replay can't reach (anything Claude mutated via `bash_tool`). See §10 below and `docs/WASM_REPLAY_APPROACH.md`. |
+| `tests/` | Regression tests. | `sh tests/run.sh`. Uses Node's and Python's built-in test runners, with a synthetic fixture only. Not used by the extension at runtime. |
 | `docs/WASM_REPLAY_APPROACH.md` | Architecture record. | Comprehensive evaluation of running Pyodide in the extension as an alternative to the CLI. We chose the CLI; this doc explains why and what would change the answer. |
 | `icon16.png` / `icon48.png` / `icon128.png` / `icon.svg` | Extension icons. | |
 | `README.md` / `USAGE.md` / `TECHNICAL.md` | Documentation. | TECHNICAL.md predates v1.5.x and doesn't describe per-turn versioning, `ExportErrorCollector`, or `ensureProjectName`. |
@@ -334,7 +335,8 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - **No automatic pushes.** Commit freely; only push when the user explicitly says so.
 - **No mass `git add .`** — stage the specific tracked files plus any new files that genuinely belong to the project. Never accidentally commit `.claude/`, transcripts, or `.DS_Store`.
 - **Manifest version stays at 1.3 in working tree** until a release is cut. README changelog has its own version cadence.
-- **Tests:** there is no automated test suite. Validation is empirical: load the unpacked extension in Chrome, export a known conversation, diff the output. The `extract_artifacts.py` Python port + the `validate-export` skill at `~/.claude/skills/validate-export/SKILL.md` form the closest thing to a regression harness — keep both in sync with `popup.js`.
+- **Tests:** run `sh tests/run.sh` before committing. See `tests/README.md`. Never put real conversations or exports in the repo, because they're private; add a synthetic case to `tests/fixtures/conversation.json` instead. Mocks have missed real claude.ai behavior here, so also export a real conversation for anything touching fetching or capture. `extract_artifacts.py` and the `validate-export` skill at `~/.claude/skills/validate-export/SKILL.md` must stay in sync with `popup.js`.
+- **No `_`-prefixed files or folders:** Chrome refuses to load an extension containing one, including `__pycache__`. Run Python with `-B`, and never import these scripts without `sys.dont_write_bytecode = True`.
 - **Syntax check after every edit:** `node --check popup.js`. Catches most copy/paste mistakes without launching Chrome.
 
 ---
