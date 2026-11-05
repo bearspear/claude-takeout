@@ -358,6 +358,15 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.5.4
+
+- **Binary files no longer corrupted** - Files Claude presented, such as PDF, DOCX, ODT, PNG and ZIP, were decoded as text and came out unreadable. They now stay as raw bytes. Re-export any archive you rely on.
+- **Delivered files exported** - Files Claude sends through `SendUserFile` are saved to `artefacts/`. A file delivered more than once keeps every copy as `_vN`, with the latest under its plain name. A delivered file that shares a name with a replayed artifact gets a `_delivered` suffix.
+- **Failed uploads recovered** - Downloads now try the `/files/<uuid>/contents` endpoint, which serves uploads the old URLs reported as 404.
+- **Newer tools supported** - `Write` and `Edit` count as artifacts, `Bash` counts like `bash_tool`, and `Read` results can recover blob files.
+- **Mega-ZIP folders stay separate** - Chats whose titles match, or match once shortened, get a numbered folder instead of merging.
+- **Smaller fixes** - Compaction summaries appear in the Markdown, filenames are normalized to NFC, and `meta.md` reports the features a chat used and any failed uploads.
+
 ### v1.5.3
 
 - **Side panel follows the selected chat** - The panel now updates when you select another chat or switch tabs. Previously it stayed on the chat it opened with, and its export buttons exported that old chat.
