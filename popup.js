@@ -85,10 +85,7 @@ class ExportErrorCollector {
         return 'Two distinct paths in the conversation produced files with the same basename. The second was saved under a numbered suffix (e.g. foo_2.html) to avoid silent overwrite. Both artifacts and all their versions are preserved in artefacts/.';
 
       case 'artifact_opaque_mutation':
-        if (details.toolName === 'Bash') {
-          return 'A Bash command modified an artifact in a way the exporter cannot replay declaratively. replay_bash.py does not cover the Bash tool yet. The exported artifact stops at the last declarative edit, and the command is in original.json.';
-        }
-        return 'A bash_tool command modified an artifact in a way the exporter cannot replay declaratively (it\'s not a create_file, str_replace, or heredoc). The exporter never attempts to interpret bash scripts; the companion CLI does. To reconstruct this artifact: run `python3 replay_bash.py <this-export-folder>` (ships alongside the extension). It replays each bash_tool command in conversation order with per-command confirmation, in a tmpdir isolated by the OS on macOS, saves the originals, and writes the result into artefacts/. These commands come from the conversation, so review them first with --dry-run.';
+        return 'A bash command modified an artifact in a way the exporter cannot replay declaratively (it\'s not a create_file, str_replace, or heredoc). The exporter never attempts to interpret bash scripts; the companion CLI does. To reconstruct this artifact: run `python3 replay_bash.py <this-export-folder>` (ships alongside the extension). It replays each bash command in conversation order with per-command confirmation, in a tmpdir isolated by the OS on macOS, saves the originals, and writes the result into artefacts/. These commands come from the conversation, so review them first with --dry-run.';
 
       default:
         return 'Check original.json for the raw conversation data that may contain this content.';
@@ -228,11 +225,11 @@ class ExportErrorCollector {
     lines.push('');
     lines.push('### Manual Recovery Steps');
     lines.push('');
-    lines.push('1. **For `artifact_opaque_mutation` warnings from `bash_tool` commands — run the replay CLI:**');
+    lines.push('1. **For `artifact_opaque_mutation` warnings — run the replay CLI:**');
     lines.push('   ```');
     lines.push('   python3 replay_bash.py /path/to/this/export/folder');
     lines.push('   ```');
-    lines.push('   The CLI replays each bash_tool command in conversation order with per-command confirmation, in a tmpdir isolated by the OS on macOS, and writes the result into artefacts/ after saving the originals. Run `--dry-run` first to read the commands.');
+    lines.push('   The CLI replays each bash command in conversation order with per-command confirmation, in a tmpdir isolated by the OS on macOS, and writes the result into artefacts/ after saving the originals. Run `--dry-run` first to read the commands.');
     lines.push('2. **Check original.json:** Open the file and search for the filename. Content may exist in `tool_result` blocks.');
     lines.push('3. **Search for "view" tool results:** Blob file contents appear after Claude reads them.');
     lines.push('4. **Re-upload files:** If files expired, upload them to a new conversation.');
@@ -887,7 +884,7 @@ function detectOpaqueMutations(data, errorCollector) {
         if (pyOpenStrRe.test(command) ||
             (pyOpenVarRe && pyOpenVarRe.test(command)) ||
             shellRe.test(command)) {
-          opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command: rawCommand, toolName: block.name });
+          opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command: rawCommand });
           break;
         }
       }
@@ -907,16 +904,8 @@ function detectOpaqueMutations(data, errorCollector) {
       errorCollector.addWarning(
         'artifact_opaque_mutation',
         basenameOf(om.artifactPath),
-        om.toolName === 'bash_tool'
-          ? `A bash_tool command modified ${basenameOf(om.artifactPath)} in a way the exporter cannot replay declaratively (it's not a create_file, str_replace, or heredoc). The exported artifact may differ from what Claude actually produced. Use replay_bash.py to reconstruct.`
-          : `A Bash command modified ${basenameOf(om.artifactPath)} in a way the exporter cannot replay declaratively. The exported artifact may differ from what Claude actually produced.`,
-        {
-          path: om.artifactPath,
-          toolName: om.toolName,
-          note: om.toolName === 'bash_tool'
-            ? 'Run: python3 replay_bash.py <this-export-folder>'
-            : 'replay_bash.py does not replay the Bash tool yet, so check the command in original.json.'
-        }
+        `A bash command modified ${basenameOf(om.artifactPath)} in a way the exporter cannot replay declaratively (it's not a create_file, str_replace, or heredoc). The exported artifact may differ from what Claude actually produced. Use replay_bash.py to reconstruct.`,
+        { path: om.artifactPath, note: 'Run: python3 replay_bash.py <this-export-folder>' }
       );
     }
   }

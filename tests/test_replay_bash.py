@@ -29,9 +29,10 @@ class Paths(unittest.TestCase):
     def rw(self,c):return rb.rewrite_paths(c,Path('/S'))
     def test_bare_root(self):self.assertEqual(self.rw('cd /home/claude && ls'),'cd /S/home/claude && ls')
     def test_tmp(self):self.assertEqual(self.rw('cat /tmp/x'),'cat /S/tmp/x')
+    def test_session_root(self):self.assertEqual(self.rw('ls /root/.claude/uploads/a'),'ls /S/root/.claude/uploads/a')
     def test_quoted(self):self.assertEqual(self.rw("open('/mnt/user-data/outputs/a')"),"open('/S/mnt/user-data/outputs/a')")
     def test_no_lookalike(self):
-        for c in('/tmpfoo','/var/tmp/x','/home/claudette/x','/x/home/claude'):self.assertEqual(self.rw(c),c)
+        for c in('/tmpfoo','/var/tmp/x','/home/claudette/x','/x/home/claude','/root/.claudeX/a','/root/x'):self.assertEqual(self.rw(c),c)
     def test_sandbox_path_rejects(self):
         td=Path(tempfile.mkdtemp(dir=SP)).resolve()
         for p in('/home/claude/../../../etc/x','/etc/passwd','relative.txt','/tmp/../../x','/mnt/user-data/uploads/../../../../x'):self.assertIsNone(rb.sandbox_path(td,p),p)
@@ -69,6 +70,24 @@ class Replay(unittest.TestCase):
         d=export([c1,c2,res('2'),e,res('3'),sh('echo x >> /home/claude/a.html')],{'a.html':b'real'})
         r=run(d);self.assertEqual((d/'artefacts/a.html').read_text(),'realx\n',r.stdout)
         self.assertEqual(rb.declarative_state(json.loads((d/'original.json').read_text()))[P],'real')
+    def test_bash_write_edit_replay(self):
+        N='/tmp/claude-0/-home-claude/s/scratchpad/build.py'
+        w={'type':'tool_use','name':'Write','input':{'file_path':N,'content':'one one\n'}}
+        e={'type':'tool_use','name':'Edit','input':{'file_path':N,'old_string':'one','new_string':'two','replace_all':True}}
+        b={'type':'tool_use','name':'Bash','input':{'command':"cd /tmp/claude-0/-home-claude/s/scratchpad && python3 - <<'E'\np='build.py';s=open(p).read()\nopen(p,'w').write(s.replace('two','three'))\nE"}}
+        d=export([w,e,b],{'build.py':b'stale'})
+        r=run(d);self.assertEqual((d/'artefacts/build.py').read_text(),'three three\n',r.stdout+r.stderr)
+    def test_failed_bash_tool_write_skipped(self):
+        w=dict({'type':'tool_use','name':'Write','input':{'file_path':P,'content':'rejected'}},id='1')
+        d=export([cf(P,'real'),w,{'type':'tool_result','tool_use_id':'1','is_error':True,'content':[]},sh('echo x >> /home/claude/a.html')],{'a.html':b'real'})
+        run(d);self.assertEqual((d/'artefacts/a.html').read_text(),'realx\n')
+    def test_session_uploads_found(self):
+        U='/root/.claude/uploads/abc-123'
+        b={'type':'tool_use','name':'Bash','input':{'command':f"cat {U}/deadbeef-my_file.txt > /home/claude/a.html"}}
+        d=export([cf(P,'x'),b],{'a.html':b'x'});(d/'uploads').mkdir();(d/'uploads/p01_my file.txt').write_text('from upload')
+        data=json.loads((d/'original.json').read_text());data['chat_messages'][0]['files']=[{'file_name':'my file.txt','file_uuid':'deadbeef-0000','success':True}]
+        (d/'original.json').write_text(json.dumps(data))
+        r=run(d);self.assertEqual((d/'artefacts/a.html').read_text(),'from upload',r.stdout+r.stderr)
     def test_versioned_too(self):
         d=export([cf(P,'o'),sh('echo n > /home/claude/a.html')],{'a.html':b'o','a_v2.html':b'o'})
         run(d);self.assertEqual((d/'artefacts/a_v2.html').read_text(),'n\n')

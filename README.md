@@ -353,6 +353,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.5.9
+
+- **`replay_bash.py` covers newer chats** - It now replays the `Bash`, `Write` and `Edit` tools, and finds uploads where those sessions keep them. `artifact_opaque_mutation` warnings from `Bash` commands now have a recovery path.
+
 ### v1.5.8
 
 - **Refresh stays put** - Refresh reloads the current chat in place, instead of reloading your tab and closing the popup or panel. The button now just says Refresh.
