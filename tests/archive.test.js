@@ -113,7 +113,7 @@ test('symlinks are not followed', () => {
   fs.symlinkSync(tmp, path.join(tmp, 'loop2'));
   const res = find(tmp);
   assert.strictEqual(res.archives.length, 1);
-  const added = scanAdded(res.archives[0]);
+  const added = scanAdded(res.archives[0]).files;
   assert.ok(!added.some(f => f.path.startsWith('loop')));
   assert.deepStrictEqual(added.map(f => f.path), ['_index.md']);
 });
@@ -147,7 +147,7 @@ test('zips outside archives are listed; zips inside archives are not', () => {
   put(tmp, 'top.zip', 'z');
   const res = find(tmp);
   assert.deepStrictEqual(res.zips.sort(), [path.join(tmp, 'elsewhere', 'export.ZIP'), path.join(tmp, 'top.zip')]);
-  assert.deepStrictEqual(scanAdded(res.archives[0]).map(f => f.path), ['loose.zip']);
+  assert.deepStrictEqual(scanAdded(res.archives[0]).files.map(f => f.path), ['loose.zip']);
 });
 
 test('scanAdded lists files outside the export layout', () => {
@@ -162,7 +162,7 @@ test('scanAdded lists files outside the export layout', () => {
   put(s, 'synthesis/.DS_Store');
   put(s, 'synthesis/Thumbs.db');
   put(s, '_index.md');
-  const added = scanAdded(find(tmp).archives[0]);
+  const added = scanAdded(find(tmp).archives[0]).files;
   assert.deepStrictEqual(added.map(f => f.path), ['_index.md', 'synthesis/a.md']);
   assert.strictEqual(added[1].size, 5);
   assert.strictEqual(added[1].chatDir, null);
@@ -173,7 +173,7 @@ test('scanAdded sorts by code unit and keeps the on-disk spelling', () => {
   const s = path.join(tmp, 's');
   put(s, 'original.json', CHAT);
   for (const f of ['c.md', 'B.md', 'a.md', 'Ä.md', 'dir/y.md', 'dir/Z.md']) put(s, f);
-  assert.deepStrictEqual(scanAdded(find(tmp).archives[0]).map(f => f.path), ['B.md', 'a.md', 'c.md', 'dir/Z.md', 'dir/y.md', 'Ä.md']);
+  assert.deepStrictEqual(scanAdded(find(tmp).archives[0]).files.map(f => f.path), ['B.md', 'a.md', 'c.md', 'dir/Z.md', 'dir/y.md', 'Ä.md']);
 });
 
 test('scanAdded in a mega sets chatDir for chat-folder files, null for root ones', () => {
@@ -189,7 +189,7 @@ test('scanAdded in a mega sets chatDir for chat-folder files, null for root ones
   put(m, 'chat two/original.json', CHAT);
   const arch = find(tmp).archives[0];
   assert.strictEqual(arch.kind, 'mega');
-  assert.deepStrictEqual(scanAdded(arch).map(f => [f.path, f.chatDir]), [
+  assert.deepStrictEqual(scanAdded(arch).files.map(f => [f.path, f.chatDir]), [
     ['chat one/synthesis/s.md', 'chat one'],
     ['notes.md', null],
   ]);
@@ -200,4 +200,50 @@ test('isGeneratedViewer recognises the marker or the template shape', () => {
   assert.ok(isGeneratedViewer('<script id="data" type="application/json">{}</script> function chainFrom('));
   assert.ok(!isGeneratedViewer('<html>my own page</html>'));
   assert.ok(!isGeneratedViewer('<script id="data" type="application/json">{}</script>'));
+});
+
+test('a skipped or excluded chat folder in a mega adds no files', () => {
+  const tmp = tmpRoot();
+  const m = path.join(tmp, 'mega');
+  put(m, 'index.md');
+  put(m, 'good/original.json', CHAT);
+  put(m, 'gem/original.json', CHAT);
+  put(m, 'gem/conversation.json', '{}');
+  put(m, 'gem/notes.md');
+  put(m, 'out/original.json', CHAT);
+  put(m, 'out/mine.md');
+  put(m, 'plain/synthesis/s.md');
+  const res = find(tmp, [path.join(m, 'out')]);
+  assert.deepStrictEqual(res.archives[0].chats.map(c => c.relDir), ['good']);
+  assert.deepStrictEqual(scanAdded(res.archives[0]).files.map(f => f.path), ['plain/synthesis/s.md']);
+});
+
+test('a folder with its own original.json is a single even beside index.md', () => {
+  const tmp = tmpRoot();
+  put(tmp, 'index.md');
+  put(tmp, 'original.json', CHAT);
+  put(tmp, 'synthesis/other-export/original.json', CHAT);
+  const res = find(tmp);
+  assert.strictEqual(res.archives.length, 1);
+  assert.strictEqual(res.archives[0].kind, 'single');
+  assert.strictEqual(res.archives[0].root, tmp);
+  assert.deepStrictEqual(scanAdded(res.archives[0]).files.map(f => f.path), ['synthesis/other-export/original.json']);
+});
+
+test('scanAdded reports an unreadable folder and keeps going', { skip: process.getuid && process.getuid() === 0 }, () => {
+  const tmp = tmpRoot();
+  const s = path.join(tmp, 's');
+  put(s, 'original.json', CHAT);
+  put(s, 'ok.md');
+  put(s, 'locked/a.md');
+  put(s, 'zlast.md');
+  const arch = find(tmp).archives[0];
+  fs.chmodSync(path.join(s, 'locked'), 0o000);
+  try {
+    const res = scanAdded(arch);
+    assert.deepStrictEqual(res.files.map(f => f.path), ['ok.md', 'zlast.md']);
+    assert.strictEqual(res.errors.length, 1);
+    assert.strictEqual(res.errors[0].path, 'locked');
+    assert.ok(res.errors[0].message);
+  } finally { fs.chmodSync(path.join(s, 'locked'), 0o755); }
 });

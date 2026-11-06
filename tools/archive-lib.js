@@ -83,6 +83,15 @@ function findArchives(root, { exclude = [] } = {}) {
       const names = subdirs(dir);
       const chatNames = names.filter(n => isRealFile(path.join(dir, n, 'original.json')));
 
+      // A folder with its own original.json is always a single chat, whatever else sits beside it.
+      if (hasOriginal) {
+        if (isRealFile(path.join(dir, 'conversation.json')) || !looksLikeChat(path.join(dir, 'original.json'))) {
+          skipped.push({ path: dir, reason: 'not a Claude chat' });
+        } else {
+          archives.push({ root: dir, kind: 'single', chats: [{ dir, relDir: '.' }], hasViewer: isRealFile(path.join(dir, 'viewer.html')) });
+        }
+        return;
+      }
       if (isRealFile(path.join(dir, 'index.md')) && chatNames.length) {
         const chats = [];
         for (const n of chatNames) {
@@ -93,14 +102,6 @@ function findArchives(root, { exclude = [] } = {}) {
           } else chats.push({ dir: cdir, relDir: n });
         }
         archives.push({ root: dir, kind: 'mega', chats, hasViewer: isRealFile(path.join(dir, 'viewer.html')) });
-        return;
-      }
-      if (hasOriginal) {
-        if (isRealFile(path.join(dir, 'conversation.json')) || !looksLikeChat(path.join(dir, 'original.json'))) {
-          skipped.push({ path: dir, reason: 'not a Claude chat' });
-        } else {
-          archives.push({ root: dir, kind: 'single', chats: [{ dir, relDir: '.' }], hasViewer: isRealFile(path.join(dir, 'viewer.html')) });
-        }
         return;
       }
       for (const e of fs.readdirSync(dir, { withFileTypes: true }).sort((a, b) => byCodeUnit(a.name, b.name))) {
@@ -136,40 +137,56 @@ function isGeneratedViewer(html) {
 
 // Files the owner added: anything in an archive root or chat folder outside the export layout.
 // Inside an added folder every file counts. Known folders (uploads/ and so on) list nothing.
+// Chat folders of a mega (including skipped or excluded ones) are never "added" at the root.
+// Returns { files: [{ path, chatDir, size }], errors: [{ path, message }] }; one unreadable folder
+// or vanished file is recorded in errors and the scan goes on.
 function scanAdded(archive) {
-  const out = [];
-  const chatRel = new Set(archive.kind === 'mega' ? archive.chats.map(c => c.relDir) : []);
+  const files = [];
+  const errors = [];
+  let chatRel = new Set();
+  if (archive.kind === 'mega') {
+    try { chatRel = new Set(subdirs(archive.root).filter(n => isRealFile(path.join(archive.root, n, 'original.json')))); } catch (e) {
+      errors.push({ path: '', message: e.message });
+    }
+    for (const c of archive.chats) chatRel.add(c.relDir);
+  }
+
+  const relOf = (rel, name) => (rel ? rel + '/' + name : name);
+  const addFile = (p, r, chatDir) => {
+    try { files.push({ path: r, chatDir, size: fs.lstatSync(p).size }); } catch (e) { errors.push({ path: r, message: e.message }); }
+  };
+  const entries = (dir, rel) => {
+    try { return fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { errors.push({ path: rel, message: e.message }); return []; }
+  };
 
   function addTree(dir, rel, chatDir) {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const e of entries(dir, rel)) {
       if (isIgnored(e.name)) continue;
       const p = path.join(dir, e.name);
-      const r = rel ? rel + '/' + e.name : e.name;
+      const r = relOf(rel, e.name);
       if (e.isDirectory()) addTree(p, r, chatDir);
-      else if (e.isFile()) out.push({ path: r, chatDir, size: fs.lstatSync(p).size });
+      else if (e.isFile()) addFile(p, r, chatDir);
     }
   }
 
   function scanLevel(dir, rel, chatDir, skipDirs) {
-    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+    for (const e of entries(dir, rel)) {
       if (isIgnored(e.name)) continue;
       const p = path.join(dir, e.name);
-      const r = rel ? rel + '/' + e.name : e.name;
+      const r = relOf(rel, e.name);
       if (e.isDirectory()) {
         if (KNOWN_DIRS.includes(e.name) || skipDirs.has(e.name)) continue;
         addTree(p, r, chatDir);
       } else if (e.isFile()) {
-        if (KNOWN_ROOT_FILES.includes(e.name)) continue;
-        out.push({ path: r, chatDir, size: fs.lstatSync(p).size });
+        if (!KNOWN_ROOT_FILES.includes(e.name)) addFile(p, r, chatDir);
       }
     }
   }
 
   scanLevel(archive.root, '', null, chatRel);
-  for (const c of archive.kind === 'mega' ? archive.chats : []) {
-    scanLevel(c.dir, c.relDir, c.relDir, new Set());
-  }
-  return out.sort((a, b) => byCodeUnit(a.path, b.path));
+  if (archive.kind === 'mega') for (const c of archive.chats) scanLevel(c.dir, c.relDir, c.relDir, new Set());
+  files.sort((a, b) => byCodeUnit(a.path, b.path));
+  return { files, errors };
 }
 
 module.exports = { findArchives, scanAdded, isGeneratedViewer, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
