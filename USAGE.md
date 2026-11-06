@@ -341,9 +341,10 @@ The tool finds every Claude export under the folder, single-chat or mega, by loo
 Things to know:
 
 - **ZIPs.** A ZIP is never changed. It is extracted into a new folder under `--out`, and the viewer is built there. `--out` can't be inside an archive or be the folder you scanned. A ZIP whose destination already exists is skipped; run the tool on that folder instead.
-- **Rerunning.** An archive that already has a `viewer.html` is skipped. `--force` replaces a viewer this tool made. It never replaces a `viewer.html` or `viewer-files/` that it didn't make.
+- **Rerunning.** An archive that already has a `viewer.html` is skipped. `--force` replaces a viewer made by this tool or by the extension. It never replaces a `viewer.html` or `viewer-files/` that neither made: that archive is reported as failed and nothing is overwritten.
 - **Your own files.** Folders and files you added to an archive, such as `synthesis/` or `_index.md`, appear in the viewer under "Archive files". Text opens in place and other files get a link.
-- **Missing files.** Generated files are rebuilt from `original.json`, so they work even if the file is gone from `artefacts/`. Uploads and binaries need the real file. Anything not found, including uploads that match no chat, is listed in the report. The tool doesn't search for them.
+- **Missing files.** Generated files are rebuilt from `original.json`, so they work even if the file is gone from `artefacts/`. Uploads and binaries need the real file. Anything not found, including expected files not found, is listed in the report. The tool doesn't search for them.
+- **Size.** An archive with a lot of large uploaded text makes a large `viewer.html`. A real 24-chat archive came to 97 MB and opened in about 3 seconds.
 - **Skipped.** Gemini and other non-Claude exports are skipped and listed in the report, as is anything that has no Claude chat in it.
 - **Previews.** Added HTML and SVG get the same sandboxed preview as generated files, with the same limits listed under [Reading an export in the viewer](#reading-an-export-in-the-viewer). Be as careful with them as with files from someone else's export.
 - **Sibling files.** Pages added to an archive don't load their sibling files in the preview, so a page that links its own `.css`, `.js` or images shows without them.
