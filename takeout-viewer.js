@@ -11,7 +11,10 @@
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
 //   joinPath(folder, rel)              folder + rel with '..' resolved
 //   escapeJson(data)                   JSON that is safe inside a <script> tag
-//   assembleViewer({template, css, marked, katex, logic, app, data})  one self-contained HTML string
+//   assembleViewer({template, css, marked, katex, logic, app, data, fileScripts})  one self-contained HTML string.
+//                                      fileScripts adds file: to the page's script-src, for viewer-files/ beside it;
+//                                      exports never set it
+//   kindFor(filename, mime, hasText)   a GenFile's kind
 //   VIEWER_ASSETS                      paths of the six viewer files
 //   TOOL_TEXT_LIMIT                    longest tool result text kept
 //   TEXT_EMBED_LIMIT                   longest upload or project text a caller should pass in ctx
@@ -428,7 +431,7 @@
 
   // One pass with function replacers: '$&' or a placeholder inside a value stays literal.
   // data: object (escaped here) or an already-escaped JSON string.
-  function assembleViewer({ template, css, marked, katex, logic, app, data }) {
+  function assembleViewer({ template, css, marked, katex, logic, app, data, fileScripts }) {
     const script = code => String(code).replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
     const values = {
       KATEX_CSS: () => String(css).replace(/<\/style/gi, '<\\/style'),
@@ -438,10 +441,12 @@
       LOGIC_JS: () => script(logic),
       APP_JS: () => script(app)
     };
-    return String(template).replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
+    // On the template, before the scripts go in: the preview sandbox policy in logic must stay as it is.
+    const page = fileScripts ? String(template).replace(/(http-equiv="Content-Security-Policy" content="[^"]*script-src [^;"]*)/, '$1 file:') : String(template);
+    return page.replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
-  const api = { buildViewerChat, modelLabel, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT };
+  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT };
   root.CTViewer = Object.assign(root.CTViewer || {}, api);
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);

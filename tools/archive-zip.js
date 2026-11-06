@@ -122,4 +122,10 @@ async function zipFreeSpaceOk(zipPath, destParent) {
   return { ok: free >= needed, needed, free };
 }
 
-module.exports = { extractZip, zipFreeSpaceOk, MAX_ZIP_BYTES };
+// Names as the ZIP holds them, for a look before extracting. Nothing is written.
+async function zipEntryNames(zipPath) {
+  const { zip } = await loadZip(zipPath);
+  return Object.values(zip.files).map(entry => entry.unsafeOriginalName || entry.name);
+}
+
+module.exports = { extractZip, zipFreeSpaceOk, zipEntryNames, MAX_ZIP_BYTES };

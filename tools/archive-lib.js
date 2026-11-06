@@ -397,4 +397,4 @@ function chatFromDisk(archive, chat) {
   return { viewerChat, missing, warnings };
 }
 
-module.exports = { findArchives, scanAdded, isGeneratedViewer, chatFromDisk, matchFile, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
+module.exports = { findArchives, scanAdded, isGeneratedViewer, chatFromDisk, matchFile, stripBom, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };

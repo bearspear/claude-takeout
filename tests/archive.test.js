@@ -639,3 +639,589 @@ test('extractZip keeps a decomposed name as stored', async () => {
   const [got] = fs.readdirSync(dest);
   assert.strictEqual(Buffer.from(got).toString('hex'), Buffer.from(name).toString('hex'));
 });
+
+// ---- build_viewer (tools/build_viewer.js) ----
+// Everything here runs on synthetic folders in a temp dir. Required on use, so one failure can't hide the rest.
+const crypto = require('crypto');
+const vm = require('vm');
+const { spawnSync } = require('child_process');
+const CTViewer = require('../takeout-viewer.js');
+const zipLib = require('../tools/archive-zip.js');
+
+const tool = () => require('../tools/build_viewer.js');
+const TOOL_PATH = path.resolve(__dirname, '..', 'tools', 'build_viewer.js');
+const cli = (...args) => spawnSync(process.execPath, [TOOL_PATH, ...args], { encoding: 'utf8' });
+const chatJson = (uuid, name = 'Chat ' + uuid, extra = {}) => JSON.stringify({
+  uuid, name, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+  chat_messages: [
+    { uuid: uuid + '-1', sender: 'human', content: [{ type: 'text', text: 'hello ' + uuid }], parent_message_uuid: null },
+    { uuid: uuid + '-2', sender: 'assistant', content: [{ type: 'text', text: 'hi' }], parent_message_uuid: uuid + '-1' },
+  ],
+  current_leaf_message_uuid: uuid + '-2', ...extra,
+});
+const OWN_FILES = /^(viewer\.html|viewer-check\.gif|viewer-files(\/part-\d{4}\.js)?)$/;
+
+// rel -> kind, size, mode and content hash of every entry. Directory mtimes change by design, so they aren't in it.
+function hashTree(root) {
+  const out = {};
+  const walk = (dir, rel) => {
+    for (const name of fs.readdirSync(dir).sort()) {
+      const p = path.join(dir, name);
+      const r = rel ? rel + '/' + name : name;
+      const s = fs.lstatSync(p);
+      if (s.isSymbolicLink()) out[r] = 'link:' + fs.readlinkSync(p);
+      else if (s.isDirectory()) { out[r] = 'dir:' + s.mode; walk(p, r); }
+      else out[r] = `file:${s.size}:${s.mode}:${crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex')}`;
+    }
+  };
+  walk(root, '');
+  return out;
+}
+const assertKept = (before, after, except = []) => {
+  for (const [k, v] of Object.entries(before)) {
+    if (!except.includes(k) && !k.startsWith('viewer-files/')) assert.strictEqual(after[k], v, 'changed: ' + k);
+  }
+};
+const newEntries = (before, after) => Object.keys(after).filter(k => !(k in before));
+const viewerData = root => {
+  const html = fs.readFileSync(path.join(root, 'viewer.html'), 'utf8');
+  return JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(html)[1]);
+};
+const loadPart = body => {
+  const got = [];
+  vm.runInNewContext(body, { window: { __archivePart: (n, data) => got.push({ n, data }) } });
+  assert.strictEqual(got.length, 1);
+  return got[0];
+};
+const single = root => findArchives(root).archives[0];
+// One archive with an added note, a nested added file, a PDF, an upload and a skipped hidden file.
+function richSingle(root) {
+  put(root, 'original.json', chatJson('s1'));
+  put(root, 'README.md', 'readme');
+  put(root, '_index.md', '# index');
+  put(root, 'synthesis/deep note.md', 'note </script> text');
+  put(root, 'studies/paper.pdf', '%PDF-1.4 binary');
+  put(root, 'uploads/p01_x.txt', 'upload');
+  return root;
+}
+
+test('assembleViewer: fileScripts adds file: to the page policy only, and exports are unchanged', () => {
+  const [template, logic, app, marked, katex, css] = CTViewer.VIEWER_ASSETS.map(a => fs.readFileSync(path.resolve(__dirname, '..', a), 'utf8'));
+  const parts = { template, css, marked, katex, logic, app, data: { exported: 'x', chats: [] } };
+  const plain = CTViewer.assembleViewer(parts);
+  const withFiles = CTViewer.assembleViewer({ ...parts, fileScripts: true });
+  assert.strictEqual(CTViewer.assembleViewer({ ...parts, fileScripts: false }), plain);
+  assert.strictEqual(withFiles, plain.replace(`content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval';`, `content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' file:;`));
+  assert.notStrictEqual(withFiles, plain);
+  assert.ok(!/<meta http-equiv="Content-Security-Policy"[^>]*script-src[^;]*file:/.test(plain));
+  assert.ok(withFiles.includes(`const PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src`), 'preview sandbox policy is untouched');
+  // The template with no placeholders comes back as it went in.
+  assert.strictEqual(CTViewer.assembleViewer({ ...parts, template: 'plain' }), 'plain');
+});
+
+test('kindFor is exported', () => {
+  assert.strictEqual(CTViewer.kindFor('a.md', null, true), 'md');
+  assert.strictEqual(CTViewer.kindFor('a.txt', null, true), 'code');
+  assert.strictEqual(CTViewer.kindFor('a.bin', null, false), 'binary');
+});
+
+test('buildParts splits a 5 MB set at PART_LIMIT, and every part runs as JS', () => {
+  const { buildParts, PART_LIMIT } = tool();
+  assert.strictEqual(PART_LIMIT, 4 * 1024 * 1024);
+  const tmp = tmpRoot();
+  const files = [];
+  for (let i = 0; i < 5; i++) {
+    const rel = `notes/n${i}.md`;
+    const text = `</script><!-- ${i}   ` + 'x'.repeat(1024 * 1024);
+    put(tmp, rel, text);
+    files.push({ path: rel, chat: null, size: Buffer.byteLength(text) });
+  }
+  const { entries, parts } = buildParts(files, { root: tmp });
+  assert.strictEqual(parts.length, 2);
+  assert.deepStrictEqual(parts.map(p => p.name), ['part-0001.js', 'part-0002.js']);
+  const loaded = {};
+  for (const p of parts) {
+    assert.ok(Buffer.byteLength(p.body) <= PART_LIMIT, 'over the limit');
+    assert.match(p.body, /^window\.__archivePart\(\d+, /);
+    assert.ok(!p.body.includes('</script'), 'no raw closing tag');
+    const { n, data } = loadPart(p.body);
+    loaded[n] = data;
+  }
+  entries.forEach((e, i) => {
+    assert.strictEqual(typeof e.key, 'string');
+    assert.ok(loaded[e.part][e.key].startsWith(`</script><!-- ${i}   `), e.path);
+  });
+});
+
+test('buildParts: what embeds, what links, and that parts can go straight to disk', () => {
+  const { buildParts } = tool();
+  const tmp = tmpRoot();
+  const big = 'y'.repeat(CTViewer.TEXT_EMBED_LIMIT + 1);
+  const add = (rel, text, chat = null) => { put(tmp, rel, text); return { path: rel, chat, size: Buffer.byteLength(text) }; };
+  const files = [
+    add('a b/Größe #1.md', '﻿cafÃ©', 'chat-1'),
+    add('big.txt', big),
+    add('paper.pdf', '%PDF'),
+    add('data.csv', 'a,b'),
+    { path: 'gone.md', chat: null, size: 3 },
+  ];
+  const seen = [];
+  const { entries, parts, warnings } = buildParts(files, { root: tmp, onPart: p => seen.push(p) });
+  assert.deepStrictEqual(parts, []);
+  assert.strictEqual(seen.length, 1);
+  const data = loadPart(seen[0].body).data;
+  const [md, large, pdf, csv, gone] = entries;
+  assert.deepStrictEqual({ ...md, key: null }, { path: 'a b/Größe #1.md', chat: 'chat-1', kind: 'md', size: md.size, href: 'a%20b/Gr%C3%B6%C3%9Fe%20%231.md', part: 1, key: null });
+  assert.strictEqual(data[md.key], 'café');
+  assert.deepStrictEqual(large, { path: 'big.txt', chat: null, kind: 'binary', size: big.length, href: 'big.txt', part: null, key: null });
+  assert.deepStrictEqual(pdf, { path: 'paper.pdf', chat: null, kind: 'pdf', size: 4, href: 'paper.pdf', part: null, key: null });
+  assert.strictEqual(csv.kind, 'code');
+  assert.strictEqual(data[csv.key], 'a,b');
+  assert.deepStrictEqual([gone.part, gone.key], [null, null]);
+  assert.ok(warnings.some(w => w.includes('gone.md')));
+});
+
+test('writeViewer: every existing file is untouched; only the viewer, gif and parts are new', () => {
+  const { writeViewer } = tool();
+  const root = richSingle(tmpRoot());
+  fs.chmodSync(path.join(root, '_index.md'), 0o640);
+  const before = hashTree(root);
+  const res = writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  assert.strictEqual(res.chats, 1);
+  assert.strictEqual(res.added, 3);
+  const after = hashTree(root);
+  assertKept(before, after);
+  assert.deepStrictEqual(newEntries(before, after).sort(), ['viewer-check.gif', 'viewer-files', 'viewer-files/part-0001.js', 'viewer.html']);
+  assert.ok(isGeneratedViewer(fs.readFileSync(path.join(root, 'viewer.html'), 'utf8')));
+  assert.deepStrictEqual(fs.readFileSync(path.join(root, 'viewer-check.gif')), Buffer.from(CTViewer.VIEWER_CHECK_BASE64, 'base64'));
+
+  const data = viewerData(root);
+  assert.strictEqual(data.chats[0].id, 's1');
+  assert.ok(!Number.isNaN(Date.parse(data.exported)));
+  assert.deepStrictEqual(data.added.map(a => [a.path, a.kind, a.part === null]), [
+    ['_index.md', 'md', false], ['studies/paper.pdf', 'pdf', true], ['synthesis/deep note.md', 'md', false]]);
+  assert.strictEqual(data.added[2].href, 'synthesis/deep%20note.md');
+  assert.match(fs.readFileSync(path.join(root, 'viewer.html'), 'utf8'), /<meta http-equiv="Content-Security-Policy"[^>]*script-src[^;]* file:;/);
+  const part = loadPart(fs.readFileSync(path.join(root, 'viewer-files/part-0001.js'), 'utf8'));
+  assert.strictEqual(part.data[data.added[2].key], 'note </script> text');
+  assert.ok(!fs.readFileSync(path.join(root, 'viewer.html'), 'utf8').includes('note </script> text'));
+});
+
+test('writeViewer: with no added text there is no parts folder, no file: policy and no added field', () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  put(root, 'original.json', chatJson('s1'));
+  assert.strictEqual(writeViewer(single(root), {}).status, 'written');
+  assert.ok(!fs.existsSync(path.join(root, 'viewer-files')));
+  const html = fs.readFileSync(path.join(root, 'viewer.html'), 'utf8');
+  assert.ok(!/<meta http-equiv="Content-Security-Policy"[^>]*script-src[^;]*file:/.test(html));
+  assert.ok(!('added' in viewerData(root)));
+});
+
+test('dry run writes nothing at all and says what would happen', () => {
+  const tmp = tmpRoot();
+  const root = richSingle(path.join(tmp, 'in', 'one'));
+  const before = hashTree(tmp);
+  const out = path.join(tmp, 'not', 'there');
+  const r = cli(path.join(tmp, 'in'), '--out', out, '--dry-run', '--json');
+  assert.strictEqual(r.status, 0, r.stderr);
+  const report = JSON.parse(r.stdout);
+  assert.strictEqual(report.dryRun, true);
+  assert.deepStrictEqual(report.archives.map(a => [a.root.endsWith('one'), a.status, a.chats, a.added]), [[true, 'written', 1, 3]]);
+  assert.deepStrictEqual(hashTree(tmp), before);
+  assert.ok(!fs.existsSync(path.join(tmp, 'not')));
+  assert.ok(fs.existsSync(root));
+  assert.match(cli(path.join(tmp, 'in'), '--dry-run').stdout, /would write: /);
+});
+
+test('an existing viewer is skipped; --force replaces a marked one and leaves the rest alone', () => {
+  const { writeViewer } = tool();
+  const root = richSingle(tmpRoot());
+  writeViewer(single(root), {});
+  put(root, 'viewer-files/part-0002.js', 'window.__archivePart(2, {});'); // stale, from an older run
+  const before = hashTree(root);
+  const skip = writeViewer(single(root), {});
+  assert.strictEqual(skip.status, 'skipped');
+  assert.match(skip.reason, /viewer/);
+  assert.deepStrictEqual(hashTree(root), before);
+
+  const res = writeViewer(single(root), { force: true });
+  assert.strictEqual(res.status, 'written', res.reason);
+  const after = hashTree(root);
+  assertKept(before, after, ['viewer.html']);
+  assert.notStrictEqual(after['viewer.html'], before['viewer.html']);
+  assert.deepStrictEqual(Object.keys(after).filter(k => k.startsWith('viewer-files/')), ['viewer-files/part-0001.js']);
+  assert.ok(!fs.readdirSync(root).some(n => /\.(tmp|old)-/.test(n)), 'no temp left');
+});
+
+test('--force replaces a v1.6 viewer, and writes a gif when there was none', () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  put(root, 'original.json', chatJson('s1'));
+  put(root, 'viewer.html', '<meta name="generator" content="Claude Takeout">old');
+  const res = writeViewer(single(root), { force: true });
+  assert.strictEqual(res.status, 'written', res.reason);
+  assert.ok(fs.existsSync(path.join(root, 'viewer-check.gif')));
+  assert.ok(!fs.readFileSync(path.join(root, 'viewer.html'), 'utf8').endsWith('old'));
+});
+
+test('--force refuses a hand-made viewer, whatever it is', () => {
+  const { writeViewer } = tool();
+  const root = richSingle(tmpRoot());
+  put(root, 'viewer.html', '<h1>my own page</h1>');
+  const before = hashTree(root);
+  const res = writeViewer(single(root), { force: true });
+  assert.strictEqual(res.status, 'failed');
+  assert.match(res.reason, /not generated|hand-made/);
+  assert.deepStrictEqual(hashTree(root), before);
+  assert.strictEqual(writeViewer(single(root), {}).status, 'skipped');
+  assert.deepStrictEqual(hashTree(root), before);
+
+  // A link is not followed or replaced, with or without --force.
+  const other = tmpRoot();
+  put(other, 'original.json', chatJson('s2'));
+  put(other, 'target.html', '<h1>target</h1>');
+  fs.symlinkSync('target.html', path.join(other, 'viewer.html'));
+  const linked = hashTree(other);
+  assert.notStrictEqual(writeViewer(single(other), {}).status, 'written');
+  assert.notStrictEqual(writeViewer(single(other), { force: true }).status, 'written');
+  assert.deepStrictEqual(hashTree(other), linked);
+});
+
+test('viewer-check.gif or viewer-files that are not ours fail the archive and stay as they are', () => {
+  const { writeViewer } = tool();
+  const marked = '<meta name="generator" content="Claude Takeout">';
+  const gif = Buffer.from(CTViewer.VIEWER_CHECK_BASE64, 'base64');
+  const cases = [
+    ['gif with no viewer', { 'viewer-check.gif': gif }, false, /viewer-check\.gif/],
+    ['parts with no viewer', { 'viewer-files/part-0001.js': 'x' }, false, /viewer-files/],
+    ['owner gif beside a marked viewer', { 'viewer.html': marked, 'viewer-check.gif': 'my drawing' }, true, /viewer-check\.gif/],
+    ['owner notes in viewer-files', { 'viewer.html': marked, 'viewer-files/notes.md': 'mine' }, true, /viewer-files/],
+    ['a file called viewer-files', { 'viewer.html': marked, 'viewer-files': 'mine' }, true, /viewer-files/],
+  ];
+  for (const [label, files, force, reason] of cases) {
+    const root = tmpRoot();
+    put(root, 'original.json', chatJson('s1'));
+    put(root, 'note.md', 'added');
+    for (const [rel, body] of Object.entries(files)) put(root, rel, body);
+    const before = hashTree(root);
+    const res = writeViewer(single(root), { force });
+    assert.strictEqual(res.status, 'failed', label);
+    assert.match(res.reason, reason, label);
+    assert.deepStrictEqual(hashTree(root), before, label);
+  }
+});
+
+test('an old mega with no projects folder gets one viewer at its root with all its chats', () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  put(root, 'index.md', '# index');
+  put(root, 'renamed folder/original.json', chatJson('c1'));
+  put(root, 'renamed folder/synthesis/a.md', 'in a chat');
+  put(root, 'other/original.json', chatJson('c2'));
+  put(root, '_root note.md', 'at the root');
+  const before = hashTree(root);
+  const res = writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  assert.strictEqual(res.chats, 2);
+  const after = hashTree(root);
+  assertKept(before, after);
+  assert.deepStrictEqual(newEntries(before, after).filter(k => !OWN_FILES.test(k)), []);
+  const data = viewerData(root);
+  assert.deepStrictEqual(data.chats.map(c => c.id).sort(), ['c1', 'c2']);
+  const byPath = Object.fromEntries(data.added.map(a => [a.path, a]));
+  assert.strictEqual(byPath['_root note.md'].chat, null);
+  assert.strictEqual(byPath['renamed folder/synthesis/a.md'].chat, 'c1');
+  assert.strictEqual(byPath['renamed folder/synthesis/a.md'].href, 'renamed%20folder/synthesis/a.md');
+});
+
+test('one bad original.json: the rest get a viewer and it is reported; exit 1', () => {
+  const tmp = tmpRoot();
+  put(tmp, 'index.md', '# index');
+  put(tmp, 'good/original.json', chatJson('c1'));
+  put(tmp, 'bad/original.json', '{"uuid": "broken", "chat_mess');
+  put(tmp, 'bad/notes.md', 'still here');
+  const before = hashTree(tmp);
+  const r = cli(tmp, '--json');
+  assert.strictEqual(r.status, 1, r.stderr);
+  const [a] = JSON.parse(r.stdout).archives;
+  assert.strictEqual(a.status, 'written');
+  assert.strictEqual(a.chats, 1);
+  assert.deepStrictEqual(a.failedChats.map(c => c.chat), ['bad']);
+  assertKept(before, hashTree(tmp));
+  const data = viewerData(tmp);
+  assert.deepStrictEqual(data.chats.map(c => c.id), ['c1']);
+  assert.deepStrictEqual(data.added.map(x => [x.path, x.chat]), [['bad/notes.md', null]]);
+  assert.match(cli(tmp, '--force').stdout, /bad/);
+});
+
+test('every chat bad: no viewer, the archive is failed, and the next one still runs', () => {
+  const tmp = tmpRoot();
+  put(tmp, 'a/original.json', 'nope');
+  put(tmp, 'b/original.json', chatJson('c2'));
+  const r = cli(tmp, '--json');
+  assert.strictEqual(r.status, 1);
+  const { archives } = JSON.parse(r.stdout);
+  assert.deepStrictEqual(archives.map(a => a.status), ['failed', 'written']);
+  assert.ok(!fs.existsSync(path.join(tmp, 'a/viewer.html')));
+  assert.ok(fs.existsSync(path.join(tmp, 'b/viewer.html')));
+});
+
+test('a read-only archive fails with no temp files, and the next archive runs', { skip: process.getuid && process.getuid() === 0 }, () => {
+  const tmp = tmpRoot();
+  richSingle(path.join(tmp, 'a'));
+  put(tmp, 'b/original.json', chatJson('c2'));
+  const before = hashTree(path.join(tmp, 'a'));
+  fs.chmodSync(path.join(tmp, 'a'), 0o555);
+  try {
+    const r = cli(tmp, '--json');
+    assert.strictEqual(r.status, 1, r.stderr);
+    const { archives } = JSON.parse(r.stdout);
+    assert.deepStrictEqual(archives.map(a => a.status), ['failed', 'written']);
+    assert.ok(archives[0].reason);
+    assert.deepStrictEqual(hashTree(path.join(tmp, 'a')), before);
+  } finally { fs.chmodSync(path.join(tmp, 'a'), 0o755); }
+  assert.ok(fs.existsSync(path.join(tmp, 'b/viewer.html')));
+});
+
+test('a write failure leaves no viewer, no parts and no temps', t => {
+  const { writeViewer } = tool();
+  const root = richSingle(tmpRoot());
+  const before = hashTree(root);
+  const real = fs.writeFileSync;
+  t.mock.method(fs, 'writeFileSync', function (target, data, ...rest) {
+    if (typeof target === 'number' && String(data).includes('Content-Security-Policy')) {
+      real(target, String(data).slice(0, 100));
+      throw Object.assign(new Error('no space left on device'), { code: 'ENOSPC' });
+    }
+    return real(target, data, ...rest);
+  });
+  const res = writeViewer(single(root), {});
+  t.mock.restoreAll();
+  assert.strictEqual(res.status, 'failed');
+  assert.match(res.reason, /no space/);
+  assert.deepStrictEqual(hashTree(root), before);
+});
+
+test('a failed rename at each step leaves a new archive as it was', t => {
+  const { writeViewer } = tool();
+  const real = fs.renameSync;
+  for (const failing of ['viewer-files', 'viewer-check.gif', 'viewer.html']) {
+    const root = richSingle(tmpRoot());
+    const before = hashTree(root);
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (path.basename(to) === failing) throw Object.assign(new Error('rename blocked'), { code: 'EIO' });
+      return real(from, to);
+    });
+    const res = writeViewer(single(root), {});
+    t.mock.restoreAll();
+    assert.strictEqual(res.status, 'failed', failing);
+    assert.deepStrictEqual(hashTree(root), before, failing);
+  }
+});
+
+test('--force: a failure puts the old viewer and parts back', t => {
+  const { writeViewer } = tool();
+  const real = fs.renameSync;
+  for (const failing of ['viewer-files', 'viewer.html']) {
+    const root = richSingle(tmpRoot());
+    assert.strictEqual(writeViewer(single(root), {}).status, 'written');
+    const before = hashTree(root);
+    let blocked = false;
+    t.mock.method(fs, 'renameSync', (from, to) => {
+      if (!blocked && path.basename(to) === failing && from.includes('.tmp-')) {
+        blocked = true;
+        throw Object.assign(new Error('rename blocked'), { code: 'EIO' });
+      }
+      return real(from, to);
+    });
+    const res = writeViewer(single(root), { force: true });
+    t.mock.restoreAll();
+    assert.strictEqual(res.status, 'failed', failing);
+    assert.ok(blocked);
+    assert.deepStrictEqual(hashTree(root), before, failing);
+  }
+});
+
+test('a leftover temp from another run is reported, and never reused or removed', () => {
+  const { writeViewer } = tool();
+  const root = richSingle(tmpRoot());
+  put(root, `viewer-files.tmp-${process.pid}/mine.txt`, 'not this run');
+  const before = hashTree(root);
+  const res = writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'failed');
+  assert.deepStrictEqual(hashTree(root), before);
+});
+
+test('ZIP: extracted to <out>/<zip name>, viewer there, the ZIP itself unchanged', async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => { z.file('original.json', chatJson('z1')); z.file('Übergröße.md', 'hallo'); }, 'single.zip');
+  await makeZip(input, z => { z.file('index.md', '# i'); z.file('c1/original.json', chatJson('m1')); z.file('c2/original.json', chatJson('m2')); }, 'mega.zip');
+  await makeZip(input, z => { z.file('wrapper/original.json', chatJson('w1')); }, 'wrapped.ZIP');
+  put(input, 'folder/original.json', chatJson('f1'));
+  const zipsBefore = hashTree(input);
+  const out = path.join(tmp, 'out');
+  const r = cli(input, '--out', out, '--json');
+  assert.strictEqual(r.status, 0, r.stderr + r.stdout);
+  const report = JSON.parse(r.stdout);
+  assertKept(zipsBefore, hashTree(input));
+  assert.ok(fs.existsSync(path.join(input, 'folder/viewer.html')));
+  assert.deepStrictEqual(viewerData(path.join(out, 'single')).chats.map(c => c.id), ['z1']);
+  assert.deepStrictEqual(viewerData(path.join(out, 'single')).added.map(a => a.path), ['Übergröße.md']);
+  assert.deepStrictEqual(viewerData(path.join(out, 'mega')).chats.map(c => c.id).sort(), ['m1', 'm2']);
+  assert.ok(fs.existsSync(path.join(out, 'wrapped/wrapper/viewer.html')));
+  assert.deepStrictEqual(report.zips.map(z => z.status), ['written', 'written', 'written']);
+  // Folders first, then ZIPs.
+  assert.strictEqual(report.archives.length, 1);
+  assert.strictEqual(report.archives[0].root, path.join(input, 'folder'));
+  assert.strictEqual(report.zips[0].archives.length, 1);
+});
+
+test('ZIPs with no --out: clear message, exit 1, folders still processed', async () => {
+  const tmp = tmpRoot();
+  await makeZip(tmp, z => z.file('original.json', chatJson('z1')), 'a.zip');
+  put(tmp, 'folder/original.json', chatJson('f1'));
+  const r = cli(tmp);
+  assert.strictEqual(r.status, 1);
+  assert.match(r.stdout, /--out/);
+  assert.ok(fs.existsSync(path.join(tmp, 'folder/viewer.html')));
+  assert.ok(!fs.existsSync(path.join(tmp, 'a')));
+});
+
+test('an out folder that exists is reported and left alone', async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => z.file('original.json', chatJson('z1')), 'a.zip');
+  const out = path.join(tmp, 'out');
+  put(out, 'a/mine.md', 'keep');
+  const before = hashTree(out);
+  const r = cli(input, '--out', out, '--json');
+  assert.strictEqual(r.status, 0, r.stderr);
+  const [z] = JSON.parse(r.stdout).zips;
+  assert.strictEqual(z.status, 'skipped');
+  assert.match(z.reason, /exists/);
+  assert.deepStrictEqual(hashTree(out), before);
+});
+
+test('a ZIP with no Claude chat is skipped without extracting; a broken ZIP fails alone', async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => z.file('conversation.json', '{}'), 'gemini.zip');
+  await makeZip(input, z => z.file('not_original.json', '{}'), 'near.zip');
+  put(input, 'broken.zip', 'not a zip');
+  await makeZip(input, z => z.file('original.json', chatJson('z1')), 'zgood.zip');
+  const out = path.join(tmp, 'out');
+  const r = cli(input, '--out', out, '--json');
+  assert.strictEqual(r.status, 1);
+  const zips = Object.fromEntries(JSON.parse(r.stdout).zips.map(z => [path.basename(z.zip), z]));
+  assert.strictEqual(zips['gemini.zip'].status, 'skipped');
+  assert.strictEqual(zips['near.zip'].status, 'skipped');
+  assert.strictEqual(zips['broken.zip'].status, 'failed');
+  assert.strictEqual(zips['zgood.zip'].status, 'written');
+  assert.deepStrictEqual(fs.readdirSync(out), ['zgood']);
+});
+
+test('a ZIP that would not fit is reported and the others run', async t => {
+  const { run } = tool();
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => z.file('original.json', chatJson('z1')), 'a.zip');
+  await makeZip(input, z => z.file('original.json', chatJson('z2')), 'b.zip');
+  const out = path.join(tmp, 'out');
+  t.mock.method(zipLib, 'zipFreeSpaceOk', async zp => (zp.endsWith('a.zip') ? { ok: false, needed: 2e9, free: 1e6 } : { ok: true, needed: 1, free: 2 }));
+  const report = await run(input, { out });
+  assert.deepStrictEqual(report.zips.map(z => z.status), ['failed', 'written']);
+  assert.match(report.zips[0].reason, /space/);
+  assert.strictEqual(report.ok, false);
+  assert.ok(!fs.existsSync(path.join(out, 'a')));
+  assert.ok(fs.existsSync(path.join(out, 'b/viewer.html')));
+});
+
+test('dry run on ZIPs reports the extraction and free space, and writes nothing', async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => z.file('original.json', chatJson('z1')), 'a.zip');
+  const before = hashTree(tmp);
+  const out = path.join(tmp, 'out');
+  const r = cli(input, '--out', out, '--dry-run', '--json');
+  assert.strictEqual(r.status, 0, r.stderr);
+  const [z] = JSON.parse(r.stdout).zips;
+  assert.strictEqual(z.status, 'written');
+  assert.strictEqual(z.dest, path.join(out, 'a'));
+  assert.strictEqual(z.space.ok, true);
+  assert.strictEqual(z.chats, 1);
+  assert.deepStrictEqual(hashTree(tmp), before);
+});
+
+test('--out inside the folder is not rescanned; --out holding the folder is refused', async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => z.file('original.json', chatJson('z1')), 'a.zip');
+  const out = path.join(input, 'out');
+  assert.strictEqual(cli(input, '--out', out).status, 0);
+  const second = JSON.parse(cli(input, '--out', out, '--json').stdout);
+  assert.deepStrictEqual(second.archives, []);
+  assert.strictEqual(second.zips[0].status, 'skipped');
+  const before = hashTree(tmp);
+  for (const bad of [input, tmp]) {
+    const r = cli(input, '--out', bad);
+    assert.strictEqual(r.status, 1);
+    assert.match(r.stderr, /--out/);
+  }
+  assert.deepStrictEqual(hashTree(tmp), before);
+});
+
+test('dry run resolves a new --out through a linked parent', () => {
+  const tmp = fs.realpathSync(tmpRoot());
+  put(tmp, 'in/original.json', chatJson('c1'));
+  fs.symlinkSync(path.join(tmp, 'in'), path.join(tmp, 'link'));
+  const r = cli(path.join(tmp, 'in'), '--out', path.join(tmp, 'link'), '--dry-run');
+  assert.strictEqual(r.status, 1, 'the link resolves to the folder itself');
+  assert.match(r.stderr, /--out/);
+  const ok = cli(path.join(tmp, 'in'), '--out', path.join(tmp, 'link', 'new', 'out'), '--dry-run', '--json');
+  assert.strictEqual(ok.status, 0, ok.stderr);
+  assert.strictEqual(JSON.parse(ok.stdout).archives.length, 1);
+});
+
+test('plain report: a line per archive, then capped missing files, then skipped folders', () => {
+  const tmp = tmpRoot();
+  const uploads = Array.from({ length: 30 }, (_, i) => ({ success: true, file_name: `f${i}.pdf`, file_uuid: 'u' + i }));
+  put(tmp, 'a/original.json', chatJson('c1', 'One', { chat_messages: [{ uuid: 'm', sender: 'human', content: [], files_v2: uploads }] }));
+  put(tmp, 'gemini/conversation.json', '{}');
+  put(tmp, 'gemini/original.json', '{}');
+  const r = cli(tmp);
+  assert.strictEqual(r.status, 0, r.stderr);
+  const lines = r.stdout.split('\n');
+  assert.match(lines[0], /^written: .*\/a \(1 chat, 30 missing\)$/);
+  const m = lines.indexOf('Missing files:');
+  const s = lines.indexOf('Skipped:');
+  assert.ok(m > 0 && s > m, r.stdout);
+  assert.ok(lines.slice(m, s).filter(l => /f\d+\.pdf/.test(l)).length < 30);
+  assert.ok(lines.some(l => /and \d+ more/.test(l)));
+  assert.match(lines[s + 1], /gemini: not a Claude chat/);
+});
+
+test('command line: usage errors exit 1, and --json prints one object', () => {
+  assert.strictEqual(cli().status, 1);
+  assert.strictEqual(cli('--nope', 'x').status, 1);
+  assert.strictEqual(cli(path.join(tmpRoot(), 'missing')).status, 1);
+  const tmp = tmpRoot();
+  put(tmp, 'x/original.json', chatJson('c1'));
+  const r = cli(tmp, '--json');
+  assert.deepStrictEqual(Object.keys(JSON.parse(r.stdout)).sort(), ['archives', 'dryRun', 'folder', 'force', 'ok', 'out', 'skipped', 'zips']);
+  assert.strictEqual(JSON.parse(cli(path.join(tmp, 'missing'), '--json').stdout).ok, false);
+});
+
+test('tool can be imported without running', () => {
+  const r = spawnSync(process.execPath, ['-e', `require(${JSON.stringify(TOOL_PATH)})`], { encoding: 'utf8' });
+  assert.strictEqual(r.status, 0, r.stderr);
+  assert.strictEqual(r.stdout + r.stderr, '');
+});
