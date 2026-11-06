@@ -209,11 +209,12 @@ const ATTACKS = {
 const HOSTILE_HTML = `<!doctype html><html><head><title>hostile</title>
 <link rel="stylesheet" href="https://remote.test/s.css">
 <style>@import url(https://remote.test/i.css); @font-face { font-family: f; src: url(https://remote.test/f.woff); } body { font-family: f; background: url(https://remote.test/bg.png); }</style>
+<script>window.addEventListener('message', e => { if (typeof e.data === 'string' && e.data.startsWith('NESTED ')) console.log(e.data); });</script>
 </head><body><h1>hostile</h1>
 <base href="https://remote.test/base/"><img src="relative.png">
 <img src="https://remote.test/tag.png"><video src="https://remote.test/v.mp4" autoplay></video>
 <iframe src="https://remote.test/frame"></iframe><object data="https://remote.test/obj"></object>
-<iframe srcdoc="<script>console.log('NESTED ran');fetch('https://remote.test/nested')<\/script>"></iframe>
+<iframe srcdoc="<script>const say = m => parent.postMessage('NESTED ' + m, '*'); document.addEventListener('securitypolicyviolation', e => say('violation ' + e.violatedDirective + ' ' + e.blockedURI)); say('ran'); fetch('https://remote.test/nested').catch(() => say('fetch failed'))<\/script>"></iframe>
 <a id="pop" href="https://remote.test/link" target="_blank">go</a>
 <script>${REPORT}
 const attempt = async (name, run) => {
@@ -235,10 +236,11 @@ const ATTACK_ENDS = {
   'top-location': 'threw SecurityError', 'window-open': 'gave blocked', 'link-popup': 'gave clicked', storage: 'threw SecurityError', cookie: 'threw SecurityError',
 };
 
-// Each leaves the document it runs in, so each gets a file of its own. ran is logged before the attempt.
+// Each leaves the document it runs in, so each gets a file of its own. ran is logged before the attempt, and again
+// shortly after: a console line from a frame this new can be missed, but one a moment later is not.
 const navArtifact = (name, attempt, head = '') => ({
   name,
-  versions: [`<!doctype html><html><head>${head}</head><body>${name}<script>console.log('NAV ran ${name}');setTimeout(() => { ${attempt} }, 30);<\/script></body></html>`],
+  versions: [`<!doctype html><html><head>${head}</head><body>${name}<script>console.log('NAV ran ${name}');setTimeout(() => console.log('NAV ran ${name}'), 120);setTimeout(() => { ${attempt} }, 30);<\/script></body></html>`],
 });
 
 const ESCAPE_HTML = "<!doctype html><script>console.log('ESCAPED');fetch('https://remote.test/escaped')<\/script>";
@@ -892,7 +894,13 @@ async function unzipMegaZip(out) {
     for (const url of ['https://remote.test/fetch', 'https://remote.test/beacon', 'wss://remote.test/ws', 'https://remote.test/img.png', 'https://remote.test/tag.png', 'https://remote.test/f.woff', 'https://remote.test/bg.png', 'https://remote.test/s.css']) {
       check(`hostile: the policy stopped ${url}`, violations.some(v => v.endsWith(' ' + url)), violations.join(' | '));
     }
-    check('hostile: a nested frame ran, and is held to the same policy', await waitLog(atk, 'NESTED ran') && await waitLog(atk, "Refused to connect to 'https://remote.test/nested'"), atk.seen.logs.filter(l => /nested/i.test(l)).join(' | '));
+    // The nested frame reports from inside itself, through the hostile page (a console line from a frame that loads
+    // this early can be missed). Its violation can only come from its own fetch, so it proves it ran and was blocked.
+    const nestedSaid = () => atk.seen.logs.filter(l => l.startsWith('NESTED ')).join(' | ');
+    const nestedRan = await waitLog(atk, 'NESTED ran');
+    const nestedBlocked = await waitLog(atk, 'NESTED violation connect-src https://remote.test/nested');
+    check('hostile: a nested frame ran', nestedRan, nestedSaid());
+    check('hostile: the nested frame is held to the same policy', nestedBlocked && await waitLog(atk, 'NESTED fetch failed'), nestedSaid());
     await atk.page.waitForTimeout(400);
     check('hostile: no request left the page', atk.seen.requests.length === 0, atk.seen.requests.join());
     check('hostile: no window opened', popups === 0, String(popups));
@@ -1022,14 +1030,6 @@ async function unzipMegaZip(out) {
     await pop.page.keyboard.press('Escape');
     clean('popups', pop.seen);
 
-    const noProject = await open({}, url);
-    check('project: hidden for a chat without one', await noProject.page.$eval('#project', n => n.hidden));
-    const phoneP = await open({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }, 'file://' + ufile);
-    await phoneP.page.locator('.chip:has(b:text-is("photo.png"))').tap();
-    await dialog(phoneP).waitFor();
-    check('phone: the popup fits the screen', await phoneP.page.$eval('[role="dialog"]', n => { const r = n.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; }));
-    check('phone: no sideways scroll with the popup', await phoneP.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
-
 
     // Project instructions: shown first, as text, and scrollable when long.
     check('instructions: the heading is above the files', await project.evaluate(n => { const h = n.querySelector('h2'), c = n.querySelector('.chips'); return !!h && h.textContent === 'Project instructions' && !!c && !!(h.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING); }));
@@ -1096,6 +1096,14 @@ async function unzipMegaZip(out) {
     await fail.page.evaluate(() => { document.execCommand = () => true; });
     await fail.page.locator('.msg[data-id="m01"] .copy-msg').click();
     check('copy: the fallback counts when it works', (await fail.page.locator('.msg[data-id="m01"] .copy-msg').textContent()) === 'Copied');
+
+    const noProject = await open({}, url);
+    check('project: hidden for a chat without one', await noProject.page.$eval('#project', n => n.hidden));
+    const phoneP = await open({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }, 'file://' + ufile);
+    await phoneP.page.locator('.chip:has(b:text-is("photo.png"))').tap();
+    await dialog(phoneP).waitFor();
+    check('phone: the popup fits the screen', await phoneP.page.$eval('[role="dialog"]', n => { const r = n.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; }));
+    check('phone: no sideways scroll with the popup', await phoneP.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
 
     // Search and project grouping
     const branchy = plainChat('branchy', 'Branchy chat', 2, '2026-04-01T00:00:00Z');
