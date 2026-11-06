@@ -637,9 +637,24 @@ function buildViewerDeliveries(deliveredFiles) {
   return deliveries;
 }
 
+// One chat's project for the viewer, or null outside a project. A document too
+// long to embed (or instructions too long) is cut here and stays whole on disk.
+// limit: CTViewer.TEXT_EMBED_LIMIT.
+function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileNames, instructions = '', limit = 2 * 1024 * 1024) {
+  if (!data.project_uuid && !data.project?.uuid) return null;
+  const docs = Object.entries(projectFiles).map(([filename, content]) => {
+    const name = projectFileMapping[filename];
+    const text = String(content == null ? '' : content);
+    return { name, text: text.length > limit ? `${text.slice(0, limit)}\n[... truncated: the whole text is in project/${name}]` : text };
+  });
+  const text = String(instructions == null ? '' : instructions);
+  const cut = text.length > limit ? `${text.slice(0, limit)}\n[... truncated: the whole text is in project/prompt_template.md]` : text;
+  return { name: data.project?.name || '', fileDir, fileNames, docs, instructions: cut };
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     fixMojibake, isTextFile, getMessageChain, failedToolUseIds, isBashTool, heredocPath, HEREDOC_RE, heredocFiles,
-    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries,
+    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject,
   };
 }

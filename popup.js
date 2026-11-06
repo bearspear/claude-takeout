@@ -307,21 +307,6 @@ async function viewerUploadText(name, content) {
   }
 }
 
-// One chat's project for the viewer, or null outside a project. A document too
-// long to embed (or instructions too long) is cut here and stays whole on disk.
-function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileNames, instructions = '') {
-  if (!data.project_uuid && !data.project?.uuid) return null;
-  const limit = CTViewer.TEXT_EMBED_LIMIT;
-  const docs = Object.entries(projectFiles).map(([filename, content]) => {
-    const name = projectFileMapping[filename];
-    const text = String(content == null ? '' : content);
-    return { name, text: text.length > limit ? `${text.slice(0, limit)}\n[... truncated: the whole text is in project/${name}]` : text };
-  });
-  const text = String(instructions == null ? '' : instructions);
-  const cut = text.length > limit ? `${text.slice(0, limit)}\n[... truncated: the whole text is in project/prompt_template.md]` : text;
-  return { name: data.project?.name || '', fileDir, fileNames, docs, instructions: cut };
-}
-
 // Add viewer.html and viewer-check.gif to the ZIP root, once per export. Returns
 // false and writes nothing on any failure, because the export must still download.
 async function writeViewer(zip, chats) {
@@ -2562,7 +2547,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       uploads: viewerUploads,
       deliveries: buildViewerDeliveries(savedDeliveries),
       heredocs: heredocFiles,
-      project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions)
+      project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions, CTViewer.TEXT_EMBED_LIMIT)
     });
   } catch (err) {
     console.error('Could not build the viewer chat:', err);

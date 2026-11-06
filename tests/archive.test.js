@@ -4,7 +4,8 @@ const assert = require('node:assert');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { findArchives, scanAdded, isGeneratedViewer, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES } = require('../tools/archive-lib.js');
+const { findArchives, scanAdded, isGeneratedViewer, chatFromDisk, matchFile, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES } = require('../tools/archive-lib.js');
+const { textBlob, projectResponses, exportPopup, runFolder, withUploads, oneMessage } = require('./helpers');
 
 const tmpRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'archive-test-'));
 const put = (root, rel, text = 'x') => {
@@ -246,4 +247,130 @@ test('scanAdded reports an unreadable folder and keeps going', { skip: process.g
     assert.strictEqual(res.errors[0].path, 'locked');
     assert.ok(res.errors[0].message);
   } finally { fs.chmodSync(path.join(s, 'locked'), 0o755); }
+});
+
+// ---- chatFromDisk ----
+// Writes what populateConversationFolder produced into dir. A blob stub is written as its marker text.
+const writeFolder = (dir, written) => {
+  for (const [name, entry] of Object.entries(written)) {
+    const content = entry && entry.options ? entry.content : entry;
+    put(dir, name, typeof content === 'string' ? content : String(content && content.marker !== undefined ? content.marker : 'binary'));
+  }
+};
+const singleOf = dir => ({ root: dir, kind: 'single', chats: [{ dir, relDir: '.' }] });
+const exportToDisk = async (opts = {}) => {
+  const dir = tmpRoot();
+  const data = withUploads();
+  data.chat_messages.find(m => m.sender === 'human').files_v2[3].path = '/mnt/user-data/uploads/legacy.txt';
+  const legacy = [/download-file/, () => ({ ok: true, status: 200, blob: async () => textBlob('old') })];
+  const { written, chat } = await runFolder(exportPopup({ routes: [...projectResponses(), legacy], texts: { 'up-text': textBlob('hello'), 'de000000-0000-4000-8000-000000000003': textBlob('x', 'application/vnd.oasis.opendocument.text') } }),
+    Object.assign(data, { project_uuid: 'P' }), opts);
+  writeFolder(dir, written);
+  return { dir, archive: singleOf(dir), chat: singleOf(dir).chats[0], expected: chat, written };
+};
+
+test('parity: a folder written by the real export rebuilds the same viewer chat', async () => {
+  const { archive, chat, expected } = await exportToDisk();
+  const got = chatFromDisk(archive, chat);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(got.viewerChat)), JSON.parse(JSON.stringify(expected)));
+  assert.deepStrictEqual(got.missing, []);
+});
+
+test('text survives a deleted artefact, a binary is reported missing', async () => {
+  const { dir, archive, chat } = await exportToDisk();
+  fs.rmSync(`${dir}/artefacts/report.html`);
+  let got = chatFromDisk(archive, chat);
+  const report = Object.values(got.viewerChat.files).find(f => f.name === 'report.html');
+  assert.ok(report && report.versions.every(v => typeof v.text === 'string' && v.text));
+  assert.deepStrictEqual(got.missing, []);
+  const odt = fs.readdirSync(`${dir}/artefacts`).filter(n => /\.odt$/.test(n));
+  assert.ok(odt.length);
+  for (const n of odt) fs.rmSync(`${dir}/artefacts/${n}`);
+  got = chatFromDisk(archive, chat);
+  assert.ok(got.missing.includes('Minutes.odt'), got.missing.join());
+});
+
+test('disk text wins over the replayed text, BOM stripped', async () => {
+  const { dir, archive, chat } = await exportToDisk();
+  put(dir, 'artefacts/report_v3.html', '\uFEFF<p>fixed by replay_bash</p>');
+  put(dir, 'artefacts/extra.txt', 'only on disk');
+  const files = Object.values(chatFromDisk(archive, chat).viewerChat.files);
+  assert.strictEqual(files.find(f => f.name === 'report.html').versions.slice(-1)[0].text, '<p>fixed by replay_bash</p>');
+});
+
+test('a renamed upload is found by loose match, and an upload that is gone is missing', async () => {
+  const { dir, archive, chat } = await exportToDisk();
+  fs.renameSync(`${dir}/uploads/p01_notes.txt`, `${dir}/uploads/P01 Notes.txt`);
+  fs.rmSync(`${dir}/uploads/p01_photo.png`);
+  const got = chatFromDisk(archive, chat);
+  const ups = Object.fromEntries(got.viewerChat.messages.flatMap(m => m.uploads).map(u => [u.name, u]));
+  assert.strictEqual(ups['notes.txt'].href, 'uploads/P01%20Notes.txt');
+  assert.strictEqual(ups['notes.txt'].text, 'hello');
+  assert.strictEqual(ups['photo.png'].href, null);
+  assert.ok(got.missing.includes('p01_photo.png'));
+});
+
+test('older mega: no projects/ folder, project files in the chat folder', async () => {
+  const { dir, written } = await exportToDisk();
+  const mega = tmpRoot();
+  put(mega, 'index.md');
+  fs.cpSync(dir, `${mega}/chat a`, { recursive: true });
+  const archive = { root: mega, kind: 'mega', chats: [{ dir: `${mega}/chat a`, relDir: 'chat a' }] };
+  const p = chatFromDisk(archive, archive.chats[0]).viewerChat.project;
+  assert.strictEqual(p.name, 'My Project');
+  assert.deepStrictEqual(p.files.map(f => f.name), ['Paper.pdf']);
+  assert.strictEqual(p.files[0].href, 'chat%20a/project/files/Paper.pdf');
+  assert.ok(written['project/Brief.md']);
+});
+
+test('mega with a shared projects/ folder: the link comes from the chat README', async () => {
+  const mega = tmpRoot();
+  put(mega, 'index.md');
+  put(mega, 'c/original.json', JSON.stringify({ uuid: 'u', project_uuid: 'P', project: { uuid: 'P', name: 'Shared' }, chat_messages: [] }));
+  put(mega, 'c/README.md', '\uFEFF- [Paper.pdf](../projects/My%20Proj/files/Paper.pdf)\n');
+  put(mega, 'projects/My Proj/files/Paper.pdf', 'pdf');
+  const archive = { root: mega, kind: 'mega', chats: [{ dir: `${mega}/c`, relDir: 'c' }] };
+  const p = chatFromDisk(archive, archive.chats[0]).viewerChat.project;
+  assert.deepStrictEqual(p.files.map(f => f.href), ['projects/My%20Proj/files/Paper.pdf']);
+});
+
+test('project is null without a project uuid, and built from project.json when only the folder is there', () => {
+  const dir = tmpRoot();
+  put(dir, 'original.json', JSON.stringify({ uuid: 'u', chat_messages: [] }));
+  const archive = singleOf(dir);
+  assert.strictEqual(chatFromDisk(archive, archive.chats[0]).viewerChat.project, null);
+  put(dir, 'project/project.json', JSON.stringify({ name: 'Old Proj', prompt_template: 'be brief' }));
+  put(dir, 'project/Notes.md', '\uFEFFnotes');
+  put(dir, 'project/prompt_template.md', '\uFEFFbe brief');
+  const p = chatFromDisk(archive, archive.chats[0]).viewerChat.project;
+  assert.strictEqual(p.name, 'Old Proj');
+  assert.strictEqual(p.instructions, 'be brief');
+  assert.deepStrictEqual(p.docs.map(d => d.name), ['Notes.md']);
+});
+
+test('matchFile: exact, NFC, loose, and ambiguous', () => {
+  assert.strictEqual(matchFile('p01_My Report.pdf', ['p01_My_Report.pdf']), 'p01_My_Report.pdf');
+  assert.strictEqual(matchFile('p01_a b.pdf', ['p01_a_b.pdf', 'p01_a-b.pdf']), null);
+  assert.strictEqual(matchFile('p01_Gödel.md', ['p01_Gödel.md']), 'p01_Gödel.md');
+  const nfd = 'p01_Go\u0308del.md';
+  assert.strictEqual(matchFile('p01_G\u00f6del.md', [nfd]), nfd);
+  assert.strictEqual(matchFile('x.pdf', ['y.pdf']), null);
+  assert.strictEqual(matchFile('a.pdf', ['A.PDF', 'a.pdf']), 'a.pdf');
+  assert.strictEqual(matchFile('---', ['___']), null);
+});
+
+test('unreadable original.json throws with its path; odd shapes lose detail, not the chat', () => {
+  const dir = tmpRoot();
+  put(dir, 'original.json', '{"chat_mess');
+  assert.throws(() => chatFromDisk(singleOf(dir), { dir, relDir: '.' }), e => e.message.includes(path.join(dir, 'original.json')));
+  put(dir, 'original.json', '\uFEFF' + JSON.stringify({
+    uuid: 'u', current_leaf_message_uuid: 'b', chat_messages: [
+      { uuid: 'a', parent_message_uuid: null, sender: 'human', content: null, attachments: {}, files: null, files_v2: 'x' },
+      null,
+      { uuid: 'b', parent_message_uuid: 'a', sender: 'assistant', content: [null, { type: 'text', text: 'ok' }, { type: 'tool_use', name: 'create_file', input: null }], attachments: null },
+    ],
+  }));
+  const got = chatFromDisk(singleOf(dir), { dir, relDir: '.' });
+  assert.strictEqual(got.viewerChat.id, 'u');
+  assert.ok(got.viewerChat.messages.length >= 1);
 });

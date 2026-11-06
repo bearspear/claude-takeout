@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const { REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages } = require('./helpers');
+const { REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads } = require('./helpers');
 
 const { fn, sandbox } = loadPopup({
   fetch: async (url) => {
@@ -241,49 +241,7 @@ test('mega-ZIP stores project files once and every chat links to them', async ()
 
 // ---- viewer.html ----
 // fetch answers: uuid in failing -> 404; project endpoints from project; any other file a text blob.
-const textBlob = (text, type = 'text/plain') => ({
-  marker: text, size: text.length, type, text: async () => text, arrayBuffer: async () => new ArrayBuffer(0),
-});
-const projectResponses = (name = 'My Project') => [
-  [/\/projects\/P$/, () => ({ ok: true, status: 200, json: async () => ({ name, docs_count: 1, files_count: 1 }) })],
-  [/\/projects\/P\/docs$/, () => ({ ok: true, status: 200, json: async () => [{ uuid: 'd1', file_name: 'Brief.md', content: 'be kind' }] })],
-  [/\/projects\/P\/files$/, () => ({ ok: true, status: 200, json: async () => [{ file_uuid: 'pf1', file_name: 'Paper.pdf' }] })],
-];
-const zipStub = () => {
-  const written = {};
-  return { written, file: (name, content, options) => { written[name] = options ? { content, options } : content; } };
-};
-function exportPopup({ failing = [], routes = [], texts = {} } = {}) {
-  return loadPopup({
-    fetch: async (url) => {
-      for (const [re, answer] of routes) if (re.test(url)) return answer(url);
-      if (failing.some((id) => url.includes(id))) return { ok: false, status: 404 };
-      const hit = /\/files\/([^/]+)\/contents?$/.exec(url);
-      if (hit) return { ok: true, status: 200, blob: async () => (texts[hit[1]] !== undefined ? texts[hit[1]] : textBlob(`file ${hit[1]}`)) };
-      return { ok: false, status: 404 };
-    },
-  });
-}
-async function runFolder(popup, data, { folderName = '', shared = null, target = zipStub() } = {}) {
-  popup.sandbox.__folder = target;
-  popup.sandbox.__data = data;
-  popup.sandbox.__shared = shared;
-  popup.sandbox.__name = folderName;
-  const output = await vm.runInContext("populateConversationFolder(__folder, __data, null, 'org', __shared, __name)", popup.sandbox);
-  return { written: target.written, output, chat: output.viewerChat };
-}
-const withUploads = () => {
-  const data = loadFixture();
-  const first = data.chat_messages.find((m) => m.sender === 'human');
-  first.files = [];
-  first.files_v2 = [
-    { success: true, file_name: 'notes.txt', file_uuid: 'up-text', file_kind: 'blob' },
-    { success: true, file_name: 'photo.png', file_uuid: 'up-png', file_kind: 'image' },
-    { success: true, file_name: 'gone.pdf', file_uuid: 'up-gone', file_kind: 'document' },
-    { success: true, file_name: 'legacy.txt', file_kind: 'blob' },
-  ];
-  return data;
-};
+// textBlob, projectResponses, zipStub, exportPopup, runFolder and withUploads live in helpers.js
 const uploadsOf = (chat) => Object.fromEntries(chat.messages.flatMap((m) => m.uploads).map((u) => [u.name, u]));
 
 test('viewerChat has the right cards, and the folder prefixes every link', async () => {
