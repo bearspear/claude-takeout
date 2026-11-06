@@ -619,3 +619,34 @@ test('buildViewerDeliveries names each uuid after its first file', () => {
   const files = [{ filename: 'a_v1.md', uuid: 'u1', path: '/p/a.md' }, { filename: 'a_v2.md', uuid: 'u2', path: '/p/a.md' }, { filename: 'a.md', uuid: 'u2', path: '/p/a.md' }];
   assert.deepStrictEqual(buildViewerDeliveries(files), { u1: { filename: 'a_v1.md', path: '/p/a.md' }, u2: { filename: 'a_v2.md', path: '/p/a.md' } });
 });
+
+// ---- Export baseline: every file populateConversationFolder writes, hashed ----
+// Refresh with UPDATE_EXPORT_BASELINE=1 node --test tests/export.test.js, after confirming the change is intended.
+const BASELINE = path.join(__dirname, 'fixtures', 'export-baseline.json');
+test('the export of the fixture is byte-for-byte what the stored baseline says', async () => {
+  const crypto = require('crypto');
+  const popup = exportPopup({ failing: ['up-gone'], routes: projectResponses() });
+  const data = withUploads();
+  data.project_uuid = 'P';
+  const { written } = await runFolder(popup, data);
+  const files = everyFile(written);
+  delete files['viewer.html'];
+  delete files['viewer-check.gif'];
+  const manifest = {};
+  for (const [name, content] of Object.entries(files)) manifest[name] = crypto.createHash('sha256').update(content).digest('hex');
+  if (process.env.UPDATE_EXPORT_BASELINE) fs.writeFileSync(BASELINE, JSON.stringify(manifest, null, 2) + '\n');
+  assert.deepStrictEqual(manifest, JSON.parse(fs.readFileSync(BASELINE, 'utf8')));
+});
+
+test('fixMojibake sorts its map keys once, not on every call', () => {
+  const core = require('../export-core.js');
+  core.fixMojibake('warm up');
+  const sort = Array.prototype.sort;
+  let calls = 0;
+  Array.prototype.sort = function (...args) { calls++; return sort.apply(this, args); };
+  try {
+    core.fixMojibake('another â€” string');
+    core.fixMojibake('and one more');
+  } finally { Array.prototype.sort = sort; }
+  assert.strictEqual(calls, 0);
+});
