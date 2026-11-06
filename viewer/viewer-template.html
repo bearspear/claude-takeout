@@ -44,11 +44,17 @@ svg.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor
 .find input { all: unset; flex: 1; min-width: 0; font: 13.5px/1.4 var(--sans); }
 .find input::placeholder { color: var(--mute); opacity: 1; }
 .lab { font-size: 12px; font-weight: 500; color: var(--mute); padding: 10px 20px 5px; }
-#recents { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 8px; }
-#chat-list { display: flex; flex-direction: column; gap: 1px; padding: 0 10px; }
+#recents, #results { flex: 1; min-height: 0; overflow-y: auto; padding-bottom: 8px; }
+#recents[hidden], #results[hidden] { display: none; }
+#chat-list, .list { display: flex; flex-direction: column; gap: 1px; padding: 0 10px; }
 .item { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 7px 10px; border-radius: 8px; font-size: 13.5px; color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
 .item:hover { background: var(--hover); }
 .item[aria-current="true"] { background: var(--active); color: var(--ink); }
+.hit { display: block; width: 100%; text-align: left; border: 0; background: none; padding: 7px 10px; border-radius: 8px; color: var(--soft); cursor: pointer; font: inherit; }
+.hit:hover { background: var(--hover); }
+.hit b { display: block; font: 500 13.5px/1.4 var(--sans); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.hit small { display: block; font-size: 12.5px; line-height: 1.4; color: var(--mute); overflow-wrap: anywhere; }
+mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; padding: 0 1px; }
 .pill { font-size: 12px; color: var(--mute); padding: 11px 20px 13px; border-top: 1px solid var(--line); }
 
 /* Top bar */
@@ -267,12 +273,13 @@ button.chip:hover { border-color: var(--line-strong); }
     <div class="brand">Claude Takeout</div>
     <label class="find">
       <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></svg>
-      <input type="text" placeholder="Search all chats" aria-label="Search all chats" disabled>
+      <input type="text" placeholder="Search all chats" aria-label="Search all chats" autocomplete="off">
     </label>
     <div id="recents">
       <div class="lab">Recents</div>
       <div id="chat-list"></div>
     </div>
+    <div id="results" role="region" aria-label="Search results" hidden></div>
     <div class="pill" id="archive"></div>
   </aside>
   <div id="scrim"></div>

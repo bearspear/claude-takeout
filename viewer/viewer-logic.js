@@ -461,6 +461,76 @@ function openableHref(href) {
   return /\.[a-z0-9]{1,10}$/i.test(name) && !/\.(?:[sex]?html?|xht|svgz?|xml|xslt?|mht|mhtml|rss|atom|rdf)$/i.test(name);
 }
 
+// Search over every message on every branch, plus titles. One entry per message (and per title, msg null).
+function buildSearchIndex(chats) {
+  const index = [];
+  for (const chat of chats) {
+    const title = chat.title || '';
+    index.push({ chat: chat.id, msg: null, text: title, lower: title.toLowerCase() });
+    for (const m of chat.messages || []) {
+      const parts = [];
+      for (const b of m.blocks || []) if (b && b.t === 'text' && b.text) parts.push(b.text);
+      for (const a of m.attachments || []) { if (a.name) parts.push(a.name); if (a.text) parts.push(a.text); }
+      for (const u of m.uploads || []) if (u.name) parts.push(u.name);
+      if (!parts.length) continue;
+      const text = parts.join('\n');
+      index.push({ chat: chat.id, msg: m.id, text, lower: text.toLowerCase() });
+    }
+  }
+  return index;
+}
+
+// Offset in text that matches `at` in text.toLowerCase(), which differs in length for a few characters.
+function originalOffset(text, at) {
+  let lowered = 0, i = 0;
+  while (i < text.length && lowered < at) {
+    const ch = String.fromCodePoint(text.codePointAt(i));
+    lowered += ch.toLowerCase().length;
+    i += ch.length;
+  }
+  return i;
+}
+
+const SNIPPET_LENGTH = 80;
+
+function snippetAt(text, lower, at, length) {
+  let start = at, end = at + length;
+  if (lower.length !== text.length) { start = originalOffset(text, at); end = originalOffset(text, at + length); }
+  let from = end - start > 50 ? start : Math.max(0, start - 30);
+  let to = Math.min(text.length, from + SNIPPET_LENGTH);
+  if (/[\uDC00-\uDFFF]/.test(text[from] || '')) from++;
+  if (/[\uD800-\uDBFF]/.test(text[to - 1] || '')) to--;
+  const body = text.slice(from, to).replace(/\s+/g, ' ');
+  return (from > 0 ? '\u2026' : '') + body + (to < text.length ? '\u2026' : '');
+}
+
+// Literal, case-insensitive. At most `limit` hits, in index order.
+function searchChats(index, query, limit = 50) {
+  const q = String(query || '').trim().toLowerCase();
+  const hits = [];
+  if (!q) return hits;
+  for (const e of index) {
+    if (hits.length >= limit) break;
+    const at = e.lower.indexOf(q);
+    if (at < 0) continue;
+    hits.push({ chat: e.chat, msg: e.msg, snippet: snippetAt(e.text, e.lower, at, q.length) });
+  }
+  return hits;
+}
+
+// Chats outside any project, and the projects sorted by name. Both keep the order of `chats`.
+function groupChats(chats) {
+  const recents = [];
+  const byName = new Map();
+  for (const chat of chats) {
+    if (!chat.project) { recents.push(chat); continue; }
+    const name = chat.project.name || 'Untitled project';
+    if (!byName.has(name)) byName.set(name, { name, chats: [] });
+    byName.get(name).chats.push(chat);
+  }
+  return { recents, projects: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)) };
+}
+
 if (typeof module === 'object' && module.exports) {
-  module.exports = { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, fileViews, fileKindLabel, openableHref };
+  module.exports = { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats };
 }

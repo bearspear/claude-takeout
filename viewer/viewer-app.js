@@ -466,6 +466,7 @@ function renderChat(chat, leaf = chat.leaf, anchor = null) {
     next += size;
     box.append(part);
     if (first) place();
+    tryFind();
     if (next < chain.length) requestAnimationFrame(batch);
     else if (anchor) requestAnimationFrame(place);
   };
@@ -685,17 +686,123 @@ function switchTo(button) {
   navigate({ ...hash, leaf }, { anchor: next ? { id: next.id, top } : null });
 }
 
+function chatItem(chat) {
+  const item = el('button', 'item', chat.title || 'Untitled');
+  item.type = 'button';
+  item.dataset.id = chat.id;
+  item.title = chat.title || 'Untitled';
+  item.addEventListener('click', () => { setDrawer(false); navigate({ chat: chat.id }); });
+  return item;
+}
+
 function renderSidebar(chats) {
+  const { recents, projects } = groupChats(chats);
+  const holder = document.getElementById('recents');
   const list = document.getElementById('chat-list');
-  for (const chat of chats) {
-    const item = el('button', 'item', chat.title || 'Untitled');
-    item.type = 'button';
-    item.dataset.id = chat.id;
-    item.title = chat.title || 'Untitled';
-    item.addEventListener('click', () => { setDrawer(false); navigate({ chat: chat.id }); });
-    list.append(item);
+  list.append(...recents.map(chatItem));
+  if (!recents.length) holder.firstElementChild.remove();
+  for (const project of projects) {
+    const group = el('div', 'list');
+    group.append(...project.chats.map(chatItem));
+    holder.append(el('div', 'lab', project.name), group);
   }
+  if (!recents.length) list.remove();
   document.getElementById('archive').textContent = `Archive · ${chats.length} chat${chats.length === 1 ? '' : 's'} · read-only`;
+}
+
+// ---- Search ----
+const RESULT_LIMIT = 50;
+let searchIndex = null;
+let find = null; // { msg, query, gen }: the highlight waiting for its message to be drawn
+
+// Wraps the first match in a text node of the message with <mark>. A match across formatting is skipped.
+function highlightIn(node, query) {
+  const q = query.trim().toLowerCase();
+  if (!q) return null;
+  const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
+  for (let text = walker.nextNode(); text; text = walker.nextNode()) {
+    if (text.parentElement.closest('button, time, .branch, script, style')) continue;
+    const lower = text.data.toLowerCase();
+    if (lower.length !== text.data.length) continue;
+    const at = lower.indexOf(q);
+    if (at < 0) continue;
+    const middle = text.splitText(at);
+    middle.splitText(q.length);
+    const mark = document.createElement('mark');
+    middle.replaceWith(mark);
+    mark.append(middle);
+    return mark;
+  }
+  return null;
+}
+
+// Runs once the target message exists, and only for the render that was asked for.
+function tryFind() {
+  if (!find || find.gen === null) return;
+  if (find.gen !== renderGeneration) { find = null; return; }
+  const node = document.getElementById('chat').querySelector(`.msg[data-id="${CSS.escape(find.msg)}"]`);
+  if (!node) return;
+  const { query } = find;
+  find = null;
+  (highlightIn(node, query) || node).scrollIntoView({ block: 'center' });
+}
+
+function openHit(hit, query) {
+  const chat = chatsById.get(hit.chat);
+  if (!chat) return;
+  setDrawer(false);
+  if (hit.msg === null) { navigate({ chat: chat.id }); return; }
+  const now = parseHash(location.hash);
+  // A message on the branch already open stays on it; otherwise take the branch under the message.
+  const onBranch = now.chat === chat.id && chainFrom(chat.messages, now.leaf).some(m => m.id === hit.msg);
+  const leaf = onBranch ? now.leaf : leafUnder(chat.messages, hit.msg);
+  find = { msg: hit.msg, query, gen: null };
+  navigate({ chat: chat.id, leaf });
+  if (!find) return;
+  find.gen = renderGeneration;
+  tryFind();
+}
+
+function showResults(query) {
+  const holder = document.getElementById('results');
+  const q = query.trim();
+  holder.hidden = !q;
+  document.getElementById('recents').hidden = !!q;
+  if (!q) { holder.replaceChildren(); return; }
+  if (!searchIndex) searchIndex = buildSearchIndex(allChats);
+  const hits = searchChats(searchIndex, q, RESULT_LIMIT + 1);
+  const shownHits = hits.slice(0, RESULT_LIMIT);
+  const note = !hits.length ? 'No matches' : hits.length > RESULT_LIMIT ? `Showing first ${RESULT_LIMIT} results` : `${hits.length} result${hits.length === 1 ? '' : 's'}`;
+  const list = el('div', 'list');
+  for (const hit of shownHits) {
+    const chat = chatsById.get(hit.chat);
+    const button = el('button', 'hit');
+    button.type = 'button';
+    button.append(el('b', '', (chat && chat.title) || 'Untitled'));
+    if (hit.msg !== null) button.append(el('small', '', hit.snippet));
+    button.addEventListener('click', () => openHit(hit, q));
+    list.append(button);
+  }
+  holder.replaceChildren(el('div', 'lab', note), list);
+  holder.scrollTop = 0;
+}
+
+function setupSearch() {
+  const input = document.querySelector('.find input');
+  let timer = 0;
+  input.disabled = false;
+  input.addEventListener('focus', () => { if (!searchIndex) searchIndex = buildSearchIndex(allChats); });
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    if (!input.value.trim()) showResults('');
+    else timer = setTimeout(() => showResults(input.value), 120);
+  });
+  input.addEventListener('keydown', e => {
+    if (e.key !== 'Escape') return;
+    clearTimeout(timer);
+    input.value = '';
+    showResults('');
+  });
 }
 
 function start() {
@@ -703,6 +810,7 @@ function start() {
   allChats = data.chats;
   allChats.forEach(chat => chatsById.set(chat.id, chat));
   renderSidebar(data.chats);
+  setupSearch();
   document.getElementById('menu').addEventListener('click', () => setDrawer(true));
   document.getElementById('scrim').addEventListener('click', () => setDrawer(false));
   document.getElementById('panel-body').addEventListener('click', e => {

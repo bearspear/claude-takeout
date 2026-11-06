@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, groupChats } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -626,4 +626,50 @@ test('project files link under the chat folder or the shared projects folder', (
   const shared = buildViewerChat(fixture, { folder: 'A', project: { name: 'P', fileDir: '../projects/P/files', fileNames: ['x.pdf'], docs: [] } }).project;
   assert.deepStrictEqual(shared.files, [{ name: 'x.pdf', href: 'projects/P/files/x.pdf' }]);
   assert.strictEqual(buildViewerChat(fixture, {}).project, null);
+});
+
+const T = (id, parent, sender, text, extra = {}) => ({ id, parent, sender, at: '2026-01-01T00:00:0' + id.slice(-1) + 'Z', blocks: [{ t: 'text', text, cites: [] }], uploads: [], attachments: [], ...extra });
+const searchable = [
+  { id: 'c1', title: 'Alpha plans', project: { name: 'Alpha', files: [], docs: [] }, messages: [T('m1', null, 'human', 'hello'), T('m2', 'm1', 'assistant', 'old branch'), T('m3', 'm1', 'assistant', 'A Zebra crossed the road', { attachments: [{ name: 'notes.txt', text: 'pasted stripes' }], uploads: [{ name: 'photo.png', href: null, text: null }] })] },
+  { id: 'c2', title: 'Plain', project: null, messages: [T('n1', null, 'human', 'x')] },
+  { id: 'c3', title: 'Beta zebra notes', project: { name: 'Beta', files: [], docs: [] }, messages: [] },
+  { id: 'c4', title: 'Other', project: { name: 'Alpha', files: [], docs: [] }, messages: [] },
+];
+
+test('search finds text case-insensitively, on every branch, and titles', () => {
+  const idx = buildSearchIndex(searchable);
+  assert.deepStrictEqual(searchChats(idx, 'ZEBRA').map(h => [h.chat, h.msg]), [['c1', 'm3'], ['c3', null]]);
+  assert.deepStrictEqual(searchChats(idx, 'old branch').map(h => h.msg), ['m2']);
+  assert.deepStrictEqual(searchChats(idx, 'stripes').map(h => h.msg), ['m3']);
+  assert.deepStrictEqual(searchChats(idx, 'notes.txt').map(h => h.msg), ['m3']);
+  assert.deepStrictEqual(searchChats(idx, 'PHOTO.png').map(h => h.msg), ['m3']);
+  assert.ok(searchChats(idx, '  zebra ')[0].snippet.includes('Zebra'));
+});
+
+test('search edge cases: blank, long, limit, odd lowercasing', () => {
+  const idx = buildSearchIndex(searchable);
+  assert.deepStrictEqual(searchChats(idx, '   '), []);
+  assert.deepStrictEqual(searchChats(idx, ''), []);
+  assert.strictEqual(searchChats(idx, 'x'.repeat(5000)).length, 0);
+  assert.strictEqual(searchChats(idx, 'a', 2).length, 2);
+  const odd = buildSearchIndex([{ id: 'o', title: 'T', project: null, messages: [T('o1', null, 'human', '\u0130'.repeat(100) + ' needle ' + 'x'.repeat(100))] }]);
+  const hit = searchChats(odd, 'needle')[0];
+  assert.ok(hit.snippet.includes('needle'));
+  assert.ok(hit.snippet.length <= 90);
+  assert.ok(searchChats(odd, 'needle x')[0].snippet.includes('needle x'));
+  assert.ok(searchChats(buildSearchIndex([{ id: 'e', title: 'Hi', project: null, messages: [T('e1', null, 'human', 'a'.repeat(300) + 'Z')] }]), 'z')[0].snippet.startsWith('\u2026'));
+});
+
+test('snippets are about 80 characters with ellipses where cut', () => {
+  const text = 'a'.repeat(200) + 'MATCH' + 'b'.repeat(200);
+  const hit = searchChats(buildSearchIndex([{ id: 'l', title: 'L', project: null, messages: [T('l1', null, 'human', text)] }]), 'match')[0];
+  assert.ok(hit.snippet.startsWith('\u2026') && hit.snippet.endsWith('\u2026') && hit.snippet.includes('MATCH'));
+  assert.ok(hit.snippet.length <= 84);
+});
+
+test('groupChats puts project chats under their project only, by name', () => {
+  const g = groupChats(searchable);
+  assert.deepStrictEqual(g.recents.map(c => c.id), ['c2']);
+  assert.deepStrictEqual(g.projects.map(p => [p.name, p.chats.map(c => c.id)]), [['Alpha', ['c1', 'c4']], ['Beta', ['c3']]]);
+  assert.deepStrictEqual(groupChats([]), { recents: [], projects: [] });
 });
