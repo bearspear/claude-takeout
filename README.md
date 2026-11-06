@@ -13,6 +13,7 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
 - **Artifact Extraction** - Extracts and embeds created files
 - **Thinking Blocks** - Preserves Claude's reasoning with proper summaries
 - **Tool Use Display** - Formatted display of web search, bash, file operations
+- **Offline Viewer** - Every ZIP includes `viewer.html`, a page for reading the exported chats in a browser without the extension
 - **Sidebar Mode** - Keep the exporter open while browsing conversations
 - **No Configuration Required** - Auto-detects your organization ID
 
@@ -74,6 +75,8 @@ Creates a comprehensive archive:
 ├── links_and_sources.md         # URLs + web search sources by domain
 ├── errors.txt                   # Detailed error report with recovery hints (only if failures occurred)
 ├── original.json                # Original JSON export
+├── viewer.html                  # Offline viewer (unzip first, then open it)
+├── viewer-check.gif             # 1x1 image the viewer uses to detect an unzipped folder
 ├── responses/
 │   ├── 001_title_response.md       # Pure text response
 │   ├── 001_title_response.full.md  # Response with thinking/tools/embedded artifacts
@@ -99,6 +102,8 @@ Creates a comprehensive archive:
 ```
 
 *Note: The `[Project_Name-project]_` prefix only appears for conversations that are part of a Claude Project.*
+
+**Offline viewer:** unzip the archive, then open `viewer.html` in Chrome. It lists the chats, searches across them, and shows messages, thinking, tool calls, artifacts, uploads and project files. A mega-ZIP has one `viewer.html` at its root covering every chat. It needs no network. Previews of generated HTML files run their scripts in a sandbox, cut off from the viewer, other chats and your disk, and normal web requests are blocked. The browser doesn't let the viewer block every route, though, so a generated file containing injected code could send out its own text and the `.js` and `.css` files from that chat when previewed. Be careful previewing files from someone else's export.
 
 ### JSON
 **"Export Current (JSON)"**
@@ -293,6 +298,7 @@ Your existing session cookies are used for authentication (no API keys needed).
 | `popup.html` | Extension popup UI |
 | `sidepanel.html` | Sidebar panel UI |
 | `popup.js` | Export logic and markdown conversion |
+| `takeout-viewer.js`, `viewer/` | Builds `viewer.html` for ZIP exports |
 | `jszip.min.js` | ZIP generation library |
 
 ## Troubleshooting
@@ -353,6 +359,10 @@ Two stdlib-only Python 3 scripts ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.6.0
+
+- **Offline viewer** - Every ZIP export now includes `viewer.html` (plus a small `viewer-check.gif`). Unzip, then open `viewer.html` to browse, search and read the exported chats, with artifacts and uploads previewed in place. A mega-ZIP gets one viewer for all chats, with project chats grouped. The other export files are unchanged. If the viewer can't be built, the export still downloads and `errors.txt` says so.
 
 ### v1.5.10
 
