@@ -1013,8 +1013,8 @@ async function unzipMegaZip(out) {
 
     const project = pop.page.locator('#project');
     check('project: the section is under the top bar', await project.evaluate(n => n.tagName === 'DETAILS' && !n.hidden && !n.open && n.getBoundingClientRect().top >= document.getElementById('top').getBoundingClientRect().bottom - 1));
-    check('project: it names the project', (await project.locator('summary').textContent()).includes('Budget project'));
-    await project.locator('summary').click();
+    check('project: it names the project', (await project.locator('> summary').textContent()).includes('Budget project'));
+    await project.locator('> summary').click();
     check('project: it lists files and documents', (await project.locator('button.chip').allTextContents()).join('|').includes('spec.pdf') && (await project.locator('button.chip').count()) === 3);
     await project.locator('button.chip:has(b:text-is("spec.pdf"))').click();
     await dialog(pop).waitFor();
@@ -1031,23 +1031,29 @@ async function unzipMegaZip(out) {
     clean('popups', pop.seen);
 
 
-    // Project instructions: shown first, as text, and scrollable when long.
-    check('instructions: the heading is above the files', await project.evaluate(n => { const h = n.querySelector('h2'), c = n.querySelector('.chips'); return !!h && h.textContent === 'Project instructions' && !!c && !!(h.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING); }));
+    // Project instructions: first, folded, as text, and scrollable when long.
+    check('instructions: folded first, above the files', await project.evaluate(n => { const f = n.querySelector('details.instructions'), c = n.querySelector('.chips'); return !!f && !f.open && !!(f.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING) && f.querySelector('summary').textContent.trim() === 'Project instructions'; }));
+    check('instructions: its arrow stays closed', await project.locator('details.instructions .chev').evaluate(n => getComputedStyle(n).transform === 'none'));
+    check('instructions: the text stays hidden until opened', await project.locator('.instructions-text').evaluate(n => !n.checkVisibility()));
+    await project.locator('details.instructions summary').click();
+    check('instructions: opening shows the text', await project.locator('.instructions-text').evaluate(n => n.checkVisibility()));
+    check('instructions: the keyboard can scroll it', await project.locator('.instructions-text').evaluate(n => n.tabIndex === 0));
     check('instructions: the text is literal', await project.locator('.instructions-text').evaluate(n => n.textContent.includes('<img src=x onerror=') && n.textContent.includes('<script>') && n.querySelector('img, script') === null && getComputedStyle(n).whiteSpace === 'pre-wrap'));
     check('instructions: nothing ran', !(await pop.page.evaluate(() => !!window.__hit)));
-    check('instructions: a long text scrolls inside a bounded box', await project.locator('.instructions').evaluate(n => n.scrollHeight > n.clientHeight && n.clientHeight <= innerHeight * 0.3 && getComputedStyle(n).overflowY === 'auto'));
+    check('instructions: a long text scrolls inside a bounded box', await project.locator('.instructions-text').evaluate(n => n.scrollHeight > n.clientHeight && n.clientHeight <= innerHeight * 0.3 && getComputedStyle(n).overflowY === 'auto'));
     check('instructions: the whole text is there', (await project.locator('.instructions-text').textContent()).endsWith('Line of rules. '));
     check('instructions: files still follow', (await project.locator('button.chip').count()) === 3);
     const onlyFile = path.join(dir, 'only-instructions.html');
     fs.writeFileSync(onlyFile, buildHtml([plainChat('oi', 'Only rules', 2, '2026-05-01T00:00:00Z')], '2026-11-05T12:00:00Z', () => ({ project: { name: 'Rules only', fileDir: 'project/files', fileNames: [], docs: [], instructions: 'Just rules.' } })));
     const only = await open({}, 'file://' + onlyFile);
-    check('instructions: a project with only instructions still shows', await only.page.$eval('#project', n => !n.hidden) && (await only.page.textContent('#project summary')).startsWith('Project · Rules only'));
-    await only.page.click('#project summary');
+    check('instructions: a project with only instructions still shows', await only.page.$eval('#project', n => !n.hidden) && (await only.page.textContent('#project > summary')).startsWith('Project · Rules only'));
+    await only.page.click('#project > summary');
+    await only.page.click('#project details.instructions summary');
     check('instructions: and shows them', (await only.page.textContent('#project .instructions-text')) === 'Just rules.' && (await only.page.locator('#project .chips').count()) === 0);
     const bare = path.join(dir, 'no-instructions.html');
     fs.writeFileSync(bare, buildHtml([plainChat('ni', 'No rules', 2, '2026-05-01T00:00:00Z')], '2026-11-05T12:00:00Z', () => ({ project: { name: 'Quiet', fileDir: 'project/files', fileNames: ['a.pdf'], docs: [], instructions: '' } })));
     const quiet = await open({}, 'file://' + bare);
-    await quiet.page.click('#project summary');
+    await quiet.page.click('#project > summary');
     check('instructions: none, no heading', (await quiet.page.locator('#project h2, #project .instructions').count()) === 0 && (await quiet.page.locator('#project button.chip').count()) === 1);
     clean('instructions', only.seen);
 

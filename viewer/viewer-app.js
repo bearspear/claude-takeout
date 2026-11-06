@@ -353,13 +353,16 @@ function renderProject(chat) {
   summary.firstChild.classList.add('chev');
   box.append(summary);
   if (instructions) {
-    // Plain text, scrolling on its own when long.
-    const body = el('div', 'instructions');
-    body.tabIndex = 0;
-    body.setAttribute('role', 'region');
-    body.setAttribute('aria-label', 'Project instructions');
-    body.append(el('h2', '', 'Project instructions'), el('div', 'instructions-text', instructions));
-    box.append(body);
+    // Folded by default, because a project's prompt can be long. Plain text,
+    // scrolling on its own once opened.
+    const fold = el('details', 'instructions');
+    const head = el('summary');
+    head.append(icon('chevron'), el('span', '', 'Project instructions'));
+    head.firstChild.classList.add('chev');
+    const text = el('div', 'instructions-text', instructions);
+    text.tabIndex = 0;
+    fold.append(head, text);
+    box.append(fold);
   }
   if (items.length) {
     const row = el('div', 'chips');
