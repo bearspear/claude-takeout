@@ -4,22 +4,16 @@
 const fs = require('fs');
 const path = require('path');
 const { buildViewerChat, buildViewerData, assembleViewer, VIEWER_ASSETS } = require('../../takeout-viewer.js');
+const { loadPopup } = require('../helpers');
 
 const REPO = path.resolve(__dirname, '..', '..');
-
-function modelName(model) {
-  const s = String(model || '').toLowerCase();
-  const variant = (/opus|sonnet|haiku/.exec(s) || [''])[0];
-  const version = /(\d+)-(\d+)/.exec(s);
-  if (!variant) return model || '';
-  return `${variant[0].toUpperCase()}${variant.slice(1)}${version ? ` ${version[1]}.${version[2]}` : ''}`;
-}
+const getModelName = loadPopup().fn('getModelName'); // what a real export passes
 
 // conversations: claude.ai API payloads. ctxOf(conversation): extra buildViewerChat context, such as artifacts.
 function buildHtml(conversations, exported = new Date().toISOString(), ctxOf = () => ({})) {
   const read = f => fs.readFileSync(path.join(REPO, f), 'utf8');
   const [template, logic, app, marked, katex, css] = VIEWER_ASSETS.map(read);
-  const chats = conversations.map(c => buildViewerChat(c, { model: modelName(c.model), ...ctxOf(c) }));
+  const chats = conversations.map(c => buildViewerChat(c, { model: getModelName(c), ...ctxOf(c) }));
   return assembleViewer({ template, css, marked, katex, logic, app, data: buildViewerData(chats, { exported }) });
 }
 

@@ -22,7 +22,7 @@ function loadPopup({ fetch = async () => ({ ok: false, status: 404 }) } = {}) {
   const event = () => ({ addListener() {} });
   const sandbox = {
     chrome: {
-      runtime: { lastError: null, onMessage: event(), sendMessage() {} },
+      runtime: { lastError: null, onMessage: event(), sendMessage() {}, getURL: (p) => `chrome-extension://test/${p}` },
       storage: { local: { get: async () => ({}), set: async () => {} }, onChanged: event() },
       tabs: { onActivated: event(), onUpdated: event(), query: async () => [], reload: async () => {}, sendMessage() {} },
       sidePanel: {},
@@ -33,12 +33,13 @@ function loadPopup({ fetch = async () => ({ ok: false, status: 404 }) } = {}) {
       querySelectorAll: () => [], querySelector: () => null, addEventListener() {},
     },
     window: { close() {} },
-    setTimeout, clearTimeout, URL, encodeURIComponent, btoa, atob,
+    setTimeout, clearTimeout, URL, encodeURIComponent, btoa, atob, TextEncoder, TextDecoder,
     JSZip: function () {},
     FileReader: class { readAsDataURL() { this.result = 'data:x;base64,'; if (this.onload) this.onload(); } },
     fetch,
   };
   vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(REPO, 'takeout-viewer.js'), 'utf8'), sandbox);
   vm.runInContext(fs.readFileSync(path.join(REPO, 'popup.js'), 'utf8'), sandbox);
   return { sandbox, fn: (name) => vm.runInContext(name, sandbox) };
 }

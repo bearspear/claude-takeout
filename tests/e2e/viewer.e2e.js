@@ -1,7 +1,10 @@
 // The viewer page over file:// in Chromium, built from the synthetic fixture. SHOT_DIR=<dir> also saves screenshots.
 const { chromium } = require(process.env.PW);
-const fs = require('fs'), os = require('os'), path = require('path');
+const fs = require('fs'), os = require('os'), path = require('path'), vm = require('vm');
 const { buildHtml } = require('./make-viewer.js');
+const { loadPopup, REPO } = require('../helpers');
+const { VIEWER_CHECK_BASE64 } = require('../../takeout-viewer.js');
+const JSZip = require('../../jszip.min.js');
 const fixture = require('../fixtures/conversation.json');
 
 const HIT = 'window.__hit=1';
@@ -314,10 +317,56 @@ function uploadsChat() {
   };
 }
 
+// Exports two project chats as bulkExportZip does, with real populateConversationFolder, writeViewer and JSZip.
+async function unzipMegaZip(out) {
+  const PDF_ID = 'f0f0f0f0', PHOTO_ID = 'e1e1e1e1';
+  const blob = (bytes, type) => Object.assign(Buffer.from(bytes), { type, size: bytes.length, text: async () => bytes.toString() });
+  const fetchStub = async url => {
+    if (url.startsWith('chrome-extension://test/')) {
+      const text = fs.readFileSync(path.join(REPO, url.replace('chrome-extension://test/', '')), 'utf8');
+      return { ok: true, status: 200, text: async () => text };
+    }
+    if (/\/projects\/P$/.test(url)) return { ok: true, status: 200, json: async () => ({ name: 'Shared Project', docs_count: 0, files_count: 1 }) };
+    if (/\/projects\/P\/docs$/.test(url)) return { ok: true, status: 200, json: async () => [] };
+    if (/\/projects\/P\/files$/.test(url)) return { ok: true, status: 200, json: async () => [{ file_uuid: PDF_ID, file_name: 'Paper.pdf' }] };
+    if (url.endsWith(`/files/${PDF_ID}/contents`)) return { ok: true, status: 200, blob: async () => blob(Buffer.from(MINIMAL_PDF, 'latin1'), 'application/pdf') };
+    if (url.endsWith(`/files/${PHOTO_ID}/contents`)) return { ok: true, status: 200, blob: async () => blob(Buffer.from(PNG.split(',')[1], 'base64'), 'image/png') };
+    return { ok: false, status: 404 };
+  };
+  const popup = loadPopup({ fetch: fetchStub });
+  const zip = new JSZip();
+  popup.sandbox.__shared = { root: zip, byUuid: new Map(), usedDirs: new Set() };
+  const chats = [];
+  for (const [id, name, files] of [
+    ['one', 'Chat with a photo', [{ success: true, file_name: 'photo.png', file_uuid: PHOTO_ID, file_kind: 'image' }]],
+    ['two', 'Second project chat', []],
+  ]) {
+    const data = Object.assign(plainChat(id, name, 2, '2026-04-01T00:00:00Z'), { project_uuid: 'P' });
+    data.chat_messages[0].files_v2 = files;
+    await popup.fn('ensureProjectName')(data, 'org');
+    const folderName = `[${popup.fn('safeFilename')(data.project.name)}-project]_${popup.fn('safeFilename')(name)}`;
+    popup.sandbox.__folder = zip.folder(folderName);
+    popup.sandbox.__data = data;
+    popup.sandbox.__name = folderName;
+    const result = await vm.runInContext("populateConversationFolder(__folder, __data, null, 'org', __shared, __name)", popup.sandbox);
+    chats.push(result.viewerChat);
+  }
+  popup.sandbox.__zip = zip;
+  popup.sandbox.__chats = chats;
+  if (!(await vm.runInContext('writeViewer(__zip, __chats)', popup.sandbox))) throw new Error('writeViewer failed');
+  const unzip = await JSZip.loadAsync(await zip.generateAsync({ type: 'nodebuffer' }));
+  for (const [name, entry] of Object.entries(unzip.files)) {
+    if (entry.dir) continue;
+    fs.mkdirSync(path.dirname(path.join(out, name)), { recursive: true });
+    fs.writeFileSync(path.join(out, name), await entry.async('nodebuffer'));
+  }
+}
+
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'takeout-viewer-'));
   const file = path.join(dir, 'viewer.html');
   fs.writeFileSync(file, buildHtml([richChat(), plainChat('long', 'Long chat', 300, '2026-03-01T00:00:00Z'), plainChat('short', 'Short chat', 2, '2026-02-01T00:00:00Z'), textChat(), hostileChat()], '2026-11-05T12:00:00Z'));
+  fs.writeFileSync(path.join(dir, 'viewer-check.gif'), Buffer.from(VIEWER_CHECK_BASE64, 'base64'));
   const url = 'file://' + file;
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
@@ -351,7 +400,7 @@ function uploadsChat() {
     check('footer counts the chats', (await page.textContent('#archive')) === 'Archive · 5 chats · read-only');
     check('newest chat opens first', (await page.textContent('#title')) === 'Quarterly budget review');
     check('open chat is marked in the sidebar', (await page.textContent('.item[aria-current="true"]')) === 'Quarterly budget review');
-    check('top bar shows the model', (await page.textContent('#meta')).startsWith('Opus 4.8 · '));
+    check('top bar shows the model', (await page.textContent('#meta')).startsWith('Claude 4.8 Opus · '));
     check('page has a CSP', await page.$eval('meta[http-equiv="Content-Security-Policy"]', m => /default-src 'none'.*img-src file: data: blob:; media-src data: blob:/.test(m.content)));
 
     const box = await page.$eval('.bubble', b => { const r = b.getBoundingClientRect(), c = document.getElementById('chat').getBoundingClientRect(); return { right: c.right - r.right, left: r.left - c.left }; });
@@ -1017,6 +1066,52 @@ function uploadsChat() {
     await one8.page.waitForSelector('mark');
     check('one chat: search finds and highlights', (await one8.page.textContent('mark')) === 'solo answer');
     clean('one chat', one8.seen);
+
+    // A real mega-ZIP, unzipped: the real export code, the real JSZip, and two chats sharing a project.
+    const unzipped = path.join(dir, 'unzipped');
+    await unzipMegaZip(unzipped);
+    const viewerPath = path.join(unzipped, 'viewer.html');
+    const mega = await open({}, 'file://' + viewerPath);
+    check('mega-ZIP: one viewer holds every chat', (await mega.page.$$('.item')).length === 2);
+    check('mega-ZIP: no unzip banner', (await mega.page.locator('#unzip').count()) === 0);
+    await mega.page.locator('.item:has-text("Chat with a photo")').click();
+    await mega.page.waitForSelector('#chat .chip');
+    await chip(mega, 'photo.png').click();
+    await dialog(mega).waitFor();
+    await mega.page.waitForFunction(() => { const i = document.querySelector('[role="dialog"] img'); return i && i.complete; });
+    const megaImage = await mega.page.$eval('[role="dialog"] img', i => ({ width: i.naturalWidth, src: i.getAttribute('src') }));
+    check('mega-ZIP: an upload image loads from its link', megaImage.width > 0 && fs.existsSync(path.join(unzipped, decodeURIComponent(megaImage.src))), JSON.stringify(megaImage));
+    await mega.page.keyboard.press('Escape');
+    for (const title of ['Chat with a photo', 'Second project chat']) {
+      await mega.page.locator(`.item:has-text("${title}")`).click();
+      await mega.page.waitForFunction(t => document.getElementById('title').textContent === t, title);
+      await mega.page.waitForFunction(() => !document.getElementById('project').hidden);
+      await mega.page.$eval('#project', n => { n.open = true; });
+      await mega.page.locator('#project button.chip:has(b:text-is("Paper.pdf"))').click();
+      await dialog(mega).waitFor();
+      const src = await mega.page.$eval('[role="dialog"] iframe', f => f.getAttribute('src'));
+      check(`mega-ZIP: ${title} links the one shared PDF`, src === 'projects/Shared_Project/files/Paper.pdf', src);
+      check(`mega-ZIP: that PDF is on disk, byte for byte (${title})`, fs.existsSync(path.join(unzipped, src)) && fs.readFileSync(path.join(unzipped, src), 'latin1') === MINIMAL_PDF);
+      await mega.page.waitForTimeout(200);
+      check(`mega-ZIP: the browser requested that PDF (${title})`, mega.seen.files.some(u => u.endsWith('/' + src)));
+      await mega.page.keyboard.press('Escape');
+    }
+    clean('mega-ZIP', mega.seen);
+
+    // Not unzipped: alone in a folder, with no viewer-check.gif beside it.
+    const alone = path.join(dir, 'alone');
+    fs.mkdirSync(alone);
+    fs.copyFileSync(viewerPath, path.join(alone, 'viewer.html'));
+    const lonely = await open({}, 'file://' + path.join(alone, 'viewer.html'));
+    await lonely.page.waitForSelector('#unzip');
+    check('unzip: a lone viewer.html says to unzip first', (await lonely.page.textContent('#unzip')) === "Unzip this archive first. Files can't open from inside a ZIP.");
+    check('unzip: the chat text still shows', (await lonely.page.locator('#chat .msg').count()) > 0 && (await lonely.page.textContent('#chat')).includes('message 1'));
+    check('unzip: the banner does not cover the title', await lonely.page.evaluate(() => document.getElementById('unzip').getBoundingClientRect().bottom <= document.getElementById('top').getBoundingClientRect().top));
+    check('unzip: the banner does not cover the chat', await lonely.page.evaluate(() => document.getElementById('unzip').getBoundingClientRect().bottom <= document.getElementById('scroll').getBoundingClientRect().top));
+    if (process.env.SHOT_DIR) await lonely.page.screenshot({ path: path.join(process.env.SHOT_DIR, 'unzip-banner.png') });
+    const lonelyPhone = await open({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }, 'file://' + path.join(alone, 'viewer.html'));
+    await lonelyPhone.page.waitForSelector('#unzip');
+    check('unzip: fits a phone', await lonelyPhone.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
 
     if (process.env.SHOT_DIR) {
       const out = n => path.join(process.env.SHOT_DIR, n);

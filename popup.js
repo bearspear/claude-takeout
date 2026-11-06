@@ -87,6 +87,9 @@ class ExportErrorCollector {
       case 'artifact_opaque_mutation':
         return 'A bash command modified an artifact in a way the exporter cannot replay declaratively (it\'s not a create_file, str_replace, or heredoc). The exporter never attempts to interpret bash scripts; the companion CLI does. To reconstruct this artifact: run `python3 replay_bash.py <this-export-folder>` (ships alongside the extension). It replays each bash command in conversation order with per-command confirmation, in a tmpdir isolated by the OS on macOS, saves the originals, and writes the result into artefacts/. These commands come from the conversation, so review them first with --dry-run.';
 
+      case 'viewer':
+        return 'The chat data is all in this export. Only viewer.html is missing or incomplete; the Markdown files are unaffected.';
+
       default:
         return 'Check original.json for the raw conversation data that may contain this content.';
     }
@@ -368,6 +371,63 @@ async function addArtefactBlob(folder, artifacts, filename, blob) {
 }
 
 // ============================================================================
+// Offline viewer: viewer.html and its unzip check, at the ZIP root.
+// ============================================================================
+
+// An upload's text for the viewer. A failure here must never touch the export,
+// so it only ever costs the preview. content: a Blob, or a string from JSON.
+async function viewerUploadText(name, content) {
+  try {
+    if (!isTextFile(name)) return null;
+    const limit = CTViewer.TEXT_EMBED_LIMIT;
+    const text = typeof content === 'string'
+      ? content
+      : (content.size <= limit ? await content.text() : null);
+    return text !== null && text.length <= limit ? fixMojibake(text) : null;
+  } catch (e) {
+    console.warn(`Viewer: could not read ${name}:`, e.message);
+    return null;
+  }
+}
+
+// One chat's project for the viewer, or null outside a project. A document too
+// long to embed is cut here and stays whole on disk.
+function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileNames) {
+  if (!data.project_uuid && !data.project?.uuid) return null;
+  const limit = CTViewer.TEXT_EMBED_LIMIT;
+  const docs = Object.entries(projectFiles).map(([filename, content]) => {
+    const name = projectFileMapping[filename];
+    const text = String(content == null ? '' : content);
+    return { name, text: text.length > limit ? `${text.slice(0, limit)}\n[... truncated: the whole text is in project/${name}]` : text };
+  });
+  return { name: data.project?.name || '', fileDir, fileNames, docs };
+}
+
+// Add viewer.html and viewer-check.gif to the ZIP root, once per export. Returns
+// false and writes nothing on any failure, because the export must still download.
+async function writeViewer(zip, chats) {
+  try {
+    if (!chats.length) return false;
+    const assets = await Promise.all(CTViewer.VIEWER_ASSETS.map(async (asset) => {
+      const response = await fetch(chrome.runtime.getURL(asset));
+      if (!response.ok) throw new Error(`${asset}: HTTP ${response.status}`);
+      return response.text();
+    }));
+    const [template, logic, app, marked, katex, css] = assets;
+    const html = CTViewer.assembleViewer({
+      template, css, marked, katex, logic, app,
+      data: CTViewer.buildViewerData(chats, { exported: new Date().toISOString() })
+    });
+    zip.file('viewer.html', html);
+    zip.file(CTViewer.VIEWER_CHECK_FILE, CTViewer.VIEWER_CHECK_BASE64, { base64: true });
+    return true;
+  } catch (e) {
+    console.error('Could not build viewer.html:', e);
+    return false;
+  }
+}
+
+// ============================================================================
 // Upload inlining: rewrite sandbox-path references in text artifacts to
 // self-contained base64 data URIs.
 // ============================================================================
@@ -510,6 +570,11 @@ const HEREDOC_HEADER_RE = /cat\s+>\s+\S+\s+<<-?\s*['"]?\w+['"]?/g;
 
 function heredocPath(match) {
   return match[1].replace(/^['"]|['"]$/g, '');
+}
+
+// The files a Bash command writes with a heredoc, for the viewer's cards.
+function heredocFiles(command) {
+  return Array.from(String(command || '').matchAll(HEREDOC_RE), (match) => ({ path: heredocPath(match), text: match[4] }));
 }
 
 // tool_use ids whose tool_result reported an error. A failed file tool changed
@@ -2339,14 +2404,16 @@ function generateLinksAndSources(urls, webSources) {
 // Used by both single export and mega-zip export
 // In a mega-ZIP, sharedProjects stores each project's files once at the archive
 // root: { root, byUuid: Map, usedDirs: Set }. Without it, files go in this folder.
-async function populateConversationFolder(folder, data, onProgress = null, organizationId = null, sharedProjects = null) {
+// folderName is this folder's path from the ZIP root, for the viewer's links.
+async function populateConversationFolder(folder, data, onProgress = null, organizationId = null, sharedProjects = null, folderName = '') {
   const title = data.name || 'Claude Conversation';
   const messages = getMessageChain(data);
 
   // Initialize error collector for comprehensive error tracking
   const errorCollector = new ExportErrorCollector(data.name, data.uuid);
 
-  const artifacts = extractArtifacts(data, errorCollector);
+  const artifactIndex = {};
+  const artifacts = extractArtifacts(data, errorCollector, artifactIndex);
   const { attachments: textAttachments, idToFilename: attachmentIdMap } = extractTextAttachments(data);
   const uploadedFiles = extractUploadedFiles(data, organizationId);
   const presentedFiles = extractPresentedFiles(data);
@@ -2670,6 +2737,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // Download files Claude sent with SendUserFile. Their bytes exist only on the
   // server, so these are fetched by UUID.
   const deliveredFiles = extractDeliveredFiles(data, Object.keys(artifacts));
+  // File UUID -> { filename, path }, saved files only. The latest copy is listed
+  // twice with one UUID, so the first name wins: that's its _vN file.
+  const viewerDeliveries = {};
   for (let i = 0; i < deliveredFiles.length; i++) {
     const file = deliveredFiles[i];
     if (onProgress) {
@@ -2679,6 +2749,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     try {
       const blob = await fetchUploadedFile(null, file.uuid, organizationId, data.uuid, null);
       await addArtefactBlob(folder, artifacts, file.filename, blob);
+      viewerDeliveries[file.uuid] = viewerDeliveries[file.uuid] || { filename: file.filename, path: file.path };
     } catch (err) {
       console.error(`Failed to download delivered file ${file.filename}:`, err);
       errorCollector.addError('delivered_file', file.filename, err.message, {
@@ -2731,6 +2802,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   const downloadedFiles = [];
   const failedFiles = [];  // Keep for README.md backward compatibility
   const usedUploadNames = new Set();
+  const viewerUploads = {};  // File UUID (or name) -> { path, text }, saved files only
   // sandboxPath -> "data:<mime>;base64,..." for inlining into text artifacts.
   const uploadDataUris = {};
 
@@ -2767,6 +2839,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         );
         folder.file(`uploads/${finalName}`, blob);
         downloadedFiles.push({ name: finalName, fromJson: false });
+        viewerUploads[file.uuid || file.originalFilename] = { path: `uploads/${finalName}`, text: await viewerUploadText(finalName, blob) };
         // Also build a data URI keyed by sandbox path so we can inline this
         // upload into any text artifact that references it. Best-effort —
         // failures here don't block the export.
@@ -2804,6 +2877,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
             const savedName = baseName.startsWith('p') && baseName[3] === '_' ? baseName : promptPrefix + baseName;
             folder.file(`uploads/${savedName}`, result.content);
             downloadedFiles.push({ name: savedName, fromJson: true });
+            viewerUploads[file.uuid || file.originalFilename] = { path: `uploads/${savedName}`, text: await viewerUploadText(savedName, result.content) };
           } else {
             fallbackResult = 'Content not found in JSON';
             // Create enhanced error with all context
@@ -3036,6 +3110,26 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   addFileWithBOM(folder, 'README.md', readmeLines.join('\n'));
 
+  // The viewer's copy of this chat. It can only fail by itself: the chat is
+  // already written, so a failure is reported and the export carries on.
+  let viewerChat = null;
+  try {
+    viewerChat = CTViewer.buildViewerChat(data, {
+      folder: folderName,
+      model: getModelName(data),
+      fixText: fixMojibake,
+      artifacts,
+      artifactIndex,
+      uploads: viewerUploads,
+      deliveries: viewerDeliveries,
+      heredocs: heredocFiles,
+      project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads)
+    });
+  } catch (err) {
+    console.error('Could not build the viewer chat:', err);
+    errorCollector.addWarning('viewer', 'viewer.html', `This chat could not be added to viewer.html: ${err.message}`);
+  }
+
   // Write comprehensive errors report if any failures occurred
   if (errorCollector.hasAny()) {
     const errorReport = errorCollector.generateErrorReport();
@@ -3044,7 +3138,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
   }
 
-  return { messages, artifacts, textAttachments, uploadedFiles: downloadedFiles, failedFiles, errorCollector, codeBlocks, urls, responseFiles };
+  return { messages, artifacts, textAttachments, uploadedFiles: downloadedFiles, failedFiles, errorCollector, codeBlocks, urls, responseFiles, viewerChat };
 }
 
 // Create full zip export with progress callback
@@ -3060,6 +3154,9 @@ async function createZipExport(data, onProgress = null) {
 
   // Use shared helper to populate the zip
   const result = await populateConversationFolder(zip, data, onProgress, orgId);
+
+  report(85, 100, 'Building viewer...');
+  const viewerBuilt = await writeViewer(zip, result.viewerChat ? [result.viewerChat] : []);
 
   report(90, 100, 'Compressing archive...');
 
@@ -3091,7 +3188,8 @@ async function createZipExport(data, onProgress = null) {
     artifactCount: Object.keys(result.artifacts).length,
     errorCount: result.errorCollector?.errors?.length || 0,
     warningCount: result.errorCollector?.warnings?.length || 0,
-    hasErrors: result.errorCollector?.hasAny() || false
+    hasErrors: result.errorCollector?.hasAny() || false,
+    viewerBuilt
   };
 }
 
@@ -3878,6 +3976,7 @@ async function bulkExportZip() {
     // `projects` holds the shared project files, so no chat may take that name.
     const usedFolderNames = new Set(['projects']);
     const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set() };
+    const viewerChats = [];
 
     for (const conv of conversations) {
       try {
@@ -3907,7 +4006,8 @@ async function bulkExportZip() {
         const folder = megaZip.folder(folderName);
 
         // Use shared helper to populate the folder (same structure as individual zip)
-        const folderResult = await populateConversationFolder(folder, data, null, orgId, sharedProjects);
+        const folderResult = await populateConversationFolder(folder, data, null, orgId, sharedProjects, folderName);
+        if (folderResult.viewerChat) viewerChats.push(folderResult.viewerChat);
 
         // Track file-level errors/warnings
         if (folderResult.errorCollector) {
@@ -3975,6 +4075,11 @@ async function bulkExportZip() {
 
     addFileWithBOM(megaZip, 'index.md', indexLines.join('\n'));
 
+    status.textContent = 'Building viewer...';
+    const viewerBuilt = exported === 0 || await writeViewer(megaZip, viewerChats);
+    viewerChats.length = 0;  // viewer.html holds them now, and compressing needs the memory
+    const viewerNote = viewerBuilt ? '' : ' viewer.html could not be built.';
+
     // Generate and download
     status.textContent = 'Compressing archive...';
     showProgress(95, 100, 'Compressing...');
@@ -4002,7 +4107,7 @@ async function bulkExportZip() {
         if (hasFileIssues) {
           msg += ` Also ${totalFileErrors} file error${totalFileErrors !== 1 ? 's' : ''}.`;
         }
-        status.textContent = msg;
+        status.textContent = msg + viewerNote;
         console.error('Export errors:', errors);
       } else if (hasFileIssues) {
         // File-level issues but all conversations exported
@@ -4010,7 +4115,10 @@ async function bulkExportZip() {
         if (totalFileErrors > 0) issueParts.push(`${totalFileErrors} file error${totalFileErrors > 1 ? 's' : ''}`);
         if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
         status.className = 'status warning';
-        status.textContent = `Exported ${exported} conversations - ${issueParts.join(', ')}. See errors.txt`;
+        status.textContent = `Exported ${exported} conversations - ${issueParts.join(', ')}. See errors.txt${viewerBuilt ? '' : `.${viewerNote}`}`;
+      } else if (!viewerBuilt) {
+        status.className = 'status warning';
+        status.textContent = `Exported ${exported} conversations to mega-zip.${viewerNote}`;
       } else {
         status.className = 'status ready';
         status.textContent = `Exported ${exported} conversations to mega-zip!`;
@@ -4084,12 +4192,16 @@ document.getElementById('exportZip').addEventListener('click', async () => {
     hideProgress();
 
     // Show success with error/warning indicator if applicable
+    const viewerNote = result.viewerBuilt ? '' : ' viewer.html could not be built.';
     if (result.hasErrors) {
       const errorParts = [];
       if (result.errorCount > 0) errorParts.push(`${result.errorCount} error${result.errorCount > 1 ? 's' : ''}`);
       if (result.warningCount > 0) errorParts.push(`${result.warningCount} warning${result.warningCount > 1 ? 's' : ''}`);
       status.className = 'status warning';
-      status.textContent = `Exported zip (${result.responseCount} responses) - ${errorParts.join(', ')}. See errors.txt`;
+      status.textContent = `Exported zip (${result.responseCount} responses) - ${errorParts.join(', ')}. See errors.txt${result.viewerBuilt ? '' : `.${viewerNote}`}`;
+    } else if (!result.viewerBuilt) {
+      status.className = 'status warning';
+      status.textContent = `Exported zip (${result.responseCount} responses).${viewerNote}`;
     } else {
       status.className = 'status ready';
       status.textContent = `Exported zip (${result.responseCount} responses, ${result.artifactCount} artifacts)`;

@@ -54,12 +54,41 @@ let projectDownloads=0;
   check('delivered final is latest',h('artefacts/Minutes.odt')===sha(bin2));
   check('files-api upload saved',h('uploads/p01_Uploaded.odt')===sha(bin));
   check('no errors.txt',!Object.keys(f).some(k=>k.endsWith('errors.txt')),Object.keys(f).join());
+  const viewerOf=async p=>panel.evaluate(async b64=>{const z=await JSZip.loadAsync(Uint8Array.from(atob(b64),c=>c.charCodeAt(0)));const html=await z.file('viewer.html').async('string');const data=JSON.parse(html.match(/<script id="data"[^>]*>([\s\S]*?)<\/script>/)[1]);return{data,names:Object.keys(z.files),gif:await z.file('viewer-check.gif').async('base64')}},fs.readFileSync(p).toString('base64'));
+  const sv=await viewerOf(await dl.path());
+  const rootGif=await panel.evaluate(()=>CTViewer.VIEWER_CHECK_BASE64);
+  check('single ZIP: viewer.html and viewer-check.gif at root',f['viewer.html']&&f['viewer-check.gif']&&sv.gif===rootGif);
+  check('single ZIP: one chat in the viewer',sv.data.chats.length===1&&sv.data.chats[0].title==='Delivered chat');
+  const sm=Object.values(sv.data.chats[0].files).find(x=>x.name==='Minutes.odt');
+  check('single ZIP: each delivered version links its own file',sm&&sm.versions.map(v=>v.href).join()==='artefacts/Minutes_v1.odt,artefacts/Minutes_v2.odt',JSON.stringify(sm));
+  check('single ZIP: upload links its file',sv.data.chats[0].messages[0].uploads[0].href==='uploads/p01_Uploaded.odt');
+  check('single ZIP: status is clean',(await panel.$eval('#status',s=>s.className)).includes('ready'),await panel.textContent('#status'));
   [dl]=await Promise.all([panel.waitForEvent('download',{timeout:30000}),panel.click('#exportAllZip')]);
-  const g=await zipFiles(await dl.path());const dirs=new Set(Object.keys(g).map(k=>k.split('/')[0]).filter(k=>!k.endsWith('.md')&&k!=='projects'));
+  const g=await zipFiles(await dl.path());const dirs=new Set(Object.keys(g).filter(k=>k.includes('/')).map(k=>k.split('/')[0]).filter(k=>k!=='projects'));
   const shared=Object.keys(g).filter(k=>k.endsWith('Paper.pdf'));
   check('project file stored once with intact bytes',shared.length===1&&shared[0]==='projects/Shared_Project/files/Paper.pdf'&&g[shared[0]].split('|')[2]===sha(bin),shared.join());
   check('project file downloaded once',projectDownloads===1,String(projectDownloads));
   check('no errors.txt for project chats',!Object.keys(g).some(k=>k.endsWith('errors.txt')));
+  const mv=await viewerOf(await dl.path());
+  check('mega-ZIP: one viewer at the root',Object.keys(g).filter(k=>k.endsWith('viewer.html')).join()==='viewer.html'&&Object.keys(g).filter(k=>k.endsWith('viewer-check.gif')).join()==='viewer-check.gif');
+  check('mega-ZIP: the viewer has every chat',mv.data.chats.length===3,String(mv.data.chats.length));
+  const hrefs=[];for(const c of mv.data.chats){for(const m of c.messages)for(const u of m.uploads)hrefs.push(u.href);for(const x of Object.values(c.files))for(const v of x.versions)hrefs.push(v.href);for(const x of c.project?.files||[])hrefs.push(x.href)}
+  check('mega-ZIP: every link lands on a file',hrefs.length>=6&&hrefs.every(h=>h&&decodeURIComponent(h) in g),hrefs.join());
+  check('mega-ZIP: uploaded binary unchanged',g[Object.keys(g).find(k=>k.endsWith('uploads/p01_Uploaded.odt'))].split('|')[2]===sha(bin));
+  check('mega-ZIP: status is clean',(await panel.$eval('#status',s=>s.className)).includes('ready'),await panel.textContent('#status'));
+  // Review Focus 4: a viewer failure leaves the ZIP complete and says so.
+  const baseFiles=Object.keys(f).filter(k=>!/^viewer/.test(k)).sort().join();
+  await panel.evaluate(()=>{CTViewer.assembleViewer=()=>{throw new Error('boom')}});
+  [dl]=await Promise.all([panel.waitForEvent('download',{timeout:20000}),panel.click('#exportZip')]);
+  const nf=await zipFiles(await dl.path());
+  check('broken viewer: single ZIP still complete',Object.keys(nf).sort().join()===baseFiles,Object.keys(nf).sort().join());
+  await panel.waitForFunction(()=>document.getElementById('status').textContent.includes('viewer.html could not be built'),null,{timeout:5000});
+  check('broken viewer: single ZIP status is amber',(await panel.$eval('#status',s=>s.className)).includes('warning'),await panel.textContent('#status'));
+  [dl]=await Promise.all([panel.waitForEvent('download',{timeout:30000}),panel.click('#exportAllZip')]);
+  const ng=await zipFiles(await dl.path());
+  check('broken viewer: mega-ZIP still complete',Object.keys(ng).filter(k=>!k.endsWith('index.md')).sort().join()===Object.keys(g).filter(k=>!/^viewer/.test(k)&&!k.endsWith('index.md')).sort().join());
+  await panel.waitForFunction(()=>document.getElementById('status').textContent.includes('viewer.html could not be built'),null,{timeout:5000});
+  check('broken viewer: mega-ZIP status is amber',(await panel.$eval('#status',s=>s.className)).includes('warning'),await panel.textContent('#status'));
   check('same-prefix chats get separate folders',dirs.size===3,[...dirs].join(' ; '));console.log('      folders:',[...dirs].join(' ; '));
  }catch(e){failed++;console.log('HARNESS ERROR',e.message)}
  finally{await ctx.close();fs.rmSync(dir,{recursive:true,force:true})}

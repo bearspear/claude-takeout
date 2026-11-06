@@ -805,7 +805,21 @@ function setupSearch() {
   });
 }
 
+// A browser can open viewer.html from inside a ZIP, but not the files beside it.
+// The name matches VIEWER_CHECK_FILE in takeout-viewer.js.
+function checkUnzipped() {
+  const probe = new Image();
+  probe.onerror = () => {
+    const banner = el('div', '', "Unzip this archive first. Files can't open from inside a ZIP.");
+    banner.id = 'unzip';
+    banner.setAttribute('role', 'status');
+    document.getElementById('main').prepend(banner);
+  };
+  probe.src = 'viewer-check.gif';
+}
+
 function start() {
+  checkUnzipped();
   const data = JSON.parse(document.getElementById('data').textContent);
   allChats = data.chats;
   allChats.forEach(chat => chatsById.set(chat.id, chat));

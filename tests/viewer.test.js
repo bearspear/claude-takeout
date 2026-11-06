@@ -65,8 +65,8 @@ test('buildViewerChat keeps every branch, sets the leaf, and leaves data alone',
   assert.strictEqual(chat.id, fixture.uuid);
   assert.strictEqual(chat.title, 'Synthetic fixture');
   assert.strictEqual(chat.model, 'claude-x');
-  // No ctx: only the inactive branch's own create_file can be shown.
-  assert.deepStrictEqual(Object.values(chat.files).map(f => f.name), ['abandoned.py']);
+  // No ctx: only the inactive branch's own create_file can be shown; the deliveries have no file here.
+  assert.deepStrictEqual(Object.values(chat.files).map(f => [f.name, f.kind]), [['Minutes.odt', 'missing'], ['report.html', 'missing'], ['abandoned.py', 'code']]);
   assert.strictEqual(chat.project, null);
   const m = chat.messages.find(x => x.id === 'x01');
   assert.strictEqual(m.parent, 'm05');
@@ -268,10 +268,7 @@ const ctxFor = (data, extra = {}) => {
   }
   const plain = {};
   for (const k of Object.keys(artifacts)) plain[k] = artifacts[k];
-  const HEREDOC_RE = popup.fn('HEREDOC_RE');
-  const heredocPath = popup.fn('heredocPath');
-  const heredocPaths = command => Array.from(String(command).matchAll(new RegExp(HEREDOC_RE.source, 'g')), heredocPath);
-  return Object.assign({ folder: '', artifacts: plain, artifactIndex, deliveries, heredocPaths }, extra);
+  return Object.assign({ folder: '', artifacts: plain, artifactIndex, deliveries, heredocs: popup.fn('heredocFiles') }, extra);
 };
 const cardsOf = (chat, id) => chat.messages.find(m => m.id === id).blocks.filter(b => b.t === 'card');
 const fileOf = (chat, card) => chat.files[card.file];
@@ -331,9 +328,9 @@ test('Bash heredocs get a card per file and Write/Edit versions line up', () => 
   assert.strictEqual(Object.values(chat.files).find(f => f.name === 'build.py').versions[0].label, '');
 });
 
-test('without ctx.heredocPaths, Bash blocks yield no cards', () => {
+test('without ctx.heredocs, Bash blocks yield no cards', () => {
   const ctx = ctxFor(fixture);
-  delete ctx.heredocPaths;
+  delete ctx.heredocs;
   const chat = buildViewerChat(fixture, ctx);
   assert.ok(!Object.values(chat.files).some(f => f.name === 'a.txt'));
 });
@@ -352,6 +349,45 @@ test('an inactive branch card holds the create_file text; its str_replace is mis
   const missing = cardsOf(chat2, 'x01').map(c => fileOf(chat2, c)).find(g => g.name === 'other.py');
   assert.strictEqual(missing.kind, 'missing');
   assert.strictEqual(missing.versions[0].text, null);
+});
+
+test('an inactive branch heredoc shows its body from the tool call', () => {
+  const data = dataClone();
+  const command = "cat > /home/claude/off.py << 'EOF'\nbody line\nEOF\ncat > /home/claude/blank.py << 'EOF'\n\nEOF";
+  data.chat_messages.find(m => m.uuid === 'x01').content.push({ type: 'tool_use', id: 't92', name: 'bash_tool', input: { command } });
+  const chat = buildViewerChat(data, ctxFor(data));
+  const f = cardsOf(chat, 'x01').map(c => fileOf(chat, c)).find(g => g.name === 'off.py');
+  assert.strictEqual(f.kind, 'code');
+  assert.strictEqual(f.versions[0].text, 'body line');
+  assert.ok(!Object.values(chat.files).some(g => g.name === 'blank.py'), 'an empty heredoc made no artifact');
+});
+
+test('an inactive branch SendUserFile delivery is a missing card named from its path', () => {
+  const data = dataClone();
+  data.chat_messages.find(m => m.uuid === 'x01').content.push(
+    { type: 'tool_use', id: 't93', name: 'SendUserFile', input: { files: ['/tmp/out/Off.odt'] } },
+    { type: 'tool_result', tool_use_id: 't93', name: 'SendUserFile', content: [], file_deliveries: [{ file_uuid: 'off-uuid', path: '/tmp/out/Off.odt' }] });
+  const chat = buildViewerChat(data, ctxFor(data));
+  const f = cardsOf(chat, 'x01').map(c => fileOf(chat, c)).find(g => g.name === 'Off.odt');
+  assert.strictEqual(f.kind, 'missing');
+  assert.deepStrictEqual(f.versions.map(v => [v.text, v.href]), [[null, null]]);
+});
+
+test('an active delivery that was not saved is a missing card, not a dead link', () => {
+  const ctx = ctxFor(fixture);
+  ctx.deliveries = {};
+  const chat = buildViewerChat(fixture, ctx);
+  const cards = Object.values(chat.files).filter(g => g.name === 'Minutes.odt');
+  assert.strictEqual(cards.length, 1);
+  assert.strictEqual(cards[0].kind, 'missing');
+});
+
+test('viewer-check.gif is a real 1x1 GIF', () => {
+  assert.strictEqual(V.VIEWER_CHECK_FILE, 'viewer-check.gif');
+  const gif = Buffer.from(V.VIEWER_CHECK_BASE64, 'base64');
+  assert.ok(/^GIF8[79]a/.test(gif.toString('latin1', 0, 6)));
+  assert.strictEqual(gif.readUInt16LE(6), 1);
+  assert.strictEqual(gif.readUInt16LE(8), 1);
 });
 
 test('a SendUserFile delivery of a binary links to artefacts and has no text', () => {

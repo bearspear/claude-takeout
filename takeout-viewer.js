@@ -2,11 +2,11 @@
 // Classic script. Exposes globalThis.CTViewer (and module.exports for tests):
 //   buildViewerChat(data, ctx)         one conversation as the viewer's compact Chat (see the data contract).
 //                                      ctx: { folder, model, fixText, artifacts, artifactIndex, uploads,
-//                                      deliveries, heredocPaths, project }, all optional. data is never mutated.
+//                                      deliveries, heredocs, project }, all optional. data is never mutated.
 //                                      artifacts: filename to text ('' for binaries). artifactIndex: extractArtifacts' index
 //                                      (state key to { path, filename, versions, messages }). deliveries: file uuid to
-//                                      { filename, path }. heredocPaths(command): paths a Bash command writes with a heredoc;
-//                                      without it Bash blocks yield no cards.
+//                                      { filename, path }. heredocs(command): [{ path, text }], the files a Bash command
+//                                      writes with a heredoc; without it Bash blocks yield no cards.
 //   buildViewerData(chats, {exported}) { exported, chats }, newest update first
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
 //   joinPath(folder, rel)              folder + rel with '..' resolved
@@ -15,6 +15,7 @@
 //   VIEWER_ASSETS                      paths of the six viewer files
 //   TOOL_TEXT_LIMIT                    longest tool result text kept
 //   TEXT_EMBED_LIMIT                   longest upload or project text a caller should pass in ctx
+//   VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64  a 1x1 GIF beside viewer.html: if it won't load, the ZIP wasn't unzipped
 //   ctx.uploads: file uuid (or file name when there is none) to { path: 'uploads/<name>', text: string|null }
 //   ctx.project: { name, fileDir, fileNames, docs: [{ name, text }] }, fileDir relative to the chat folder
 (function (root) {
@@ -22,6 +23,8 @@
 
   const TOOL_TEXT_LIMIT = 20000;
   const TEXT_EMBED_LIMIT = 2 * 1024 * 1024; // longest upload or project text a caller should embed
+  const VIEWER_CHECK_FILE = 'viewer-check.gif';
+  const VIEWER_CHECK_BASE64 = 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
   const SAFE_IMAGE = /^image\/(png|jpeg|gif|webp)$/;
 
   const VIEWER_ASSETS = [
@@ -160,7 +163,7 @@
       }
     }
     const isBash = n => n === 'bash_tool' || n === 'Bash';
-    const heredocs = command => (typeof c.heredocPaths === 'function' ? c.heredocPaths(String(command || '')) : []) || [];
+    const heredocs = command => (typeof c.heredocs === 'function' ? c.heredocs(String(command || '')) : []) || [];
 
     // Every delivered version of a path, in chain order, for the uuids the caller knows.
     const deliveredUuids = new Map();
@@ -217,13 +220,13 @@
             contentKey(after, 'x:' + m.uuid + ':' + key, name || baseName(key), String(text), mime);
           }
         } else if (bash) {
-          for (const p of heredocs(input.command)) {
+          for (const { path: p, text: body } of heredocs(input.command)) {
             if (active) {
               const entry = hasOwn(index, p) ? index[p] : null;
               const v = entry ? versionAsOf(entry, at) : -1;
               if (entry && v >= 0) touch(after, p, () => entryFile(entry.filename, entry.versions, null), v);
-            } else {
-              missingKey(after, 'x:' + m.uuid + ':' + p, baseName(p));
+            } else if (body) {
+              contentKey(after, 'x:' + m.uuid + ':' + p, baseName(p), String(body), null);
             }
           }
         } else if (b.name === 'present_files') {
@@ -243,10 +246,15 @@
               touch(after, 'missing:' + p, () => missingFile(base), 0);
             }
           }
-        } else if (b.name === 'SendUserFile' && active) {
+        } else if (b.name === 'SendUserFile') {
           const r = resultOf.get(b.id);
           for (const d of (r && Array.isArray(r.file_deliveries) ? r.file_deliveries : [])) {
-            if (!d || !d.path || !hasOwn(deliveries, d.file_uuid)) continue;
+            if (!d || !d.path) continue;
+            // Off the active branch, or not saved: the file isn't in this export.
+            if (!active || !hasOwn(deliveries, d.file_uuid)) {
+              missingKey(after, 'x:' + m.uuid + ':' + d.path, baseName(d.path));
+              continue;
+            }
             const uuids = deliveredUuids.get(d.path) || [];
             const v = uuids.indexOf(d.file_uuid);
             if (v < 0) continue;
@@ -412,7 +420,7 @@
     return String(template).replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
-  const api = { buildViewerChat, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT };
+  const api = { buildViewerChat, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT };
   root.CTViewer = Object.assign(root.CTViewer || {}, api);
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);
