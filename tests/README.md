@@ -12,8 +12,7 @@ Needs Node 20+ and Python 3.10+, with no packages to install.
 | `export.test.js` | Artifact replay, heredocs, failed tool calls, binaries, delivered files, warnings, and JS and Python parity |
 | `test_replay_bash.py` | `replay_bash.py` replay order and containment |
 | `viewer.test.js` | Viewer tree, hash, Markdown steps and data building |
-| `e2e/viewer.e2e.js` | The viewer page over `file://` in Chromium: rendering, previews, `sanitizeHtml` (optional, see below) |
-| `e2e/` | Real extension in Chromium against a mock claude.ai, and the viewer page over `file://` (optional) |
+| `e2e/` | Real extension in Chromium against a mock claude.ai, and the viewer page over `file://` (`viewer.e2e.js`: rendering, previews, `sanitizeHtml`) (optional, see below) |
 
 `test_replay_bash.py` makes real attempts to escape the sandbox, so its replay tests run only where `sandbox-exec` exists.
 
@@ -38,6 +37,8 @@ PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests
 ```
 
 `viewer.e2e.js` is the only coverage for `sanitizeHtml`, so run it after changing anything in the viewer.
+
+`node tests/e2e/make-viewer.js <original.json> <out.html>` builds a viewer from one exported chat so you can check the page by eye. Keep the output out of the repo, since it holds the chat.
 
 ## What these can't prove
 

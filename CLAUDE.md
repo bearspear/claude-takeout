@@ -208,7 +208,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 
 `p<NN>_` prefixes group files by the user prompt that introduced them (incremented on `sender === 'human'`).
 
-`viewer.html` and `viewer-check.gif` are written by `writeViewer` once per export, at the root. In a single ZIP that is beside the chat files; in a mega-ZIP, one viewer at the root covers all chats (`populateConversationFolder` returns `viewerChat`, built by `CTViewer.buildViewerChat`). Failure to build never blocks the download: it records a `viewer` warning.
+`viewer.html` and `viewer-check.gif` are written by `writeViewer` once per export, at the root. In a single ZIP that is beside the chat files; in a mega-ZIP, one viewer at the root covers all chats (`populateConversationFolder` returns `viewerChat`, built by `CTViewer.buildViewerChat`). Failure to build never blocks the download: a chat that fails to build gets a `viewer` warning, and a whole-viewer failure shows only in the status line.
 
 Mega-ZIP only:
 ```
@@ -292,7 +292,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - `artifact_basename_collision` — two paths produced the same basename; one was renamed.
 - `artifact_opaque_mutation` — a bash command changed an artifact in a way replay can't follow.
 - `delivered_file` — a `SendUserFile` delivery could not be downloaded.
-- `viewer` — `viewer.html`, or one chat in it, could not be built. The export itself is complete.
+- `viewer` — one chat could not be added to `viewer.html` (`buildViewerChat` threw). A failure of `writeViewer` as a whole is not recorded here: the status line says "viewer.html could not be built." The export itself is complete.
 
 `errors.txt` is built by `generateErrorReport()` and embedded into the ZIP only when `hasAny()` is true. The status pill turns amber (`.status.warning`) when there are warnings but the export still succeeded.
 

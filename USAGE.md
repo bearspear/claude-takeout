@@ -161,7 +161,7 @@ What to know about previews of generated HTML:
 - The browser doesn't let the viewer block every route. A generated file that contains injected code could still send out its own text, and the `.js` and `.css` files from that chat, when you preview it.
 - So the viewer is not a security boundary for untrusted exports. Be careful previewing files from someone else's export. Your own exports of your own chats are the intended use.
 
-If `viewer.html` couldn't be built, the export still downloads and `errors.txt` has a `viewer` warning. The Markdown files are unaffected.
+If `viewer.html` couldn't be built at all, the export still downloads and the status line says "viewer.html could not be built." If only some chats couldn't be added to it, `errors.txt` lists them under a `viewer` warning. The Markdown files are unaffected either way.
 
 ### Per-turn artifact versions
 
@@ -202,7 +202,7 @@ Each entry includes:
 | `project_metadata` | Project metadata fetch failed. `project.json` may be incomplete. | Re-export when the Project endpoint works. |
 | `str_replace_failed` | A `str_replace` edit couldn't be applied to an artifact during reconstruction (the `old_str` didn't appear or appeared multiple times). | Usually mirrors what happened in Claude's actual sandbox — no action needed unless `original.json` shows the tool succeeded but the warning fired anyway. |
 | `artifact_basename_collision` | Two distinct artifact paths produced files with the same basename. The second was renamed to avoid overwriting. | Inspect both source paths to confirm they were intentionally distinct files. |
-| `viewer` | `viewer.html` (or one chat in it) couldn't be built. | Nothing is lost: the chat data is all in the export and only the viewer is missing or incomplete. Use the Markdown files, or re-export. |
+| `viewer` | A chat couldn't be added to `viewer.html`. (If the whole viewer fails, only the status line says so.) | Nothing is lost: the chat data is all in the export and only the viewer is missing or incomplete. Use the Markdown files, or re-export. |
 | `artifact_opaque_mutation` | A `bash_tool` command mutated an artifact in a way the extension can't reconstruct (Python heredoc, sed, awk, multi-step pipeline, etc.). | **Run `replay_bash.py`** — see next section. |
 
 The Troubleshooting Guide at the bottom of `errors.txt` includes a copy-paste-ready `python3 replay_bash.py` command pointing at the export folder.

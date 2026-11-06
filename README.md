@@ -362,7 +362,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.6.0
 
-- **Offline viewer** - Every ZIP export now includes `viewer.html` (plus a small `viewer-check.gif`). Unzip, then open `viewer.html` to browse, search and read the exported chats, with artifacts and uploads previewed in place. A mega-ZIP gets one viewer for all chats, with project chats grouped. The other export files are unchanged. If the viewer can't be built, the export still downloads and `errors.txt` says so.
+- **Offline viewer** - Every ZIP export now includes `viewer.html` (plus a small `viewer-check.gif`). Unzip, then open `viewer.html` to browse, search and read the exported chats, with artifacts and uploads previewed in place. A mega-ZIP gets one viewer for all chats, with project chats grouped. The other export files are unchanged. If the viewer can't be built, the export still downloads and the status line says so. Chats that couldn't be added to it are listed in `errors.txt`.
 
 ### v1.5.10
 
