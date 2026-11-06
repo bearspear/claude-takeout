@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, restoreMath, addCitations, toolInputText } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, toolInputText } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -177,46 +177,49 @@ test('protectMath takes math and leaves money and code alone', () => {
   assert.deepStrictEqual(protectMath('$$\na\nb\n$$').math, ['$$\na\nb\n$$']);
 });
 
-test('protectMath placeholders round trip through restoreMath', () => {
+test('protectMath placeholders split back out by index', () => {
   const p = protectMath('so $x$ and $$y$$');
   assert.ok(!p.text.includes('$'));
-  const html = restoreMath(p.text, p.math, (src, display) => `[${src}|${display}]`);
-  assert.strictEqual(html, 'so [x|false] and [y|true]');
+  assert.deepStrictEqual(splitPlaceholders(p.text, p.mark).map(x => (typeof x === 'string' ? x : x.kind + x.index)), ['so ', 'M0', ' and ', 'M1']);
 });
 
-test('restoreMath only replaces text, never inside tags or comments', () => {
-  const math = ['$x$'];
-  const render = () => '<span class="katex">k</span>';
-  const inAttr = '<a title="XMATHX0XEND <img src=x onerror=alert(1)>">t</a>';
-  assert.strictEqual(restoreMath(inAttr, math, render), inAttr);
-  const inComment = '<!-- " XMATHX0XEND -->';
-  assert.strictEqual(restoreMath(inComment, math, render), inComment);
-  assert.strictEqual(restoreMath('<b>XMATHX0XEND</b>', math, render), '<b><span class="katex">k</span></b>');
-  assert.strictEqual(restoreMath('XMATHX7XEND', math, render), 'XMATHX7XEND');
+test('placeholders can never be typed in a chat', () => {
+  assert.notStrictEqual(placeholderMark('plain'), placeholderMark(placeholderMark('plain')));
+  const typed = `${placeholderMark('')}M0⟧ and $x$`;
+  const p = protectMath(typed);
+  assert.deepStrictEqual(splitPlaceholders(p.text, p.mark).filter(x => typeof x !== 'string').length, 1);
+  assert.ok(p.text.startsWith(typed.slice(0, 8)));
+  const old = protectMath('XMATHX0XEND');
+  assert.strictEqual(old.text, 'XMATHX0XEND');
+  assert.deepStrictEqual(splitPlaceholders(old.text, old.mark), ['XMATHX0XEND']);
 });
 
-test('restoreMath falls back to escaped source when the renderer throws', () => {
-  const html = restoreMath('XMATHX0XEND', ['$<b>$'], () => { throw new Error('bad'); });
-  assert.strictEqual(html, '$&lt;b&gt;$');
+test('placeholders count as punctuation, so emphasis beside them still closes', () => {
+  const m = placeholderMark('');
+  assert.ok(/^\p{P}/u.test(m));
+  assert.ok(/\p{P}$/u.test(protectMath('$x$').text));
 });
+
+const citeIds = (c) => splitPlaceholders(c.text, c.mark).filter(x => typeof x !== 'string').map(x => x.kind + x.index);
 
 test('addCitations marks the text and numbers each source once', () => {
   const c = addCitations('Hello world', [{ end: 5, url: 'https://a.test', title: 'A' }]);
   assert.strictEqual(c.sources[0].n, 1);
-  assert.ok(c.text.startsWith('Hello<sup class="cite">'));
-  assert.ok(c.text.endsWith(' world'));
+  const parts = splitPlaceholders(c.text, c.mark);
+  assert.strictEqual(parts[0], 'Hello');
+  assert.strictEqual(parts[1].kind, 'C');
+  assert.strictEqual(parts[2], ' world');
   const two = addCitations('one two three', [
     { end: 3, url: 'https://a.test', title: 'A' }, { end: 7, url: 'https://b.test', title: 'B' }, { end: 13, url: 'https://a.test', title: 'A' }]);
   assert.deepStrictEqual(two.sources.map(s => s.n), [1, 2]);
-  assert.strictEqual((two.text.match(/<sup/g) || []).length, 3);
-  assert.ok(/>1<\/a><\/sup>$/.test(two.text));
+  assert.deepStrictEqual(citeIds(two), ['C1', 'C2', 'C1']);
 });
 
-test('addCitations escapes its values and tolerates a bad offset', () => {
-  const c = addCitations('Hi', [{ end: 99, url: 'https://a.test/?a="b"&c=<d>', title: '"><img src=x>' }, { url: 'https://b.test', title: 'B' }]);
-  assert.ok(!/<img/.test(c.text));
-  assert.ok(c.text.includes('&quot;'));
-  assert.ok(c.text.startsWith('Hi<sup'));
+test('addCitations puts no chat value into the text, and tolerates a bad offset', () => {
+  const c = addCitations('Hi', [{ end: 99, url: 'https://a.test/?a="b"', title: '"><img src=x>' }, { url: 'https://b.test', title: 'B' }]);
+  assert.ok(!/img|a\.test/.test(c.text));
+  assert.ok(c.text.startsWith('Hi⟦'));
+  assert.strictEqual(c.sources[0].title, '"><img src=x>');
   assert.strictEqual(addCitations('Hi', []).text, 'Hi');
   assert.strictEqual(addCitations('Hi').sources.length, 0);
 });
@@ -226,7 +229,7 @@ test('addCitations continues numbering across blocks of one message', () => {
   addCitations('a', [{ end: 1, url: 'https://a.test', title: 'A' }], seen);
   const c = addCitations('b', [{ end: 1, url: 'https://b.test', title: 'B' }, { end: 1, url: 'https://a.test', title: 'A' }], seen);
   assert.deepStrictEqual(c.sources.map(s => s.n), [1, 2]);
-  assert.ok(/>2<\/a><\/sup>/.test(c.text) && />1<\/a><\/sup>/.test(c.text));
+  assert.deepStrictEqual(citeIds(c), ['C2', 'C1']);
 });
 
 test('toolInputText shows commands bare and everything else as JSON', () => {

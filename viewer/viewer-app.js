@@ -1,5 +1,6 @@
 // Viewer page: sidebar, top bar and message rendering. Classic script, inlined after viewer-logic.js.
 // Chat text is untrusted. Only sanitizeHtml's output reaches innerHTML; all else goes through textContent.
+// KaTeX's output is the one addition, and goes in through fillPlaceholders.
 
 const BATCH_SIZE = 10;
 
@@ -57,6 +58,24 @@ function timeStamp(at) {
   return node;
 }
 
+// Raw HTML in a chat displays as the text it is, as on claude.ai. marked would stop escaping the text
+// after a tag like <code>, and stop linking after <a>, so its state is reset after every tag.
+const markdown = new marked.Marked({
+  gfm: true,
+  renderer: {
+    html(raw, block) {
+      return block ? `<p class="raw-html">${escHtml(raw.trimEnd())}</p>` : escHtml(raw);
+    },
+  },
+  tokenizer: {
+    tag(src) {
+      const token = marked.Tokenizer.prototype.tag.call(this, src);
+      if (token) { this.lexer.state.inLink = false; this.lexer.state.inRawBlock = false; }
+      return token;
+    },
+  },
+});
+
 function renderMath(src, displayMode) {
   return katex.renderToString(src, { displayMode, throwOnError: false });
 }
@@ -88,11 +107,12 @@ function dressMarkdown(box) {
 
 // sources: shared across the message, so numbers don't restart in a later block.
 function renderText(block, sources) {
-  const cited = addCitations(block.text, block.cites, sources);
-  const safe = protectMath(cited.text);
-  const clean = sanitizeHtml(marked.parse(safe.text, { gfm: true }), new DOMParser());
+  const mark = placeholderMark(block.text);
+  const cited = addCitations(block.text, block.cites, sources, mark);
+  const safe = protectMath(cited.text, mark);
   const box = el('div', 'prose');
-  box.innerHTML = restoreMath(clean, safe.math, renderMath);
+  box.innerHTML = sanitizeHtml(markdown.parse(safe.text), new DOMParser());
+  fillPlaceholders(box, { mark, math: safe.math, sources, render: renderMath });
   dressMarkdown(box);
   return box;
 }
@@ -208,7 +228,13 @@ function renderAssistant(m) {
 }
 
 function renderMessage(m) {
-  const node = m.sender === 'human' ? renderHuman(m) : renderAssistant(m);
+  let node;
+  try {
+    node = m.sender === 'human' ? renderHuman(m) : renderAssistant(m);
+  } catch (e) {
+    console.warn('Could not display a message', m.id, e);
+    node = el('section', 'msg failed', "This message couldn't be displayed");
+  }
   if (!node) return null;
   node.dataset.id = m.id;
   const stamp = timeStamp(m.at);

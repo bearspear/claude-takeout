@@ -24,6 +24,11 @@ const PIPELINE_PAYLOADS = [
   `<img name="getElementById" src="${PNG}">`,
   '<div style="background:url(https://remote.test/z.png);width:9px;height:9px"></div>',
   `<video src="https://remote.test/v.mp4" autoplay></video><audio src="https://remote.test/a.mp3" autoplay></audio>`,
+  // A quote in an attribute name once put math's double quotes inside a live attribute value.
+  `<div x'y="$x$" <q=" tabindex=1 autofocus onfocus=${HIT} ">hello</div>`,
+  `<div x"y='$x$' <q=" tabindex=1 autofocus onfocus=${HIT} ">hello</div>`,
+  `<div x'y="$x$ <img src=x onerror=${HIT}>">hello</div>`,
+  '<frameset>',
 ];
 
 const RICH = `## Spending by team
@@ -94,22 +99,49 @@ function plainChat(id, name, count, updated) {
   return { uuid: id, name, model: 'claude-x', created_at: '2026-02-01T10:00:00Z', updated_at: updated, settings: {}, current_leaf_message_uuid: `${id}-${count - 1}`, chat_messages: messages };
 }
 
-function hostileChat() {
-  const c = plainChat('hostile', `<img src=x onerror="${HIT}">`, 2, '2026-01-01T00:00:00Z');
-  c.chat_messages[0].content[0].text = PIPELINE_PAYLOADS.join('\n');
-  c.chat_messages[1].content[0].text = PIPELINE_PAYLOADS.join('\n\n');
+// Assistant messages with these texts, each after a short user message. items: a string or a content block.
+function turnsChat(id, name, items, updated) {
+  const c = plainChat(id, name, items.length * 2, updated);
+  items.forEach((item, i) => {
+    c.chat_messages[i * 2].content[0].text = `question ${i}`;
+    c.chat_messages[i * 2 + 1].content[0] = typeof item === 'string' ? { type: 'text', text: item } : { type: 'text', ...item };
+  });
   return c;
+}
+
+// Each payload in a message of its own, so that one can't hide another.
+function hostileChat() {
+  const c = turnsChat('hostile', `<img src=x onerror="${HIT}">`, PIPELINE_PAYLOADS, '2026-01-01T00:00:00Z');
+  c.chat_messages[0].content[0].text = PIPELINE_PAYLOADS.join('\n');
+  return c;
+}
+
+const TAG_WORDS = {
+  textarea: 'Use a <textarea> for input, and keep going.\n\nSecond paragraph stays.\n\n## This heading stays',
+  script: 'The <script> tag runs code.\n\nThis second paragraph is important.',
+  comment: 'Start <!-- not closed\n\nThis other paragraph is important.',
+  rawCode: 'Inside <code> 1 < 2 <notatag and more.\n\nFinal paragraph.',
+};
+
+function textChat() {
+  return turnsChat('text', 'Text chat', [
+    ...Object.values(TAG_WORDS),
+    'Literal XMATHX0XEND and \u27E6T0M0\u27E7 with $y^2$ beside them.',
+    { text: 'Area $x^2$ was **Done.** and more.', citations: [{ end_index: 25, url: 'https://example.com/a?x="1"&y=<2>', title: '"><b>Title</b>' }, { end_index: 2, url: 'https://example.com/z', title: 'Zed' }] },
+    { text: 'Before.\n\n```\n$x$ in a fence\n```\n\n    $z$ indented\n\nInline `$q$` too, and [$w$](https://example.com/w "$t$").', citations: [{ end_index: 16, url: 'https://example.com/f', title: 'In a fence' }] },
+    'See <https://example.com/auto> here.',
+  ], '2026-01-02T00:00:00Z');
 }
 
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'takeout-viewer-'));
   const file = path.join(dir, 'viewer.html');
-  fs.writeFileSync(file, buildHtml([richChat(), plainChat('long', 'Long chat', 300, '2026-03-01T00:00:00Z'), plainChat('short', 'Short chat', 2, '2026-02-01T00:00:00Z'), hostileChat()], '2026-11-05T12:00:00Z'));
+  fs.writeFileSync(file, buildHtml([richChat(), plainChat('long', 'Long chat', 300, '2026-03-01T00:00:00Z'), plainChat('short', 'Short chat', 2, '2026-02-01T00:00:00Z'), textChat(), hostileChat()], '2026-11-05T12:00:00Z'));
   const url = 'file://' + file;
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
   const check = (n, ok, x = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n} ${ok ? '' : x}`); };
-  const open = async (options = {}) => {
+  const open = async (options = {}, target = url) => {
     const context = await browser.newContext({ viewport: { width: 1360, height: 900 }, ...options });
     const page = await context.newPage();
     const seen = { requests: [], errors: [] };
@@ -121,7 +153,7 @@ function hostileChat() {
     });
     page.on('console', m => { if (m.type() === 'error') seen.errors.push(m.text()); });
     page.on('pageerror', e => seen.errors.push(e.message));
-    await page.goto(url);
+    await page.goto(target);
     await page.waitForSelector('.msg');
     return { page, seen, context };
   };
@@ -134,8 +166,8 @@ function hostileChat() {
     const { page, seen } = await open();
     const chats = await page.$$eval('.item', els => els.map(e => e.textContent));
     check('sidebar shows the brand', (await page.textContent('.brand')) === 'Claude Takeout');
-    check('sidebar lists every chat', chats.length === 4 && chats.includes('Short chat'), chats.join());
-    check('footer counts the chats', (await page.textContent('#archive')) === 'Archive · 4 chats · read-only');
+    check('sidebar lists every chat', chats.length === 5 && chats.includes('Short chat'), chats.join());
+    check('footer counts the chats', (await page.textContent('#archive')) === 'Archive · 5 chats · read-only');
     check('newest chat opens first', (await page.textContent('#title')) === 'Quarterly budget review');
     check('open chat is marked in the sidebar', (await page.textContent('.item[aria-current="true"]')) === 'Quarterly budget review');
     check('top bar shows the model', (await page.textContent('#meta')).startsWith('Opus 4.8 · '));
@@ -188,13 +220,14 @@ function hostileChat() {
     clean('main flow', seen);
 
     const hostile = await open();
-    await hostile.page.click('.item >> nth=3');
+    await hostile.page.click('.item >> nth=4');
     await hostile.page.waitForSelector('.msg.assistant');
-    await hostile.page.waitForTimeout(300);
+    await hostile.page.waitForFunction(n => document.querySelectorAll('.msg').length >= n, PIPELINE_PAYLOADS.length * 2, { timeout: 3000 }).catch(() => {});
+    await hostile.page.waitForTimeout(500);
     const dom = await hostile.page.evaluate(() => {
       const box = document.getElementById('chat');
       return {
-        hit: !!window.__hit, bad: box.querySelectorAll('.prose script, .prose iframe, .prose svg:not(.ic), .prose style, .prose video, .prose audio').length,
+        hit: !!window.__hit, focused: !!document.activeElement.closest('.msg'), shown: box.querySelectorAll('.msg').length, bad: box.querySelectorAll('.prose script, .prose iframe, .prose svg:not(.ic), .prose style, .prose video, .prose audio').length,
         remote: [...box.querySelectorAll('.prose [src]')].filter(n => !n.src.startsWith('data:image/png')).length,
         js: box.querySelectorAll('a[href^="javascript" i]').length,
         clobbered: typeof document.getElementById !== 'function',
@@ -203,6 +236,10 @@ function hostileChat() {
       };
     });
     check('hostile chat: nothing runs', !dom.hit, JSON.stringify(dom));
+    check('hostile chat: no onfocus or autofocus takes the focus', !dom.focused, JSON.stringify(dom));
+    check('hostile chat: every message shows', dom.shown === PIPELINE_PAYLOADS.length * 2, JSON.stringify(dom));
+    const rawText = await hostile.page.$$eval('.msg.assistant .prose', p => p.map(x => x.textContent).join('\n'));
+    check('hostile chat: raw HTML shows as text', rawText.includes('<frameset>') && rawText.includes(`<div x'y="$x$" <q=`), rawText.slice(-400));
     check('hostile chat: no dangerous element survives', dom.bad === 0, JSON.stringify(dom));
     check('hostile chat: nothing loads', dom.remote === 0, JSON.stringify(dom));
     check('hostile chat: no script links', dom.js === 0);
@@ -210,6 +247,52 @@ function hostileChat() {
     check('hostile chat: no inline styles', dom.styled === 0, JSON.stringify(dom));
     check('hostile chat: user text stays text', dom.bubble);
     check('hostile title stays text', (await hostile.page.textContent('#title')).startsWith('<img') && (await hostile.page.$$('#side img, #top img')).length === 0);
+
+    await hostile.page.click('.item >> nth=3');
+    await hostile.page.waitForFunction(() => document.querySelectorAll('.msg').length === 16, null, { timeout: 3000 }).catch(() => {});
+    const proses = await hostile.page.$$eval('.msg.assistant', m => m.map(x => x.textContent.replace(/\s+/g, ' ')));
+    Object.entries(TAG_WORDS).forEach(([name, text], i) => {
+      const words = text.replace(/\n\n## /, ' ').replace(/\s+/g, ' ');
+      check(`tag word shows literally: ${name}`, (proses[i] || '').includes(words), proses[i]);
+    });
+    check('a typed placeholder stays literal', (proses[4] || '').includes('Literal XMATHX0XEND and \u27E6T0M0\u27E7 with'), proses[4]);
+    const marks = await hostile.page.evaluate(() => {
+      const m = [...document.querySelectorAll('.msg.assistant')];
+      const links = n => [...m[n].querySelectorAll('sup.cite a')].map(a => [a.textContent, a.getAttribute('href'), a.title]);
+      return {
+        typed: m[4].querySelectorAll('.katex').length, math: m[5].querySelectorAll('.katex').length, bold: m[5].querySelector('strong')?.textContent,
+        cites: links(5), fenced: links(6).length, fence: m[6].querySelector('.code code')?.textContent,
+        indented: m[6].querySelectorAll('.code code')[1]?.textContent, inline: m[6].querySelector('.prose :not(pre) > code')?.textContent,
+        linkMath: m[6].querySelectorAll('.prose a .katex').length, linkTitle: m[6].querySelector('.prose a[title]')?.title,
+        leftovers: document.getElementById('chat').textContent.includes('\u27E6T1'), auto: m[7].querySelector('a')?.getAttribute('href'),
+      };
+    });
+    check('math renders beside a typed placeholder', marks.typed === 1, JSON.stringify(marks));
+    check('math and citations render', marks.math === 1 && marks.cites.length === 2, JSON.stringify(marks));
+    check('citation values stay intact', marks.cites[1] && marks.cites[1][1] === 'https://example.com/a?x="1"&y=<2>' && marks.cites[1][2] === '"><b>Title</b>', JSON.stringify(marks));
+    check('a citation after bold leaves the bold working', marks.bold === 'Done.', JSON.stringify(marks));
+    check('dollars in a fence stay literal', /^\$x\$ in a fence/.test(marks.fence || ''), JSON.stringify(marks));
+    check('dollars in indented code stay literal', /^\$z\$ indented/.test(marks.indented || ''), JSON.stringify(marks));
+    check('dollars in inline code stay literal', marks.inline === '$q$', JSON.stringify(marks));
+    check('a citation inside code is dropped, not shown', marks.fenced === 0 && !marks.leftovers, JSON.stringify(marks));
+    check('math in link text and titles', marks.linkMath === 1 && marks.linkTitle === '$t$', JSON.stringify(marks));
+    check('angle-bracket links still work', marks.auto === 'https://example.com/auto', JSON.stringify(marks));
+
+    const broken = await hostile.page.evaluate(() => {
+      const msg = (id, parent, blocks) => ({ id, parent, sender: 'assistant', at: '2026-01-01T00:00:00Z', blocks, uploads: [], attachments: [] });
+      renderChat({ id: 'broken', title: 'Broken', messages: [msg('a', null, [{ t: 'text', text: 'first', cites: [] }]), msg('b', 'a', null), msg('c', 'b', [{ t: 'text', text: 'third', cites: [] }])], leaf: 'c' });
+      return [...document.querySelectorAll('.msg')].map(m => m.textContent);
+    });
+    check('a failed message leaves the rest showing', broken.length === 3 && broken[0].includes('first') && broken[1].includes("This message couldn't be displayed") && broken[2].includes('third'), broken.join(' | '));
+
+    const odd = await hostile.page.evaluate(() => ({
+      names: sanitizeHtml('<div x\'y="1" a"b="2" data-ok="3" title="t">z</div>', new DOMParser()),
+      comment: sanitizeHtml('a<!-- " x -->b', new DOMParser()),
+      frames: sanitizeHtml('<frameset><frame></frameset>', new DOMParser()),
+    }));
+    check('sanitizeHtml drops odd attribute names', odd.names === '<div data-ok="3" title="t">z</div>', odd.names);
+    check('sanitizeHtml drops comments', odd.comment === 'ab', odd.comment);
+    check('sanitizeHtml survives a frameset', odd.frames === '', odd.frames);
 
     for (const payload of PAYLOADS) {
       const out = await hostile.page.evaluate(html => {
@@ -232,6 +315,17 @@ function hostileChat() {
     const svgData = await hostile.page.evaluate(() => sanitizeHtml('<img src="data:image/svg+xml;base64,PHN2Zz4=">', new DOMParser()));
     check('sanitizeHtml drops SVG data images', !svgData.includes('<img'), svgData);
     clean('hostile flow', hostile.seen);
+
+    // autofocus only fires on a page's first chat, before anything has been clicked.
+    for (const [i, payload] of PIPELINE_PAYLOADS.filter(t => t.includes('autofocus')).entries()) {
+      const one = path.join(dir, `focus${i}.html`);
+      fs.writeFileSync(one, buildHtml([turnsChat('one', 'One', [payload], '2026-01-01T00:00:00Z')], '2026-11-05T12:00:00Z'));
+      const s = await open({}, 'file://' + one);
+      await s.page.waitForTimeout(400);
+      const state = await s.page.evaluate(() => ({ hit: !!window.__hit, focused: document.activeElement.tagName }));
+      check(`no onfocus fires on open: ${payload.slice(0, 12)}`, !state.hit && state.focused === 'BODY', JSON.stringify(state));
+      clean(`autofocus payload ${i}`, s.seen);
+    }
 
     const phone = await open({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
     check('phone: no sideways scroll', await phone.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
