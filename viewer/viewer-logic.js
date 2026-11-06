@@ -132,11 +132,12 @@ function splitPlaceholders(text, mark) {
   return parts;
 }
 
-// Code fences and spans are matched first and put back unchanged, so a `$` inside them is never math.
-// An unclosed fence runs to the end, as it does in Markdown. A span can't cross a blank line.
+// Code fences, spans and web addresses are matched first and put back unchanged, so a `$` inside them
+// is never math. An unclosed fence runs to the end, as it does in Markdown. A span can't cross a blank line.
 const MATH_OR_CODE = new RegExp([
   '^ {0,3}(`{3,}|~{3,})[\\s\\S]*?(?:\\n {0,3}\\1[`~]*[ \\t]*(?=\\n|$)|(?![\\s\\S]))',
   '(`+)(?!`)(?:(?!\\n[ \\t]*\\n)[\\s\\S])*?[^`]\\2(?!`)',
+  '(?<![A-Za-z0-9])(?:https?://|www\\.)[^\\s<]*',
   '\\\\\\$',
   '\\$\\$[\\s\\S]+?\\$\\$',
   '\\$(?![\\s\\d])(?:[^$\\n]*?[^\\s$])\\$(?![\\dA-Za-z])'
@@ -169,6 +170,12 @@ function addCitations(text, cites, seen, mark = placeholderMark(text)) {
   return { text: out + t.slice(from), sources, mark };
 }
 
+// Where a bare address has to end: marked's autolink would otherwise take a citation in as part of it.
+function beforeCitation(src) {
+  const at = src.search(/⟦T\d+C\d+⟧/);
+  return at < 0 ? src : src.slice(0, at);
+}
+
 function citeNode(doc, source) {
   const sup = doc.createElement('sup');
   sup.className = 'cite';
@@ -186,6 +193,7 @@ function citeNode(doc, source) {
 
 // Works on the parsed, sanitized DOM, so a placeholder only ever becomes markup inside a text node.
 // In code and attributes it goes back to its source text instead, and a citation there just goes.
+// A citation in a link lands right after the link. marked percent-encodes any placeholder in a URL.
 // render(src, displayMode) returns HTML. A placeholder with no entry stays as it is.
 function fillPlaceholders(root, { mark, math, sources, render }) {
   const doc = root.ownerDocument;
@@ -210,15 +218,24 @@ function fillPlaceholders(root, { mark, math, sources, render }) {
   while (walker.nextNode()) if (walker.currentNode.nodeValue.includes(mark)) texts.push(walker.currentNode);
   for (const node of texts) {
     if (node.parentElement.closest('code, pre, .raw-html')) { node.nodeValue = bare(node.nodeValue); continue; }
+    const link = node.parentElement.closest('a');
     const part = doc.createDocumentFragment();
+    const after = [];
     for (const p of splitPlaceholders(node.nodeValue, mark)) {
       if (typeof p === 'string' || !known(p)) part.append(typeof p === 'string' ? p : p.raw);
-      else part.append(p.kind === 'M' ? mathNodes(math[p.index]) : citeNode(doc, sources[p.index - 1]));
+      else if (p.kind === 'M') part.append(mathNodes(math[p.index]));
+      else if (link) after.push(citeNode(doc, sources[p.index - 1]));
+      else part.append(citeNode(doc, sources[p.index - 1]));
     }
     node.replaceWith(part);
+    if (link) link.after(...after);
   }
+  const encoded = new RegExp(`${encodeURI(mark)}([MC]\\d+)${encodeURI(PLACEHOLDER_END)}`, 'g');
   root.querySelectorAll('*').forEach(n => {
-    Array.from(n.attributes).forEach(a => { if (a.value.includes(mark)) a.value = bare(a.value); });
+    Array.from(n.attributes).forEach(a => {
+      const value = a.value.replace(encoded, `${mark}$1${PLACEHOLDER_END}`);
+      if (value.includes(mark)) a.value = bare(value);
+    });
   });
 }
 
@@ -298,5 +315,5 @@ function toolInputText(input) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, fillPlaceholders, sanitizeHtml, toolInputText };
+  module.exports = { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText };
 }

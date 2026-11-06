@@ -123,6 +123,17 @@ const TAG_WORDS = {
   rawCode: 'Inside <code> 1 < 2 <notatag and more.\n\nFinal paragraph.',
 };
 
+// Citations or math against a URL. href: what the link must point to, link: its text, text: what shows.
+const LINK_CASES = [
+  { item: { text: 'See https://example.com/docs. More.', citations: [{ end_index: 29, url: 'https://example.com/c1', title: 'C1' }] }, href: 'https://example.com/docs', link: 'https://example.com/docs', text: 'See https://example.com/docs.1 More.', cites: 1 },
+  { item: { text: 'See https://example.com/docs now', citations: [{ end_index: 28, url: 'https://example.com/c2', title: 'C2' }] }, href: 'https://example.com/docs', link: 'https://example.com/docs', text: 'See https://example.com/docs1 now', cites: 1 },
+  { item: { text: 'See www.example.com/docs now', citations: [{ end_index: 24, url: 'https://example.com/c3', title: 'C3' }] }, href: 'http://www.example.com/docs', link: 'www.example.com/docs', text: 'See www.example.com/docs1 now', cites: 1 },
+  { item: { text: 'See <https://example.com/docs> now', citations: [{ end_index: 29, url: 'https://example.com/c4', title: 'C4' }] }, href: 'https://example.com/docs', link: 'https://example.com/docs', text: 'See https://example.com/docs1 now', cites: 1 },
+  { item: 'Go https://a.test/?a=$x$&b=$y$ now', href: 'https://a.test/?a=$x$&b=$y$', link: 'https://a.test/?a=$x$&b=$y$', text: 'Go https://a.test/?a=$x$&b=$y$ now', cites: 0 },
+  { item: '[go](https://a.test/$x$/$y$) now', href: 'https://a.test/$x$/$y$', link: 'go', text: 'go now', cites: 0 },
+  { item: '[mail](mailto:me$x$@a.test) now', href: 'mailto:me$x$@a.test', link: 'mail', text: 'mail now', cites: 0 },
+];
+
 function textChat() {
   return turnsChat('text', 'Text chat', [
     ...Object.values(TAG_WORDS),
@@ -130,6 +141,7 @@ function textChat() {
     { text: 'Area $x^2$ was **Done.** and more.', citations: [{ end_index: 25, url: 'https://example.com/a?x="1"&y=<2>', title: '"><b>Title</b>' }, { end_index: 2, url: 'https://example.com/z', title: 'Zed' }] },
     { text: 'Before.\n\n```\n$x$ in a fence\n```\n\n    $z$ indented\n\nInline `$q$` too, and [$w$](https://example.com/w "$t$").', citations: [{ end_index: 16, url: 'https://example.com/f', title: 'In a fence' }] },
     'See <https://example.com/auto> here.',
+    ...LINK_CASES.map(c => c.item),
   ], '2026-01-02T00:00:00Z');
 }
 
@@ -249,7 +261,7 @@ function textChat() {
     check('hostile title stays text', (await hostile.page.textContent('#title')).startsWith('<img') && (await hostile.page.$$('#side img, #top img')).length === 0);
 
     await hostile.page.click('.item >> nth=3');
-    await hostile.page.waitForFunction(() => document.querySelectorAll('.msg').length === 16, null, { timeout: 3000 }).catch(() => {});
+    await hostile.page.waitForFunction(() => document.querySelectorAll('.msg').length === 30, null, { timeout: 3000 }).catch(() => {});
     const proses = await hostile.page.$$eval('.msg.assistant', m => m.map(x => x.textContent.replace(/\s+/g, ' ')));
     Object.entries(TAG_WORDS).forEach(([name, text], i) => {
       const words = text.replace(/\n\n## /, ' ').replace(/\s+/g, ' ');
@@ -277,6 +289,23 @@ function textChat() {
     check('a citation inside code is dropped, not shown', marks.fenced === 0 && !marks.leftovers, JSON.stringify(marks));
     check('math in link text and titles', marks.linkMath === 1 && marks.linkTitle === '$t$', JSON.stringify(marks));
     check('angle-bracket links still work', marks.auto === 'https://example.com/auto', JSON.stringify(marks));
+
+    const links = await hostile.page.evaluate(() => [...document.querySelectorAll('.msg.assistant')].slice(8).map(m => {
+      const prose = m.querySelector('.prose');
+      const a = prose.querySelector('a:not(sup a)');
+      return {
+        href: a && a.getAttribute('href'), link: a && a.textContent, text: prose.textContent.trim(), cites: prose.querySelectorAll('sup.cite').length,
+        nested: prose.querySelectorAll('a sup, a a').length, math: prose.querySelectorAll('.katex').length,
+      };
+    }));
+    LINK_CASES.forEach((c, i) => {
+      const got = links[i] || {};
+      const name = String(c.item.text || c.item).slice(0, 30);
+      check(`link stays clean: ${name}`, got.href === c.href && got.link === c.link, JSON.stringify(got));
+      check(`link text and citation in place: ${name}`, got.text === c.text && got.cites === c.cites && got.nested === 0 && got.math === 0, JSON.stringify(got));
+    });
+    const encoded = await hostile.page.$$eval('#chat *', els => els.flatMap(e => [...e.attributes]).filter(a => /%E2%9F%A[67]|\u27E6T\d/i.test(a.value)).map(a => a.value));
+    check('no placeholder remains in any attribute', encoded.length === 0, encoded.join(' '));
 
     const broken = await hostile.page.evaluate(() => {
       const msg = (id, parent, blocks) => ({ id, parent, sender: 'assistant', at: '2026-01-01T00:00:00Z', blocks, uploads: [], attachments: [] });

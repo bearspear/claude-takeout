@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, toolInputText } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -177,6 +177,13 @@ test('protectMath takes math and leaves money and code alone', () => {
   assert.deepStrictEqual(protectMath('$$\na\nb\n$$').math, ['$$\na\nb\n$$']);
 });
 
+test('protectMath leaves dollars in web addresses alone', () => {
+  assert.deepStrictEqual(protectMath('https://a.test/?a=$x$&b=$y$ and $z$').math, ['$z$']);
+  assert.deepStrictEqual(protectMath('[go](https://a.test/$x$/$y$)').math, []);
+  assert.deepStrictEqual(protectMath('www.a.test/$x$/$y$').math, []);
+  assert.deepStrictEqual(protectMath('awww.test $x$').math, ['$x$']);
+});
+
 test('protectMath placeholders split back out by index', () => {
   const p = protectMath('so $x$ and $$y$$');
   assert.ok(!p.text.includes('$'));
@@ -230,6 +237,13 @@ test('addCitations continues numbering across blocks of one message', () => {
   const c = addCitations('b', [{ end: 1, url: 'https://b.test', title: 'B' }, { end: 1, url: 'https://a.test', title: 'A' }], seen);
   assert.deepStrictEqual(c.sources.map(s => s.n), [1, 2]);
   assert.deepStrictEqual(citeIds(c), ['C2', 'C1']);
+});
+
+test('beforeCitation ends a bare address at a citation, not at math', () => {
+  const c = addCitations('https://a.test/x now', [{ end: 16, url: 'https://b.test', title: 'B' }]);
+  assert.strictEqual(beforeCitation(c.text), 'https://a.test/x');
+  assert.strictEqual(beforeCitation('https://a.test/⟦T0M0⟧'), 'https://a.test/⟦T0M0⟧');
+  assert.strictEqual(beforeCitation('plain'), 'plain');
 });
 
 test('toolInputText shows commands bare and everything else as JSON', () => {

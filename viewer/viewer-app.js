@@ -73,6 +73,9 @@ const markdown = new marked.Marked({
       if (token) { this.lexer.state.inLink = false; this.lexer.state.inRawBlock = false; }
       return token;
     },
+    url(src, ...rest) {
+      return marked.Tokenizer.prototype.url.call(this, beforeCitation(src), ...rest);
+    },
   },
 });
 
