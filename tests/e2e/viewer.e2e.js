@@ -284,6 +284,36 @@ console.log('THIEF other ' + said.includes('SECRET-' + 'OTHER'));
   ], '2026-06-01T00:00:00Z');
 }
 
+const UPLOAD_HTML = `<h1>Uploaded</h1><img src=x onerror="${HIT}"><script>${HIT}</script>`;
+
+// A message with uploads of each shape, a pasted attachment, and a project with a file and a document.
+function uploadsChat() {
+  const c = plainChat('uploads', 'Uploads chat', 2, '2025-01-01T00:00:00Z');
+  const m = c.chat_messages[0];
+  m.content[0].text = 'Here are my files.';
+  m.files_v2 = [
+    { file_uuid: 'f-photo', file_name: 'photo.png', file_kind: 'image', success: true },
+    { file_uuid: 'f-html', file_name: 'page.html', success: true },
+    { file_uuid: 'f-pdf', file_name: 'paper.pdf', success: true },
+    { file_uuid: 'f-odt', file_name: 'minutes.odt', success: true },
+    { file_uuid: 'f-lost', file_name: 'lost.csv', success: true },
+  ];
+  m.attachments = [{ file_name: 'pasted.txt', extracted_content: 'line one\nline two <b>literal</b>' }];
+  return {
+    conversation: c,
+    ctx: {
+      folder: '',
+      uploads: {
+        'f-photo': { path: 'uploads/p01_photo.png', text: null },
+        'f-html': { path: 'uploads/p01_page.html', text: UPLOAD_HTML },
+        'f-pdf': { path: 'uploads/p01_paper.pdf', text: null },
+        'f-odt': { path: 'uploads/p01_minutes.odt', text: null },
+      },
+      project: { name: 'Budget project', fileDir: 'project/files', fileNames: ['spec.pdf', 'data.zip'], docs: [{ name: 'Brief', text: 'Be <i>kind</i>.\nSecond line.' }] },
+    },
+  };
+}
+
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'takeout-viewer-'));
   const file = path.join(dir, 'viewer.html');
@@ -809,6 +839,109 @@ console.log('THIEF other ' + said.includes('SECRET-' + 'OTHER'));
     check('phone: no sideways scroll with the panel', await tiny.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
     await tiny.page.tap('#panel .close');
     check('phone: close returns to the chat', await tiny.page.$eval('#panel', n => n.hidden));
+
+
+    // Popups for uploads, attachments and project files.
+    const ups = uploadsChat();
+    fs.mkdirSync(path.join(dir, 'uploads'), { recursive: true });
+    fs.mkdirSync(path.join(dir, 'project', 'files'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'uploads', 'p01_photo.png'), Buffer.from(PNG.split(',')[1], 'base64'));
+    fs.writeFileSync(path.join(dir, 'uploads', 'p01_page.html'), UPLOAD_HTML);
+    fs.writeFileSync(path.join(dir, 'uploads', 'p01_paper.pdf'), MINIMAL_PDF);
+    fs.writeFileSync(path.join(dir, 'uploads', 'p01_minutes.odt'), 'PK');
+    fs.writeFileSync(path.join(dir, 'project', 'files', 'spec.pdf'), MINIMAL_PDF);
+    fs.writeFileSync(path.join(dir, 'project', 'files', 'data.zip'), 'PK');
+    const ufile = path.join(dir, 'popups.html');
+    fs.writeFileSync(ufile, buildHtml([ups.conversation], '2026-11-05T12:00:00Z', () => ups.ctx));
+    const pop = await open({}, 'file://' + ufile);
+    const chip = (p, name) => p.page.locator(`.chip:has(b:text-is(${JSON.stringify(name)}))`);
+    const dialog = p => p.page.locator('[role="dialog"]');
+    const hashBefore = await atHash(pop);
+    check('popup: five uploads and one attachment are chips', (await pop.page.locator('#chat .chips .chip').count()) === 6);
+    check('popup: chips are buttons', (await pop.page.locator('#chat .chips button.chip').count()) === 6);
+    check('popup: no dialog before a click', (await dialog(pop).count()) === 0);
+
+    await chip(pop, 'photo.png').click();
+    await dialog(pop).waitFor();
+    check('popup: it is a modal dialog', (await dialog(pop).getAttribute('aria-modal')) === 'true');
+    check('popup: the dialog is named by the file', (await dialog(pop).getAttribute('aria-label')) === 'photo.png');
+    check('popup: the page behind is inert', await pop.page.$eval('#app', a => a.inert === true));
+    check('popup: focus moved into the dialog', await pop.page.evaluate(() => !!document.activeElement.closest('[role="dialog"]')));
+    await pop.page.waitForFunction(() => { const i = document.querySelector('[role="dialog"] img'); return i && i.complete; });
+    check('popup: an image shows', await pop.page.$eval('[role="dialog"] img', i => i.naturalWidth > 0 && i.getAttribute('src') === 'uploads/p01_photo.png'));
+    check('popup: an image offers Open file', (await dialog(pop).locator('a:text-is("Open file")').getAttribute('href')) === 'uploads/p01_photo.png');
+    for (let i = 0; i < 6; i++) await pop.page.keyboard.press('Tab');
+    check('popup: Tab stays in the dialog', await pop.page.evaluate(() => !!document.activeElement.closest('[role="dialog"]')));
+    await pop.page.keyboard.press('Shift+Tab');
+    await pop.page.keyboard.press('Shift+Tab');
+    await pop.page.keyboard.press('Shift+Tab');
+    check('popup: Shift+Tab stays in the dialog', await pop.page.evaluate(() => !!document.activeElement.closest('[role="dialog"]')));
+    await pop.page.keyboard.press('Escape');
+    check('popup: Escape closes it', (await dialog(pop).count()) === 0);
+    check('popup: focus returns to the chip', await pop.page.evaluate(() => document.activeElement.querySelector('b') && document.activeElement.querySelector('b').textContent === 'photo.png'));
+    check('popup: the page is live again', await pop.page.$eval('#app', a => a.inert === false));
+
+    await chip(pop, 'page.html').click();
+    await dialog(pop).waitFor();
+    const source = await dialog(pop).locator('pre').textContent();
+    check('popup: uploaded html shows as source', source === UPLOAD_HTML, source);
+    await pop.page.waitForTimeout(200);
+    check('popup: uploaded html never ran', !(await pop.page.evaluate(() => !!window.__hit)) && (await dialog(pop).locator('h1, script, iframe, img').count()) === 0);
+    check('popup: text has no Open file', (await dialog(pop).locator('a').count()) === 0);
+    await dialog(pop).locator('.close').click();
+    check('popup: the close button closes it', (await dialog(pop).count()) === 0);
+
+    await chip(pop, 'pasted.txt').click();
+    await dialog(pop).waitFor();
+    check('popup: an attachment shows its text literally', (await dialog(pop).locator('pre').textContent()) === 'line one\nline two <b>literal</b>' && (await dialog(pop).locator('pre b').count()) === 0);
+    await pop.page.mouse.click(5, 5);
+    check('popup: a click outside closes it', (await dialog(pop).count()) === 0);
+
+    await chip(pop, 'paper.pdf').click();
+    await dialog(pop).waitFor();
+    check('popup: a pdf is a frame', await pop.page.$eval('[role="dialog"] iframe', f => f.getAttribute('src') === 'uploads/p01_paper.pdf' && !f.hasAttribute('srcdoc')));
+    await pop.page.click('[role="dialog"]', { position: { x: 20, y: 20 } });
+    check('popup: a click inside does not close it', (await dialog(pop).count()) === 1);
+    await pop.page.keyboard.press('Escape');
+
+    await chip(pop, 'minutes.odt').click();
+    await dialog(pop).waitFor();
+    check('popup: an odt shows details and a link', (await dialog(pop).locator('.file-details b').textContent()) === 'minutes.odt' && (await dialog(pop).locator('a.file-open').getAttribute('href')) === 'uploads/p01_minutes.odt');
+    check('popup: the link opens a new tab safely', await dialog(pop).locator('a.file-open').evaluate(a => a.target === '_blank' && /noopener/.test(a.rel)));
+    await pop.page.keyboard.press('Escape');
+
+    await chip(pop, 'lost.csv').click();
+    await dialog(pop).waitFor();
+    check('popup: a missing upload says so', (await dialog(pop).textContent()).includes('This file is not in this export.') && (await dialog(pop).locator('a').count()) === 0);
+    await pop.page.keyboard.press('Escape');
+    check('popup: opening and closing leaves the hash alone', (await atHash(pop)) === hashBefore && await pop.page.$eval('#panel', n => n.hidden));
+
+    const project = pop.page.locator('#project');
+    check('project: the section is under the top bar', await project.evaluate(n => n.tagName === 'DETAILS' && !n.hidden && !n.open && n.getBoundingClientRect().top >= document.getElementById('top').getBoundingClientRect().bottom - 1));
+    check('project: it names the project', (await project.locator('summary').textContent()).includes('Budget project'));
+    await project.locator('summary').click();
+    check('project: it lists files and documents', (await project.locator('button.chip').allTextContents()).join('|').includes('spec.pdf') && (await project.locator('button.chip').count()) === 3);
+    await project.locator('button.chip:has(b:text-is("spec.pdf"))').click();
+    await dialog(pop).waitFor();
+    check('project: a file opens in the popup', await pop.page.$eval('[role="dialog"] iframe', f => f.getAttribute('src') === 'project/files/spec.pdf'));
+    await pop.page.keyboard.press('Escape');
+    await project.locator('button.chip:has(b:text-is("data.zip"))').click();
+    await dialog(pop).waitFor();
+    check('project: a zip shows a link', (await dialog(pop).locator('a.file-open').getAttribute('href')) === 'project/files/data.zip');
+    await pop.page.keyboard.press('Escape');
+    await project.locator('button.chip:has(b:text-is("Brief"))').click();
+    await dialog(pop).waitFor();
+    check('project: a document shows its text literally', (await dialog(pop).locator('pre').textContent()) === 'Be <i>kind</i>.\nSecond line.' && (await dialog(pop).locator('i').count()) === 0);
+    await pop.page.keyboard.press('Escape');
+    clean('popups', pop.seen);
+
+    const noProject = await open({}, url);
+    check('project: hidden for a chat without one', await noProject.page.$eval('#project', n => n.hidden));
+    const phoneP = await open({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }, 'file://' + ufile);
+    await phoneP.page.locator('.chip:has(b:text-is("photo.png"))').tap();
+    await dialog(phoneP).waitFor();
+    check('phone: the popup fits the screen', await phoneP.page.$eval('[role="dialog"]', n => { const r = n.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; }));
+    check('phone: no sideways scroll with the popup', await phoneP.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
 
     if (process.env.SHOT_DIR) {
       const out = n => path.join(process.env.SHOT_DIR, n);

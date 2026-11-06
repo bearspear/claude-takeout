@@ -214,6 +214,26 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
 .file-open { margin-top: 10px; padding: 5px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 13px; color: var(--ink); text-decoration: none; }
 .file-open:hover { background: var(--hover); }
 .file-missing { margin: auto; padding: 24px; font-size: 13.5px; color: var(--mute); text-align: center; }
+/* Project files, collapsed under the top bar */
+#project { flex: none; border-bottom: 1px solid var(--line); background: var(--bg); padding: 0 20px; position: relative; z-index: 2; }
+#project[hidden] { display: none; }
+#project summary { display: flex; align-items: center; gap: 7px; list-style: none; cursor: pointer; padding: 7px 0; font-size: 13px; color: var(--mute); }
+#project summary::-webkit-details-marker { display: none; }
+#project summary:hover { color: var(--ink); }
+#project .chev { width: 13px; height: 13px; transition: transform .14s; }
+#project[open] .chev { transform: rotate(90deg); }
+#project .chips { justify-content: flex-start; padding: 2px 0 12px; max-height: 40vh; overflow-y: auto; }
+button.chip { font: inherit; color: inherit; text-align: left; cursor: pointer; }
+button.chip:hover { border-color: var(--line-strong); }
+
+/* A popup over the chat: uploads, pasted files and project files */
+.veil { position: fixed; inset: 0; z-index: 20; background: rgba(40, 35, 25, .42); display: flex; align-items: center; justify-content: center; }
+.pop { width: min(860px, 92vw); height: 82vh; background: var(--card); color: var(--ink); border-radius: 12px; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 12px 40px rgba(0, 0, 0, .25); }
+.pop:focus { outline: none; }
+.pop-head { height: 44px; flex: none; display: flex; align-items: center; gap: 8px; padding: 0 12px 0 16px; border-bottom: 1px solid var(--line); }
+.pop-title { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pop-head .file-open { margin: 0; padding: 2px 8px; font-size: 12px; color: var(--mute); border-radius: 7px; border-color: var(--line); }
+.pop-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
 /* Too narrow for both: the panel covers the chat and leaves the sidebar */
 @media (max-width: 1100px) {
   #panel { position: fixed; top: 0; bottom: 0; right: 0; left: 272px; width: auto; z-index: 8; border-left: 1px solid var(--line); }
@@ -264,6 +284,7 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
       <h1 id="title"></h1>
       <span id="meta"></span>
     </header>
+    <details id="project" hidden></details>
     <div id="scroll"><div id="chat"></div></div>
   </main>
   <aside id="panel" aria-label="File" hidden>

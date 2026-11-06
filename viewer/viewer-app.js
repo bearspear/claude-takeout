@@ -185,8 +185,13 @@ function renderSources(sources) {
   return box;
 }
 
-function fileChip(name, note) {
-  const chip = el('div', 'chip');
+// item: { name, href, text } as the popup shows it.
+function fileChip(item, note) {
+  const name = item.name;
+  const chip = el('button', 'chip');
+  chip.type = 'button';
+  chip.setAttribute('aria-haspopup', 'dialog');
+  chip.addEventListener('click', () => openPopup(item, chip));
   const tile = el('span', 'tile');
   tile.append(icon('file'));
   const txt = el('span', 'txt');
@@ -206,8 +211,8 @@ function fileNote(name, text) {
 function renderHuman(m) {
   const node = el('section', 'msg human');
   const chips = [
-    ...(m.uploads || []).map(u => fileChip(u.name, fileNote(u.name, u.text))),
-    ...(m.attachments || []).map(a => fileChip(a.name, fileNote(a.name, a.text))),
+    ...(m.uploads || []).map(u => fileChip(u, fileNote(u.name, u.text))),
+    ...(m.attachments || []).map(a => fileChip({ name: a.name, href: null, text: a.text }, fileNote(a.name, a.text))),
   ];
   if (chips.length) {
     const row = el('div', 'chips');
@@ -217,6 +222,125 @@ function renderHuman(m) {
   const text = m.blocks.filter(b => b.t === 'text').map(b => b.text).join('\n\n');
   if (text) node.append(el('div', 'bubble', text));
   return chips.length || text ? node : null;
+}
+
+// The popup. Uploaded text only ever goes in through textContent, so an uploaded .html is source, never a page.
+// Images and PDFs are chosen by name; the page's CSP allows them from file: only.
+const POPUP_IMAGE = /\.(?:png|jpe?g|gif|webp)$/i;
+const POPUP_PDF = /\.pdf$/i;
+let popup = null; // { veil, trigger }
+
+function openLink(href) {
+  const link = el('a', 'file-open', 'Open file');
+  link.setAttribute('href', href);
+  link.setAttribute('target', '_blank');
+  link.setAttribute('rel', 'noopener');
+  return link;
+}
+
+// Returns the body nodes and, for a file the header can offer, a link.
+function popupContent(item) {
+  const name = item.name || 'Untitled';
+  if (typeof item.text === 'string') {
+    const code = el('pre', 'file-code');
+    code.textContent = item.text;
+    return { nodes: [code] };
+  }
+  if (!item.href) return { nodes: [el('div', 'file-missing', 'This file is not in this export.')] };
+  if (POPUP_IMAGE.test(name)) {
+    const img = el('img', 'file-image');
+    img.setAttribute('alt', name);
+    img.setAttribute('src', item.href);
+    const paper = el('div', 'file-paper');
+    paper.append(img);
+    return { nodes: [paper], link: openableHref(item.href) ? openLink(item.href) : null };
+  }
+  if (POPUP_PDF.test(name)) {
+    const frame = el('iframe', 'preview');
+    frame.setAttribute('title', name);
+    frame.setAttribute('src', item.href);
+    return { nodes: [frame], link: openableHref(item.href) ? openLink(item.href) : null };
+  }
+  const ext = (/\.([a-z0-9]{1,10})$/i.exec(name) || [])[1];
+  const box = el('div', 'file-details');
+  const tile = el('span', 'tile');
+  tile.append(icon('file'));
+  box.append(tile, el('b', '', name), el('small', '', ext ? `${ext.toUpperCase()} file` : 'File'));
+  if (openableHref(item.href)) box.append(openLink(item.href));
+  else box.append(el('p', '', "This file can't open from the viewer. It's in this export's folder."));
+  return { nodes: [box] };
+}
+
+function closePopup() {
+  if (!popup) return;
+  const { veil, trigger } = popup;
+  popup = null;
+  veil.remove();
+  document.getElementById('app').inert = false;
+  if (document.contains(trigger)) trigger.focus({ preventScroll: true });
+}
+
+function popupKeys(e) {
+  if (e.key === 'Escape') { e.preventDefault(); closePopup(); return; }
+  if (e.key !== 'Tab') return;
+  const pop = popup.veil.firstElementChild;
+  const stops = [...pop.querySelectorAll('a[href], button')];
+  const last = stops.length - 1;
+  const at = stops.indexOf(document.activeElement);
+  if (!stops.length) { e.preventDefault(); pop.focus(); }
+  else if (e.shiftKey && at <= 0) { e.preventDefault(); stops[last].focus(); }
+  else if (!e.shiftKey && at === last) { e.preventDefault(); stops[0].focus(); }
+}
+
+function openPopup(item, trigger) {
+  closePopup();
+  const { nodes, link } = popupContent(item);
+  const pop = el('div', 'pop');
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-modal', 'true');
+  pop.setAttribute('aria-label', item.name || 'Untitled');
+  pop.tabIndex = -1;
+  const close = el('button', 'close');
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Close');
+  close.append(icon('close'));
+  close.addEventListener('click', closePopup);
+  const head = el('div', 'pop-head');
+  head.append(el('b', 'pop-title', item.name || 'Untitled'), ...(link ? [link] : []), close);
+  const body = el('div', 'pop-body');
+  body.append(...nodes);
+  pop.append(head, body);
+  const veil = el('div', 'veil');
+  veil.append(pop);
+  veil.addEventListener('click', e => { if (e.target === veil) closePopup(); });
+  veil.addEventListener('keydown', popupKeys);
+  document.body.append(veil);
+  document.getElementById('app').inert = true;
+  popup = { veil, trigger };
+  pop.focus({ preventScroll: true });
+}
+
+// The project's files and documents, under the top bar. Rebuilt only for another chat, so it stays open.
+let projectFor = null;
+function renderProject(chat) {
+  if (projectFor === chat.id) return;
+  projectFor = chat.id;
+  const box = document.getElementById('project');
+  const project = chat.project;
+  const items = project ? [
+    ...(project.files || []).map(f => ({ name: f.name, href: f.href, text: null })),
+    ...(project.docs || []).map(d => ({ name: d.name, href: null, text: d.text })),
+  ] : [];
+  box.hidden = !items.length;
+  box.open = false;
+  box.replaceChildren();
+  if (!items.length) return;
+  const summary = el('summary');
+  summary.append(icon('chevron'), el('span', '', `Project · ${project.name || 'Untitled'} · ${items.length} item${items.length === 1 ? '' : 's'}`));
+  summary.firstChild.classList.add('chev');
+  const row = el('div', 'chips');
+  row.append(...items.map(item => fileChip(item, fileNote(item.name, item.text))));
+  box.append(summary, row);
 }
 
 function renderCard(block, chat) {
@@ -308,6 +432,7 @@ function renderChat(chat, leaf = chat.leaf, anchor = null) {
   const box = document.getElementById('chat');
   const scroll = document.getElementById('scroll');
   const title = chat.title || 'Untitled';
+  renderProject(chat);
   box.replaceChildren();
   if (!anchor) scroll.scrollTop = 0;
   document.getElementById('title').textContent = title;

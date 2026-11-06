@@ -14,10 +14,14 @@
 //   assembleViewer({template, css, marked, katex, logic, app, data})  one self-contained HTML string
 //   VIEWER_ASSETS                      paths of the six viewer files
 //   TOOL_TEXT_LIMIT                    longest tool result text kept
+//   TEXT_EMBED_LIMIT                   longest upload or project text a caller should pass in ctx
+//   ctx.uploads: file uuid (or file name when there is none) to { path: 'uploads/<name>', text: string|null }
+//   ctx.project: { name, fileDir, fileNames, docs: [{ name, text }] }, fileDir relative to the chat folder
 (function (root) {
   'use strict';
 
   const TOOL_TEXT_LIMIT = 20000;
+  const TEXT_EMBED_LIMIT = 2 * 1024 * 1024; // longest upload or project text a caller should embed
   const SAFE_IMAGE = /^image\/(png|jpeg|gif|webp)$/;
 
   const VIEWER_ASSETS = [
@@ -275,6 +279,37 @@
     return files;
   }
 
+  // files and files_v2 both list uploads; one may carry no UUID, so the name keys it. Once per key per message.
+  function buildUploads(m, c) {
+    const known = c.uploads || {};
+    const seen = new Set();
+    const out = [];
+    for (const f of [...(m.files || []), ...(m.files_v2 || [])]) {
+      if (!f) continue;
+      const name = f.file_name || baseName(f.path);
+      const key = f.file_uuid || name;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const hit = Object.prototype.hasOwnProperty.call(known, key) ? known[key] : null;
+      out.push({
+        name,
+        href: hit && hit.path ? relHref(c.folder, hit.path) : null,
+        text: hit && typeof hit.text === 'string' ? hit.text : null
+      });
+    }
+    return out;
+  }
+
+  function buildProject(p, folder) {
+    if (!p) return null;
+    const dir = joinPath(folder, p.fileDir);
+    return {
+      name: p.name || '',
+      files: (p.fileNames || []).map(name => ({ name, href: relHref(dir, name) })),
+      docs: (p.docs || []).map(d => ({ name: d.name || '', text: String(d.text == null ? '' : d.text) }))
+    };
+  }
+
   function buildViewerChat(data, ctx) {
     const c = ctx || {};
     const fix = typeof c.fixText === 'function' ? c.fixText : (s => s);
@@ -299,7 +334,7 @@
       }
       return {
         id: m.uuid, parent: m.parent_message_uuid || null, sender: m.sender, at: m.created_at,
-        blocks, uploads: [],
+        blocks, uploads: buildUploads(m, c),
         attachments: (m.attachments || []).map(a => ({ name: a.file_name || '', text: fix(a.extracted_content || '') }))
       };
     });
@@ -322,7 +357,7 @@
     return {
       id: data.uuid, title: data.name || '', model: c.model || data.model || '',
       created: data.created_at, updated: data.updated_at, leaf: data.current_leaf_message_uuid || null,
-      messages, files, project: null
+      messages, files, project: buildProject(c.project, c.folder)
     };
   }
 
@@ -377,7 +412,7 @@
     return String(template).replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
-  const api = { buildViewerChat, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, TOOL_TEXT_LIMIT };
+  const api = { buildViewerChat, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT };
   root.CTViewer = Object.assign(root.CTViewer || {}, api);
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);

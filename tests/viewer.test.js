@@ -581,3 +581,49 @@ test('openableHref never offers something a browser would run as a page', () => 
   }
   for (const h of ['artefacts/a.zip', 'a.pdf', 'a.tar.gz', 'dir.html/a.zip']) assert.strictEqual(openableHref(h), true, h);
 });
+
+// Uploads, attachments and project files.
+function uploadChat(files, filesV2) {
+  const c = JSON.parse(JSON.stringify(fixture));
+  const m = c.chat_messages.find(x => x.uuid === 'm01');
+  m.files = files;
+  m.files_v2 = filesV2;
+  return { c, of: chat => chat.messages.find(x => x.id === 'm01') };
+}
+
+test('TEXT_EMBED_LIMIT is 2 MB', () => {
+  assert.strictEqual(V.TEXT_EMBED_LIMIT, 2 * 1024 * 1024);
+});
+
+test('uploads from files and files_v2 land on their message, once per key', () => {
+  const { c, of } = uploadChat(
+    [{ file_uuid: 'u1', file_name: 'a.png' }, { path: '/mnt/user-data/uploads/old one.txt' }],
+    [{ file_uuid: 'u1', file_name: 'a.png' }, { file_uuid: 'u2', file_name: 'b.pdf' }, { file_uuid: 'u3', file_name: 'gone.pdf' }]);
+  const ctx = { folder: 'A B', uploads: { u1: { path: 'uploads/p01_a.png', text: null }, u2: { path: 'uploads/p01_b.pdf', text: null }, 'old one.txt': { path: 'uploads/p01_old one.txt', text: 'hi' } } };
+  const chat = buildViewerChat(c, ctx);
+  assert.deepStrictEqual(of(chat).uploads, [
+    { name: 'a.png', href: 'A%20B/uploads/p01_a.png', text: null },
+    { name: 'old one.txt', href: 'A%20B/uploads/p01_old%20one.txt', text: 'hi' },
+    { name: 'b.pdf', href: 'A%20B/uploads/p01_b.pdf', text: null },
+    { name: 'gone.pdf', href: null, text: null },
+  ]);
+});
+
+test('without ctx.uploads every upload is not in the export', () => {
+  const { c, of } = uploadChat([], [{ file_uuid: 'u1', file_name: 'a.png' }]);
+  assert.deepStrictEqual(of(buildViewerChat(c, {})).uploads, [{ name: 'a.png', href: null, text: null }]);
+});
+
+test('attachments pass their text through fixText', () => {
+  const chat = buildViewerChat(fixture, { fixText: s => s + '!' });
+  assert.deepStrictEqual(chat.messages.find(x => x.id === 'm03').attachments, [{ name: 'notes.txt', text: 'pasted notes!' }]);
+});
+
+test('project files link under the chat folder or the shared projects folder', () => {
+  const docs = [{ name: 'Brief', text: 'Be kind' }];
+  const own = buildViewerChat(fixture, { folder: '', project: { name: 'P', fileDir: 'project/files', fileNames: ['x.pdf', 'a b.txt'], docs } }).project;
+  assert.deepStrictEqual(own, { name: 'P', files: [{ name: 'x.pdf', href: 'project/files/x.pdf' }, { name: 'a b.txt', href: 'project/files/a%20b.txt' }], docs });
+  const shared = buildViewerChat(fixture, { folder: 'A', project: { name: 'P', fileDir: '../projects/P/files', fileNames: ['x.pdf'], docs: [] } }).project;
+  assert.deepStrictEqual(shared.files, [{ name: 'x.pdf', href: 'projects/P/files/x.pdf' }]);
+  assert.strictEqual(buildViewerChat(fixture, {}).project, null);
+});
