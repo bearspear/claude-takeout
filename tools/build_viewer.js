@@ -135,6 +135,8 @@ function inspectRoot(root, force) {
 
   if (!viewer) {
     const stray = gif ? CTViewer.VIEWER_CHECK_FILE : parts ? PARTS_DIR + '/' : null;
+    // Our own gif left behind by a deleted viewer.html is no one's file: it is rewritten with the viewer.
+    if (gif && !parts && isOurGif(gifPath, gif)) return { viewer: false, gif: true, parts: false };
     if (stray) return { stop: 'failed', reason: `${stray} is here with no viewer.html, so it counts as your file and was left alone` };
     return { viewer: false, gif: false, parts: false };
   }
@@ -163,7 +165,8 @@ async function collectChats(archive, report) {
       for (const file of built.missing) report.missing.push({ chat: chat.relDir, file });
       for (const w of built.warnings) report.warnings.push(`${chat.relDir}: ${w}`);
     } catch (e) {
-      report.failedChats.push({ chat: chat.relDir, reason: e.message });
+      if (e instanceof lib.NotAChat) report.skippedChats.push({ path: chat.dir, reason: 'not a Claude chat' });
+      else report.failedChats.push({ chat: chat.relDir, reason: e.message });
     }
   }
   return { chats, idByDir };
@@ -229,7 +232,7 @@ function install(root, tmp, old, report) {
 
 // Never rejects: a bad archive is a report, and the run goes on.
 async function writeViewer(archive, { force = false, dryRun = false } = {}) {
-  const report = { root: archive.root, kind: archive.kind, status: 'failed', reason: '', chats: 0, failedChats: [], missing: [], added: 0, notices: [], warnings: [], dryRun };
+  const report = { root: archive.root, kind: archive.kind, status: 'failed', reason: '', chats: 0, failedChats: [], skippedChats: [], missing: [], added: 0, notices: [], warnings: [], dryRun };
   const finish = (status, reason = '') => Object.assign(report, { status, reason });
   const temps = [];
   try {
@@ -253,6 +256,7 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
 
     const { chats, idByDir } = await collectChats(archive, report);
     report.chats = chats.length;
+    if (!chats.length && report.skippedChats.length && !report.failedChats.length) return finish('skipped', 'no Claude chats in it');
     if (!chats.length) return finish('failed', 'no chat could be read, so no viewer was written');
 
     if (dryRun) return finish('written', old.viewer ? 'would replace the viewer' : '');
@@ -328,6 +332,7 @@ async function processZip(zip, { outDir, force, dryRun, claims }) {
       if (stop.requested) break;
       entry.archives.push(await writeViewer(archive, { force }));
     }
+    entry.skipped.push(...entry.archives.flatMap(a => a.skippedChats));
     if (stop.requested) return finish('failed', `stopped by a signal, after it was extracted to ${entry.dest}. To finish, run the tool on that folder.`);
     if (entry.archives.some(a => a.status === 'failed')) return finish('failed', 'a viewer could not be written');
     return entry.archives.length ? finish('written') : finish('skipped', 'extracted, but no Claude chat was found');
@@ -398,7 +403,7 @@ async function run(folder, { out = null, force = false, dryRun = false } = {}) {
     !every.some(a => a.status === 'failed' || a.failedChats.length) &&
     !zips.some(z => z.status === 'failed' || z.rejected.length) &&
     !allSkipped.some(s => s.reason.startsWith('unreadable'));
-  return { folder: input, out: outDir, force, dryRun, ok, stopped: stop.requested, notRun, archives, zips, skipped: found.skipped };
+  return { folder: input, out: outDir, force, dryRun, ok, stopped: stop.requested, notRun, archives, zips, skipped: [...found.skipped, ...archives.flatMap(a => a.skippedChats)] };
 }
 
 function archiveLine(a) {
@@ -476,7 +481,10 @@ async function main(argv) {
   }
   if (args.positionals.length !== 1) return fail(USAGE);
   const { out, force, 'dry-run': dryRun } = args.values;
-  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { stop.requested = true; });
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => {
+    if (stop.requested) process.exit(130); // a second signal: some steps have no stop point
+    stop.requested = true;
+  });
   try {
     const report = await run(args.positionals[0], { out, force: !!force, dryRun: !!dryRun });
     console.log(json ? JSON.stringify(report) : formatReport(report));

@@ -931,7 +931,7 @@ test('viewer-check.gif or viewer-files that are not ours fail the archive and st
   const marked = '<meta name="generator" content="Claude Takeout">';
   const gif = Buffer.from(CTViewer.VIEWER_CHECK_BASE64, 'base64');
   const cases = [
-    ['gif with no viewer', { 'viewer-check.gif': gif }, false, /viewer-check\.gif/],
+    ['a gif that is not ours, with no viewer', { 'viewer-check.gif': Buffer.concat([gif, Buffer.from('x')]) }, false, /viewer-check\.gif/],
     ['parts with no viewer', { 'viewer-files/part-0001.js': 'x' }, false, /viewer-files/],
     ['owner gif beside a marked viewer', { 'viewer.html': marked, 'viewer-check.gif': 'my drawing' }, true, /viewer-check\.gif/],
     ['owner notes in viewer-files', { 'viewer.html': marked, 'viewer-files/notes.md': 'mine' }, true, /viewer-files/],
@@ -1643,4 +1643,95 @@ test('--force keeps the aside folder if a file appeared in it during the run', a
   assert.strictEqual(res.status, 'written', res.reason);
   assert.ok(aside && fs.readFileSync(path.join(aside, 'dropped.md'), 'utf8') === 'mine');
   assert.ok(res.notices.some(n => n.includes(path.basename(aside))), JSON.stringify(res));
+});
+
+// ---- final review fixes ----
+test('a non-chat original.json over 64 KB gets no viewer, exits 0 and is listed as skipped', () => {
+  const tmp = tmpRoot();
+  put(tmp, 'a/original.json', JSON.stringify({ unrelated: 'x'.repeat(70000) }));
+  const before = hashTree(tmp);
+  const r = cli(tmp, '--json');
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  assert.deepStrictEqual(hashTree(tmp), before);
+  const report = JSON.parse(r.stdout);
+  assert.deepStrictEqual(report.archives.map(a => a.status), ['skipped']);
+  assert.deepStrictEqual(report.archives[0].failedChats, []);
+  assert.ok(report.skipped.some(s => s.path === path.join(tmp, 'a') && s.reason === 'not a Claude chat'), r.stdout);
+});
+
+test('a big non-chat next to a real chat is skipped while the real chat gets its viewer', () => {
+  const tmp = tmpRoot();
+  put(tmp, 'mega/index.md');
+  put(tmp, 'mega/real/original.json', chatJson('r1'));
+  put(tmp, 'mega/other/original.json', JSON.stringify([1, 2, 3, 'x'.repeat(70000)]));
+  const r = cli(tmp, '--json');
+  assert.strictEqual(r.status, 0, r.stdout + r.stderr);
+  const report = JSON.parse(r.stdout);
+  assert.strictEqual(report.archives[0].status, 'written');
+  assert.strictEqual(report.archives[0].chats, 1);
+  assert.ok(report.skipped.some(s => s.path === path.join(tmp, 'mega', 'other')), r.stdout);
+});
+
+test('a second signal ends the run at once with exit 130', async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => {
+    z.file('original.json', chatJson('z1'));
+    for (let i = 0; i < 6000; i++) z.file(`notes/n${i}.md`, 'x'.repeat(4096));
+  }, 'big.zip');
+  const out = path.join(tmp, 'out');
+  const child = spawn(process.execPath, [TOOL_PATH, input, '--out', out, '--json'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let closed = false;
+  const done = new Promise(resolve => child.on('close', (code, sig) => { closed = true; resolve({ code, sig }); }));
+  while (!closed && !fs.existsSync(path.join(out, 'big.partial'))) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.ok(!closed, 'the run ended before the signal could be sent');
+  child.kill('SIGINT');
+  await new Promise(resolve => setTimeout(resolve, 5));
+  if (!closed) child.kill('SIGINT');
+  const { code } = await done;
+  assert.strictEqual(code, 130);
+});
+
+test('--force: viewer.html deleted with our viewer-check.gif left behind is replaced, not a dead end', async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  put(root, 'original.json', chatJson('s1'));
+  assert.strictEqual((await writeViewer(single(root), {})).status, 'written');
+  fs.unlinkSync(path.join(root, 'viewer.html'));
+  const res = await writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  assert.ok(fs.existsSync(path.join(root, 'viewer.html')));
+});
+
+test('a viewer-check.gif that is not ours with no viewer.html is still left alone', async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  put(root, 'original.json', chatJson('s1'));
+  put(root, 'viewer-check.gif', 'mine');
+  const res = await writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'failed');
+  assert.strictEqual(fs.readFileSync(path.join(root, 'viewer-check.gif'), 'utf8'), 'mine');
+  assert.ok(!fs.existsSync(path.join(root, 'viewer.html')));
+});
+
+test('a mega whose index.md was removed still finds the shared project files', () => {
+  const parent = tmpRoot();
+  put(parent, 'c/original.json', JSON.stringify({ uuid: 'u', project_uuid: 'P', project: { uuid: 'P', name: 'Shared' }, chat_messages: [] }));
+  put(parent, 'c/README.md', '- [Paper.pdf](../projects/My%20Proj/files/Paper.pdf)\n');
+  put(parent, 'projects/My Proj/files/Paper.pdf', 'pdf');
+  const archive = findArchives(parent).archives.find(a => a.root === path.join(parent, 'c'));
+  assert.ok(archive, 'the chat folder is a single archive');
+  const got = chatFromDisk(archive, archive.chats[0]);
+  assert.deepStrictEqual(got.viewerChat.project.files.map(f => f.name), ['Paper.pdf']);
+  assert.ok(!got.warnings.some(w => /projects/.test(w)), got.warnings.join('|'));
+});
+
+test('a README project link that points nowhere is a warning', () => {
+  const dir = tmpRoot();
+  put(dir, 'original.json', JSON.stringify({ uuid: 'u', project_uuid: 'P', chat_messages: [] }));
+  put(dir, 'README.md', '- [Paper.pdf](../projects/Gone/files/Paper.pdf)\n');
+  const archive = singleOf(dir);
+  const got = chatFromDisk(archive, archive.chats[0]);
+  assert.ok(got.warnings.some(w => /projects\/Gone/.test(w)), got.warnings.join('|'));
 });

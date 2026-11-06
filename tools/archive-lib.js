@@ -251,6 +251,9 @@ function readText(file) {
   try { return stripBom(fs.readFileSync(file, 'utf8')); } catch (e) { return null; }
 }
 
+// original.json parsed fine but is not a Claude chat (looksLikeChat can't tell from the head of a big file).
+class NotAChat extends Error {}
+
 function readChatJson(dir) {
   const file = path.join(dir, 'original.json');
   try {
@@ -277,6 +280,9 @@ const PROJECT_META_FILES = ['project.json', 'docs.json', 'files.json', 'prompt_t
 // Returns { viewerChat, missing, warnings }. Throws only when original.json can't be read or parsed.
 function chatFromDisk(archive, chat) {
   const data = readChatJson(chat.dir);
+  if (!data || typeof data !== 'object' || Array.isArray(data) || !Array.isArray(data.chat_messages)) {
+    throw new NotAChat('not a Claude chat');
+  }
   const warnings = [];
   const missing = [];
   // An odd shape in one extractor costs that detail, never the chat.
@@ -377,7 +383,13 @@ function chatFromDisk(archive, chat) {
     if (link) {
       let dir = link[1];
       try { dir = decodeURIComponent(dir); } catch (e) { /* keep it as written */ }
-      if (dir !== '.' && dir !== '..' && !/[\\/]/.test(dir) && isRealDir(path.join(archive.root, 'projects', dir))) fileDir = `../projects/${dir}/files`;
+      if (dir !== '.' && dir !== '..' && !/[\\/]/.test(dir)) {
+        // A mega whose index.md was removed is read as single chats, so projects/ sits beside the chat folder.
+        const shared = isRealDir(path.join(archive.root, 'projects', dir)) ||
+          (archive.kind === 'single' && isRealDir(path.resolve(chat.dir, '..', 'projects', dir)));
+        if (shared) fileDir = `../projects/${dir}/files`;
+        else warnings.push(`README.md links to projects/${dir}/files, which is not there, so project files are taken from project/files`);
+      }
     }
     const docs = {};
     for (const name of fileNames(projectDir)) {
@@ -408,4 +420,4 @@ function chatFromDisk(archive, chat) {
   return { viewerChat, missing, warnings };
 }
 
-module.exports = { findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, matchFile, stripBom, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
+module.exports = { findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, NotAChat, matchFile, stripBom, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };

@@ -58,6 +58,7 @@ function buildMojibakeMap() {
 
 // Lazy-loaded mojibake map
 let mojibakeMap = null;
+let mojibakeKeys = null;
 
 // Fix mojibake in text
 function fixMojibake(text) {
@@ -66,12 +67,11 @@ function fixMojibake(text) {
   // Build map on first use
   if (!mojibakeMap) {
     mojibakeMap = buildMojibakeMap();
+    // Sort by length (longest first) to handle multi-char sequences properly, once
+    mojibakeKeys = Object.keys(mojibakeMap).sort((a, b) => b.length - a.length);
   }
 
-  // Sort by length (longest first) to handle multi-char sequences properly
-  const sortedKeys = Object.keys(mojibakeMap).sort((a, b) => b.length - a.length);
-
-  for (const broken of sortedKeys) {
+  for (const broken of mojibakeKeys) {
     text = text.split(broken).join(mojibakeMap[broken]);
   }
 
