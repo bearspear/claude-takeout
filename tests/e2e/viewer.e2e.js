@@ -87,6 +87,7 @@ function richChat() {
   c.chat_messages.find(x => x.uuid === 'm06').content.push({ type: 'text', text: 'The wording is fixed.' });
   const shot = c.chat_messages.find(x => x.uuid === 'm08').content.find(b => b.tool_use_id === 't12');
   shot.content.push({ type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG.split(',')[1] } });
+  shot.content.push({ type: 'image', file_uuid: 'synthetic-file', preview_url: '/synthetic/preview', thumbnail_url: '/synthetic/thumb' });
   return c;
 }
 
@@ -427,6 +428,7 @@ async function unzipMegaZip(out) {
     check('Copy reports success', true);
 
     check('thinking and tools start collapsed', await page.$$eval('details.line', d => d.length > 8 && d.every(x => !x.open)));
+    check('missing image line hidden while collapsed', await page.$$eval('details.tool', d => { const x = d.filter(t => t.querySelector('.missing-image')); return x.length === 1 && !x[0].open && !x[0].querySelector('.missing-image').checkVisibility({ contentVisibilityAuto: true, visibilityProperty: true }); }));
     check('thinking line is labelled', (await page.textContent('details.thinking summary')).includes('Thought process'));
     await page.click('details.thinking summary');
     check('thinking expands on click', await page.$eval('details.thinking', d => d.open && d.textContent.includes('Then write it.') && d.querySelector('.line-text').offsetHeight > 0));
@@ -437,6 +439,9 @@ async function unzipMegaZip(out) {
     check('tool expands from the keyboard', await page.$eval('details.tool:nth-of-type(3)', d => d.open));
     const failing = await page.$$eval('details.tool', d => d.filter(x => x.querySelector('.fail')).map(x => x.textContent));
     check('failed tool calls say so', failing.length === 2, failing.join());
+    const missing = 'details.tool:has(.missing-image)';
+    await page.click(missing + ' summary');
+    check('missing image line shows after expanding', await page.$eval(missing, d => d.open && d.querySelector('.missing-image').textContent === 'Image not in this export' && d.querySelector('.missing-image').checkVisibility({ contentVisibilityAuto: true, visibilityProperty: true })));
     check('tool images show outside the fold', await page.$$eval('.tool-images img', i => i.length === 1 && !i[0].closest('details') && i[0].naturalWidth > 0));
     check('off-branch messages stay out', !(await page.textContent('#chat')).includes('abandoned'));
 

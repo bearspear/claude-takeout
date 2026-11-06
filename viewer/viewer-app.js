@@ -164,7 +164,9 @@ function renderTool(block) {
   const input = toolInputText(block.input);
   if (input) body.append(toolPart('Input', input));
   if (block.result) body.append(toolPart('Result', block.result, block.error));
-  if (!input && !block.result) body.append(el('div', 'line-text', 'No details in this export'));
+  const missing = block.missingImages || 0;
+  if (missing > 0) body.append(el('div', 'tool-part missing-image', missing === 1 ? 'Image not in this export' : `${missing} images not in this export`));
+  if (!input && !block.result && !missing) body.append(el('div', 'line-text', 'No details in this export'));
   const line = foldLine('tool', parts, body);
   const images = (block.images || []).filter(src => SAFE_IMAGE_URI.test(src));
   if (!images.length) return [line];

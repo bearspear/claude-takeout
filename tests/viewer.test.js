@@ -134,6 +134,23 @@ test('long tool results are cut and say so; only safe images and http(s) citatio
   assert.deepStrictEqual(text.cites, [{ end: 2, url: 'http://ok.example/', title: 'ok' }]);
 });
 
+test('tool blocks count result images that are not in the export', () => {
+  const png = { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } };
+  const link = () => ({ type: 'image', file_uuid: 'f-1', preview_url: '/synthetic/preview', thumbnail_url: '/synthetic/thumb' });
+  const tool = items => buildViewerChat({
+    uuid: 'c', name: 'n', current_leaf_message_uuid: 'a',
+    chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant', content: [
+      { type: 'tool_use', id: 'u', name: 'view', input: { path: '/x' } },
+      { type: 'tool_result', tool_use_id: 'u', content: items }] }]
+  }, {}).messages[0].blocks[0];
+  assert.strictEqual(tool([{ type: 'text', text: 'ok' }, png]).missingImages, 0);
+  const one = tool([png, link()]);
+  assert.strictEqual(one.missingImages, 1);
+  assert.deepStrictEqual(one.images, ['data:image/png;base64,AAAA']);
+  assert.strictEqual(tool([link(), link()]).missingImages, 2);
+  assert.ok(!JSON.stringify(one).includes('f-1') && !JSON.stringify(one).includes('/synthetic'));
+});
+
 test('buildViewerData sorts newest first', () => {
   const mk = (id, updated) => ({ id, title: id, updated, messages: [] });
   const d = buildViewerData([mk('old', '2026-01-01'), mk('new', '2026-03-01'), mk('mid', '2026-02-01')], { exported: 'x' });

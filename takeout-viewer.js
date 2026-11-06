@@ -67,15 +67,17 @@
     const items = Array.isArray(content) ? content : (typeof content === 'string' ? [{ type: 'text', text: content }] : []);
     const texts = [];
     const images = [];
+    let imageItems = 0;
     for (const it of items) {
       if (!it || typeof it !== 'object') continue;
+      if (it.type === 'image') imageItems++;
       if (it.type === 'text' && typeof it.text === 'string') texts.push(it.text);
       else if (it.type === 'image' && it.source && it.source.type === 'base64' &&
                SAFE_IMAGE.test(String(it.source.media_type)) && /^[A-Za-z0-9+/=\s]*$/.test(String(it.source.data))) {
         images.push(`data:${it.source.media_type};base64,${it.source.data}`);
       }
     }
-    return { text: cut(texts.join('\n')), images };
+    return { text: cut(texts.join('\n')), images, missingImages: imageItems - images.length };
   }
 
   function buildCites(citations) {
@@ -334,7 +336,7 @@
         else if (b.type === 'thinking') blocks.push({ t: 'thinking', text: String(b.thinking || ''), summary: thinkingSummary(b) });
         else if (b.type === 'tool_use') {
           const input = compactInput(b.input);
-          const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), input, result: '', error: false, images: [] };
+          const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), input, result: '', error: false, images: [], missingImages: 0 };
           blocks.push(tool);
           blockOf.set(b, tool);
           if (b.id != null) toolById.set(b.id, tool);
@@ -353,9 +355,10 @@
         if (!b || b.type !== 'tool_result') continue;
         const tool = toolById.get(b.tool_use_id);
         if (!tool) continue;
-        const { text, images } = resultParts(b.content);
+        const { text, images, missingImages } = resultParts(b.content);
         tool.result = text;
         tool.images = images;
+        tool.missingImages = missingImages;
         tool.error = !!b.is_error;
       }
     }
