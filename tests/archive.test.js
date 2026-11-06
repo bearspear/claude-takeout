@@ -487,19 +487,26 @@ test('extractZip leaves the ZIP untouched and writes nothing beside it', async (
 });
 
 // JSZip normalizes '../x' away on write, so hand-build a stored ZIP with the exact names.
+const crc32 = buf => {
+  let c, crc = 0xffffffff;
+  for (const b of buf) { c = (crc ^ b) & 0xff; for (let k = 0; k < 8; k++) c = c & 1 ? (c >>> 1) ^ 0xedb88320 : c >>> 1; crc = (crc >>> 8) ^ c; }
+  return (crc ^ 0xffffffff) >>> 0;
+};
+// entries: [name, text, { deflate, lieSize }]; lieSize is written as the header's uncompressed size.
 const rawZip = entries => {
   const zlib = require('zlib');
   const locals = [], centrals = [];
   let off = 0;
-  for (const [name, text] of entries) {
-    const n = Buffer.from(name), d = Buffer.from(text);
-    const crc = zlib.crc32 ? zlib.crc32(d) : 0;
+  for (const [name, text, o = {}] of entries) {
+    const n = Buffer.from(name), raw = Buffer.from(text);
+    const d = o.deflate ? zlib.deflateRawSync(raw) : raw;
+    const crc = crc32(raw), usize = o.lieSize != null ? o.lieSize : raw.length, method = o.deflate ? 8 : 0;
     const l = Buffer.alloc(30);
-    l.writeUInt32LE(0x04034b50, 0); l.writeUInt16LE(20, 4); l.writeUInt32LE(crc, 14);
-    l.writeUInt32LE(d.length, 18); l.writeUInt32LE(d.length, 22); l.writeUInt16LE(n.length, 26);
+    l.writeUInt32LE(0x04034b50, 0); l.writeUInt16LE(20, 4); l.writeUInt16LE(method, 8); l.writeUInt32LE(crc, 14);
+    l.writeUInt32LE(d.length, 18); l.writeUInt32LE(usize, 22); l.writeUInt16LE(n.length, 26);
     const c = Buffer.alloc(46);
-    c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt32LE(crc, 16);
-    c.writeUInt32LE(d.length, 20); c.writeUInt32LE(d.length, 24); c.writeUInt16LE(n.length, 28); c.writeUInt32LE(off, 42);
+    c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt16LE(method, 10); c.writeUInt32LE(crc, 16);
+    c.writeUInt32LE(d.length, 20); c.writeUInt32LE(usize, 24); c.writeUInt16LE(n.length, 28); c.writeUInt32LE(off, 42);
     locals.push(l, n, d); centrals.push(c, n);
     off += 30 + n.length + d.length;
   }
@@ -588,4 +595,47 @@ test('zipFreeSpaceOk reports needed (+10%) and free', async () => {
   const r = await zipFreeSpaceOk(zp, path.join(tmp, 'not', 'yet', 'there'));
   assert.strictEqual(r.needed, 1100);
   assert.ok(r.free > 0 && r.ok === true);
+});
+
+test('extractZip lists a file-then-folder clash and keeps the rest', async () => {
+  const tmp = tmpRoot();
+  const zp = path.join(tmp, 'c.zip');
+  fs.writeFileSync(zp, rawZip([['a', 'file'], ['a/b', 'child'], ['good.txt', 'g']]));
+  const dest = path.join(tmp, 'out');
+  const res = await extractZip(zp, dest);
+  assert.deepStrictEqual(res.rejected, ['a/b']);
+  assert.strictEqual(res.files, 2);
+  assert.deepStrictEqual(fs.readdirSync(dest).sort(), ['a', 'good.txt']);
+  assert.ok(!fs.existsSync(dest + '.partial'));
+});
+
+test('extractZip lists names too long for the filesystem and keeps the rest', async () => {
+  const tmp = tmpRoot();
+  const long = 'x'.repeat(300) + '.txt';
+  const zp = path.join(tmp, 'l.zip');
+  fs.writeFileSync(zp, rawZip([[long, 'l'], ['d/' + 'y'.repeat(256), 'l'], ['good.txt', 'g']]));
+  const dest = path.join(tmp, 'out');
+  const res = await extractZip(zp, dest);
+  assert.deepStrictEqual(res.rejected.sort(), [long, 'd/' + 'y'.repeat(256)].sort());
+  assert.strictEqual(res.files, 1);
+  assert.ok(fs.existsSync(path.join(dest, 'good.txt')));
+});
+
+test('extractZip streaming guard catches a header that lies about size', async () => {
+  const tmp = tmpRoot();
+  const zp = path.join(tmp, 'lie.zip');
+  fs.writeFileSync(zp, rawZip([['big.txt', '\0'.repeat(4 * 1024 * 1024), { deflate: true, lieSize: 10 }]]));
+  const dest = path.join(tmp, 'out');
+  await assert.rejects(extractZip(zp, dest, { maxBytes: 1024 * 1024 }), /zip bomb/i);
+  assert.ok(!fs.existsSync(dest) && !fs.existsSync(dest + '.partial'));
+});
+
+test('extractZip keeps a decomposed name as stored', async () => {
+  const tmp = tmpRoot();
+  const name = 'Go\u0308del.txt';
+  const zp = await makeZip(tmp, z => z.file(name, 'g'));
+  const dest = path.join(tmp, 'out');
+  await extractZip(zp, dest);
+  const [got] = fs.readdirSync(dest);
+  assert.strictEqual(Buffer.from(got).toString('hex'), Buffer.from(name).toString('hex'));
 });

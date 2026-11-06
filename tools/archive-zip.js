@@ -11,6 +11,8 @@ const MAX_ZIP_BYTES = 2 * 1024 * 1024 * 1024;
 const GB = 1024 * 1024 * 1024;
 const SYMLINK = 0o120000;
 const TYPE_MASK = 0o170000;
+// Per-entry filesystem errors that mean this name can't be stored here; the rest of the ZIP goes on.
+const NAME_ERRORS = new Set(['EEXIST', 'ENOTDIR', 'ENAMETOOLONG', 'EISDIR', 'EINVAL']);
 
 const mb = n => (n / (1024 * 1024)).toFixed(1) + ' MB';
 
@@ -79,17 +81,25 @@ async function extractZip(zipPath, destDir, opts = {}) {
         continue;
       }
       const out = path.resolve(partial, name);
-      if (entry.dir) { fs.mkdirSync(out, { recursive: true }); continue; }
-      fs.mkdirSync(path.dirname(out), { recursive: true });
-      if (fs.existsSync(out)) { rejected.push(name); continue; } // duplicate entry name
-      const counter = new Transform({
-        transform(chunk, _enc, cb) {
-          bytes += chunk.length;
-          cb(bytes > maxBytes ? tooLarge() : null, chunk);
-        },
-      });
-      await pipeline(entry.nodeStream('nodebuffer'), counter, fs.createWriteStream(out, { flags: 'wx' }));
-      files++;
+      let wrote = false;
+      try {
+        if (entry.dir) { fs.mkdirSync(out, { recursive: true }); continue; }
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        if (fs.existsSync(out)) { rejected.push(name); continue; } // duplicate entry name
+        const counter = new Transform({
+          transform(chunk, _enc, cb) {
+            bytes += chunk.length;
+            cb(bytes > maxBytes ? tooLarge() : null, chunk);
+          },
+        });
+        wrote = true;
+        await pipeline(entry.nodeStream('nodebuffer'), counter, fs.createWriteStream(out, { flags: 'wx' }));
+        files++;
+      } catch (e) {
+        if (wrote) { try { fs.rmSync(out, { force: true }); } catch (_) { /* best effort */ } } // half-written file
+        if (!NAME_ERRORS.has(e.code)) throw e; // bomb error and anything unexpected
+        rejected.push(name);
+      }
     }
     fs.renameSync(partial, dest);
   } catch (e) {
