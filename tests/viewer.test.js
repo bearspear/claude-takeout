@@ -34,3 +34,15 @@ test('hash round trip and bad input', () => {
   assert.deepStrictEqual(parseHash(formatHash(s)), s);
   assert.deepStrictEqual(parseHash('#junk=%E0%A4'), { chat: null, leaf: null, file: null, version: null });
 });
+
+test('prototype-like ids are looked up safely', () => {
+  const newest = ['r', 'a2', 'h3', 'a4'];
+  assert.deepStrictEqual(chainFrom(msgs, '__proto__').map(m => m.id), newest);
+  assert.deepStrictEqual(chainFrom(msgs, 'constructor').map(m => m.id), newest);
+  assert.doesNotThrow(() => leafUnder(msgs, '__proto__'));
+  const odd = [{ id: 'r', parent: null, at: '1' }, { id: '__proto__', parent: 'r', at: '2' }, { id: 'k', parent: '__proto__', at: '3' }];
+  assert.deepStrictEqual(chainFrom(odd, '__proto__').map(m => m.id), ['r', '__proto__']);
+  assert.strictEqual(leafUnder(odd, '__proto__'), 'k');
+  assert.deepStrictEqual(chainFrom([{ id: 'z', parent: 'constructor', at: '1' }], 'z').map(m => m.id), ['z']);
+  assert.deepStrictEqual(siblingsOf([{ id: 'z', parent: 'constructor', at: '1' }], 'z'), { ids: ['z'], index: 0 });
+});
