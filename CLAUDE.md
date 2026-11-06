@@ -34,6 +34,12 @@ For deeper dives, two companion docs live alongside this one:
 | `jszip.min.js` | ZIP library (vendored). | Used by both single-ZIP and mega-ZIP exports. |
 | `extract_artifacts.py` | Stdlib-only Python port of `extractArtifacts`. | Reconstructs all per-turn artifact versions from `original.json` offline. Byte-identical output to the JS implementation. |
 | `replay_bash.py` | Stdlib-only Python CLI for post-export bash replay. | Reconstruction, isolated by `sandbox-exec` on macOS, of artifacts the declarative replay can't reach (anything Claude mutated via `bash_tool`). See §10 below and `docs/WASM_REPLAY_APPROACH.md`. |
+| `tools/archive-lib.js` | Archive scanning for the old-archive tool. | Finds archives by `original.json`, scans owner-added files, and holds the rules that keep every existing file unchanged. |
+| `tools/archive-zip.js` | ZIP extraction for the old-archive tool. | Extracts into a new folder under `--out`; refuses unsafe entries and checks free space. |
+| `tools/build_viewer.js` | CLI that gives older archives a viewer. | `node tools/build_viewer.js <folder> [--out] [--force] [--dry-run] [--json]`. Writes only `viewer.html`, `viewer-check.gif`, `viewer-files/`. Needs Node 20+. |
+| `tests/archive.test.js` | Unit tests for the three `tools/` files. | Run by `sh tests/run.sh`. |
+| `tests/e2e/archive.e2e.js` | Browser test of a built archive viewer. | Optional; needs `playwright-core` and Chromium. |
+| `tests/e2e/hostile.js` | Hostile-input fixtures for the viewer e2e tests. | Not a test by itself. |
 | `takeout-viewer.js` | Builds the offline viewer's data. | Classic script loaded by `popup.html` and `sidepanel.html`, exposing `CTViewer` (`buildViewerChat`, `buildViewerData`, `assembleViewer`, ...). Header comment documents the contract. |
 | `viewer/` | Viewer page sources. | `viewer-template.html`, `viewer-logic.js`, `viewer-app.js`, `marked.min.js`, `katex.min.js`, `katex-inline.css`, `THIRD-PARTY-NOTICES.txt`. `writeViewer` inlines them into one `viewer.html`. |
 | `tests/` | Regression tests. | `sh tests/run.sh`. Uses Node's and Python's built-in test runners, with a synthetic fixture only. Not used by the extension at runtime. |
@@ -53,13 +59,13 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 |---|---|
 | `export-core.js` (separate file) | Mojibake repair, `isTextFile`, `getMessageChain`, `extractArtifacts` (per-turn versioning + str_replace replay), `extractUploadedFiles`, `extractPresentedFiles`, `extractDeliveredFiles`, `getModelName`, `buildViewerDeliveries` live here, not in `popup.js`. Edit them there. |
 | `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`, `viewer`. |
-| Mojibake repair + BOM helpers | Builds a UTF-8→CP1252 corruption map covering Latin, Greek, Cyrillic, math, arrows, box drawing, super/subscripts, emojis. `fixMojibake(text)`, `withBOM(text)`, `addFileWithBOM(folder, path, content)`. |
-| Extractors and renderers | `getMessageChain`, `extractArtifacts` (per-turn versioning + str_replace replay), `extractTextAttachments`, `extractWebSources`, `extractUploadedFiles`, `extractPresentedFiles`, `extractBlobContent`, `extractProjectFiles`, `getLanguageFromFilename`, `processTextWithCitations`, `formatReferences`, `getLanguageFromType`, `getThinkingSummary`, `markdownToPlainText`. |
+| BOM helpers | `withBOM(text)`, `addFileWithBOM(folder, path, content)`. The mojibake map and `fixMojibake` are in `export-core.js`. |
+| Extractors and renderers | `extractTextAttachments`, `extractWebSources`, `extractBlobContent`, `extractProjectFiles`, `getLanguageFromFilename`, `processTextWithCitations`, `formatReferences`, `getLanguageFromType`, `getThinkingSummary`, `markdownToPlainText`. |
 | ZIP/section builders | `extractCodeBlocks`, `extractUrls`, `sanitizeForFilename`, `extractFirstHeading`, `escapeMarkdown`, `extractResponseTextOnly`, `generateMeta`, `generatePrompts`, `generateResponsesTextOnly`, `generateCodeSnippets`, `generateLinksAndSources`. |
 | `populateConversationFolder` | The shared ZIP layout writer used by both single-ZIP and mega-ZIP. Constructs `ExportErrorCollector`, calls all extractors, fetches project docs + uploaded files, writes every file in the folder. |
 | `createZipExport` | Wraps `populateConversationFolder` for the single-conversation ZIP path; generates the filename + downloads the blob. |
 | Offline viewer: `viewerUploadText`, `viewerProject`, `writeViewer`, `heredocFiles` | Builds `viewer.html` for each export. `viewerUploadText` reads an upload's text for the viewer, `viewerProject` shapes project instructions, docs and files, `heredocFiles` finds files a bash heredoc wrote, and `writeViewer` assembles the page via `takeout-viewer.js` (`buildViewerChat`, `modelLabel`) and adds it to the ZIP. A failure here warns under `viewer` and never stops the export. |
-| Helpers: `formatTimestamp`, `getModelName` | Model name parsing handles `data.model` (e.g. `claude-sonnet-4-5-20250929` → "Claude 4.5 Sonnet") and falls back to `paprika_mode` / thinking-block detection. |
+| Helpers: `formatTimestamp` | `getModelName` is in `export-core.js`; its model name parsing handles `data.model` (e.g. `claude-sonnet-4-5-20250929` → "Claude 4.5 Sonnet") and falls back to `paprika_mode` / thinking-block detection. |
 | `convertToMarkdown` | The single-MD / embedded-MD renderer. Walks `getMessageChain`, formats prompts and responses, renders thinking blocks, tool uses (`create_file`, `present_files`, `web_search`, `bash_tool`, `str_replace`, `view`, etc.), citations, and references. Honors `embedArtifacts`, `seamlessMd`, `includeThinking`. |
 | `extractTextContent`, `download`, `safeFilename` | Small utilities. |
 | `updateUI`, `showProgress`, `hideProgress`, `requestData` | DOM glue. |
@@ -213,6 +219,8 @@ This is the part most likely to break or need extending. As of v1.5.2:
 
 `viewer.html` and `viewer-check.gif` are written by `writeViewer` once per export, at the root. In a single ZIP that is beside the chat files; in a mega-ZIP, one viewer at the root covers all chats (`populateConversationFolder` returns `viewerChat`, built by `CTViewer.buildViewerChat`). Failure to build never blocks the download: a chat that fails to build gets a `viewer` warning, and a whole-viewer failure shows only in the status line.
 
+`ViewerData.added` lists files the owner put in an archive after export; only the old-archive tool writes it. Each entry is `{ path, chat, kind, size, href, part }`, and the viewer shows them under "Archive files". Their text and media are not inlined in `viewer.html`: `build_viewer.js` writes them as `viewer-files/part-NNNN.js` (about 4 MB each, calling `window.__archivePart(n, {...})`), loaded as local scripts. That is why `CTViewer.assembleViewer` takes `fileScripts` (adds `file:` to the page's `script-src` and `media-src`) and `fileMedia` (`media-src` only). Added HTML and SVG are untrusted and run only in the preview sandbox, and the sandboxed preview doesn't load sibling files. The viewer's Open file link goes through the `openableHref` allowlist (`OPENABLE_EXTENSIONS` in `viewer/viewer-logic.js`): only documents, images, audio, video, archives and plain data open. Everything else, HTML and SVG included, has no link. Keep it an allowlist.
+
 Mega-ZIP only:
 ```
 claude-takeout-<YYYY-MM-DD>.zip
@@ -353,6 +361,7 @@ If you make significant changes to any of those, update both `TECHNICAL.md` and 
 | Change versioning rules for artifacts | `extractArtifacts` (§6). Also update `extract_artifacts.py` to match. Re-run validation against the `Sudden_acid_reflux_in_young_adults` fixture if available locally. |
 | Adjust the ZIP layout | `populateConversationFolder`. README's "ZIP Archive" section is the user-facing contract — update it too. |
 | Change the offline viewer | `viewer/` (page), `takeout-viewer.js` (data contract), `writeViewer` in `popup.js`. Update `tests/viewer.test.js`, run `tests/e2e/viewer.e2e.js`, and keep the `USAGE.md` preview note accurate. |
+| Change the old-archive tool | `tools/build_viewer.js`, `tools/archive-lib.js`, `tools/archive-zip.js`. Never let it write anything but `viewer.html`, `viewer-check.gif`, `viewer-files/` and new folders under `--out`. Update `tests/archive.test.js`, run `tests/e2e/archive.e2e.js`, and keep the USAGE.md section "Adding a viewer to older archives" accurate. |
 | Add a setting | Add to `defaultSettings`, `loadSettings`, `applySettings`, `popup.html` settings drawer markup, optional `sidepanel.html` markup, and the change handler block. |
 | Add a keyboard shortcut | The `keydown` switch and the `<span class="shortcut">` markup in the relevant button. |
 | Bump README's changelog | Add a `### v<next>` section at the top of the changelog, and bump `manifest.json` in the same PR. |

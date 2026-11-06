@@ -213,7 +213,7 @@ The Troubleshooting Guide at the bottom of `errors.txt` includes a copy-paste-re
 
 ## Companion CLIs
 
-Two stdlib-only Python 3 scripts ship next to the extension, in the same folder:
+Two stdlib-only Python 3 scripts ship next to the extension, in the same folder. A Node tool for older archives, `tools/build_viewer.js`, is described at the end of this section.
 
 ### `extract_artifacts.py`
 
@@ -315,6 +315,39 @@ Updated 1 artifact(s):
 The summary at the end tells you exactly which artifacts changed and what their new sizes are. Both the unversioned file and the highest `_vN` snapshot get rewritten so they stay in sync.
 
 For the why and the alternatives we considered, see `docs/WASM_REPLAY_APPROACH.md`.
+
+### Adding a viewer to older archives
+
+Exports made before v1.6 have no `viewer.html`. `tools/build_viewer.js` adds one to each. It needs Node 20+ and nothing else.
+
+```bash
+# Look first: nothing is written
+node tools/build_viewer.js ~/Downloads/old-exports --dry-run
+
+# Folders only
+node tools/build_viewer.js ~/Downloads/old-exports
+
+# A folder with ZIPs in it: --out is required
+node tools/build_viewer.js ~/Downloads/old-exports --out ~/Downloads/old-exports-viewed
+
+# Machine-readable report
+node tools/build_viewer.js ~/Downloads/old-exports --json
+```
+
+Flags: `--out <folder>`, `--force`, `--dry-run`, `--json`. The exit code is 0 when everything worked and 1 if anything failed.
+
+The tool finds every Claude export under the folder, single-chat or mega, by looking for `original.json`, so folder names don't matter. For each archive it writes only `viewer.html`, `viewer-check.gif` and a `viewer-files/` folder beside the chats. Nothing else in the archive changes. Open `viewer.html` in Chrome, as described in [Reading an export in the viewer](#reading-an-export-in-the-viewer).
+
+Things to know:
+
+- **ZIPs.** A ZIP is never changed. It is extracted into a new folder under `--out`, and the viewer is built there. `--out` can't be inside an archive or be the folder you scanned. A ZIP whose destination already exists is skipped; run the tool on that folder instead.
+- **Rerunning.** An archive that already has a `viewer.html` is skipped. `--force` replaces a viewer this tool made. It never replaces a `viewer.html` or `viewer-files/` that it didn't make.
+- **Your own files.** Folders and files you added to an archive, such as `synthesis/` or `_index.md`, appear in the viewer under "Archive files". Text opens in place and other files get a link.
+- **Missing files.** Generated files are rebuilt from `original.json`, so they work even if the file is gone from `artefacts/`. Uploads and binaries need the real file. Anything not found, including uploads that match no chat, is listed in the report. The tool doesn't search for them.
+- **Skipped.** Gemini and other non-Claude exports are skipped and listed in the report, as is anything that has no Claude chat in it.
+- **Previews.** Added HTML and SVG get the same sandboxed preview as generated files, with the same limits listed under [Reading an export in the viewer](#reading-an-export-in-the-viewer). Be as careful with them as with files from someone else's export.
+- **Sibling files.** Pages added to an archive don't load their sibling files in the preview, so a page that links its own `.css`, `.js` or images shows without them.
+- **Open file.** The link appears only for documents, images, audio, video, archives and plain data files such as PDF, DOCX, PNG, MP4, ZIP, CSV and JSON. Other types, including HTML, can be previewed but not opened from the link.
 
 ---
 
