@@ -466,11 +466,17 @@ function fileKindLabel(file) {
   return [KIND_WORDS[file.kind] || 'File', ext && ext.toUpperCase()].filter(Boolean).join(' · ');
 }
 
-// Opening a link leaves the sandbox, so never for anything a browser would run as a page, or would
-// guess the type of: with no plain extension it looks at the content instead.
+// Opening a link leaves the sandbox, so only for types a browser won't run as a page. A list of what is safe,
+// because a list of what isn't always misses one: Chromium reads .xbl as XML, so it would run XHTML in one.
+const OPENABLE_EXTENSIONS = new Set(('pdf doc docx xls xlsx ppt pptx odt ods odp rtf pages numbers key epub zip gz tar 7z rar ' +
+  'csv tsv txt log md markdown json png jpg jpeg gif webp heic tif tiff bmp mp3 m4a wav ogg flac aac mp4 mov webm m4v mkv avi').split(' '));
+
+// hrefs are relative and percent-encoded, so ?, #, : or \ means the name at the end isn't the file that opens.
 function openableHref(href) {
-  const name = String(href || '').split('/').pop();
-  return /\.[a-z0-9]{1,10}$/i.test(name) && !/\.(?:[sex]?html?|xht|svgz?|xml|xslt?|mht|mhtml|rss|atom|rdf)$/i.test(name);
+  const text = String(href || '');
+  if (/[?#:\\]/.test(text)) return false;
+  const ext = /\.([a-z0-9]+)$/i.exec(text.split('/').pop());
+  return !!ext && OPENABLE_EXTENSIONS.has(ext[1].toLowerCase());
 }
 
 // ---- Archive files ----
@@ -494,6 +500,7 @@ function addedKind(entry) {
   const href = entry.href || '';
   if (ADDED_AUDIO.test(href)) return 'audio';
   if (ADDED_VIDEO.test(href)) return 'video';
+  if (/\.markdown$/i.test(href)) return 'md'; // kindFor has only .md, and exports keep to that
   return entry.kind === 'image' && !ADDED_IMAGE.test(href) ? 'binary' : entry.kind;
 }
 
@@ -662,5 +669,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
 }

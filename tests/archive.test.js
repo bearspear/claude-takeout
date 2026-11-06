@@ -829,6 +829,21 @@ test('writeViewer: with no added text there is no parts folder, no file: policy 
   assert.ok(!('added' in viewerData(root)));
 });
 
+test('buildParts embeds a small .mmd, so it does not read as too large', async () => {
+  const { buildParts } = tool();
+  const tmp = tmpRoot();
+  put(tmp, 'flow.mmd', 'graph TD; A-->B');
+  const seen = [];
+  const { entries } = await buildParts([{ path: 'flow.mmd', chat: null, size: 15 }], { root: tmp, onPart: p => seen.push(p) });
+  assert.strictEqual(entries[0].kind, 'mermaid');
+  assert.strictEqual(entries[0].part, 1);
+  assert.strictEqual(loadPart(seen[0].body).data[entries[0].key], 'graph TD; A-->B');
+});
+
+test('isTextFile still leaves .mmd out, so exports do not change', () => {
+  assert.strictEqual(require('../export-core.js').isTextFile('flow.mmd'), false);
+});
+
 test('writeViewer: added audio with no added text can play, and no script comes from disk', async () => {
   const { writeViewer } = tool();
   const root = tmpRoot();

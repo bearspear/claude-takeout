@@ -473,7 +473,7 @@ test('kind comes from the extension and the artifacts type', () => {
 });
 
 // Side panel: what a generated file may load, and how it opens.
-const { inlineSiblings, remoteScripts, previewDoc, PREVIEW_CSP, resolveFile, fileViews, fileKindLabel, openableHref } = require('../viewer/viewer-logic.js');
+const { inlineSiblings, remoteScripts, previewDoc, PREVIEW_CSP, resolveFile, fileViews, fileKindLabel, openableHref, OPENABLE_EXTENSIONS } = require('../viewer/viewer-logic.js');
 
 const look = n => ({ 'app.js': 'run("</script>")', 'a.css': 'b{}', 'mod.js': 'go()', 'dollar.js': "x='$& $1 $`'", 'dollar.css': 'a{content:"$&"}' })[n] ?? null;
 
@@ -640,6 +640,34 @@ test('fileKindLabel reads like the card in the mockup', () => {
   assert.strictEqual(fileKindLabel({ name: 'Chart', kind: 'react' }), 'Component');
   assert.strictEqual(fileKindLabel({ name: 'a.mmd', kind: 'mermaid' }), 'Diagram · MMD');
   assert.strictEqual(fileKindLabel({ name: 'a.png', kind: 'missing' }), 'Not in this export');
+});
+
+test('openableHref offers exactly the allowlisted types', () => {
+  const allowed = 'pdf doc docx xls xlsx ppt pptx odt ods odp rtf pages numbers key epub zip gz tar 7z rar csv tsv txt log md markdown json png jpg jpeg gif webp heic tif tiff bmp mp3 m4a wav ogg flac aac mp4 mov webm m4v mkv avi'.split(' ');
+  assert.deepStrictEqual([...OPENABLE_EXTENSIONS].sort(), [...allowed].sort());
+  for (const ext of allowed) {
+    assert.strictEqual(openableHref(`dir/a.${ext}`), true, ext);
+    assert.strictEqual(openableHref(`dir/a.${ext.toUpperCase()}`), true, ext);
+  }
+});
+
+test('openableHref refuses any type not on the list', () => {
+  for (const h of ['evil.xbl', 'a.xbl', 'a.py', 'a.js', 'a.css', 'a.bin', 'a.exe', 'a.app', 'a.webloc', 'a.xsd', 'a.wsdl', 'a.pdfx', 'a.mdx', 'a.pdf1', 'a.toString', 'a.constructor', 'a.__proto__']) {
+    assert.strictEqual(openableHref(h), false, h);
+  }
+});
+
+test('openableHref goes by the file a link really opens, not a query or fragment', () => {
+  for (const h of ['a.html?x.pdf', 'a.html#x.pdf', 'a.xbl?.txt', 'a.xbl#.txt', 'a.pdf?x', 'a.pdf#x', 'a.html?a=b/c.pdf', 'a.html#/c.pdf', 'a.html\\c.pdf']) {
+    assert.strictEqual(openableHref(h), false, h);
+  }
+  assert.strictEqual(openableHref('a.html%3Fx.pdf'), true, 'an encoded ? is part of the name, and that name ends .pdf');
+  assert.strictEqual(openableHref('a.pdf%3Fx'), false);
+  assert.strictEqual(openableHref('a.pdf%23x'), false);
+});
+
+test('openableHref only follows relative links', () => {
+  for (const h of ['javascript:x.pdf', 'file:///etc/a.pdf', 'https://a.test/a.pdf', 'data:text/html,x.pdf']) assert.strictEqual(openableHref(h), false, h);
 });
 
 test('openableHref never offers something a browser would run as a page', () => {
@@ -947,6 +975,14 @@ test('addedFile: an image is one only by its href', () => {
   for (const p of ['a.png', 'a.jpg', 'a.jpeg', 'a.gif', 'a.webp', 'a.PNG']) assert.strictEqual(kindOf(p), 'image', p);
   assert.strictEqual(kindOf('a.bmp'), 'binary');
   assert.strictEqual(kindOf('a.png.exe'), 'binary');
+});
+
+test('addedFile: a .markdown file is Markdown', () => {
+  const kindOf = (path, part = 1) => addedFile([addedEntry(path, null, { kind: 'code', part })], 'x0').kind;
+  assert.strictEqual(kindOf('notes.markdown'), 'md');
+  assert.strictEqual(kindOf('NOTES.MARKDOWN'), 'md');
+  assert.strictEqual(kindOf('notes.markdown', null), 'md');
+  assert.strictEqual(kindOf('notes.markdown.txt'), 'code');
 });
 
 test('fileViews gives audio and video a preview from a link', () => {

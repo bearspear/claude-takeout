@@ -4,7 +4,8 @@ const { chromium } = require(process.env.PW);
 const { execFileSync } = require('child_process');
 const fs = require('fs'), os = require('os'), path = require('path');
 const { buildHtml } = require('./make-viewer.js');
-const { HIT, ATTACK_ENDS, ATTACKS, hostileHtml } = require('./hostile.js');
+const { HIT, ATTACK_ENDS, ATTACKS, hostileHtml, NAV_PAGES } = require('./hostile.js');
+const { OPENABLE_EXTENSIONS } = require('../../viewer/viewer-logic.js');
 const { REPO } = require('../helpers');
 const { VIEWER_CHECK_BASE64, TEXT_EMBED_LIMIT } = require('../../takeout-viewer.js');
 
@@ -13,6 +14,9 @@ const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR
 const PDF = '%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n';
 const MARKER = 'ADDED-TEXT-STAYS-OUT-OF-THE-VIEWER';
 const ESCAPE_HTML = "<!doctype html><script>console.log('ESCAPED');fetch('https://remote.test/escaped')<\/script>";
+const RUNS = "console.log('EVIL ran')";
+const XHTML = `<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><script>${RUNS}</script></body></html>`;
+const HTML = `<!doctype html><html><body><script>${RUNS}</script></body></html>`;
 const BAD_NAME = `x"><img src=x onerror=${HIT}>.md`;
 const NOTES = `## Notes from ${MARKER}\n\nThe **variance** is $x^2$, for Gödel.\n\n<script>${HIT}</script>\n\n<img src=x onerror="${HIT}">\n\n![remote](https://remote.test/md.png)\n\n\`\`\`python\nprint("hi")\n\`\`\`\n`;
 const BULK = 1000;
@@ -63,16 +67,23 @@ function makeArchive(root, attacks) {
   put(root, 'chat-one/media/odd.bmp', 'BM');
   put(root, 'chat-one/media/page.xml.zip', 'PK');
   put(root, 'chat-one/media/NOEXT', 'plain');
+  put(root, 'chat-one/media/bad.m4a', 'not really audio');
+  put(root, 'chat-one/unsafe/evil.xbl', XHTML);
+  put(root, 'chat-one/unsafe/evil.rtf', HTML);
+  put(root, 'chat-one/synthesis/plain.markdown', '# Long extension\n\n**bold**');
+  put(root, 'chat-one/synthesis/flow.mmd', 'graph TD; A-->B');
+  for (const nav of NAV_PAGES) put(root, `chat-one/nav/${nav.name}`, nav.versions[0]);
   put(root, 'chat-one/large/huge.html', ESCAPE_HTML + ' '.repeat(TEXT_EMBED_LIMIT + 10));
   put(root, 'chat-one/large/huge.md', '# Too much\n' + 'x'.repeat(TEXT_EMBED_LIMIT + 10));
   put(root, 'chat-one/large/huge.py', '#'.repeat(TEXT_EMBED_LIMIT + 10));
+  put(root, 'chat-one/large/huge.txt', HTML + ' '.repeat(TEXT_EMBED_LIMIT + 10));
   // Three bodies that can't share a 4 MB part.
   for (const n of [1, 2, 3]) put(root, `chat-one/parts/block${n}.md`, `# Block ${n}\n\n` + 'word '.repeat(330000));
 
   put(root, 'chat-two/only-two.md', '# Second chat only');
 }
 
-const CHAT_ONE_FILES = 19, CHAT_TWO_FILES = 1, SHARED_FILES = 1 + BULK;
+const CHAT_ONE_FILES = 19 + 6 + NAV_PAGES.length, CHAT_TWO_FILES = 1, SHARED_FILES = 1 + BULK;
 
 function runTool(folder) {
   return JSON.parse(execFileSync(process.execPath, [TOOL, folder, '--json'], { encoding: 'utf8', maxBuffer: 1 << 26 }));
@@ -275,10 +286,35 @@ function viewerDataOf(file) {
     await page.waitForFunction(() => document.querySelector('#panel audio').readyState >= 1);
     const audio = await page.$eval('#panel audio', a => ({ controls: a.controls, auto: a.autoplay, paused: a.paused, src: a.getAttribute('src'), kids: a.children.length, duration: a.duration }));
     check('audio loads from a relative path, with controls and no autoplay', audio.controls && !audio.auto && audio.paused && audio.src === 'chat-one/media/talk.wav' && audio.duration > 0.4, JSON.stringify(audio));
-    await openAdded(main, 'chat-one/media/clip.mp4');
-    await page.waitForSelector('#panel video');
-    const video = await page.$eval('#panel video', v => ({ controls: v.controls, auto: v.autoplay, paused: v.paused, src: v.getAttribute('src') }));
+    // Held back, so the element is there to look at before the fake file fails.
+    const videoGate = { match: u => u.endsWith('/clip.mp4') };
+    const film = await open(url, { delay: videoGate });
+    await openAdded(film, 'chat-one/media/clip.mp4');
+    await film.page.waitForSelector('#panel video');
+    const video = await film.page.$eval('#panel video', v => ({ controls: v.controls, auto: v.autoplay, paused: v.paused, src: v.getAttribute('src') }));
     check('video has controls and no autoplay', video.controls && !video.auto && video.paused && video.src === 'chat-one/media/clip.mp4', JSON.stringify(video));
+    (await held(videoGate))();
+    await film.page.waitForSelector('#panel .file-details');
+    const filmText = await film.page.textContent('#panel .file-details');
+    check('a video that fails says so, with its path', filmText.includes("This file can't play here") && filmText.includes('chat-one/media/clip.mp4'), filmText);
+    check('a video that fails leaves no player', (await film.page.$$('#panel video')).length === 0);
+    check('a video that fails still links to the file', (await film.page.getAttribute('#panel .file-details a', 'href')) === 'chat-one/media/clip.mp4');
+    await film.context.close();
+    await openAdded(main, 'chat-one/media/bad.m4a');
+    await page.waitForSelector('#panel .file-details');
+    const badText = await page.textContent('#panel .file-details');
+    check('audio that fails says so, with its path', badText.includes("This file can't play here") && badText.includes('chat-one/media/bad.m4a') && (await page.$$('#panel audio')).length === 0, badText);
+    await openAdded(main, 'chat-one/media/talk.wav');
+    await page.waitForSelector('#panel audio');
+    await page.waitForTimeout(150);
+    check('audio that plays keeps its player', (await page.$$('#panel audio')).length === 1 && (await page.$$('#panel .file-details')).length === 0);
+
+    await openAdded(main, 'chat-one/synthesis/plain.markdown');
+    await page.waitForSelector('#panel-body .prose h1');
+    check('a .markdown file renders as Markdown', (await page.textContent('#panel-body .prose h1')) === 'Long extension' && (await page.$$('#panel-body .prose strong')).length === 1);
+    await openAdded(main, 'chat-one/synthesis/flow.mmd');
+    await page.waitForSelector('#panel .file-code');
+    check('a small .mmd shows its text, not "too large"', (await page.textContent('#panel .file-code')).includes('A-->B') && !(await panelText(main)).includes('too large'), await panelText(main));
 
     for (const [rel, link] of [['chat-one/media/odd.bmp', 'chat-one/media/odd.bmp'], ['chat-one/media/page.xml.zip', 'chat-one/media/page.xml.zip'], ['chat-one/media/NOEXT', null]]) {
       await openAdded(main, rel);
@@ -300,8 +336,58 @@ function viewerDataOf(file) {
     check('oversized .md: the note and a link', (await page.textContent('#panel .file-details')).includes('This file is too large to preview here') && (await page.getAttribute('#panel .file-details a', 'href')) === 'chat-one/large/huge.md');
     await openAdded(main, 'chat-one/large/huge.py');
     await page.waitForSelector('#panel .file-details');
-    check('oversized code: the note and a link', (await page.textContent('#panel .file-details')).includes('This file is too large to preview here') && (await page.getAttribute('#panel .file-details a', 'href')) === 'chat-one/large/huge.py');
-    check('no panel link ever points at a page', await page.$$eval('#panel a', a => a.every(x => !/\.(html?|svg|xhtml)$/i.test(x.getAttribute('href')))));
+    check('oversized code off the list: the note and no link', (await page.textContent('#panel .file-details')).includes('This file is too large to preview here') && (await page.$$('#panel a')).length === 0);
+    await openAdded(main, 'chat-one/large/huge.txt');
+    await page.waitForSelector('#panel .file-details a');
+    check('oversized text on the list: the note and a link', (await page.textContent('#panel .file-details')).includes('This file is too large to preview here') && (await page.getAttribute('#panel .file-details a', 'href')) === 'chat-one/large/huge.txt');
+
+    // Open file leaves the sandbox, so these really click.
+    const clickOpen = async () => {
+      const [tab] = await Promise.all([main.context.waitForEvent('page'), page.click('#panel .file-details a')]);
+      const logs = [];
+      tab.on('console', m => logs.push(m.text()));
+      await tab.waitForLoadState().catch(() => {});
+      await new Promise(done => setTimeout(done, 300));
+      // A download closes its own tab.
+      const type = await tab.evaluate(() => document.contentType).catch(() => 'closed');
+      await tab.close().catch(() => {});
+      return { logs, type };
+    };
+    const txt = await clickOpen();
+    check('clicking Open file on HTML text in a .txt runs nothing', !txt.logs.includes('EVIL ran') && txt.type === 'text/plain', JSON.stringify(txt));
+    await openAdded(main, 'chat-one/unsafe/evil.rtf');
+    await page.waitForSelector('#panel .file-details a');
+    const rtf = await clickOpen();
+    check('clicking Open file on HTML in a .rtf runs nothing', !rtf.logs.includes('EVIL ran') && rtf.type !== 'text/html' && rtf.type !== 'application/xhtml+xml', JSON.stringify(rtf));
+    await openAdded(main, 'chat-one/unsafe/evil.xbl');
+    await page.waitForSelector('#panel .file-details');
+    check('an XHTML .xbl offers no link', (await page.$$('#panel a')).length === 0);
+    check('an XHTML .xbl gets no frame', (await page.$$('#panel iframe')).length === 0);
+    check('an XHTML .xbl says it cannot open', (await page.textContent('#panel .file-details')).includes("This file can't open from the viewer."));
+    check('an XHTML .xbl shows where it is', (await page.textContent('#panel .file-details')).includes('chat-one/unsafe/evil.xbl'));
+
+    // Whatever the list offers has to stay inert when a browser opens it on its own.
+    const sweep = await browser.newContext({ acceptDownloads: true });
+    const runsAt = async (ext, body) => {
+      const file = path.join(dir, `sweep.${ext}`);
+      fs.writeFileSync(file, body);
+      const tab = await sweep.newPage();
+      let ran = false;
+      tab.on('console', m => { if (m.text() === 'EVIL ran') ran = true; });
+      await tab.goto('file://' + file, { timeout: 2500 }).catch(() => {});
+      await tab.waitForTimeout(60);
+      await tab.close();
+      fs.rmSync(file);
+      return ran;
+    };
+    check('control: an HTML page runs at the top level', await runsAt('html', HTML));
+    check('control: an XHTML .xbl runs at the top level', await runsAt('xbl', XHTML));
+    const ranAt = [];
+    for (const ext of OPENABLE_EXTENSIONS) {
+      if ((await runsAt(ext, HTML)) || (await runsAt(ext, XHTML))) ranAt.push(ext);
+    }
+    await sweep.close();
+    check(`none of the ${OPENABLE_EXTENSIONS.size} listed types runs a page`, OPENABLE_EXTENSIONS.size > 40 && ranAt.length === 0, ranAt.join());
     check('the escape page never ran', !main.seen.logs.includes('ESCAPED'));
 
     // Hashes
@@ -453,6 +539,55 @@ function viewerDataOf(file) {
     check('an added SVG runs in the sandbox', await waitLog(atk, 'SVG ran'));
     check('an added SVG frame is sandboxed', (await atk.page.$eval('#panel iframe', f => f.getAttribute('sandbox'))) === 'allow-scripts');
     await atk.context.close();
+
+    // Each leaves the document it runs in, so each opens on its own.
+    for (const navPage of NAV_PAGES) {
+      const { name, target } = navPage;
+      const rawCtx = await browser.newContext();
+      const raw = await rawCtx.newPage();
+      const rawSeen = [];
+      raw.on('console', m => rawSeen.push(m.text()));
+      await raw.route('**/*', r => { const u = r.request().url(); if (!u.startsWith('file:') && !u.startsWith('blob:')) rawSeen.push(u); return u.startsWith('http') ? r.abort() : r.continue(); });
+      await raw.goto('file://' + path.join(root, 'chat-one', 'nav', name)).catch(() => {});
+      for (let i = 0; i < 40 && !rawSeen.includes(target); i++) await new Promise(done => setTimeout(done, 25));
+      check(`control: ${name} leaves when it has no sandbox`, rawSeen.includes(target), rawSeen.join(' | '));
+      await rawCtx.close();
+
+      const nav = await open(url);
+      let opened = 0;
+      nav.context.on('page', () => { opened++; });
+      await openAdded(nav, `chat-one/nav/${name}`);
+      await frameIn(nav);
+      // A zero-delay refresh can replace the page before its script logs. The refusal
+      // naming the target proves the attempt, so it counts too, for this file only.
+      const refused = () => name === 'nav-refresh.html' && nav.seen.logs.some(l => l.includes("Refused to frame 'https://remote.test/refresh"));
+      const ran = await waitLog(nav, `NAV ran ${name}`) || refused();
+      await nav.page.waitForTimeout(500);
+      check(`${name}: the attempt ran`, ran, nav.seen.logs.join(' | '));
+      check(`${name}: nothing got out`, !nav.seen.logs.some(l => l.includes('ESCAPED')) && nav.seen.requests.length === 0 && opened === 0, [...nav.seen.logs, ...nav.seen.requests].join(' | '));
+      check(`${name}: the viewer stays`, nav.page.url().startsWith(url) && (await nav.page.title()) === 'First chat - Claude Takeout', nav.page.url());
+      await nav.context.close();
+    }
+
+    // A chat with a project and added files gets all three folds.
+    const projected = path.join(dir, 'project-chat');
+    put(projected, 'original.json', JSON.stringify({ ...JSON.parse(chatJson('p1', 'Project chat', '2026-01-01T00:00:00Z')), project_uuid: 'P', project: { uuid: 'P', name: 'Budget project' } }));
+    put(projected, 'project/project.json', JSON.stringify({ name: 'Budget project' }));
+    put(projected, 'project/prompt_template.md', 'Always answer briefly.');
+    put(projected, 'project/files/spec.pdf', Buffer.from(PDF, 'latin1'));
+    put(projected, 'notes/extra.md', '# Extra note');
+    runTool(projected);
+    const both = await open('file://' + path.join(projected, 'viewer.html'));
+    const folds = await both.page.$$eval('#project > details', d => d.map(x => [x.className, x.open, x.querySelector('summary').textContent]));
+    check('project chat: three folds in order, all closed', JSON.stringify(folds) === JSON.stringify([['instructions', false, 'Project instructions'], ['project-files', false, 'Project · Budget project · 1 item'], ['archive-files', false, 'Archive files · 1']]), JSON.stringify(folds));
+    await both.page.click('details.project-files > summary');
+    check('project chat: the project file shows', (await both.page.textContent('details.project-files .chip')).includes('spec.pdf'));
+    await openAdded(both, 'notes/extra.md');
+    await both.page.waitForSelector('#panel-body .prose h1');
+    check('project chat: the added file opens', (await both.page.textContent('#panel-body .prose h1')) === 'Extra note');
+    check('project chat: the other folds stay as they were', await both.page.$eval('details.project-files', d => d.open));
+    clean('project chat flow', both.seen);
+    await both.context.close();
 
     // An added file reaches nothing of the chat that happens to be open.
     const neighbour = path.join(dir, 'neighbour');

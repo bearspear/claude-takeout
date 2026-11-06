@@ -43,10 +43,13 @@ async function stopPoint() {
 // Added files
 // ===================================================================
 
+// isTextFile leaves .mmd out, and exports keep to it.
+const isAddedText = name => core.isTextFile(name) || /\.mmd$/i.test(name);
+
 // The text to embed for an added file, or null when it only gets a link.
 function addedText(root, rel, size, warnings) {
   const parts = rel.split('/');
-  if (!core.isTextFile(parts[parts.length - 1]) || size > CTViewer.TEXT_EMBED_LIMIT) return null;
+  if (!isAddedText(parts[parts.length - 1]) || size > CTViewer.TEXT_EMBED_LIMIT) return null;
   try {
     const text = lib.stripBom(fs.readFileSync(path.join(root, ...parts), 'utf8'));
     return text.length <= CTViewer.TEXT_EMBED_LIMIT ? core.fixMojibake(text) : null;
@@ -78,7 +81,7 @@ async function buildParts(added, { root, onPart } = {}) {
     const name = file.path.split('/').pop();
     const text = addedText(root, file.path, file.size, warnings);
     const entry = {
-      path: file.path, chat: file.chat == null ? null : file.chat, kind: CTViewer.kindFor(name, null, core.isTextFile(name)),
+      path: file.path, chat: file.chat == null ? null : file.chat, kind: CTViewer.kindFor(name, null, isAddedText(name)),
       size: file.size, href: CTViewer.relHref(file.path), part: null, key: null,
     };
     if (text !== null) {

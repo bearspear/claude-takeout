@@ -751,8 +751,13 @@ function previewNodes(chat, file, version) {
   if (file.kind === 'audio' || file.kind === 'video') {
     const media = el(file.kind, `file-${file.kind}`);
     media.controls = true;
-    media.setAttribute('src', version.href);
     const paper = el('div', 'file-paper');
+    media.addEventListener('error', () => {
+      const box = fileDetails(file, version);
+      box.append(el('p', '', "This file can't play here"), el('small', 'file-path', file.path));
+      paper.replaceWith(box);
+    });
+    media.setAttribute('src', version.href);
     paper.append(media);
     return [paper];
   }

@@ -11,9 +11,10 @@
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
 //   joinPath(folder, rel)              folder + rel with '..' resolved
 //   escapeJson(data)                   JSON that is safe inside a <script> tag
-//   assembleViewer({template, css, marked, katex, logic, app, data, fileScripts})  one self-contained HTML string.
-//                                      fileScripts adds file: to the page's script-src, for viewer-files/ beside it;
-//                                      exports never set it
+//   assembleViewer({template, css, marked, katex, logic, app, data, fileScripts, fileMedia})  one self-contained HTML string.
+//                                      fileScripts adds file: to the page's script-src and media-src, for viewer-files/
+//                                      beside it and added audio and video. fileMedia adds it to media-src alone, for a
+//                                      viewer with no parts. Exports set neither
 //   kindFor(filename, mime, hasText)   a GenFile's kind
 //   VIEWER_ASSETS                      paths of the six viewer files
 //   TOOL_TEXT_LIMIT                    longest tool result text kept

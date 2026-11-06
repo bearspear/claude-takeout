@@ -54,4 +54,18 @@ const ATTACK_ENDS = {
   'top-location': 'threw SecurityError', 'window-open': 'gave blocked', 'link-popup': 'gave clicked', storage: 'threw SecurityError', cookie: 'threw SecurityError',
 };
 
-module.exports = { HIT, ATTACKS, ATTACK_ENDS, HOSTILE_HTML, hostileHtml };
+// Each leaves the document it runs in, so each gets a file of its own. ran is logged before the attempt, and again
+// shortly after: a console line from a frame this new can be missed, but one a moment later is not.
+const navArtifact = (name, attempt, head = '') => ({
+  name,
+  versions: [`<!doctype html><html><head>${head}</head><body>${name}<script>console.log('NAV ran ${name}');setTimeout(() => console.log('NAV ran ${name}'), 120);setTimeout(() => { ${attempt} }, 30);<\/script></body></html>`],
+});
+
+// Used by both suites. target: what the same page reaches with no sandbox, for the "really ran" controls.
+const NAV_PAGES = [
+  { ...navArtifact('nav-http.html', "location.href = 'http://remote.test/nav';"), target: 'http://remote.test/nav' },
+  { ...navArtifact('nav-refresh.html', '', '<meta http-equiv="refresh" content="0;url=https://remote.test/refresh">'), target: 'https://remote.test/refresh' },
+  { ...navArtifact('nav-blob.html', "location.href = URL.createObjectURL(new Blob(['<script>console.log(\"ESCAPED\")<\\/script>'], { type: 'text/html' }));"), target: 'ESCAPED' },
+];
+
+module.exports = { HIT, ATTACKS, ATTACK_ENDS, HOSTILE_HTML, hostileHtml, navArtifact, NAV_PAGES };
