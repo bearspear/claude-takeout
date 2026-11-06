@@ -177,6 +177,48 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
 .sources a { color: var(--soft); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-decoration: none; }
 .sources a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 2px; }
 
+/* A generated file in the message stream */
+.art { display: flex; align-items: center; gap: 12px; width: 100%; max-width: 440px; text-align: left; background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 9px 14px 9px 10px; margin: 12px 0; font-family: var(--sans); cursor: pointer; }
+.art:hover { border-color: var(--line-strong); }
+.art.on { border-color: var(--acc); }
+.art .tile { width: 36px; height: 36px; border-radius: 8px; background: var(--bub); color: var(--mute); display: flex; align-items: center; justify-content: center; flex: none; }
+.art .txt { min-width: 0; display: flex; flex-direction: column; }
+.art b { font-size: 14px; font-weight: 600; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.art small { font-size: 12px; line-height: 1.3; color: var(--mute); }
+
+/* The file panel */
+#panel { width: 43%; flex: none; display: flex; flex-direction: column; min-height: 0; background: var(--card); border-left: 1px solid var(--line); }
+#panel[hidden] { display: none; }
+#panel-head { height: 52px; flex: none; display: flex; align-items: center; gap: 6px; padding: 0 12px 0 16px; border-bottom: 1px solid var(--line); }
+.panel-title { flex: 1 1 60px; min-width: 0; font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.panel-kind { flex: 0 1 auto; min-width: 0; font-size: 12px; color: var(--mute); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-right: 6px; }
+.vers { display: flex; gap: 4px; flex: 0 1 auto; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.vers:empty { display: none; }
+.tab, .ver, .close { flex: none; border: 1px solid var(--line); border-radius: 7px; background: none; padding: 2px 8px; font-size: 12px; line-height: 1.5; color: var(--mute); cursor: pointer; }
+.tab:hover, .ver:hover, .close:hover { color: var(--ink); background: var(--hover); }
+.tab.on, .ver.on { background: var(--bub); color: var(--ink); }
+.close { display: flex; align-items: center; padding: 3px 5px; }
+.close svg.ic { width: 13px; height: 13px; }
+#panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow: auto; }
+#panel-body > .prose { padding: 20px 22px; }
+.preview { flex: 1; min-height: 0; width: 100%; border: 0; display: block; background: #fff; }
+.file-note { flex: none; padding: 8px 16px; font-size: 12.5px; line-height: 1.45; color: var(--soft); background: var(--bub); border-bottom: 1px solid var(--line); }
+.file-code { flex: 1 0 auto; margin: 0; padding: 14px 16px; font: 12.5px/1.55 var(--mono); color: var(--code-ink); background: var(--code-bg); white-space: pre; width: max-content; min-width: 100%; }
+.file-paper { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--bub); }
+.file-image { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
+.file-details { margin: auto; padding: 24px; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; max-width: 340px; }
+.file-details .tile { width: 44px; height: 44px; border-radius: 10px; background: var(--bub); color: var(--mute); display: flex; align-items: center; justify-content: center; margin-bottom: 4px; }
+.file-details b { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
+.file-details small { font-size: 12px; color: var(--mute); }
+.file-details p { margin: 8px 0 0; font-size: 13px; color: var(--mute); }
+.file-open { margin-top: 10px; padding: 5px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 13px; color: var(--ink); text-decoration: none; }
+.file-open:hover { background: var(--hover); }
+.file-missing { margin: auto; padding: 24px; font-size: 13.5px; color: var(--mute); text-align: center; }
+/* Too narrow for both: the panel covers the chat and leaves the sidebar */
+@media (max-width: 1100px) {
+  #panel { position: fixed; top: 0; bottom: 0; right: 0; left: 272px; width: auto; z-index: 8; border-left: 1px solid var(--line); }
+}
+
 /* Phone: the sidebar becomes a drawer */
 #scrim { display: none; position: fixed; inset: 0; background: rgba(20, 18, 12, .42); z-index: 9; }
 @media (max-width: 760px) {
@@ -186,6 +228,12 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
   #menu { display: block; }
   #top { padding: 0 14px; gap: 8px; }
   #scroll { scrollbar-gutter: auto; }
+  #panel { left: 0; border-left: 0; }
+  #panel-head { height: auto; flex-wrap: wrap; padding: 8px 12px; }
+  .panel-title { flex: 1 1 0; order: 1; }
+  .panel-kind { display: none; }
+  .close { order: 2; }
+  .tab, .vers { order: 3; }
   #chat { padding: 12px 12px 72px; }
   .prose { font-size: 16px; }
   .bubble { max-width: 90%; }
@@ -218,6 +266,10 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
     </header>
     <div id="scroll"><div id="chat"></div></div>
   </main>
+  <aside id="panel" aria-label="File" hidden>
+    <div id="panel-head"></div>
+    <div id="panel-body"></div>
+  </aside>
 </div>
 <script id="data" type="application/json">/*DATA_JSON*/</script>
 <script>/*MARKED_JS*/</script>

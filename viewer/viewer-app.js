@@ -1,11 +1,13 @@
-// Viewer page: sidebar, top bar and message rendering. Classic script, inlined after viewer-logic.js.
+// Viewer page: sidebar, top bar, message rendering and the file panel. Classic script, inlined after viewer-logic.js.
 // Chat text is untrusted. Only sanitizeHtml's output reaches innerHTML; all else goes through textContent.
-// KaTeX's output is the one addition, and goes in through fillPlaceholders.
+// KaTeX's output is the one addition, and goes in through fillPlaceholders. A generated file only ever
+// runs in a frame with sandbox="allow-scripts"; its text reaches that frame as an attribute value.
 
 const BATCH_SIZE = 10;
 
 const ICON_PATHS = {
   chevron: 'm9 6 6 6-6 6',
+  close: 'M6 6l12 12M18 6 6 18',
   copy: 'M9 9h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1ZM5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1',
   check: 'm5 12.5 4.5 4.5L19 7.5',
   file: 'M6 3h8l5 5v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm8 0v5h5',
@@ -217,13 +219,35 @@ function renderHuman(m) {
   return chips.length || text ? node : null;
 }
 
-function renderAssistant(m) {
+function renderCard(block, chat) {
+  const file = resolveFile(chat.files, block.file, block.version) && chat.files[block.file];
+  if (!file) return null;
+  const card = el('button', 'art');
+  card.type = 'button';
+  card.dataset.file = block.file;
+  card.dataset.version = String(block.version);
+  card.classList.toggle('on', openFile !== null && openFile.file === block.file && openFile.version === block.version);
+  const tile = el('span', 'tile');
+  tile.append(icon('file'));
+  const label = el('span', 'txt');
+  const version = file.versions.length > 1 && file.versions[block.version];
+  label.append(el('b', '', file.name || 'Untitled'), el('small', '', [fileKindLabel(file), version && version.label].filter(Boolean).join(' · ')));
+  card.append(tile, label);
+  card.title = file.name || '';
+  return card;
+}
+
+function renderAssistant(m, chat) {
   const node = el('section', 'msg assistant');
   const sources = [];
   for (const block of m.blocks) {
     if (block.t === 'text') { if (block.text) node.append(renderText(block, sources)); }
     else if (block.t === 'thinking') node.append(renderThinking(block));
     else if (block.t === 'tool') node.append(...renderTool(block));
+    else if (block.t === 'card') {
+      const card = renderCard(block, chat);
+      if (card) node.append(card);
+    }
   }
   if (!node.hasChildNodes()) return null;
   if (sources.length) node.append(renderSources(sources));
@@ -248,10 +272,10 @@ function branchControl(sib) {
   return box;
 }
 
-function renderMessage(m, sib) {
+function renderMessage(m, sib, chat) {
   let node;
   try {
-    node = m.sender === 'human' ? renderHuman(m) : renderAssistant(m);
+    node = m.sender === 'human' ? renderHuman(m) : renderAssistant(m, chat);
   } catch (e) {
     console.warn('Could not display a message', m.id, e);
     node = el('section', 'msg failed', "This message couldn't be displayed");
@@ -310,7 +334,7 @@ function renderChat(chat, leaf = chat.leaf, anchor = null) {
     const size = next === 0 && anchorAt >= 0 ? Math.max(BATCH_SIZE, anchorAt + 1) : BATCH_SIZE;
     const part = document.createDocumentFragment();
     for (const m of chain.slice(next, next + size)) {
-      const node = renderMessage(m, sibsOf(m));
+      const node = renderMessage(m, sibsOf(m), chat);
       if (node) part.append(node);
     }
     const first = next === 0;
@@ -351,24 +375,171 @@ function setDrawer(open) {
   document.body.classList.toggle('drawer', open);
 }
 
+// The file panel. A chat's file, its version and the view: only the view isn't kept in the hash.
+let openFile = null; // { file, version } as the hash has it
+let panelFor = ''; // what the panel shows, so a hash change that leaves it alone doesn't reload a frame
+let panelView = null;
+
+// Siblings are found by name, newest text of the last file with that name.
+function siblingLookup(chat) {
+  const texts = new Map();
+  for (const file of Object.values(chat.files || {})) {
+    const text = (file.versions || []).map(v => v.text).filter(t => t != null).pop();
+    if (text != null) texts.set(file.name, text);
+  }
+  return name => (texts.has(name) ? texts.get(name) : null);
+}
+
+// The order matters: sandbox goes on before the document does, and the frame only then joins the page.
+function previewFrame(srcdoc, title) {
+  const frame = el('iframe', 'preview');
+  frame.setAttribute('sandbox', 'allow-scripts');
+  frame.setAttribute('title', title);
+  frame.setAttribute('srcdoc', srcdoc);
+  return frame;
+}
+
+function fileDetails(file, version) {
+  const box = el('div', 'file-details');
+  const tile = el('span', 'tile');
+  tile.append(icon('file'));
+  box.append(tile, el('b', '', file.name || 'Untitled'), el('small', '', fileKindLabel(file)));
+  if (openableHref(version.href)) {
+    const link = el('a', 'file-open', 'Open file');
+    link.setAttribute('href', version.href);
+    link.setAttribute('target', '_blank');
+    link.setAttribute('rel', 'noopener');
+    box.append(link);
+  } else {
+    box.append(el('p', '', "This file can't open from the viewer. It's in the artefacts folder of this export."));
+  }
+  return box;
+}
+
+function previewNodes(chat, file, version) {
+  if (file.kind === 'md') return [renderText({ text: version.text, cites: [] }, [])];
+  if (file.kind === 'image') {
+    const img = el('img', 'file-image');
+    img.setAttribute('alt', file.name || '');
+    img.setAttribute('src', version.href);
+    const paper = el('div', 'file-paper');
+    paper.append(img);
+    return [paper];
+  }
+  if (file.kind === 'pdf') {
+    // Chrome's PDF viewer refuses a sandboxed frame. fileViews only gives this view to a .pdf link.
+    const frame = el('iframe', 'preview');
+    frame.setAttribute('title', file.name || '');
+    frame.setAttribute('src', version.href);
+    return [frame];
+  }
+  const doc = previewDoc(version.text, siblingLookup(chat));
+  const frame = previewFrame(doc.srcdoc, file.name || '');
+  return doc.remote ? [el('div', 'file-note', REMOTE_NOTE), frame] : [frame];
+}
+
+function panelButton(className, text, pressed, onClick) {
+  const button = el('button', className, text);
+  button.type = 'button';
+  button.classList.toggle('on', pressed);
+  button.setAttribute('aria-pressed', String(pressed));
+  button.addEventListener('click', onClick);
+  return button;
+}
+
+function renderPanelBody(chat, file, version, shape) {
+  const body = document.getElementById('panel-body');
+  if (shape.missing) body.replaceChildren(el('div', 'file-missing', 'This file is not in this export.'));
+  else if (!shape.views.length) body.replaceChildren(fileDetails(file, version));
+  else if (panelView === 'preview') body.replaceChildren(...previewNodes(chat, file, version));
+  else {
+    const code = el('pre', 'file-code');
+    code.textContent = version.text;
+    body.replaceChildren(...(shape.note ? [el('div', 'file-note', shape.note)] : []), code);
+  }
+  body.scrollTop = 0;
+}
+
+function renderPanelHead(chat, id, file, at, shape) {
+  const head = document.getElementById('panel-head');
+  const focused = head.contains(document.activeElement) ? document.activeElement.textContent : null;
+  const name = el('b', 'panel-title', file.name || 'Untitled');
+  name.title = file.name || '';
+  const tabs = shape.views.map(view => panelButton('tab', view === 'preview' ? 'Preview' : 'Code', view === panelView, () => {
+    panelView = view;
+    showPanel(chat, { file: id, version: at }, true);
+  }));
+  const versions = file.versions.length > 1 ? file.versions.map((v, i) => panelButton('ver', v.label || `v${i + 1}`, i === at, () => {
+    navigate({ ...parseHash(location.hash), file: id, version: i }, { replace: true });
+  })) : [];
+  const row = el('div', 'vers');
+  row.append(...versions);
+  const close = el('button', 'close');
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Close file');
+  close.append(icon('close'));
+  close.addEventListener('click', () => {
+    const card = document.querySelector('.art.on');
+    navigate({ ...parseHash(location.hash), file: null, version: null });
+    if (card) card.focus({ preventScroll: true });
+  });
+  head.replaceChildren(name, el('small', 'panel-kind', fileKindLabel(file)), ...tabs, row, close);
+  if (focused) [...tabs, ...versions].find(b => b.textContent === focused)?.focus();
+}
+
+// open: from resolveFile, or null to close. again: draw it even if it's what the panel already shows.
+function showPanel(chat, open, again = false) {
+  openFile = open;
+  document.querySelectorAll('.art').forEach(card => {
+    card.classList.toggle('on', open !== null && card.dataset.file === open.file && Number(card.dataset.version) === open.version);
+  });
+  const panel = document.getElementById('panel');
+  const fileKey = open ? `${chat.id}\n${open.file}\n` : '';
+  const key = open ? fileKey + open.version : '';
+  if (key === panelFor && !again) return;
+  if (!fileKey || !panelFor.startsWith(fileKey)) panelView = null; // a new file starts at its first view
+  panelFor = key;
+  panel.hidden = !open;
+  if (!open) {
+    document.getElementById('panel-head').replaceChildren();
+    document.getElementById('panel-body').replaceChildren();
+    return;
+  }
+  const file = chat.files[open.file];
+  const version = file.versions[open.version];
+  const shape = fileViews(file.kind, version);
+  if (!shape.views.includes(panelView)) panelView = shape.views[0] || null;
+  renderPanelHead(chat, open.file, file, open.version, shape);
+  renderPanelBody(chat, file, version, shape);
+}
+
 const chatsById = new Map();
 let allChats = [];
 let shown = ''; // the hash of what the page is showing, so a hashchange we caused isn't rendered again
+let drawn = ''; // the chat and leaf in the column, which a change of file leaves alone
 
 // The only way to change chat, leaf or file. Writes the hash, then renders. options.replace edits the
 // current history entry; options.anchor keeps a message in place; options.fromHash means the hash is already set.
 function navigate(state, options = {}) {
-  const chat = chatsById.get(state.chat) || allChats[0];
+  const known = chatsById.get(state.chat);
+  const chat = known || allChats[0];
   if (!chat) return;
+  // Leaf, file and version belong to the chat they came with, not to the one standing in for it.
+  const want = known ? state : {};
   const ids = new Set(chat.messages.map(m => m.id));
-  const chain = chainFrom(chat.messages, ids.has(state.leaf) ? state.leaf : (state.leaf ? null : chat.leaf));
+  const chain = chainFrom(chat.messages, ids.has(want.leaf) ? want.leaf : (want.leaf ? null : chat.leaf));
   const leaf = chain.length ? chain[chain.length - 1].id : null;
-  const hash = formatHash({ chat: chat.id, leaf, file: state.file, version: state.version });
+  const open = resolveFile(chat.files, want.file, want.version);
+  const hash = formatHash({ chat: chat.id, leaf, file: open && open.file, version: open && open.version });
   if (!options.fromHash && hash !== location.hash) {
     if (options.replace) history.replaceState(null, '', hash);
     else location.hash = hash;
   } else if (options.fromHash && hash !== location.hash) history.replaceState(null, '', hash);
   shown = hash;
+  showPanel(chat, open);
+  const column = `${chat.id}\n${leaf}`;
+  if (column === drawn) return;
+  drawn = column;
   renderChat(chat, leaf, options.anchor);
 }
 
@@ -409,9 +580,15 @@ function start() {
   renderSidebar(data.chats);
   document.getElementById('menu').addEventListener('click', () => setDrawer(true));
   document.getElementById('scrim').addEventListener('click', () => setDrawer(false));
+  document.getElementById('panel-body').addEventListener('click', e => {
+    const button = e.target.closest('.copy');
+    if (button) onCopy(button);
+  });
   document.getElementById('chat').addEventListener('click', e => {
     const button = e.target.closest('.copy');
     if (button) { onCopy(button); return; }
+    const card = e.target.closest('.art');
+    if (card) { navigate({ ...parseHash(location.hash), file: card.dataset.file, version: Number(card.dataset.version) }); return; }
     const arrow = e.target.closest('.branch button');
     if (arrow && !arrow.disabled) switchTo(arrow);
   });

@@ -314,6 +314,151 @@ function toolInputText(input) {
   return JSON.stringify(input, null, 2);
 }
 
+// Generated files. Their text is hostile until shown otherwise: previews run in a sandboxed frame under this policy.
+const PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; base-uri 'none'; form-action 'none'";
+
+const OFFLINE_NOTE = "This file type can't preview offline. Code view shows the full source.";
+const REMOTE_NOTE = 'This file loads a script from the internet, which the viewer blocks, so it may not work here. Code view shows the full source.';
+
+const TAG_OPEN = /<!--|<([a-z][^\s/>]*)/gi;
+const RAW_TEXT = new Set(['script', 'style', 'textarea', 'title']);
+const TAG_ATTR = /[\s/]*(?:(>)|([^\s/>=][^\s/>=]*)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]*)))?)/y;
+
+// Reads the attributes after a tag name. Null when the tag never closes, as then a browser drops it too.
+function readAttrs(html, from) {
+  const attrs = [];
+  TAG_ATTR.lastIndex = from;
+  for (let hit; (hit = TAG_ATTR.exec(html));) {
+    if (hit[1]) return { attrs, end: TAG_ATTR.lastIndex };
+    attrs.push({ name: hit[2].toLowerCase(), value: hit[3] ?? hit[4] ?? hit[5] ?? '', raw: hit[0] });
+  }
+  return null;
+}
+
+// Offers each script and link to visit(tag, attrs), skipping comments, attribute values and raw text such
+// as a string in a script. visit returns a replacement or null. One pass that stops at anything unfinished, so a huge
+// file of unclosed tags can't stall the page.
+function rewriteTags(html, visit) {
+  const out = [];
+  let from = 0;
+  const open = new RegExp(TAG_OPEN);
+  for (let hit; (hit = open.exec(html));) {
+    if (hit[0] === '<!--') {
+      const end = html.indexOf('-->', open.lastIndex);
+      if (end < 0) break;
+      open.lastIndex = end + 3;
+      continue;
+    }
+    const tag = hit[1].toLowerCase();
+    const read = readAttrs(html, open.lastIndex);
+    if (!read) break;
+    let end = read.end;
+    if (RAW_TEXT.has(tag)) {
+      const close = new RegExp(`</${tag}[\\s/>]`, 'gi');
+      close.lastIndex = end;
+      const shut = close.exec(html);
+      if (!shut) break;
+      end = html.indexOf('>', shut.index);
+      if (end < 0) break;
+      end++;
+    }
+    open.lastIndex = end;
+    const swap = tag === 'script' || tag === 'link' ? visit(tag, read.attrs) : null;
+    if (swap !== null) {
+      out.push(html.slice(from, hit.index), swap);
+      from = end;
+    }
+  }
+  out.push(html.slice(from));
+  return out.join('');
+}
+
+// A file beside this one, by bare name or ./name. Null for anything that points elsewhere.
+function siblingName(url) {
+  const name = url.trim().replace(/^\.\//, '');
+  return /^[^/\\:?#]+$/.test(name) && !name.includes('..') && name !== '.' ? name : null;
+}
+
+const attrOf = (attrs, name) => attrs.find(a => a.name === name);
+
+// Puts files from the export into the document, since a sandboxed frame can't load them.
+// lookup(name): the sibling's text or null. What can't be found stays as it is, for the policy to block.
+function inlineSiblings(html, lookup) {
+  const text = attr => {
+    const name = attr ? siblingName(attr.value) : null;
+    return name === null ? null : lookup(name);
+  };
+  return rewriteTags(String(html), (tag, attrs) => {
+    if (tag === 'script') {
+      const src = attrOf(attrs, 'src');
+      const code = text(src);
+      if (code == null) return null;
+      const rest = attrs.filter(a => a !== src).map(a => a.raw).join('');
+      return `<script${rest}>${String(code).replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--')}</script>`;
+    }
+    const rel = attrOf(attrs, 'rel');
+    if (!rel || !/(^|\s)stylesheet(\s|$)/i.test(rel.value)) return null;
+    const css = text(attrOf(attrs, 'href'));
+    if (css == null) return null;
+    const media = attrOf(attrs, 'media');
+    return `<style${media ? media.raw : ''}>${String(css).replace(/<\/(style)/gi, '<\\/$1')}</style>`;
+  });
+}
+
+function remoteScripts(html) {
+  let count = 0;
+  rewriteTags(String(html), (tag, attrs) => {
+    const src = tag === 'script' ? attrOf(attrs, 'src') : null;
+    if (src && /^\s*(?:https?:|[/\\]{2})/i.test(src.value)) count++;
+    return null;
+  });
+  return count;
+}
+
+// The policy comes first, before anything the file wrote can be parsed.
+function previewDoc(text, lookup) {
+  const rest = String(text).replace(/^﻿?\s*<!doctype[^>]*>/i, '');
+  return {
+    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${inlineSiblings(rest, lookup)}`,
+    remote: remoteScripts(rest),
+  };
+}
+
+// The file and version a hash can really open, or null. A bad version means the latest.
+function resolveFile(files, id, version) {
+  if (id == null || !files || !Object.prototype.hasOwnProperty.call(files, id)) return null;
+  const count = (files[id].versions || []).length;
+  if (!count) return null;
+  return { file: id, version: Number.isInteger(version) && version >= 0 && version < count ? version : count - 1 };
+}
+
+// views: the tabs this version gets, first one showing. None and not missing: details and maybe a link.
+function fileViews(kind, version) {
+  const text = version.text != null;
+  const href = version.href != null;
+  if (kind === 'missing' || (!text && !href)) return { views: [], note: '', missing: true };
+  const preview = kind === 'html' || kind === 'svg' || kind === 'md' ? text
+    : kind === 'image' ? href
+    : kind === 'pdf' && href && /\.pdf$/i.test(version.href);
+  const views = [...(preview ? ['preview'] : []), ...(text ? ['code'] : [])];
+  return { views, note: text && (kind === 'react' || kind === 'mermaid') ? OFFLINE_NOTE : '', missing: false };
+}
+
+const KIND_WORDS = { html: 'Document', md: 'Document', pdf: 'Document', svg: 'Image', image: 'Image', code: 'Code', react: 'Component', mermaid: 'Diagram', binary: 'File' };
+
+function fileKindLabel(file) {
+  if (file.kind === 'missing') return 'Not in this export';
+  const ext = (/\.([a-z0-9]{1,6})$/i.exec(file.name || '') || [])[1];
+  return [KIND_WORDS[file.kind] || 'File', ext && ext.toUpperCase()].filter(Boolean).join(' · ');
+}
+
+// Opening a link leaves the sandbox, so never for anything a browser would run as a page, or would
+// guess the type of: with no plain extension it looks at the content instead.
+function openableHref(href) {
+  const name = String(href || '').split('/').pop();
+  return /\.[a-z0-9]{1,10}$/i.test(name) && !/\.(?:[sex]?html?|xht|svgz?|xml|xslt?|mht|mhtml|rss|atom|rdf)$/i.test(name);
+}
+
 if (typeof module === 'object' && module.exports) {
-  module.exports = { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText };
+  module.exports = { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, fileViews, fileKindLabel, openableHref };
 }

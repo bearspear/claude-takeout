@@ -418,3 +418,145 @@ test('kind comes from the extension and the artifacts type', () => {
   assert.deepStrictEqual(kindOf(mk('artifacts', { command: 'create', id: 'r', title: 'App', type: 'application/vnd.ant.react', content: 'x' })), ['react']);
   assert.deepStrictEqual(kindOf(mk('artifacts', { command: 'create', id: 'm', title: 'Flow', type: 'application/vnd.ant.mermaid', content: 'x' })), ['mermaid']);
 });
+
+// Side panel: what a generated file may load, and how it opens.
+const { inlineSiblings, remoteScripts, previewDoc, PREVIEW_CSP, resolveFile, fileViews, fileKindLabel, openableHref } = require('../viewer/viewer-logic.js');
+
+const look = n => ({ 'app.js': 'run("</script>")', 'a.css': 'b{}', 'mod.js': 'go()', 'dollar.js': "x='$& $1 $`'", 'dollar.css': 'a{content:"$&"}' })[n] ?? null;
+
+test('PREVIEW_CSP is the agreed policy', () => {
+  assert.strictEqual(PREVIEW_CSP, "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:; font-src data:; media-src data: blob:; base-uri 'none'; form-action 'none'");
+});
+
+test('inlineSiblings feeds in ./name and name, and escapes closing tags', () => {
+  assert.ok(inlineSiblings('<script src="./app.js"></script>', look).includes('run("<\\/script>")'));
+  assert.ok(inlineSiblings('<link rel="stylesheet" href="a.css">', look).includes('<style>b{}</style>'));
+  assert.strictEqual(inlineSiblings('<script src="app.js"></script>', n => n === 'app.js' ? 'a</SCRIPT>b</style>' : null), '<script>a<\\/SCRIPT>b</style></script>');
+  assert.strictEqual(inlineSiblings('<link rel=stylesheet href=a.css>', n => n === 'a.css' ? 'a</STYLE>b</script>' : null), '<style>a<\\/STYLE>b</script></style>');
+  assert.strictEqual(inlineSiblings('<script src="app.js"></script>', () => 'x="<!--<script>"'), '<script>x="<\\!--<script>"</script>');
+});
+
+test('inlineSiblings handles attribute order and quote styles', () => {
+  assert.strictEqual(inlineSiblings('<script type="module" src=mod.js></script>', look), '<script type="module">go()</script>');
+  assert.strictEqual(inlineSiblings("<script src='./mod.js' defer></script>", look), '<script defer>go()</script>');
+  assert.strictEqual(inlineSiblings('<SCRIPT SRC="mod.js"></SCRIPT>', look), '<script>go()</script>');
+  assert.strictEqual(inlineSiblings('<script data-src="mod.js" src="mod.js"></script>', look), '<script data-src="mod.js">go()</script>');
+  assert.strictEqual(inlineSiblings('<link href="a.css" rel="stylesheet">', look), '<style>b{}</style>');
+  assert.strictEqual(inlineSiblings("<link href='./a.css' rel='stylesheet' />", look), '<style>b{}</style>');
+  assert.strictEqual(inlineSiblings('<link media="print" rel="stylesheet" href="a.css">', look), '<style media="print">b{}</style>');
+  assert.strictEqual(inlineSiblings('<script src="\n mod.js "></script>', look), '<script>go()</script>');
+});
+
+test('inlineSiblings leaves everything but a plain sibling name alone', () => {
+  const names = ['https://x.test/app.js', 'http://x.test/app.js', '//x.test/app.js', '/app.js', '../app.js', './../app.js', 'sub/app.js', 'a/../app.js', 'data:text/javascript,1', 'javascript:app.js', 'file:///app.js', '\\\\x.test\\app.js', '..', '.', ''];
+  const all = () => 'SHOULD NOT APPEAR';
+  for (const n of names) {
+    assert.strictEqual(inlineSiblings(`<script src="${n}"></script>`, all), `<script src="${n}"></script>`, n);
+    assert.strictEqual(inlineSiblings(`<link rel="stylesheet" href="${n}">`, all), `<link rel="stylesheet" href="${n}">`, n);
+  }
+  assert.strictEqual(inlineSiblings('<script src="gone.js"></script>', look), '<script src="gone.js"></script>');
+  assert.strictEqual(inlineSiblings('<link rel="icon" href="a.css">', look), '<link rel="icon" href="a.css">');
+  assert.strictEqual(inlineSiblings('<link rel="preload" href="a.css"><link href="a.css">', look), '<link rel="preload" href="a.css"><link href="a.css">');
+});
+
+test('inlineSiblings only touches real tags', () => {
+  for (const html of [
+    '<!-- <script src="app.js"></script> -->',
+    '<script>var s = \'<script src="app.js"><\\/script>\';</script>',
+    '<style>/* <link rel="stylesheet" href="a.css"> */</style>',
+    '<textarea><script src="app.js"></script></textarea>',
+    '<title><link rel="stylesheet" href="a.css"></title>',
+    '<script src="app.js">',
+    '<!-- never closed <script src="app.js"></script>',
+    '<script src="app.js',
+    '<img alt=\'<script src="app.js"></script>\'>',
+    '<iframe srcdoc="<link rel=stylesheet href=a.css>"></iframe>',
+  ]) assert.strictEqual(inlineSiblings(html, look), html);
+});
+
+test('inlineSiblings keeps $ patterns in sibling text', () => {
+  assert.strictEqual(inlineSiblings('<script src="dollar.js"></script>', look), "<script>x='$& $1 $`'</script>");
+  assert.strictEqual(inlineSiblings('<link rel="stylesheet" href="dollar.css">', look), '<style>a{content:"$&"}</style>');
+});
+
+test('inlineSiblings stays quick on unfinished tags', () => {
+  const t = Date.now();
+  inlineSiblings('<script a="'.repeat(200000), look);
+  inlineSiblings('<script>'.repeat(200000), look);
+  inlineSiblings('<!--'.repeat(200000), look);
+  inlineSiblings('<link '.repeat(200000), look);
+  assert.ok(Date.now() - t < 1000, `${Date.now() - t}ms`);
+});
+
+test('remoteScripts counts scripts from the network only', () => {
+  assert.strictEqual(remoteScripts('<script src="https://x.test/a.js"></script><script src="b.js"></script>'), 1);
+  assert.strictEqual(remoteScripts('<script src=http://x.test/a.js></script><script src="//x.test/b.js"></script><SCRIPT SRC=\'HTTPS://x.test/c.js\'></SCRIPT>'), 3);
+  assert.strictEqual(remoteScripts('<!-- <script src="https://x.test/a.js"></script> --><script>"<script src=https://x.test/a.js>"</script>'), 0);
+  assert.strictEqual(remoteScripts('<img alt=\'<script src="https://x.test/a.js"></script>\'>'), 0);
+  assert.strictEqual(remoteScripts('<link rel="stylesheet" href="https://x.test/a.css"><img src="https://x.test/a.png">'), 0);
+  assert.strictEqual(remoteScripts('<script src=" https://x.test/a.js"></script><script src="\\\\x.test/b.js"></script>'), 2);
+});
+
+test('previewDoc leads with the policy', () => {
+  const head = `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">`;
+  // The policy leads the document, so a comment holding "<head>" can't push it out of force
+  const d = previewDoc('<!doctype html><!-- <head> --><html><head></head>x', () => null);
+  assert.ok(d.srcdoc.startsWith(head));
+  assert.strictEqual(d.srcdoc, `${head}<!-- <head> --><html><head></head>x`);
+  assert.strictEqual(d.remote, 0);
+  assert.strictEqual(previewDoc('﻿\n <!DOCTYPE HTML PUBLIC "x">a', () => null).srcdoc, `${head}a`);
+  assert.strictEqual(previewDoc('<svg></svg>', () => null).srcdoc, `${head}<svg></svg>`);
+  assert.strictEqual(previewDoc('<!doctype html><!doctype html>a', () => null).srcdoc, `${head}<!doctype html>a`);
+  const r = previewDoc('<script src="https://x.test/a.js"></script><script src="app.js"></script>', look);
+  assert.strictEqual(r.remote, 1);
+  assert.ok(r.srcdoc.includes('run("<\\/script>")'));
+});
+
+test('resolveFile finds real ids only, and settles the version', () => {
+  const files = { a1: { versions: [{}, {}, {}] }, a2: { versions: [{}] } };
+  assert.deepStrictEqual(resolveFile(files, 'a1', 1), { file: 'a1', version: 1 });
+  assert.deepStrictEqual(resolveFile(files, 'a1', null), { file: 'a1', version: 2 });
+  assert.deepStrictEqual(resolveFile(files, 'a1', 9), { file: 'a1', version: 2 });
+  assert.deepStrictEqual(resolveFile(files, 'a1', -1), { file: 'a1', version: 2 });
+  for (const id of ['nope', '__proto__', 'constructor', 'toString', null]) assert.strictEqual(resolveFile(files, id, 0), null);
+  assert.strictEqual(resolveFile(undefined, 'a1', 0), null);
+  assert.strictEqual(resolveFile({ a1: { versions: [] } }, 'a1', 0), null);
+});
+
+test('fileViews picks what each kind can show', () => {
+  const v = (text, href) => ({ label: '', text, href });
+  const views = (kind, ver) => fileViews(kind, ver).views.join();
+  assert.strictEqual(views('html', v('x', 'a.html')), 'preview,code');
+  assert.strictEqual(views('svg', v('x', null)), 'preview,code');
+  assert.strictEqual(views('md', v('x', 'a.md')), 'preview,code');
+  assert.strictEqual(views('code', v('x', 'a.py')), 'code');
+  assert.strictEqual(views('react', v('x', 'a.jsx')), 'code');
+  assert.strictEqual(views('mermaid', v('x', 'a.mmd')), 'code');
+  assert.strictEqual(views('image', v(null, 'a.png')), 'preview');
+  assert.strictEqual(views('image', v('x', null)), 'code');
+  assert.strictEqual(views('pdf', v(null, 'a.pdf')), 'preview');
+  assert.strictEqual(views('pdf', v(null, 'a.html')), '');
+  assert.strictEqual(views('binary', v(null, 'a.zip')), '');
+  assert.strictEqual(views('html', v(null, 'a.html')), '');
+  assert.strictEqual(fileViews('react', v('x', null)).note, "This file type can't preview offline. Code view shows the full source.");
+  assert.strictEqual(fileViews('mermaid', v('x', null)).note, "This file type can't preview offline. Code view shows the full source.");
+  assert.strictEqual(fileViews('code', v('x', null)).note, '');
+  assert.strictEqual(fileViews('missing', v(null, null)).missing, true);
+  assert.strictEqual(fileViews('html', v(null, null)).missing, true);
+  assert.strictEqual(fileViews('html', v('x', null)).missing, false);
+});
+
+test('fileKindLabel reads like the card in the mockup', () => {
+  assert.strictEqual(fileKindLabel({ name: 'a.html', kind: 'html' }), 'Document · HTML');
+  assert.strictEqual(fileKindLabel({ name: 'a.py', kind: 'code' }), 'Code · PY');
+  assert.strictEqual(fileKindLabel({ name: 'Chart', kind: 'react' }), 'Component');
+  assert.strictEqual(fileKindLabel({ name: 'a.mmd', kind: 'mermaid' }), 'Diagram · MMD');
+  assert.strictEqual(fileKindLabel({ name: 'a.png', kind: 'missing' }), 'Not in this export');
+});
+
+test('openableHref never offers something a browser would run as a page', () => {
+  for (const h of ['artefacts/a.html', 'a.htm', 'a.HTML', 'a.svg', 'a.xhtml', 'a.xht', 'a.shtml', 'a.xml', 'a.xsl', 'a.mhtml', 'a.mht', 'a.svgz', 'noextension', 'a.html%20', 'a.html.', 'a.html%00', '', null]) {
+    assert.strictEqual(openableHref(h), false, String(h));
+  }
+  for (const h of ['artefacts/a.zip', 'a.pdf', 'a.tar.gz', 'dir.html/a.zip']) assert.strictEqual(openableHref(h), true, h);
+});
