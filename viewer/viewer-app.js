@@ -92,16 +92,23 @@ function copyButton() {
   return button;
 }
 
-// Code fences get a header with their language and a Copy button. Wide tables scroll on their own.
+// A code block's frame: a header with its language and a Copy button. The caller adds the pre.
+function codeBlock(lang) {
+  const wrap = el('div', 'code');
+  const head = el('div', 'code-head');
+  head.append(el('span', '', lang), copyButton());
+  wrap.append(head);
+  return wrap;
+}
+
+// Code fences become code blocks. Wide tables scroll on their own.
 function dressMarkdown(box) {
   box.querySelectorAll('pre').forEach(pre => {
     const code = pre.querySelector('code');
     const lang = code && /(?:^|\s)language-(\S+)/.exec(code.className);
-    const wrap = el('div', 'code');
-    const head = el('div', 'code-head');
-    head.append(el('span', '', lang ? lang[1] : ''), copyButton());
+    const wrap = codeBlock(lang ? lang[1] : '');
     pre.replaceWith(wrap);
-    wrap.append(head, pre);
+    wrap.append(pre);
   });
   box.querySelectorAll('table').forEach(table => {
     const wrap = el('div', 'table');
@@ -231,7 +238,19 @@ function renderHuman(m) {
     node.append(row);
   }
   const text = m.blocks.filter(b => b.t === 'text').map(b => b.text).join('\n\n');
-  if (text) node.append(el('div', 'bubble', text));
+  if (text) {
+    // Code fences show as code blocks. The rest stays exactly as typed.
+    const bubble = el('div', 'bubble');
+    for (const part of splitFences(text)) {
+      if (part.t === 'text') { bubble.append(el('div', 'typed', part.text)); continue; }
+      const pre = document.createElement('pre');
+      pre.append(el('code', '', part.text));
+      const block = codeBlock(part.lang);
+      block.append(pre);
+      bubble.append(block);
+    }
+    node.append(bubble);
+  }
   return chips.length || text ? node : null;
 }
 

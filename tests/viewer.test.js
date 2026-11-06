@@ -790,3 +790,16 @@ test('copyText: hostile text stays literal', () => {
   const text = '<script>window.__hit=1</script><img src=x onerror=alert(1)>';
   assert.strictEqual(copyText({ sender: 'assistant', blocks: [{ t: 'text', text }] }), text);
 });
+
+test('splitFences turns only closed fences into code', () => {
+  const { splitFences } = require('../viewer/viewer-logic.js');
+  assert.deepStrictEqual(splitFences('plain *text*'), [{ t: 'text', text: 'plain *text*' }]);
+  assert.deepStrictEqual(splitFences('see:\n\n```js\nlet a = 1;\n\nlet b;\n```\nafter'), [
+    { t: 'text', text: 'see:' }, { t: 'code', lang: 'js', text: 'let a = 1;\n\nlet b;' }, { t: 'text', text: 'after' }]);
+  assert.deepStrictEqual(splitFences('```\nno language\n```'), [{ t: 'code', lang: '', text: 'no language' }]);
+  assert.deepStrictEqual(splitFences('````\n```\ninner\n```\n````'), [{ t: 'code', lang: '', text: '```\ninner\n```' }]);
+  assert.deepStrictEqual(splitFences('~~~\nx\n~~~'), [{ t: 'code', lang: '', text: 'x' }]);
+  assert.deepStrictEqual(splitFences('never closed\n```\nstill typed'), [{ t: 'text', text: 'never closed\n```\nstill typed' }]);
+  assert.deepStrictEqual(splitFences('inline ```code``` stays'), [{ t: 'text', text: 'inline ```code``` stays' }]);
+  assert.deepStrictEqual(splitFences('```\n<script>x</script>\n```'), [{ t: 'code', lang: '', text: '<script>x</script>' }]);
+});

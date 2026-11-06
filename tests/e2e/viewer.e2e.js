@@ -914,7 +914,10 @@ async function unzipMegaZip(out) {
       nav.context.on('page', () => { opened++; });
       await openFile(nav, name);
       await frameIn(nav);
-      const ran = await waitLog(nav, `NAV ran ${name}`);
+      // A zero-delay refresh can replace the page before its script logs. The refusal
+      // naming the target proves the attempt, so it counts too, for this file only.
+      const refused = () => name === 'nav-refresh.html' && nav.seen.logs.some(l => l.includes("Refused to frame 'https://remote.test/"));
+      const ran = await waitLog(nav, `NAV ran ${name}`) || refused();
       await nav.page.waitForTimeout(500);
       check(`${name}: the attempt ran`, ran, nav.seen.logs.join(' | '));
       check(`${name}: nothing got out`, !nav.seen.logs.some(l => l.includes('ESCAPED')) && nav.seen.requests.length === 0 && opened === 0, [...nav.seen.logs, ...nav.seen.requests].join(' | '));
@@ -1066,6 +1069,19 @@ async function unzipMegaZip(out) {
     const copyIn = id => cp.page.locator(`.msg[data-id="${id}"] .foot .copy-msg`);
     check('copy: a prompt has a labelled Copy', (await copyIn('m01').getAttribute('aria-label')) === 'Copy prompt' && (await copyIn('m01').textContent()) === 'Copy');
     check('copy: a response has a labelled Copy', (await copyIn('m02').getAttribute('aria-label')) === 'Copy response');
+    {
+      const fenced = path.join(dir, 'fenced.html');
+      const prompt = 'Before\n\n```python\nprint("<img src=x onerror=window.__hit=1>")\n```\nAfter *as typed*';
+      fs.writeFileSync(fenced, buildHtml([{ ...plainChat('fc', 'Fenced', 2, '2026-05-01T00:00:00Z'), current_leaf_message_uuid: 'h', chat_messages: [{ uuid: 'h', parent_message_uuid: null, sender: 'human', created_at: '2026-05-01T00:00:00Z', content: [{ type: 'text', text: prompt }], attachments: [], files: [], files_v2: [] }] }], '2026-11-05T12:00:00Z'));
+      const fp = await open({}, 'file://' + fenced);
+      const bubble = fp.page.locator('.bubble');
+      check('prompt fence: a code block with its language', (await bubble.locator('.code .code-head span').first().textContent()) === 'python');
+      check('prompt fence: no raw backticks', !(await bubble.textContent()).includes('```'));
+      check('prompt fence: the code is literal', (await bubble.locator('.code code').textContent()) === 'print("<img src=x onerror=window.__hit=1>")' && !(await fp.page.evaluate(() => !!window.__hit)));
+      check('prompt fence: other text stays as typed', (await bubble.locator('.typed').nth(1).textContent()) === 'After *as typed*');
+      check('prompt fence: Copy still gives the prompt as typed', await fp.page.locator('.msg[data-id="h"] .copy-msg').count() === 1);
+      await fp.page.close();
+    }
     const footOrder = id => cp.page.$eval(`.msg[data-id="${id}"] .foot`, f => [...f.children].map(c => c.matches('.copy-msg') ? 'copy' : c.matches('time.when') ? 'time' : 'other').join());
     check('copy: a prompt shows the time, then Copy', (await footOrder('m01')) === 'time,copy', await footOrder('m01'));
     check('copy: a response shows Copy, then the time', (await footOrder('m02')) === 'copy,time', await footOrder('m02'));

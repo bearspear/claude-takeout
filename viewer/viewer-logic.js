@@ -471,6 +471,35 @@ function openableHref(href) {
   return /\.[a-z0-9]{1,10}$/i.test(name) && !/\.(?:[sex]?html?|xht|svgz?|xml|xslt?|mht|mhtml|rss|atom|rdf)$/i.test(name);
 }
 
+// A prompt split at its code fences: [{ t: 'text', text }, { t: 'code', lang, text }].
+// Only fences change: other text stays as typed, and an unclosed fence stays text.
+function splitFences(text) {
+  const lines = String(text).split('\n');
+  const parts = [];
+  let plain = [];
+  const flush = () => {
+    const body = plain.join('\n').replace(/^\n+|\n+$/g, '');
+    if (body) parts.push({ t: 'text', text: body });
+    plain = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const open = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)[^`]*$/.exec(lines[i]);
+    if (!open) { plain.push(lines[i]); continue; }
+    const mark = open[1];
+    let end = -1;
+    for (let k = i + 1; k < lines.length; k++) {
+      const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(lines[k]);
+      if (close && close[1][0] === mark[0] && close[1].length >= mark.length) { end = k; break; }
+    }
+    if (end < 0) { plain.push(lines[i]); continue; }
+    flush();
+    parts.push({ t: 'code', lang: open[2], text: lines.slice(i + 1, end).join('\n') });
+    i = end;
+  }
+  flush();
+  return parts;
+}
+
 // What the Copy button puts on the clipboard: the raw text of the message's text blocks, as sent or written
 // (before citations and math are touched), joined by a blank line. '' when there is nothing to copy.
 function copyText(msg) {
@@ -550,5 +579,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
 }
