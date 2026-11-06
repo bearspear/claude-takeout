@@ -299,6 +299,8 @@ Your existing session cookies are used for authentication (no API keys needed).
 | `sidepanel.html` | Sidebar panel UI |
 | `popup.js` | Export logic and markdown conversion |
 | `takeout-viewer.js`, `viewer/` | Builds `viewer.html` for ZIP exports |
+| `export-core.js` | Extractors shared by the extension and the tools |
+| `tools/` | `build_viewer.js`, which adds a viewer to older archives |
 | `jszip.min.js` | ZIP generation library |
 
 ## Troubleshooting
@@ -349,16 +351,23 @@ See [TECHNICAL.md](TECHNICAL.md) for a comprehensive technical writeup covering:
 
 ## Companion CLIs
 
-Two stdlib-only Python 3 scripts ship with the extension:
+Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 
 | Tool | Purpose |
 |---|---|
 | `extract_artifacts.py` | Offline reconstruction of every artifact version from `original.json`. Byte-identical output to the extension's `extractArtifacts`. Useful when you only have the JSON, or for validating exports via `diff -r`. |
 | `replay_bash.py` | Post-export recovery: replays Claude's `bash_tool` commands in a tmpdir, under an OS sandbox on macOS, with per-command confirmation, to reconstruct artifacts the extension flagged as `artifact_opaque_mutation`. |
 
+`tools/build_viewer.js` (Node 20+) gives archives from before v1.6 an offline viewer. Run it on a folder of exports: `node tools/build_viewer.js <folder> --dry-run` first, then without `--dry-run`.
+
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.6.1
+
+- **Viewer for older archives** - `tools/build_viewer.js` gives exports made before v1.6 a `viewer.html`, from a folder or a ZIP. It changes none of the existing files. Files you added to an archive show in the viewer under "Archive files". See [USAGE.md](USAGE.md#adding-a-viewer-to-older-archives).
+- **Open file limited to safe types** - In every viewer, the Open file link appears only for documents, images, audio, video, archives and plain data files. HTML, SVG and other types that run in the browser can still be previewed in the sandbox, but have no link that opens them directly.
 
 ### v1.6.0
 

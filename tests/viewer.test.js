@@ -473,7 +473,7 @@ test('kind comes from the extension and the artifacts type', () => {
 });
 
 // Side panel: what a generated file may load, and how it opens.
-const { inlineSiblings, remoteScripts, previewDoc, PREVIEW_CSP, resolveFile, fileViews, fileKindLabel, openableHref } = require('../viewer/viewer-logic.js');
+const { inlineSiblings, remoteScripts, previewDoc, PREVIEW_CSP, resolveFile, fileViews, fileKindLabel, openableHref, OPENABLE_EXTENSIONS } = require('../viewer/viewer-logic.js');
 
 const look = n => ({ 'app.js': 'run("</script>")', 'a.css': 'b{}', 'mod.js': 'go()', 'dollar.js': "x='$& $1 $`'", 'dollar.css': 'a{content:"$&"}' })[n] ?? null;
 
@@ -640,6 +640,34 @@ test('fileKindLabel reads like the card in the mockup', () => {
   assert.strictEqual(fileKindLabel({ name: 'Chart', kind: 'react' }), 'Component');
   assert.strictEqual(fileKindLabel({ name: 'a.mmd', kind: 'mermaid' }), 'Diagram · MMD');
   assert.strictEqual(fileKindLabel({ name: 'a.png', kind: 'missing' }), 'Not in this export');
+});
+
+test('openableHref offers exactly the allowlisted types', () => {
+  const allowed = 'pdf doc docx xls xlsx ppt pptx odt ods odp rtf pages numbers key epub zip gz tar 7z rar csv tsv txt log md markdown json png jpg jpeg gif webp heic tif tiff bmp mp3 m4a wav ogg flac aac mp4 mov webm m4v mkv avi'.split(' ');
+  assert.deepStrictEqual([...OPENABLE_EXTENSIONS].sort(), [...allowed].sort());
+  for (const ext of allowed) {
+    assert.strictEqual(openableHref(`dir/a.${ext}`), true, ext);
+    assert.strictEqual(openableHref(`dir/a.${ext.toUpperCase()}`), true, ext);
+  }
+});
+
+test('openableHref refuses any type not on the list', () => {
+  for (const h of ['evil.xbl', 'a.xbl', 'a.py', 'a.js', 'a.css', 'a.bin', 'a.exe', 'a.app', 'a.webloc', 'a.xsd', 'a.wsdl', 'a.pdfx', 'a.mdx', 'a.pdf1', 'a.toString', 'a.constructor', 'a.__proto__']) {
+    assert.strictEqual(openableHref(h), false, h);
+  }
+});
+
+test('openableHref goes by the file a link really opens, not a query or fragment', () => {
+  for (const h of ['a.html?x.pdf', 'a.html#x.pdf', 'a.xbl?.txt', 'a.xbl#.txt', 'a.pdf?x', 'a.pdf#x', 'a.html?a=b/c.pdf', 'a.html#/c.pdf', 'a.html\\c.pdf']) {
+    assert.strictEqual(openableHref(h), false, h);
+  }
+  assert.strictEqual(openableHref('a.html%3Fx.pdf'), true, 'an encoded ? is part of the name, and that name ends .pdf');
+  assert.strictEqual(openableHref('a.pdf%3Fx'), false);
+  assert.strictEqual(openableHref('a.pdf%23x'), false);
+});
+
+test('openableHref only follows relative links', () => {
+  for (const h of ['javascript:x.pdf', 'file:///etc/a.pdf', 'https://a.test/a.pdf', 'data:text/html,x.pdf']) assert.strictEqual(openableHref(h), false, h);
 });
 
 test('openableHref never offers something a browser would run as a page', () => {
@@ -820,4 +848,147 @@ test('thinking keeps every summary when the text is hidden', () => {
   assert.deepStrictEqual(one.summaries, ['First step.', 'Second step.']);
   assert.strictEqual(one.text, '');
   assert.deepStrictEqual(two.summaries, []);
+});
+
+// ---- Archive files ----
+
+const { addedTree, filterAdded, addedForChat, addedFile, isAddedId } = require('../viewer/viewer-logic.js');
+const addedEntry = (path, chat = null, extra = {}) => ({ path, chat, kind: 'md', size: 1, href: path, part: 1, key: path, ...extra });
+const treeNames = node => ({ name: node.name, files: node.files.map(f => f.path), folders: node.folders.map(treeNames) });
+
+test('addedTree nests folders and sorts folders and files by name', () => {
+  const added = ['b/z.md', 'b/a.md', 'a/deep/er/x.md', 'a/f10.md', 'a/f2.md', 'root.md'].map(p => addedEntry(p));
+  assert.deepStrictEqual(addedTree(added, 'c1').map(treeNames), [{
+    name: '',
+    files: ['root.md'],
+    folders: [
+      { name: 'a', files: ['a/f2.md', 'a/f10.md'], folders: [{ name: 'deep', files: [], folders: [{ name: 'er', files: ['a/deep/er/x.md'], folders: [] }] }] },
+      { name: 'b', files: ['b/a.md', 'b/z.md'], folders: [] },
+    ],
+  }]);
+});
+
+test('addedTree hands back the Added entries themselves', () => {
+  const entry = addedEntry('a/b.md');
+  assert.strictEqual(addedTree([entry], 'c1')[0].folders[0].files[0], entry);
+});
+
+test('addedTree: a mega root file shows with every chat, a chat file only with its own', () => {
+  const added = [addedEntry('_index.md'), addedEntry('one/a.md', 'c1'), addedEntry('two/b.md', 'c2')];
+  const paths = id => { const out = []; const walk = n => { out.push(...n.files.map(f => f.path)); n.folders.forEach(walk); }; addedTree(added, id).forEach(walk); return out; };
+  assert.deepStrictEqual(paths('c1'), ['_index.md', 'one/a.md']);
+  assert.deepStrictEqual(paths('c2'), ['_index.md', 'two/b.md']);
+  assert.deepStrictEqual(paths('c3'), ['_index.md']);
+  assert.deepStrictEqual(addedForChat(added, 'c2').map(a => a.path), ['_index.md', 'two/b.md']);
+});
+
+test('addedTree has nothing to show for an empty view', () => {
+  assert.deepStrictEqual(addedTree([], 'c1'), []);
+  assert.deepStrictEqual(addedTree([addedEntry('a.md', 'c2')], 'c1'), []);
+  assert.deepStrictEqual(addedTree(undefined, 'c1'), []);
+});
+
+test('addedTree keeps folders with prototype-like names as folders', () => {
+  const [root] = addedTree([addedEntry('__proto__/a.md'), addedEntry('constructor/toString/b.md')], 'c1');
+  assert.deepStrictEqual(root.folders.map(f => f.name), ['__proto__', 'constructor']);
+  assert.strictEqual(root.folders[0].files[0].path, '__proto__/a.md');
+});
+
+test('filterAdded matches the file name, ignoring case', () => {
+  const added = ['synthesis/Alpha.md', 'alphabet/beta.md', 'x/ALPHA.txt'].map(p => addedEntry(p));
+  assert.deepStrictEqual(filterAdded(added, 'alpha').map(a => a.path), ['synthesis/Alpha.md', 'x/ALPHA.txt']);
+  assert.deepStrictEqual(filterAdded(added, '  ALPHA ').length, 2);
+  assert.deepStrictEqual(filterAdded(added, 'gamma'), []);
+});
+
+test('filterAdded takes the query as plain text, not a pattern', () => {
+  const added = ['a/file(1).md', 'a/file2.md', 'a/.*.md'].map(p => addedEntry(p));
+  assert.deepStrictEqual(filterAdded(added, '(1').map(a => a.path), ['a/file(1).md']);
+  assert.deepStrictEqual(filterAdded(added, '.*').map(a => a.path), ['a/.*.md']);
+  assert.deepStrictEqual(filterAdded(added, '[').length, 0);
+});
+
+test('filterAdded finds a name stored decomposed, as a Mac disk spells it', () => {
+  const added = [addedEntry('a/Gödel.md')];
+  assert.strictEqual(filterAdded(added, 'Gödel').length, 1);
+  assert.strictEqual(filterAdded(added, 'gödel').length, 1);
+});
+
+test('filterAdded with an empty query gives everything', () => {
+  const added = [addedEntry('a.md'), addedEntry('b.md')];
+  assert.strictEqual(filterAdded(added, '   ').length, 2);
+});
+
+test('resolveFile opens x ids in range, for any chat', () => {
+  const added = [addedEntry('a.md', 'other'), addedEntry('b.md')];
+  assert.deepStrictEqual(resolveFile({}, 'x0', null, added), { file: 'x0', version: 0 });
+  assert.deepStrictEqual(resolveFile(undefined, 'x1', 7, added), { file: 'x1', version: 0 });
+});
+
+test('resolveFile rejects any x id that is not an index into added', () => {
+  const added = [addedEntry('a.md')];
+  for (const id of ['x1', 'x-1', 'x', 'x01', 'x1e0', 'x0.0', 'x0 ', ' x0', 'x__proto__', 'xconstructor', 'xlength', 'x99999999999999999999', 'X0']) {
+    assert.strictEqual(resolveFile({}, id, 0, added), null, id);
+  }
+  assert.strictEqual(resolveFile({}, 'x0', 0), null);
+  assert.strictEqual(resolveFile({}, 'x0', 0, []), null);
+  assert.strictEqual(resolveFile({}, 'x0', 0, 'x'), null);
+  assert.strictEqual(isAddedId('x0'), true);
+  assert.strictEqual(isAddedId('a0'), false);
+  assert.strictEqual(isAddedId(null), false);
+});
+
+test('resolveFile still finds generated files with added present', () => {
+  assert.deepStrictEqual(resolveFile({ a1: { versions: [{}] } }, 'a1', 0, [addedEntry('a.md')]), { file: 'a1', version: 0 });
+});
+
+test('addedFile builds a GenFile the panel can show', () => {
+  const entry = addedEntry('notes/Plan.md', null, { key: '4', part: 2, href: 'notes/Plan.md' });
+  assert.deepStrictEqual(addedFile([entry], 'x0'), {
+    name: 'Plan.md', path: 'notes/Plan.md', kind: 'md', added: true, tooLarge: false,
+    versions: [{ label: '', text: null, href: 'notes/Plan.md', part: 2, key: '4' }],
+  });
+  assert.strictEqual(addedFile([entry], 'x1'), null);
+  assert.strictEqual(addedFile([entry], 'x__proto__'), null);
+  assert.strictEqual(fileKindLabel(addedFile([entry], 'x0')), 'Document · MD');
+});
+
+test('addedFile: text with no part is too large, whatever its kind', () => {
+  const big = (path, kind) => addedFile([addedEntry(path, null, { kind, part: null, key: null })], 'x0');
+  for (const [path, kind] of [['a.html', 'html'], ['a.svg', 'svg'], ['a.md', 'md'], ['a.py', 'code'], ['a.jsx', 'react'], ['a.mmd', 'mermaid']]) {
+    assert.strictEqual(big(path, kind).tooLarge, true, path);
+  }
+  for (const [path, kind] of [['a.png', 'image'], ['a.pdf', 'pdf'], ['a.zip', 'binary'], ['a.mp3', 'binary']]) {
+    assert.strictEqual(big(path, kind).tooLarge, false, path);
+  }
+});
+
+test('addedFile: audio and video go by their href, and only those types', () => {
+  const kindOf = path => addedFile([addedEntry(path, null, { kind: 'binary', part: null, key: null })], 'x0').kind;
+  for (const p of ['a.m4a', 'a.mp3', 'a.wav', 'a.ogg', 'a.MP3']) assert.strictEqual(kindOf(p), 'audio', p);
+  for (const p of ['a.mp4', 'a.webm', 'a.mov']) assert.strictEqual(kindOf(p), 'video', p);
+  for (const p of ['a.flac', 'a.avi', 'a.mp3.zip', 'mp3']) assert.strictEqual(kindOf(p), 'binary', p);
+});
+
+test('addedFile: an image is one only by its href', () => {
+  const kindOf = (path, kind = 'image') => addedFile([addedEntry(path, null, { kind, part: null, key: null })], 'x0').kind;
+  for (const p of ['a.png', 'a.jpg', 'a.jpeg', 'a.gif', 'a.webp', 'a.PNG']) assert.strictEqual(kindOf(p), 'image', p);
+  assert.strictEqual(kindOf('a.bmp'), 'binary');
+  assert.strictEqual(kindOf('a.png.exe'), 'binary');
+});
+
+test('addedFile: a .markdown file is Markdown', () => {
+  const kindOf = (path, part = 1) => addedFile([addedEntry(path, null, { kind: 'code', part })], 'x0').kind;
+  assert.strictEqual(kindOf('notes.markdown'), 'md');
+  assert.strictEqual(kindOf('NOTES.MARKDOWN'), 'md');
+  assert.strictEqual(kindOf('notes.markdown', null), 'md');
+  assert.strictEqual(kindOf('notes.markdown.txt'), 'code');
+});
+
+test('fileViews gives audio and video a preview from a link', () => {
+  assert.deepStrictEqual(fileViews('audio', { text: null, href: 'a.mp3' }), { views: ['preview'], note: '', missing: false });
+  assert.deepStrictEqual(fileViews('video', { text: null, href: 'a.mp4' }), { views: ['preview'], note: '', missing: false });
+  assert.strictEqual(fileViews('audio', { text: null, href: null }).missing, true);
+  assert.strictEqual(fileKindLabel({ kind: 'audio', name: 'a.mp3' }), 'Audio · MP3');
+  assert.strictEqual(fileKindLabel({ kind: 'video', name: 'a.mov' }), 'Video · MOV');
 });

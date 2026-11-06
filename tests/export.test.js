@@ -4,7 +4,7 @@ const assert = require('node:assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const { REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages } = require('./helpers');
+const { REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads } = require('./helpers');
 
 const { fn, sandbox } = loadPopup({
   fetch: async (url) => {
@@ -241,49 +241,7 @@ test('mega-ZIP stores project files once and every chat links to them', async ()
 
 // ---- viewer.html ----
 // fetch answers: uuid in failing -> 404; project endpoints from project; any other file a text blob.
-const textBlob = (text, type = 'text/plain') => ({
-  marker: text, size: text.length, type, text: async () => text, arrayBuffer: async () => new ArrayBuffer(0),
-});
-const projectResponses = (name = 'My Project') => [
-  [/\/projects\/P$/, () => ({ ok: true, status: 200, json: async () => ({ name, docs_count: 1, files_count: 1 }) })],
-  [/\/projects\/P\/docs$/, () => ({ ok: true, status: 200, json: async () => [{ uuid: 'd1', file_name: 'Brief.md', content: 'be kind' }] })],
-  [/\/projects\/P\/files$/, () => ({ ok: true, status: 200, json: async () => [{ file_uuid: 'pf1', file_name: 'Paper.pdf' }] })],
-];
-const zipStub = () => {
-  const written = {};
-  return { written, file: (name, content, options) => { written[name] = options ? { content, options } : content; } };
-};
-function exportPopup({ failing = [], routes = [], texts = {} } = {}) {
-  return loadPopup({
-    fetch: async (url) => {
-      for (const [re, answer] of routes) if (re.test(url)) return answer(url);
-      if (failing.some((id) => url.includes(id))) return { ok: false, status: 404 };
-      const hit = /\/files\/([^/]+)\/contents?$/.exec(url);
-      if (hit) return { ok: true, status: 200, blob: async () => (texts[hit[1]] !== undefined ? texts[hit[1]] : textBlob(`file ${hit[1]}`)) };
-      return { ok: false, status: 404 };
-    },
-  });
-}
-async function runFolder(popup, data, { folderName = '', shared = null, target = zipStub() } = {}) {
-  popup.sandbox.__folder = target;
-  popup.sandbox.__data = data;
-  popup.sandbox.__shared = shared;
-  popup.sandbox.__name = folderName;
-  const output = await vm.runInContext("populateConversationFolder(__folder, __data, null, 'org', __shared, __name)", popup.sandbox);
-  return { written: target.written, output, chat: output.viewerChat };
-}
-const withUploads = () => {
-  const data = loadFixture();
-  const first = data.chat_messages.find((m) => m.sender === 'human');
-  first.files = [];
-  first.files_v2 = [
-    { success: true, file_name: 'notes.txt', file_uuid: 'up-text', file_kind: 'blob' },
-    { success: true, file_name: 'photo.png', file_uuid: 'up-png', file_kind: 'image' },
-    { success: true, file_name: 'gone.pdf', file_uuid: 'up-gone', file_kind: 'document' },
-    { success: true, file_name: 'legacy.txt', file_kind: 'blob' },
-  ];
-  return data;
-};
+// textBlob, projectResponses, zipStub, exportPopup, runFolder and withUploads live in helpers.js
 const uploadsOf = (chat) => Object.fromEntries(chat.messages.flatMap((m) => m.uploads).map((u) => [u.name, u]));
 
 test('viewerChat has the right cards, and the folder prefixes every link', async () => {
@@ -636,4 +594,68 @@ test('project instructions: over the embed limit they are cut with a note, whole
   assert.ok(chat.project.instructions.length < long.length);
   assert.match(chat.project.instructions, /truncated.*project\/prompt_template\.md/);
   assert.ok(written['project/prompt_template.md'].includes(long));
+});
+
+// ---- export-core.js ----
+test('export-core.js exports the shared extractors', () => {
+  const core = require('../export-core.js');
+  const names = ['fixMojibake', 'isTextFile', 'getMessageChain', 'failedToolUseIds', 'isBashTool', 'heredocPath', 'HEREDOC_RE', 'heredocFiles',
+    'extractArtifacts', 'extractUploadedFiles', 'extractPresentedFiles', 'extractDeliveredFiles', 'getModelName', 'buildViewerDeliveries'];
+  for (const name of names) assert.ok(name in core, `${name} is exported`);
+});
+
+test('popup.html and sidepanel.html load export-core.js, takeout-viewer.js, then popup.js', () => {
+  for (const page of ['popup.html', 'sidepanel.html']) {
+    const html = fs.readFileSync(path.join(REPO, page), 'utf8');
+    const scripts = Array.from(html.matchAll(/<script src="([^"]+)"/g), (m) => m[1]);
+    const order = ['export-core.js', 'takeout-viewer.js', 'popup.js'].map((s) => scripts.indexOf(s));
+    assert.ok(order.every((i) => i >= 0), `${page} loads all three`);
+    assert.deepStrictEqual(order, [...order].sort((a, b) => a - b), `${page} order`);
+  }
+});
+
+test('buildViewerDeliveries names each uuid after its first file', () => {
+  const { buildViewerDeliveries } = require('../export-core.js');
+  const files = [{ filename: 'a_v1.md', uuid: 'u1', path: '/p/a.md' }, { filename: 'a_v2.md', uuid: 'u2', path: '/p/a.md' }, { filename: 'a.md', uuid: 'u2', path: '/p/a.md' }];
+  assert.deepStrictEqual(buildViewerDeliveries(files), { u1: { filename: 'a_v1.md', path: '/p/a.md' }, u2: { filename: 'a_v2.md', path: '/p/a.md' } });
+});
+
+// ---- Export baseline: every file populateConversationFolder writes, hashed ----
+// Refresh with UPDATE_EXPORT_BASELINE=1 node --test tests/export.test.js, after confirming the change is intended.
+const BASELINE = path.join(__dirname, 'fixtures', 'export-baseline.json');
+test('the export of the fixture is byte-for-byte what the stored baseline says', async () => {
+  const crypto = require('crypto');
+  // formatTimestamp prints local time, so the export runs in UTC whatever the machine's zone is.
+  // Tests in a file run one at a time, and the zone is put back in finally.
+  const zone = process.env.TZ;
+  process.env.TZ = 'UTC';
+  let written;
+  try {
+    const popup = exportPopup({ failing: ['up-gone'], routes: projectResponses() });
+    const data = withUploads();
+    data.project_uuid = 'P';
+    ({ written } = await runFolder(popup, data));
+  } finally {
+    if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
+  }
+  const files = everyFile(written);
+  delete files['viewer.html'];
+  delete files['viewer-check.gif'];
+  const manifest = {};
+  for (const [name, content] of Object.entries(files)) manifest[name] = crypto.createHash('sha256').update(content).digest('hex');
+  if (process.env.UPDATE_EXPORT_BASELINE) fs.writeFileSync(BASELINE, JSON.stringify(manifest, null, 2) + '\n');
+  assert.deepStrictEqual(manifest, JSON.parse(fs.readFileSync(BASELINE, 'utf8')));
+});
+
+test('fixMojibake sorts its map keys once, not on every call', () => {
+  const core = require('../export-core.js');
+  core.fixMojibake('warm up');
+  const sort = Array.prototype.sort;
+  let calls = 0;
+  Array.prototype.sort = function (...args) { calls++; return sort.apply(this, args); };
+  try {
+    core.fixMojibake('another â€” string');
+    core.fixMojibake('and one more');
+  } finally { Array.prototype.sort = sort; }
+  assert.strictEqual(calls, 0);
 });

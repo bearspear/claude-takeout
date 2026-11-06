@@ -75,6 +75,7 @@ function makeEnv({ url = chatUrl(A), captured = conv(A, 'Chat A') } = {}) {
     window: { close() {} }, setTimeout, clearTimeout, URL, JSZip: function () {},
   };
   env.ctx = vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(REPO, 'export-core.js'), 'utf8'), env.ctx);
   vm.runInContext(fs.readFileSync(path.join(REPO, 'popup.js'), 'utf8'), env.ctx);
 
   sandbox.__downloads = [];

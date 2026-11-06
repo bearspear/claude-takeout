@@ -437,7 +437,9 @@ function previewDoc(text, lookup) {
 }
 
 // The file and version a hash can really open, or null. A bad version means the latest.
-function resolveFile(files, id, version) {
+// added: ViewerData.added. An x id opens from any chat, since a hash can be shared.
+function resolveFile(files, id, version, added) {
+  if (addedEntryFor(added, id)) return { file: id, version: 0 };
   if (id == null || !files || !Object.prototype.hasOwnProperty.call(files, id)) return null;
   const count = (files[id].versions || []).length;
   if (!count) return null;
@@ -450,13 +452,13 @@ function fileViews(kind, version) {
   const href = version.href != null;
   if (kind === 'missing' || (!text && !href)) return { views: [], note: '', missing: true };
   const preview = kind === 'html' || kind === 'svg' || kind === 'md' ? text
-    : kind === 'image' ? href
+    : kind === 'image' || kind === 'audio' || kind === 'video' ? href
     : kind === 'pdf' && href && /\.pdf$/i.test(version.href);
   const views = [...(preview ? ['preview'] : []), ...(text ? ['code'] : [])];
   return { views, note: text && (kind === 'react' || kind === 'mermaid') ? OFFLINE_NOTE : '', missing: false };
 }
 
-const KIND_WORDS = { html: 'Document', md: 'Document', pdf: 'Document', svg: 'Image', image: 'Image', code: 'Code', react: 'Component', mermaid: 'Diagram', binary: 'File' };
+const KIND_WORDS = { html: 'Document', md: 'Document', pdf: 'Document', svg: 'Image', image: 'Image', audio: 'Audio', video: 'Video', code: 'Code', react: 'Component', mermaid: 'Diagram', binary: 'File' };
 
 function fileKindLabel(file) {
   if (file.kind === 'missing') return 'Not in this export';
@@ -464,11 +466,92 @@ function fileKindLabel(file) {
   return [KIND_WORDS[file.kind] || 'File', ext && ext.toUpperCase()].filter(Boolean).join(' · ');
 }
 
-// Opening a link leaves the sandbox, so never for anything a browser would run as a page, or would
-// guess the type of: with no plain extension it looks at the content instead.
+// Opening a link leaves the sandbox, so only for types a browser won't run as a page. A list of what is safe,
+// because a list of what isn't always misses one: Chromium reads .xbl as XML, so it would run XHTML in one.
+const OPENABLE_EXTENSIONS = new Set(('pdf doc docx xls xlsx ppt pptx odt ods odp rtf pages numbers key epub zip gz tar 7z rar ' +
+  'csv tsv txt log md markdown json png jpg jpeg gif webp heic tif tiff bmp mp3 m4a wav ogg flac aac mp4 mov webm m4v mkv avi').split(' '));
+
+// hrefs are relative and percent-encoded, so ?, #, : or \ means the name at the end isn't the file that opens.
 function openableHref(href) {
-  const name = String(href || '').split('/').pop();
-  return /\.[a-z0-9]{1,10}$/i.test(name) && !/\.(?:[sex]?html?|xht|svgz?|xml|xslt?|mht|mhtml|rss|atom|rdf)$/i.test(name);
+  const text = String(href || '');
+  if (/[?#:\\]/.test(text)) return false;
+  const ext = /\.([a-z0-9]+)$/i.exec(text.split('/').pop());
+  return !!ext && OPENABLE_EXTENSIONS.has(ext[1].toLowerCase());
+}
+
+// ---- Archive files ----
+// Added = { path, chat, kind, size, href, part, key }. A null chat shows with every chat.
+const ADDED_ID = /^x(0|[1-9]\d*)$/;
+const ADDED_IMAGE = /\.(?:png|jpe?g|gif|webp)$/i;
+const ADDED_AUDIO = /\.(?:m4a|mp3|wav|ogg)$/i;
+const ADDED_VIDEO = /\.(?:mp4|webm|mov)$/i;
+const ADDED_TEXT_KINDS = new Set(['html', 'svg', 'md', 'code', 'react', 'mermaid']);
+
+const isAddedId = id => typeof id === 'string' && ADDED_ID.test(id);
+
+function addedEntryFor(added, id) {
+  if (!isAddedId(id) || !Array.isArray(added)) return null;
+  const index = Number(id.slice(1));
+  return index < added.length ? added[index] : null;
+}
+
+// The kind the panel goes by. Audio and video have no kind of their own in the data, and only these image types show.
+function addedKind(entry) {
+  const href = entry.href || '';
+  if (ADDED_AUDIO.test(href)) return 'audio';
+  if (ADDED_VIDEO.test(href)) return 'video';
+  if (/\.markdown$/i.test(href)) return 'md'; // kindFor has only .md, and exports keep to that
+  return entry.kind === 'image' && !ADDED_IMAGE.test(href) ? 'binary' : entry.kind;
+}
+
+// The GenFile for an x id, or null. Its text arrives later, from the part. Text with no part was too large to embed.
+function addedFile(added, id) {
+  const entry = addedEntryFor(added, id);
+  if (!entry) return null;
+  const kind = addedKind(entry);
+  const part = entry.part == null ? null : entry.part;
+  return {
+    name: String(entry.path).split('/').pop(), path: entry.path, kind, added: true, tooLarge: part === null && ADDED_TEXT_KINDS.has(kind),
+    versions: [{ label: '', text: null, href: entry.href == null ? null : entry.href, part, key: entry.key == null ? null : entry.key }],
+  };
+}
+
+const addedForChat = (added, chatId) => (added || []).filter(a => a.chat == null || a.chat === chatId);
+
+const byName = (a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+
+function sortedNode(node) {
+  return {
+    name: node.name,
+    files: node.files.sort((a, b) => byName(a.path.split('/').pop(), b.path.split('/').pop())),
+    folders: [...node.folders.values()].sort((a, b) => byName(a.name, b.name)).map(sortedNode),
+  };
+}
+
+// One root node, named '', holding the view's top-level files and folders. [] when the view is empty.
+function addedTree(added, chatId) {
+  const shown = addedForChat(added, chatId);
+  if (!shown.length) return [];
+  const blank = name => ({ name, files: [], folders: new Map() });
+  const root = blank('');
+  for (const entry of shown) {
+    const segments = String(entry.path).split('/');
+    segments.pop();
+    let node = root;
+    for (const name of segments) {
+      if (!node.folders.has(name)) node.folders.set(name, blank(name));
+      node = node.folders.get(name);
+    }
+    node.files.push(entry);
+  }
+  return [sortedNode(root)];
+}
+
+// Disks on a Mac can hold names decomposed, so both sides are normalized. The query is plain text.
+function filterAdded(added, query) {
+  const fold = s => s.normalize('NFC').toLowerCase();
+  const q = fold(String(query).trim());
+  return (added || []).filter(a => fold(String(a.path).split('/').pop()).includes(q));
 }
 
 // A prompt split at its code fences: [{ t: 'text', text }, { t: 'code', lang, text }].
@@ -586,5 +669,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
 }
