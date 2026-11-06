@@ -31,7 +31,7 @@ const isInside = (p, dir) => p === dir || p.startsWith(dir + path.sep);
 // Set by SIGINT and SIGTERM. A handler only runs when the event loop does, so long loops call stopPoint.
 const stop = { requested: false };
 class Stopped extends Error {
-  constructor() { super('stopped by a signal, so nothing was changed here'); }
+  constructor() { super('stopped by a signal, so no viewer was written'); }
 }
 const breathe = () => new Promise(resolve => setImmediate(resolve));
 async function stopPoint() {
@@ -216,20 +216,34 @@ function install(root, tmp, old, report) {
     throw e;
   }
   if (old.parts) {
-    try { fs.rmSync(aside, { recursive: true }); } catch (e) { report.warnings.push(`old parts left at ${aside}: ${e.message}`); }
+    // Looked at again: nothing else here deletes what was there before the run, and it may have been long.
+    try {
+      if (isOurParts(aside, fs.lstatSync(aside))) fs.rmSync(aside, { recursive: true });
+      else report.notices.push(`Old viewer parts kept at ${aside}: something else is in that folder now`);
+    } catch (e) { report.notices.push(`Old viewer parts left at ${aside}: ${e.message}`); }
   }
 }
 
 // Never rejects: a bad archive is a report, and the run goes on.
 async function writeViewer(archive, { force = false, dryRun = false } = {}) {
-  const report = { root: archive.root, kind: archive.kind, status: 'failed', reason: '', chats: 0, failedChats: [], missing: [], added: 0, warnings: [], dryRun };
+  const report = { root: archive.root, kind: archive.kind, status: 'failed', reason: '', chats: 0, failedChats: [], missing: [], added: 0, notices: [], warnings: [], dryRun };
   const finish = (status, reason = '') => Object.assign(report, { status, reason });
   const temps = [];
   try {
     await stopPoint();
     for (const name of fs.readdirSync(archive.root)) {
-      if (lib.LEFTOVER_NAME.test(name)) report.warnings.push(`Left alone, from an interrupted run: ${name}`);
+      if (lib.LEFTOVER_NAME.test(name)) report.notices.push(`Left alone, from an interrupted run: ${name}`);
     }
+    // Before any early return: these need seeing whether or not this archive gets a viewer.
+    const scan = lib.scanAdded(archive);
+    for (const e of scan.errors) report.warnings.push(`added files, ${e.path || 'archive root'}: ${e.message}`);
+    for (const f of scan.files) {
+      if (path.posix.basename(f.path) === 'original.json') {
+        report.notices.push(`Another export is inside this archive at ${path.posix.dirname(f.path)}; run the tool on that folder.`);
+      }
+    }
+    report.added = scan.files.length;
+
     const old = inspectRoot(archive.root, force);
     if (old.stop) return finish(old.stop, old.reason);
     if (!archive.chats.length) return finish('skipped', 'no Claude chats in it');
@@ -238,14 +252,6 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
     report.chats = chats.length;
     if (!chats.length) return finish('failed', 'no chat could be read, so no viewer was written');
 
-    const scan = lib.scanAdded(archive);
-    for (const e of scan.errors) report.warnings.push(`added files, ${e.path || 'archive root'}: ${e.message}`);
-    for (const f of scan.files) {
-      if (path.posix.basename(f.path) === 'original.json') {
-        report.warnings.push(`Another export is inside this archive at ${path.posix.dirname(f.path)}; run the tool on that folder.`);
-      }
-    }
-    report.added = scan.files.length;
     if (dryRun) return finish('written', old.viewer ? 'would replace the viewer' : '');
 
     const name = base => path.join(archive.root, `${base}.tmp-${process.pid}`);
@@ -298,26 +304,28 @@ async function processZip(zip, { outDir, force, dryRun, claims }) {
     entry.chats = names.filter(n => /(^|\/)original\.json$/.test(n)).length;
     if (!entry.chats) return finish('skipped', 'no Claude chat in it');
 
-    // Only a ZIP that was (or in a dry run would be) extracted holds a name. Case folds, as it does on a Mac.
+    // Every ZIP with a chat in it holds its name, on every run, so a clash shows even once the folder exists.
+    // Case folds, as it does on a Mac.
     const claim = entry.dest.normalize('NFC').toLowerCase();
-    if (claims.has(claim)) return finish('failed', `${entry.dest} is already taken in this run by ${claims.get(claim)}`);
+    if (claims.has(claim)) return finish('failed', `it extracts to the same folder as ${claims.get(claim)}: ${entry.dest}. Rename one ZIP.`);
+    claims.set(claim, zip);
     if (lstat(entry.dest)) return finish('skipped', `${entry.dest} already exists, so it was left alone. To give it a viewer, run the tool on that folder.`);
 
     entry.space = await zipLib.zipFreeSpaceOk(zip, outDir);
     if (!entry.space.ok) return finish('failed', `not enough free space: needs ${entry.space.needed} bytes, ${entry.space.free} free`);
-    if (dryRun) {
-      claims.set(claim, zip);
-      return finish('written', `would extract to ${entry.dest}`);
-    }
+    if (dryRun) return finish('written', `would extract to ${entry.dest}`);
 
     await stopPoint();
     const extracted = await zipLib.extractZip(zip, entry.dest);
-    claims.set(claim, zip);
     entry.files = extracted.files;
     entry.rejected = extracted.rejected;
     const found = lib.findArchives(entry.dest);
     entry.skipped = [...found.skipped, ...found.zips.map(p => ({ path: p, reason: 'a ZIP inside a ZIP is not opened' }))];
-    for (const archive of found.archives) entry.archives.push(await writeViewer(archive, { force }));
+    for (const archive of found.archives) {
+      if (stop.requested) break;
+      entry.archives.push(await writeViewer(archive, { force }));
+    }
+    if (stop.requested) return finish('failed', `stopped by a signal, after it was extracted to ${entry.dest}. To finish, run the tool on that folder.`);
     if (entry.archives.some(a => a.status === 'failed')) return finish('failed', 'a viewer could not be written');
     return entry.archives.length ? finish('written') : finish('skipped', 'extracted, but no Claude chat was found');
   } catch (e) {
@@ -339,7 +347,7 @@ function realPlanned(p) {
     rest.unshift(path.basename(cur));
     cur = path.dirname(cur);
   }
-  return path.join(fs.realpathSync(cur), ...rest);
+  return path.join(fs.realpathSync.native(cur), ...rest);
 }
 
 const isFolder = p => { try { return fs.statSync(p).isDirectory(); } catch (e) { return false; } };
@@ -352,15 +360,14 @@ async function run(folder, { out = null, force = false, dryRun = false } = {}) {
   const exclude = [];
   if (out) {
     outDir = path.resolve(out);
-    const realIn = fs.realpathSync(input);
+    const realIn = fs.realpathSync.native(input);
     const realOut = realPlanned(outDir);
     if (isInside(realIn, realOut)) throw new UsageError(`--out can't be the folder being scanned, or hold it: ${outDir}`);
     if (lstat(outDir) && !isFolder(outDir)) throw new UsageError(`--out is not a folder: ${outDir}`);
-    // Extracting there would add to an archive. Looked for with --out left in, as it may be that archive.
-    if (isInside(realOut, realIn)) {
-      for (const archive of lib.findArchives(input).archives) {
-        if (isInside(realOut, fs.realpathSync(archive.root))) throw new UsageError(`--out can't be inside an archive: ${archive.root}`);
-      }
+    // Extracting there would add to an archive, wherever it is.
+    for (let dir = realOut; ; dir = path.dirname(dir)) {
+      if (lib.isArchiveRoot(dir)) throw new UsageError(`--out can't be inside an archive: ${dir}`);
+      if (path.dirname(dir) === dir) break;
     }
     if (!dryRun) fs.mkdirSync(outDir, { recursive: true });
     exclude.push(realOut);
@@ -398,7 +405,8 @@ function archiveLine(a) {
   if (a.failedChats.length) facts.push(`${a.failedChats.length} failed`);
   if (a.added) facts.push(`${a.added} added`);
   if (a.missing.length) facts.push(`${a.missing.length} missing`);
-  if (a.warnings.length) facts.push(plural(a.warnings.length, 'warning'));
+  const warnings = a.notices.length + a.warnings.length;
+  if (warnings) facts.push(plural(warnings, 'warning'));
   return `${label}: ${a.root}${facts.length ? ` (${facts.join(', ')})` : ''}${a.reason ? `: ${a.reason}` : ''}`;
 }
 
@@ -408,14 +416,19 @@ function zipLine(z) {
   return `${label}: ${z.zip}${facts}${z.reason ? `: ${z.reason}` : ''}`;
 }
 
-// A heading, then per owner its list, cut at LIST_SHOWN. groups: [{ owner, items: [string] }]
-function section(lines, heading, groups) {
+// Names in a report come from archives, so they can hold anything: this keeps each on its own line and
+// keeps control codes from the terminal. C0, DEL, C1, line separators and bidi overrides.
+const UNPRINTABLE = /[\u0000-\u001f\u007f-\u009f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g;
+const printable = line => line.replace(UNPRINTABLE, c => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
+
+// A heading, then per owner its list, cut at shown. groups: [{ owner, items: [string] }]
+function section(lines, heading, groups, shown = LIST_SHOWN) {
   const used = groups.filter(g => g.items.length);
   if (used.length) lines.push('', heading);
   for (const { owner, items } of used) {
     lines.push(`  ${owner} (${items.length}):`);
-    for (const item of items.slice(0, LIST_SHOWN)) lines.push(`    ${item}`);
-    if (items.length > LIST_SHOWN) lines.push(`    ... and ${items.length - LIST_SHOWN} more`);
+    for (const item of items.slice(0, shown)) lines.push(`    ${item}`);
+    if (items.length > shown) lines.push(`    ... and ${items.length - shown} more`);
   }
 }
 
@@ -428,6 +441,7 @@ function formatReport(report) {
   const every = [...report.archives, ...report.zips.flatMap(z => z.archives)];
   const inChat = (chat, text) => (chat === '.' ? text : `${chat}/${text}`);
 
+  section(lines, 'Needs attention:', every.map(a => ({ owner: a.root, items: a.notices })), Infinity);
   if (report.stopped) section(lines, 'Stopped by a signal. Not processed:', [{ owner: report.folder, items: report.notRun }]);
   section(lines, 'Failed chats:', every.map(a => ({ owner: a.root, items: a.failedChats.map(c => `${c.chat}: ${c.reason}`) })));
   section(lines, 'Missing files:', every.map(a => ({ owner: a.root, items: a.missing.map(m => inChat(m.chat, m.file)) })));
@@ -439,7 +453,7 @@ function formatReport(report) {
   for (const s of skipped) lines.push(`  ${s.path}: ${s.reason}`);
 
   if (!report.archives.length && !report.zips.length) lines.unshift(`No Claude archives found in ${report.folder}`);
-  return lines.join('\n');
+  return lines.map(printable).join('\n');
 }
 
 async function main(argv) {

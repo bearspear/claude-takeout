@@ -732,7 +732,7 @@ test('buildParts splits a 5 MB set at PART_LIMIT, and every part runs as JS', as
   const files = [];
   for (let i = 0; i < 5; i++) {
     const rel = `notes/n${i}.md`;
-    const text = `</script><!-- ${i}   ` + 'x'.repeat(1024 * 1024);
+    const text = `</script><!-- ${i} \u2028 ` + 'x'.repeat(1024 * 1024);
     put(tmp, rel, text);
     files.push({ path: rel, chat: null, size: Buffer.byteLength(text) });
   }
@@ -749,7 +749,7 @@ test('buildParts splits a 5 MB set at PART_LIMIT, and every part runs as JS', as
   }
   entries.forEach((e, i) => {
     assert.strictEqual(typeof e.key, 'string');
-    assert.ok(loaded[e.part][e.key].startsWith(`</script><!-- ${i}   `), e.path);
+    assert.ok(loaded[e.part][e.key].startsWith(`</script><!-- ${i} \u2028 `), e.path);
   });
 });
 
@@ -1321,7 +1321,7 @@ test('an export inside an archive stays an added file, with a warning', async ()
   const r = cli(mega, '--json');
   assert.strictEqual(r.status, 0, r.stderr);
   const [a] = JSON.parse(r.stdout).archives;
-  assert.deepStrictEqual(a.warnings.filter(w => w.startsWith(nested)).sort(), [
+  assert.deepStrictEqual(a.notices.filter(w => w.startsWith(nested)).sort(), [
     `${nested}c1/old; run the tool on that folder.`, `${nested}inner/c2; run the tool on that folder.`]);
   assert.deepStrictEqual(viewerData(mega).added.map(x => x.path), ['c1/old/original.json', 'inner/c2/original.json']);
   assert.deepStrictEqual(viewerData(mega).chats.map(c => c.id), ['c1']);
@@ -1330,7 +1330,7 @@ test('an export inside an archive stays an added file, with a warning', async ()
   put(one, 'original.json', chatJson('s'));
   put(one, 'kept/original.json', chatJson('k'));
   const plain = cli(one, '--dry-run');
-  assert.ok(plain.stdout.includes(`Warnings:\n  ${one} (1):\n    ${nested}kept; run the tool on that folder.`), plain.stdout);
+  assert.ok(plain.stdout.includes(`Needs attention:\n  ${one} (1):\n    ${nested}kept; run the tool on that folder.`), plain.stdout);
 });
 
 test('leftovers from a killed run are reported, untouched and not added files', async () => {
@@ -1348,12 +1348,12 @@ test('leftovers from a killed run are reported, untouched and not added files', 
   const r = cli(tmp, '--json');
   assert.strictEqual(r.status, 0, r.stderr);
   const [a, b] = JSON.parse(r.stdout).archives;
-  assert.strictEqual(a.warnings.filter(w => /viewer.*\.(tmp|old)-\d+/.test(w)).length, 4);
+  assert.strictEqual(a.notices.filter(w => /viewer.*\.(tmp|old)-\d+/.test(w)).length, 4);
   assert.strictEqual(b.status, 'skipped');
-  assert.strictEqual(b.warnings.length, 1, 'warned even when skipped');
+  assert.strictEqual(b.notices.length, 1, 'warned even when skipped');
   assertKept(before, hashTree(path.join(tmp, 'a')));
   assert.deepStrictEqual(viewerData(path.join(tmp, 'a')).added.map(x => x.path), ['deep/viewer.html.tmp-15', 'note.md', 'viewer.html.tmp-x']);
-  assert.match(cli(tmp).stdout, /Warnings:[\s\S]*viewer-files\.tmp-16/);
+  assert.match(cli(tmp).stdout, /Needs attention:[\s\S]*viewer-files\.tmp-16/);
 });
 
 for (const signal of ['SIGINT', 'SIGTERM']) {
@@ -1432,4 +1432,178 @@ test('--out inside an archive is refused, and nothing is created', async () => {
       assert.deepStrictEqual(hashTree(tmp), before, rel);
     }
   }
+});
+
+test('a clash shows on a re-run: the second ZIP fails and names the first', async () => {
+  const { input, out } = twoFolders();
+  const first = path.join(input, 'a', 'x.zip');
+  await makeZip(path.join(input, 'a'), z => z.file('original.json', chatJson('one')), 'x.zip');
+  await makeZip(path.join(input, 'b'), z => z.file('original.json', chatJson('two')), 'x.zip');
+  assert.strictEqual(cli(input, '--out', out).status, 1);
+  const before = hashTree(out);
+  const r = cli(input, '--out', out, '--json');
+  assert.strictEqual(r.status, 1, r.stdout);
+  const z = zipStatus(r);
+  assert.strictEqual(z['a/x.zip'].status, 'skipped');
+  assert.match(z['a/x.zip'].reason, /run the tool on that folder/);
+  assert.strictEqual(z['b/x.zip'].status, 'failed');
+  assert.ok(z['b/x.zip'].reason.includes(first), z['b/x.zip'].reason);
+  assert.ok(!/run the tool on that folder/.test(z['b/x.zip'].reason));
+  assert.deepStrictEqual(hashTree(out), before);
+});
+
+test('a clash shows when the out folder was there before the first run', async () => {
+  const { input, out } = twoFolders();
+  const first = path.join(input, 'a', 'x.zip');
+  await makeZip(path.join(input, 'a'), z => z.file('original.json', chatJson('one')), 'x.zip');
+  await makeZip(path.join(input, 'b'), z => z.file('original.json', chatJson('two')), 'x.zip');
+  put(out, 'x/mine.md', 'keep');
+  const before = hashTree(out);
+  for (const extra of [[], ['--dry-run']]) {
+    const r = cli(input, '--out', out, '--json', ...extra);
+    assert.strictEqual(r.status, 1, r.stdout);
+    const z = zipStatus(r);
+    assert.strictEqual(z['a/x.zip'].status, 'skipped');
+    assert.strictEqual(z['b/x.zip'].status, 'failed');
+    assert.ok(z['b/x.zip'].reason.includes(first));
+  }
+  assert.deepStrictEqual(hashTree(out), before);
+});
+
+test('nested-export and leftover warnings are never cut, and print first', () => {
+  const tmp = tmpRoot();
+  put(tmp, 'index.md', '# i');
+  for (let i = 0; i < 25; i++) {
+    put(tmp, `c${i}/original.json`, chatJson('c' + i));
+    put(tmp, `c${i}/project/project.json`, '{ broken');
+  }
+  for (let i = 0; i < 30; i++) put(tmp, `kept/old${i}/original.json`, chatJson('k' + i));
+  put(tmp, 'viewer-files.tmp-99/part-0001.js', 'left');
+  const { stdout, status } = cli(tmp);
+  assert.strictEqual(status, 0, stdout);
+  const lines = stdout.split('\n');
+  assert.strictEqual(lines.filter(l => l.includes('Another export is inside this archive at ')).length, 30);
+  assert.ok(lines.some(l => l.includes('viewer-files.tmp-99')));
+  const notice = lines.indexOf('Needs attention:');
+  const warn = lines.indexOf('Warnings:');
+  assert.ok(notice > 0 && warn > notice, stdout);
+  assert.deepStrictEqual(lines.filter(l => /^\S.*:$/.test(l)).slice(0, 2), ['Needs attention:', 'Warnings:']);
+  assert.ok(lines.slice(warn).some(l => /and 5 more/.test(l)));
+  assert.match(lines[0], /\(25 chats, 30 added, 56 warnings\)$/);
+});
+
+test('a nested export in a skipped or refused archive still gets its warning', async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  put(root, 'original.json', chatJson('s'));
+  put(root, 'kept/original.json', chatJson('k'));
+  put(root, 'viewer.html', '<h1>mine</h1>');
+  const nested = 'Another export is inside this archive at kept; run the tool on that folder.';
+  for (const force of [false, true]) {
+    const res = await writeViewer(single(root), { force });
+    assert.notStrictEqual(res.status, 'written');
+    assert.deepStrictEqual(res.notices, [nested]);
+  }
+});
+
+test('--out inside an archive outside the input is refused, at any depth', () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  put(input, 'a/original.json', chatJson('a'));
+  put(tmp, 'other/one/original.json', chatJson('s'));
+  put(tmp, 'other/mega/index.md', '# i');
+  put(tmp, 'other/mega/c1/original.json', chatJson('c1'));
+  put(tmp, 'other/plain/index.md', 'an index with no chats');
+  const before = hashTree(tmp);
+  for (const rel of ['other/one', 'other/one/new', 'other/one/new/deep', 'other/mega', 'other/mega/new/deep']) {
+    const r = cli(input, '--out', path.join(tmp, rel));
+    assert.strictEqual(r.status, 1, rel);
+    assert.match(r.stderr, /--out.*archive/, rel);
+    assert.deepStrictEqual(hashTree(tmp), before, rel);
+  }
+  assert.strictEqual(cli(input, '--out', path.join(tmp, 'other/plain/new'), '--dry-run').status, 0);
+  assert.strictEqual(cli(input, '--out', path.join(tmp, 'elsewhere')).status, 0);
+});
+
+const foldsCase = dir => fs.existsSync(path.join(path.dirname(dir), path.basename(dir).toUpperCase()));
+
+test('--out checks ignore the typed case on a disk that folds it', { skip: !foldsCase(fs.mkdtempSync(path.join(os.tmpdir(), 'case-probe-'))) }, async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  put(input, 'one/original.json', chatJson('s'));
+  await makeZip(input, z => z.file('original.json', chatJson('z1')), 'a.zip');
+  const before = hashTree(tmp);
+  for (const [out, why] of [[path.join(input, 'ONE', 'new'), /archive/], [path.join(input, 'ONE'), /archive/], [path.join(tmp, 'IN'), /scanned/], [path.join(tmp, 'IN', 'ONE', 'x', 'y'), /archive/]]) {
+    const r = cli(input, '--out', out);
+    assert.strictEqual(r.status, 1, out);
+    assert.match(r.stderr, why, out);
+    assert.deepStrictEqual(hashTree(tmp), before, out);
+  }
+  // The scan sees the folder under its true name, whatever case the input was typed in.
+  const out = path.join(input, 'out');
+  assert.strictEqual(cli(input, '--out', out).status, 0);
+  const second = JSON.parse(cli(path.join(tmp, 'IN'), '--out', out, '--json').stdout);
+  assert.ok(!second.archives.some(a => a.root.toLowerCase().includes(`${path.sep}out${path.sep}`)), JSON.stringify(second.archives));
+});
+
+test('names from an archive cannot forge a report line or reach the terminal raw', async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  const evil = 'x\nwritten: /forged\u001b[31m\u0085\u2028';
+  fs.writeFileSync(path.join(input, 'a.zip'), rawZip([['original.json', chatJson('z1')], [`../${evil}.txt`, 'x']]));
+  const upload = { success: true, file_name: `${evil}.pdf`, file_uuid: 'u1' };
+  put(input, `f${evil}/original.json`, chatJson('c1', 'One', { chat_messages: [{ uuid: 'm', sender: 'human', content: [], files_v2: [upload] }] }));
+  put(input, `f${evil}/kept${evil}/original.json`, chatJson('c2'));
+  const { stdout, status } = cli(input, '--out', path.join(tmp, 'out'));
+  assert.strictEqual(status, 1);
+  assert.ok(!/[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u2028\u2029]/.test(stdout), JSON.stringify(stdout));
+  assert.ok(!stdout.split('\n').some(l => /^\s*written: \/forged/.test(l)), stdout);
+  assert.ok(stdout.includes('x\\u000awritten: /forged\\u001b[31m'), stdout);
+  for (const heading of ['Refused ZIP entries:', 'Missing files:', 'Needs attention:']) assert.ok(stdout.includes(heading), heading);
+});
+
+test('a stop during extraction says what was really done', async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => {
+    z.file('original.json', chatJson('z1'));
+    for (let i = 0; i < 3000; i++) z.file(`notes/n${i}.md`, 'x'.repeat(4096));
+  }, 'big.zip');
+  const out = path.join(tmp, 'out');
+  const dest = path.join(out, 'big');
+  const child = spawn(process.execPath, [TOOL_PATH, input, '--out', out, '--json'], { stdio: ['ignore', 'pipe', 'pipe'] });
+  let stdout = '';
+  let closed = false;
+  child.stdout.on('data', d => { stdout += d; });
+  const done = new Promise(resolve => child.on('close', code => { closed = true; resolve(code); }));
+  while (!closed && !fs.existsSync(dest + '.partial')) await new Promise(resolve => setTimeout(resolve, 1));
+  assert.ok(!closed, 'the run ended before the signal could be sent');
+  child.kill('SIGINT');
+  assert.notStrictEqual(await done, 0);
+  const [z] = JSON.parse(stdout).zips;
+  assert.strictEqual(z.status, 'failed');
+  assert.ok(z.reason.includes(dest), z.reason);
+  assert.match(z.reason, /extracted/);
+  assert.ok(!/nothing was changed/.test(z.reason), z.reason);
+  assert.ok(fs.existsSync(path.join(dest, 'original.json')));
+  assert.ok(!fs.existsSync(path.join(dest, 'viewer.html')));
+});
+
+test('--force keeps the aside folder if a file appeared in it during the run', async t => {
+  const { writeViewer } = tool();
+  const root = richSingle(tmpRoot());
+  assert.strictEqual((await writeViewer(single(root), {})).status, 'written');
+  const real = fs.renameSync;
+  let aside = null;
+  t.mock.method(fs, 'renameSync', (from, to) => {
+    real(from, to);
+    if (/viewer-files\.old-\d+$/.test(to)) { aside = to; fs.writeFileSync(path.join(to, 'dropped.md'), 'mine'); }
+  });
+  const res = await writeViewer(single(root), { force: true });
+  t.mock.restoreAll();
+  assert.strictEqual(res.status, 'written', res.reason);
+  assert.ok(aside && fs.readFileSync(path.join(aside, 'dropped.md'), 'utf8') === 'mine');
+  assert.ok(res.notices.some(n => n.includes(path.basename(aside))), JSON.stringify(res));
 });

@@ -31,8 +31,9 @@ function lstat(p) {
 const isRealFile = p => { const s = lstat(p); return !!s && s.isFile(); };
 const isRealDir = p => { const s = lstat(p); return !!s && s.isDirectory(); };
 
+// .native gives the name as stored, whatever case it was typed in; the JS version keeps the typed case.
 function realOrResolved(p) {
-  try { return fs.realpathSync(p); } catch (e) { return path.resolve(p); }
+  try { return fs.realpathSync.native(p); } catch (e) { return path.resolve(p); }
 }
 
 // Immediate real subfolders, sorted. Symlinks and ignored names are left out.
@@ -123,6 +124,13 @@ function findArchives(root, { exclude = [] } = {}) {
   // The folder the user names may itself be a link; everything below it is not followed.
   walk(root);
   return { archives, skipped, zips };
+}
+
+// True when dir is an archive as findArchives sees one: a chat, or index.md beside a chat folder.
+function isArchiveRoot(dir) {
+  if (isRealFile(path.join(dir, 'original.json'))) return true;
+  if (!isRealFile(path.join(dir, 'index.md'))) return false;
+  try { return subdirs(dir).some(n => isRealFile(path.join(dir, n, 'original.json'))); } catch (e) { return false; }
 }
 
 // ===================================================================
@@ -400,4 +408,4 @@ function chatFromDisk(archive, chat) {
   return { viewerChat, missing, warnings };
 }
 
-module.exports = { findArchives, scanAdded, isGeneratedViewer, chatFromDisk, matchFile, stripBom, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
+module.exports = { findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, matchFile, stripBom, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
