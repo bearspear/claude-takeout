@@ -13,13 +13,31 @@ const zipLib = require('./archive-zip.js'); // called through the module, so tes
 
 const PART_LIMIT = 4 * 1024 * 1024;
 const PART_OVERHEAD = 64; // the window.__archivePart(n, {...}); around a part's entries
-const MISSING_SHOWN = 20;
+const PART_HEAD = 'window.__archivePart(';
+const SYSTEM_JUNK = ['.DS_Store', 'Thumbs.db'];
+const LIST_SHOWN = 20;
 const VIEWER_FILE = 'viewer.html';
 const PARTS_DIR = 'viewer-files';
 const USAGE = 'Usage: node tools/build_viewer.js <folder> [--out <folder>] [--force] [--dry-run] [--json]';
 
 const lstat = p => { try { return fs.lstatSync(p); } catch (e) { return null; } };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+const isInside = (p, dir) => p === dir || p.startsWith(dir + path.sep);
+
+// ===================================================================
+// Stopping
+// ===================================================================
+
+// Set by SIGINT and SIGTERM. A handler only runs when the event loop does, so long loops call stopPoint.
+const stop = { requested: false };
+class Stopped extends Error {
+  constructor() { super('stopped by a signal, so nothing was changed here'); }
+}
+const breathe = () => new Promise(resolve => setImmediate(resolve));
+async function stopPoint() {
+  await breathe();
+  if (stop.requested) throw new Stopped();
+}
 
 // ===================================================================
 // Added files
@@ -40,7 +58,7 @@ function addedText(root, rel, size, warnings) {
 
 // added: [{ path, chat, size }], paths relative to root. Parts are filled in order and each is handed to
 // onPart as soon as it is full, so only one part's text is in memory. With no onPart they come back in parts.
-function buildParts(added, { root, onPart } = {}) {
+async function buildParts(added, { root, onPart } = {}) {
   const parts = [];
   const emit = onPart || (p => parts.push(p));
   const entries = [];
@@ -55,7 +73,8 @@ function buildParts(added, { root, onPart } = {}) {
     pending = [];
     pendingBytes = 0;
   };
-  added.forEach((file, index) => {
+  for (const [index, file] of added.entries()) {
+    await stopPoint();
     const name = file.path.split('/').pop();
     const text = addedText(root, file.path, file.size, warnings);
     const entry = {
@@ -73,7 +92,7 @@ function buildParts(added, { root, onPart } = {}) {
       entry.key = key;
     }
     entries.push(entry);
-  });
+  }
   flush();
   return { entries, parts, warnings, partCount: count };
 }
@@ -88,10 +107,20 @@ function isOurGif(file, stat) {
   return stat.isFile() && fs.readFileSync(file).equals(checkGif());
 }
 
+function startsLikePart(file) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const head = Buffer.alloc(PART_HEAD.length);
+    const n = fs.readSync(fd, head, 0, head.length, 0);
+    return head.toString('utf8', 0, n) === PART_HEAD;
+  } finally { fs.closeSync(fd); }
+}
+
+// --force deletes this folder, so a name alone isn't enough: a part has to be one by content too.
 function isOurParts(dir, stat) {
   if (!stat.isDirectory()) return false;
-  return fs.readdirSync(dir, { withFileTypes: true }).every(e =>
-    e.isFile() && (/^part-\d{4,}\.js$/.test(e.name) || lib.IGNORED_NAMES.includes(e.name)));
+  return fs.readdirSync(dir, { withFileTypes: true }).every(e => e.isFile() && (SYSTEM_JUNK.includes(e.name) ||
+    (/^part-\d{4,}\.js$/.test(e.name) && startsLikePart(path.join(dir, e.name)))));
 }
 
 // { stop, reason } when this archive gets no viewer, otherwise what may be replaced: { viewer, gif, parts }.
@@ -119,10 +148,11 @@ function inspectRoot(root, force) {
 // Writing one archive
 // ===================================================================
 
-function collectChats(archive, report) {
+async function collectChats(archive, report) {
   const chats = [];
   const idByDir = new Map();
   for (const chat of archive.chats) {
+    await stopPoint();
     try {
       const built = lib.chatFromDisk(archive, chat);
       chats.push(built.viewerChat);
@@ -190,29 +220,38 @@ function install(root, tmp, old, report) {
   }
 }
 
-// Never throws: a bad archive is a report, and the run goes on.
-function writeViewer(archive, { force = false, dryRun = false } = {}) {
+// Never rejects: a bad archive is a report, and the run goes on.
+async function writeViewer(archive, { force = false, dryRun = false } = {}) {
   const report = { root: archive.root, kind: archive.kind, status: 'failed', reason: '', chats: 0, failedChats: [], missing: [], added: 0, warnings: [], dryRun };
   const finish = (status, reason = '') => Object.assign(report, { status, reason });
   const temps = [];
   try {
+    await stopPoint();
+    for (const name of fs.readdirSync(archive.root)) {
+      if (lib.LEFTOVER_NAME.test(name)) report.warnings.push(`Left alone, from an interrupted run: ${name}`);
+    }
     const old = inspectRoot(archive.root, force);
     if (old.stop) return finish(old.stop, old.reason);
     if (!archive.chats.length) return finish('skipped', 'no Claude chats in it');
 
-    const { chats, idByDir } = collectChats(archive, report);
+    const { chats, idByDir } = await collectChats(archive, report);
     report.chats = chats.length;
     if (!chats.length) return finish('failed', 'no chat could be read, so no viewer was written');
 
     const scan = lib.scanAdded(archive);
     for (const e of scan.errors) report.warnings.push(`added files, ${e.path || 'archive root'}: ${e.message}`);
+    for (const f of scan.files) {
+      if (path.posix.basename(f.path) === 'original.json') {
+        report.warnings.push(`Another export is inside this archive at ${path.posix.dirname(f.path)}; run the tool on that folder.`);
+      }
+    }
     report.added = scan.files.length;
     if (dryRun) return finish('written', old.viewer ? 'would replace the viewer' : '');
 
     const name = base => path.join(archive.root, `${base}.tmp-${process.pid}`);
     const tmp = { parts: null, gif: null, viewer: name(VIEWER_FILE) };
     const added = scan.files.map(f => ({ path: f.path, size: f.size, chat: idByDir.get(f.chatDir) }));
-    const built = buildParts(added, {
+    const built = await buildParts(added, {
       root: archive.root,
       onPart: part => {
         if (!tmp.parts) {
@@ -233,7 +272,8 @@ function writeViewer(archive, { force = false, dryRun = false } = {}) {
       tmp.gif = name(CTViewer.VIEWER_CHECK_FILE);
       writeNew(tmp.gif, checkGif(), temps);
     }
-    install(archive.root, tmp, old, report);
+    await stopPoint();
+    install(archive.root, tmp, old, report); // no stop point inside: it runs to the end or undoes itself
     return finish('written', old.viewer ? 'replaced the viewer' : '');
   } catch (e) {
     for (const t of temps) {
@@ -247,29 +287,37 @@ function writeViewer(archive, { force = false, dryRun = false } = {}) {
 // ZIPs
 // ===================================================================
 
-async function processZip(zip, { outDir, force, dryRun, planned }) {
+async function processZip(zip, { outDir, force, dryRun, claims }) {
   const entry = { zip, dest: null, status: 'failed', reason: '', chats: 0, space: null, files: 0, rejected: [], archives: [], skipped: [], dryRun };
   const finish = (status, reason = '') => Object.assign(entry, { status, reason });
   try {
     if (!outDir) return finish('failed', 'ZIPs need --out <folder> to extract into');
     entry.dest = path.join(outDir, path.basename(zip).replace(/\.zip$/i, ''));
-    if (lstat(entry.dest) || planned.has(entry.dest)) return finish('skipped', `${entry.dest} already exists, so it was left alone`);
-    planned.add(entry.dest);
 
     const names = await zipLib.zipEntryNames(zip);
     entry.chats = names.filter(n => /(^|\/)original\.json$/.test(n)).length;
     if (!entry.chats) return finish('skipped', 'no Claude chat in it');
 
+    // Only a ZIP that was (or in a dry run would be) extracted holds a name. Case folds, as it does on a Mac.
+    const claim = entry.dest.normalize('NFC').toLowerCase();
+    if (claims.has(claim)) return finish('failed', `${entry.dest} is already taken in this run by ${claims.get(claim)}`);
+    if (lstat(entry.dest)) return finish('skipped', `${entry.dest} already exists, so it was left alone. To give it a viewer, run the tool on that folder.`);
+
     entry.space = await zipLib.zipFreeSpaceOk(zip, outDir);
     if (!entry.space.ok) return finish('failed', `not enough free space: needs ${entry.space.needed} bytes, ${entry.space.free} free`);
-    if (dryRun) return finish('written', `would extract to ${entry.dest}`);
+    if (dryRun) {
+      claims.set(claim, zip);
+      return finish('written', `would extract to ${entry.dest}`);
+    }
 
+    await stopPoint();
     const extracted = await zipLib.extractZip(zip, entry.dest);
+    claims.set(claim, zip);
     entry.files = extracted.files;
     entry.rejected = extracted.rejected;
     const found = lib.findArchives(entry.dest);
     entry.skipped = [...found.skipped, ...found.zips.map(p => ({ path: p, reason: 'a ZIP inside a ZIP is not opened' }))];
-    entry.archives = found.archives.map(archive => writeViewer(archive, { force }));
+    for (const archive of found.archives) entry.archives.push(await writeViewer(archive, { force }));
     if (entry.archives.some(a => a.status === 'failed')) return finish('failed', 'a viewer could not be written');
     return entry.archives.length ? finish('written') : finish('skipped', 'extracted, but no Claude chat was found');
   } catch (e) {
@@ -306,21 +354,41 @@ async function run(folder, { out = null, force = false, dryRun = false } = {}) {
     outDir = path.resolve(out);
     const realIn = fs.realpathSync(input);
     const realOut = realPlanned(outDir);
-    if (realIn === realOut || realIn.startsWith(realOut + path.sep)) throw new UsageError(`--out can't be the folder being scanned, or hold it: ${outDir}`);
+    if (isInside(realIn, realOut)) throw new UsageError(`--out can't be the folder being scanned, or hold it: ${outDir}`);
     if (lstat(outDir) && !isFolder(outDir)) throw new UsageError(`--out is not a folder: ${outDir}`);
+    // Extracting there would add to an archive. Looked for with --out left in, as it may be that archive.
+    if (isInside(realOut, realIn)) {
+      for (const archive of lib.findArchives(input).archives) {
+        if (isInside(realOut, fs.realpathSync(archive.root))) throw new UsageError(`--out can't be inside an archive: ${archive.root}`);
+      }
+    }
     if (!dryRun) fs.mkdirSync(outDir, { recursive: true });
     exclude.push(realOut);
   }
 
   const found = lib.findArchives(input, { exclude });
-  const archives = found.archives.map(archive => writeViewer(archive, { force, dryRun }));
+  const archives = [];
   const zips = [];
-  const planned = new Set();
-  for (const zip of found.zips) zips.push(await processZip(zip, { outDir, force, dryRun, planned }));
+  const notRun = [];
+  const claims = new Map();
+  for (const archive of found.archives) {
+    await breathe();
+    if (stop.requested) notRun.push(archive.root);
+    else archives.push(await writeViewer(archive, { force, dryRun }));
+  }
+  for (const zip of found.zips) {
+    await breathe();
+    if (stop.requested) notRun.push(zip);
+    else zips.push(await processZip(zip, { outDir, force, dryRun, claims }));
+  }
 
   const every = [...archives, ...zips.flatMap(z => z.archives)];
-  const ok = !every.some(a => a.status === 'failed' || a.failedChats.length) && !zips.some(z => z.status === 'failed');
-  return { folder: input, out: outDir, force, dryRun, ok, archives, zips, skipped: found.skipped };
+  const allSkipped = [...found.skipped, ...zips.flatMap(z => z.skipped)];
+  const ok = !stop.requested &&
+    !every.some(a => a.status === 'failed' || a.failedChats.length) &&
+    !zips.some(z => z.status === 'failed' || z.rejected.length) &&
+    !allSkipped.some(s => s.reason.startsWith('unreadable'));
+  return { folder: input, out: outDir, force, dryRun, ok, stopped: stop.requested, notRun, archives, zips, skipped: found.skipped };
 }
 
 function archiveLine(a) {
@@ -340,6 +408,17 @@ function zipLine(z) {
   return `${label}: ${z.zip}${facts}${z.reason ? `: ${z.reason}` : ''}`;
 }
 
+// A heading, then per owner its list, cut at LIST_SHOWN. groups: [{ owner, items: [string] }]
+function section(lines, heading, groups) {
+  const used = groups.filter(g => g.items.length);
+  if (used.length) lines.push('', heading);
+  for (const { owner, items } of used) {
+    lines.push(`  ${owner} (${items.length}):`);
+    for (const item of items.slice(0, LIST_SHOWN)) lines.push(`    ${item}`);
+    if (items.length > LIST_SHOWN) lines.push(`    ... and ${items.length - LIST_SHOWN} more`);
+  }
+}
+
 function formatReport(report) {
   const lines = [...report.archives.map(archiveLine)];
   for (const z of report.zips) {
@@ -347,21 +426,13 @@ function formatReport(report) {
     for (const a of z.archives) lines.push(archiveLine(a));
   }
   const every = [...report.archives, ...report.zips.flatMap(z => z.archives)];
+  const inChat = (chat, text) => (chat === '.' ? text : `${chat}/${text}`);
 
-  const failed = every.filter(a => a.failedChats.length);
-  if (failed.length) lines.push('', 'Failed chats:');
-  for (const a of failed) {
-    lines.push(`  ${a.root}:`);
-    for (const c of a.failedChats) lines.push(`    ${c.chat}: ${c.reason}`);
-  }
-
-  const missing = every.filter(a => a.missing.length);
-  if (missing.length) lines.push('', 'Missing files:');
-  for (const a of missing) {
-    lines.push(`  ${a.root} (${a.missing.length}):`);
-    for (const m of a.missing.slice(0, MISSING_SHOWN)) lines.push(`    ${m.chat === '.' ? m.file : `${m.chat}/${m.file}`}`);
-    if (a.missing.length > MISSING_SHOWN) lines.push(`    ... and ${a.missing.length - MISSING_SHOWN} more`);
-  }
+  if (report.stopped) section(lines, 'Stopped by a signal. Not processed:', [{ owner: report.folder, items: report.notRun }]);
+  section(lines, 'Failed chats:', every.map(a => ({ owner: a.root, items: a.failedChats.map(c => `${c.chat}: ${c.reason}`) })));
+  section(lines, 'Missing files:', every.map(a => ({ owner: a.root, items: a.missing.map(m => inChat(m.chat, m.file)) })));
+  section(lines, 'Refused ZIP entries:', report.zips.map(z => ({ owner: z.zip, items: z.rejected })));
+  section(lines, 'Warnings:', every.map(a => ({ owner: a.root, items: a.warnings })));
 
   const skipped = [...report.skipped, ...report.zips.flatMap(z => z.skipped)];
   if (skipped.length) lines.push('', 'Skipped:');
@@ -388,6 +459,7 @@ async function main(argv) {
   }
   if (args.positionals.length !== 1) return fail(USAGE);
   const { out, force, 'dry-run': dryRun } = args.values;
+  for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => { stop.requested = true; });
   try {
     const report = await run(args.positionals[0], { out, force: !!force, dryRun: !!dryRun });
     console.log(json ? JSON.stringify(report) : formatReport(report));

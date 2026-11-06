@@ -17,6 +17,9 @@ const KNOWN_ROOT_FILES = [
 const KNOWN_DIRS = ['responses', 'artefacts', 'attachments', 'uploads', 'project', 'projects', 'viewer-files'];
 const IGNORED_NAMES = ['.DS_Store', 'Thumbs.db', '__MACOSX', '.git', 'node_modules'];
 
+// What a killed build_viewer run can leave at an archive root. Not added files; the tool reports them.
+const LEFTOVER_NAME = /^(viewer\.html|viewer-check\.gif|viewer-files)\.tmp-\d+$|^viewer-files\.old-\d+$/;
+
 const HEAD_BYTES = 64 * 1024;
 
 const isIgnored = name => IGNORED_NAMES.includes(name) || name.startsWith('.');
@@ -173,7 +176,7 @@ function scanAdded(archive) {
 
   function scanLevel(dir, rel, chatDir, skipDirs) {
     for (const e of entries(dir, rel)) {
-      if (isIgnored(e.name)) continue;
+      if (isIgnored(e.name) || (rel === '' && LEFTOVER_NAME.test(e.name))) continue;
       const p = path.join(dir, e.name);
       const r = relOf(rel, e.name);
       if (e.isDirectory()) {
@@ -397,4 +400,4 @@ function chatFromDisk(archive, chat) {
   return { viewerChat, missing, warnings };
 }
 
-module.exports = { findArchives, scanAdded, isGeneratedViewer, chatFromDisk, matchFile, stripBom, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
+module.exports = { findArchives, scanAdded, isGeneratedViewer, chatFromDisk, matchFile, stripBom, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
