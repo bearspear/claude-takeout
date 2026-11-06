@@ -152,7 +152,7 @@ Unzip and you'll see something like this:
 
 Unzip the archive first, then open `viewer.html` in Chrome. Opening it from inside the ZIP won't work, because the previews need the files beside it; the viewer shows a notice if it can't find them. A mega-ZIP has one `viewer.html` at the root that covers every chat.
 
-The viewer lists the chats, searches across them, and shows each message with its thinking, tool calls, artifacts, uploads and project files. Click a file to preview it in a popup.
+The viewer lists the chats, searches across them, and shows each message with its thinking, tool calls, artifacts, uploads and project files. Click a file to open it in the side panel, as a preview or as code.
 
 What to know about previews of generated HTML:
 

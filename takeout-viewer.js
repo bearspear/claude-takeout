@@ -88,7 +88,7 @@
 
   // Same rule as getThinkingSummary in popup.js.
   function thinkingSummary(block) {
-    const s = Array.isArray(block.summaries) ? block.summaries : [];
+    const s = (Array.isArray(block.summaries) ? block.summaries : []).filter(Boolean);
     if (s.length && s[s.length - 1].summary) return s[s.length - 1].summary;
     const first = String(block.thinking || '').split('\n')[0];
     return first.length > 80 ? first.substring(0, 77) + '...' : first;
@@ -292,8 +292,8 @@
     const known = c.uploads || {};
     const seen = new Set();
     const out = [];
-    for (const f of [...(m.files || []), ...(m.files_v2 || [])]) {
-      if (!f) continue;
+    const list = v => (Array.isArray(v) ? v : []).filter(Boolean);
+    for (const f of [...list(m.files), ...list(m.files_v2)]) {
       const name = f.file_name || baseName(f.path);
       const key = f.file_uuid || name;
       if (!key || seen.has(key)) continue;
@@ -313,15 +313,15 @@
     const dir = joinPath(folder, p.fileDir);
     return {
       name: p.name || '',
-      files: (p.fileNames || []).map(name => ({ name, href: relHref(dir, name) })),
-      docs: (p.docs || []).map(d => ({ name: d.name || '', text: String(d.text == null ? '' : d.text) }))
+      files: (Array.isArray(p.fileNames) ? p.fileNames : []).map(name => ({ name, href: relHref(dir, name) })),
+      docs: (Array.isArray(p.docs) ? p.docs : []).filter(Boolean).map(d => ({ name: d.name || '', text: String(d.text == null ? '' : d.text) }))
     };
   }
 
   function buildViewerChat(data, ctx) {
     const c = ctx || {};
     const fix = typeof c.fixText === 'function' ? c.fixText : (s => s);
-    const source = Array.isArray(data.chat_messages) ? data.chat_messages : [];
+    const source = (Array.isArray(data.chat_messages) ? data.chat_messages : []).filter(Boolean);
 
     // tool_use_id -> tool block, across every message, so a result can land in an earlier message's block.
     const toolById = new Map();
@@ -343,7 +343,7 @@
       return {
         id: m.uuid, parent: m.parent_message_uuid || null, sender: m.sender, at: m.created_at,
         blocks, uploads: buildUploads(m, c),
-        attachments: (m.attachments || []).map(a => ({ name: a.file_name || '', text: fix(a.extracted_content || '') }))
+        attachments: (Array.isArray(m.attachments) ? m.attachments : []).filter(Boolean).map(a => ({ name: a.file_name || '', text: fix(a.extracted_content || '') }))
       };
     });
 
@@ -367,6 +367,15 @@
       created: data.created_at, updated: data.updated_at, leaf: data.current_leaf_message_uuid || null,
       messages, files, project: buildProject(c.project, c.folder)
     };
+  }
+
+  // The viewer's own model name ("Opus 4.8"); meta.md keeps getModelName's wording. Unknown ids get the fallback.
+  function modelLabel(id, fallback) {
+    const m = /^claude-(?:(opus|sonnet|haiku)-(\d+)(?:-(\d{1,2}))?|(\d+)(?:-(\d{1,2}))?-(opus|sonnet|haiku))(?:-\d{8})?$/i.exec(String(id || '').trim());
+    if (!m) return fallback;
+    const family = (m[1] || m[6]).toLowerCase();
+    const major = m[2] || m[4], minor = m[3] || m[5];
+    return `${family[0].toUpperCase()}${family.slice(1)} ${major}${minor ? '.' + minor : ''}`;
   }
 
   function buildViewerData(chats, { exported } = {}) {
@@ -420,7 +429,7 @@
     return String(template).replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
-  const api = { buildViewerChat, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT };
+  const api = { buildViewerChat, modelLabel, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT };
   root.CTViewer = Object.assign(root.CTViewer || {}, api);
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);

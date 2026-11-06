@@ -3,7 +3,7 @@
 // Keep the output out of the repo: it holds the chat.
 const fs = require('fs');
 const path = require('path');
-const { buildViewerChat, buildViewerData, assembleViewer, VIEWER_ASSETS } = require('../../takeout-viewer.js');
+const { buildViewerChat, modelLabel, buildViewerData, assembleViewer, VIEWER_ASSETS } = require('../../takeout-viewer.js');
 const { loadPopup } = require('../helpers');
 
 const REPO = path.resolve(__dirname, '..', '..');
@@ -13,7 +13,7 @@ const getModelName = loadPopup().fn('getModelName'); // what a real export passe
 function buildHtml(conversations, exported = new Date().toISOString(), ctxOf = () => ({})) {
   const read = f => fs.readFileSync(path.join(REPO, f), 'utf8');
   const [template, logic, app, marked, katex, css] = VIEWER_ASSETS.map(read);
-  const chats = conversations.map(c => buildViewerChat(c, { model: getModelName(c), ...ctxOf(c) }));
+  const chats = conversations.map(c => buildViewerChat(c, { model: modelLabel(c.model, getModelName(c)), ...ctxOf(c) }));
   return assembleViewer({ template, css, marked, katex, logic, app, data: buildViewerData(chats, { exported }) });
 }
 

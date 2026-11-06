@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src file: data: blob:; media-src data: blob:; font-src data:; frame-src file:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src file: data: blob:; media-src data: blob:; font-src data:; frame-src file:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Claude Takeout</title>
@@ -107,6 +107,8 @@ mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; 
 .prose { font: 17px/1.6 var(--serif); color: var(--ink); overflow-wrap: break-word; }
 .prose > :first-child { margin-top: 0; }
 .prose > :last-child { margin-bottom: 0; }
+.prose.plain { white-space: pre-wrap; }
+.plain-note { margin: 0 0 12px; font: italic 13px/1.4 var(--sans); color: var(--mute); white-space: normal; }
 .prose + .prose { margin-top: 16px; }
 .prose p { margin: 0 0 15px; }
 .prose .raw-html { white-space: pre-wrap; }

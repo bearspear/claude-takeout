@@ -3118,7 +3118,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   try {
     viewerChat = CTViewer.buildViewerChat(data, {
       folder: folderName,
-      model: getModelName(data),
+      model: CTViewer.modelLabel(data.model, getModelName(data)),
       fixText: fixMojibake,
       artifacts: { ...artifacts, ...viewerArtifacts },
       artifactIndex,

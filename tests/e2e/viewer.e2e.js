@@ -254,6 +254,9 @@ function panelChat() {
     { name: 'hostile.html', versions: [HOSTILE_HTML] },
     { name: 'uses-sibling.html', versions: ['<!doctype html><link href="./sibling.css" rel="stylesheet"><body><p id="s">before</p><script type="module" src=sibling.js></script></body>'] },
     { name: 'sibling.js', versions: ["console.log('SIBLING ran $&');\ndocument.getElementById('s').textContent = 'changed by sibling';\nconst closing = '</script>';\nconsole.log('SIBLING after ' + closing);\n"] },
+    { name: 'defer.html', versions: ['<!doctype html><html><head><script defer src="defer.js"></script></head><body><p id="d">before</p></body></html>'] },
+    { name: 'defer.js', versions: ["console.log('DEFER ran ' + !!document.getElementById('d'));\ndocument.getElementById('d').textContent = 'changed by defer';\n"] },
+    { name: 'eval.html', versions: ["<!doctype html><body><script>try { console.log('EVAL gave ' + new Function('return 7')()); } catch (e) { console.log('EVAL threw ' + e.name); }<\/script></body>"] },
     { name: 'sibling.css', versions: ['p { color: rgb(1, 2, 3); }'] },
     { name: 'notes.txt', versions: ['SECRET-NOTES\n'] },
     { name: 'other.html', versions: ['<!doctype html><p>SECRET-OTHER</p>'] },
@@ -400,7 +403,7 @@ async function unzipMegaZip(out) {
     check('footer counts the chats', (await page.textContent('#archive')) === 'Archive · 5 chats · read-only');
     check('newest chat opens first', (await page.textContent('#title')) === 'Quarterly budget review');
     check('open chat is marked in the sidebar', (await page.textContent('.item[aria-current="true"]')) === 'Quarterly budget review');
-    check('top bar shows the model', (await page.textContent('#meta')).startsWith('Claude 4.8 Opus · '));
+    check('top bar shows the model', (await page.textContent('#meta')).startsWith('Opus 4.8 · '));
     check('page has a CSP', await page.$eval('meta[http-equiv="Content-Security-Policy"]', m => /default-src 'none'.*img-src file: data: blob:; media-src data: blob:/.test(m.content)));
 
     const box = await page.$eval('.bubble', b => { const r = b.getBoundingClientRect(), c = document.getElementById('chat').getBoundingClientRect(); return { right: c.right - r.right, left: r.left - c.left }; });
@@ -496,11 +499,28 @@ async function unzipMegaZip(out) {
     const clickHash = await keep.page.evaluate(() => location.hash);
     check('sidebar clicks go through the hash', /chat=/.test(clickHash) && !/short/.test(clickHash), clickHash);
 
+    // Emphasis parsing is quadratic on runs like this; the block shows as plain text instead.
+    const slowFile = path.join(dir, 'slow.html');
+    fs.writeFileSync(slowFile, buildHtml([turnsChat('slow', 'Slow chat', ['*a '.repeat(34000), 'Next **bold** one'], '2026-05-01T00:00:00Z')], '2026-11-05T12:00:00Z'));
+    const started = Date.now();
+    const slow = await open({}, 'file://' + slowFile);
+    await slow.page.waitForFunction(() => document.querySelectorAll('.msg').length === 4, null, { timeout: 5000 }).catch(() => {});
+    const took = Date.now() - started;
+    const slowInfo = await slow.page.evaluate(() => ({ text: document.querySelector('.msg[data-id="slow-1"] .prose').textContent, bold: !!document.querySelector('.msg[data-id="slow-3"] .prose strong') })).catch(() => ({ text: '', bold: false }));
+    check('100 KB of emphasis marks renders in under 2 s', took < 2000, `${took} ms`);
+    check('and says it is plain text', slowInfo.text.includes("This message was too complex to format, so it's shown as plain text.") && slowInfo.text.includes('*a *a'), slowInfo.text.slice(0, 200));
+    check('the next message still formats', slowInfo.bold);
+
     // A branch near the end of a long chat keeps its place on screen.
     const bc = plainChat('branchy', 'Branchy', 40, '2026-04-01T00:00:00Z');
-    bc.chat_messages.push({ ...clone(bc.chat_messages[39]), uuid: 'branchy-alt', content: [{ type: 'text', text: 'alternative ending' }] });
+    bc.chat_messages.push({ ...clone(bc.chat_messages[39]), uuid: 'branchy-alt', created_at: '2026-02-01T11:59:00Z', content: [{ type: 'text', text: 'alternative ending' }] });
     const bfile = path.join(dir, 'branchy.html');
     fs.writeFileSync(bfile, buildHtml([bc], '2026-11-05T12:00:00Z'));
+    const lost = await open({}, 'file://' + bfile + '#chat=branchy&leaf=nope');
+    await lost.page.waitForSelector('.msg[data-id="branchy-39"]', { timeout: 3000 }).catch(() => {});
+    const lostIds = await lost.page.$$eval('.msg', m => m.map(x => x.dataset.id));
+    check('an unknown leaf falls back to the chat leaf', lostIds.includes('branchy-39') && !lostIds.includes('branchy-alt'), lostIds.slice(-2).join());
+    check('and the hash names that leaf', (await lost.page.evaluate(() => location.hash)).includes('leaf=branchy-39'), await lost.page.evaluate(() => location.hash));
     const pos = await open({}, 'file://' + bfile + '#chat=branchy');
     await pos.page.waitForFunction(() => document.querySelectorAll('.msg').length === 40);
     const topOf = () => pos.page.evaluate(() => { const b = document.querySelector('.branch'); return b ? b.closest('.msg').getBoundingClientRect().top : null; });
@@ -772,6 +792,19 @@ async function unzipMegaZip(out) {
     check('a sibling stylesheet applies', (await sf.$eval('#s', n => getComputedStyle(n).color)) === 'rgb(1, 2, 3)');
     check('no note without a remote script', (await note(sib)) === null);
     clean('sibling flow', sib.seen);
+
+    const dfr = await open({}, purl);
+    await openFile(dfr, 'defer.html');
+    const df = await frameIn(dfr);
+    check('a deferred sibling runs once the body exists', await waitLog(dfr, 'DEFER ran true'), dfr.seen.logs.join(' | '));
+    check('a deferred sibling reaches the page', (await df.textContent('#d')) === 'changed by defer');
+    clean('defer flow', dfr.seen);
+
+    const ev = await open({}, purl);
+    await openFile(ev, 'eval.html');
+    await frameIn(ev);
+    check('a preview may use new Function', await waitLog(ev, 'EVAL gave 7'), ev.seen.logs.join(' | '));
+    check('eval is not blocked by the page policy', !ev.seen.errors.some(e => /unsafe-eval/.test(e)), ev.seen.errors.join(' | '));
 
     const thief = await open({}, purl);
     await openFile(thief, 'thief.html');

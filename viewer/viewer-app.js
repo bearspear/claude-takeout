@@ -111,7 +111,16 @@ function dressMarkdown(box) {
 }
 
 // sources: shared across the message, so numbers don't restart in a later block.
+// marked's emphasis parsing is quadratic, so a block with this many * and _ would hang the tab.
+const EMPHASIS_LIMIT = 4000;
+const PLAIN_NOTE = "This message was too complex to format, so it's shown as plain text.";
+
 function renderText(block, sources) {
+  if ((block.text.match(/[*_]/g) || []).length > EMPHASIS_LIMIT) {
+    const plain = el('div', 'prose plain');
+    plain.append(el('p', 'plain-note', PLAIN_NOTE), document.createTextNode(block.text));
+    return plain;
+  }
   const mark = placeholderMark(block.text);
   const cited = addCitations(block.text, block.cites, sources, mark);
   const safe = protectMath(cited.text, mark);
@@ -653,7 +662,7 @@ function navigate(state, options = {}) {
   // Leaf, file and version belong to the chat they came with, not to the one standing in for it.
   const want = known ? state : {};
   const ids = new Set(chat.messages.map(m => m.id));
-  const chain = chainFrom(chat.messages, ids.has(want.leaf) ? want.leaf : (want.leaf ? null : chat.leaf));
+  const chain = chainFrom(chat.messages, ids.has(want.leaf) ? want.leaf : chat.leaf);
   const leaf = chain.length ? chain[chain.length - 1].id : null;
   const open = resolveFile(chat.files, want.file, want.version);
   const hash = formatHash({ chat: chat.id, leaf, file: open && open.file, version: open && open.version });

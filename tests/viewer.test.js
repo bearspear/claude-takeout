@@ -483,6 +483,20 @@ test('inlineSiblings handles attribute order and quote styles', () => {
   assert.strictEqual(inlineSiblings('<script src="\n mod.js "></script>', look), '<script>go()</script>');
 });
 
+test('inlineSiblings keeps a space before the next attribute', () => {
+  assert.strictEqual(inlineSiblings('<script src="mod.js"type="module"></script>', look), '<script type="module">go()</script>');
+  assert.strictEqual(inlineSiblings('<link rel="stylesheet" href="a.css"media="print">', look), '<style media="print">b{}</style>');
+  assert.strictEqual(inlineSiblings('<script src="mod.js"/data-x=1></script>', look), '<script data-x=1>go()</script>');
+});
+
+test('inlineSiblings moves a deferred or async script to the end, since inline defer does nothing', () => {
+  assert.strictEqual(inlineSiblings('<head><script defer src="mod.js"></script></head><body>x</body>', look), '<head></head><body>x</body><script defer>go()</script>');
+  assert.strictEqual(inlineSiblings('<script async src="mod.js"></script><p>x</p>', look), '<p>x</p><script async>go()</script>');
+  // Modules are deferred already; a plain script stays where it was.
+  assert.strictEqual(inlineSiblings('<script type="module" defer src="mod.js"></script>', look), '<script type="module" defer>go()</script>');
+  assert.strictEqual(inlineSiblings('<script src="mod.js"></script><p>x</p>', look), '<script>go()</script><p>x</p>');
+});
+
 test('inlineSiblings leaves everything but a plain sibling name alone', () => {
   const names = ['https://x.test/app.js', 'http://x.test/app.js', '//x.test/app.js', '/app.js', '../app.js', './../app.js', 'sub/app.js', 'a/../app.js', 'data:text/javascript,1', 'javascript:app.js', 'file:///app.js', '\\\\x.test\\app.js', '..', '.', ''];
   const all = () => 'SHOULD NOT APPEAR';
@@ -708,4 +722,27 @@ test('groupChats puts project chats under their project only, by name', () => {
   assert.deepStrictEqual(g.recents.map(c => c.id), ['c2']);
   assert.deepStrictEqual(g.projects.map(p => [p.name, p.chats.map(c => c.id)]), [['Alpha', ['c1', 'c4']], ['Beta', ['c3']]]);
   assert.deepStrictEqual(groupChats([]), { recents: [], projects: [] });
+});
+
+test('modelLabel names a model by family and version, whatever the id style', () => {
+  const cases = { 'claude-opus-4-8': 'Opus 4.8', 'claude-opus-5': 'Opus 5', 'claude-opus-5-5': 'Opus 5.5', 'claude-sonnet-4-20250514': 'Sonnet 4', 'claude-sonnet-4-5-20250929': 'Sonnet 4.5', 'claude-3-5-sonnet-20241022': 'Sonnet 3.5', 'claude-haiku-5-5': 'Haiku 5.5', 'CLAUDE-OPUS-4-8': 'Opus 4.8' };
+  for (const [id, label] of Object.entries(cases)) assert.strictEqual(V.modelLabel(id, 'FB'), label, id);
+  for (const id of ['claude-x', '', null, undefined, 'gpt-5', 'claude-opus']) assert.strictEqual(V.modelLabel(id, 'FB'), 'FB', String(id));
+});
+
+test('odd shapes drop the odd item, never the chat', () => {
+  const odd = JSON.parse(JSON.stringify(fixture));
+  const base = buildViewerChat(odd, { folder: '' }).messages.length;
+  odd.chat_messages.push(null);
+  odd.chat_messages[1].attachments = { not: 'an array' };
+  odd.chat_messages[2].attachments = [null, { file_name: 'a.txt', extracted_content: 'x' }];
+  odd.chat_messages[1].files = 'oops';
+  odd.chat_messages[2].files_v2 = { x: 1 };
+  odd.chat_messages[3].content = [{ type: 'thinking', thinking: 'hm', summaries: [null] }, ...odd.chat_messages[3].content];
+  const chat = buildViewerChat(odd, { folder: '', project: { name: 'P', fileDir: 'f', fileNames: ['a'], docs: [null, { name: 'd', text: 't' }] } });
+  assert.strictEqual(chat.messages.length, base);
+  assert.deepStrictEqual(chat.messages[2].attachments, [{ name: 'a.txt', text: 'x' }]);
+  assert.deepStrictEqual(chat.messages[1].attachments, []);
+  assert.deepStrictEqual(chat.project.docs, [{ name: 'd', text: 't' }]);
+  assert.ok(chat.messages[3].blocks.some(b => b.t === 'thinking'));
 });

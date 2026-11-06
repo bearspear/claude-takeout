@@ -390,21 +390,31 @@ function inlineSiblings(html, lookup) {
     const name = attr ? siblingName(attr.value) : null;
     return name !== null && type.test(name) ? lookup(name) : null;
   };
-  return rewriteTags(String(html), (tag, attrs) => {
+  // defer and async mean nothing on an inline script, so those go after the document, where they would have run.
+  const late = [];
+  const kept = attrs => attrs.map(a => ' ' + a.raw.replace(/^[\s/]+/, '')).join('');
+  const out = rewriteTags(String(html), (tag, attrs) => {
     if (tag === 'script') {
       const src = attrOf(attrs, 'src');
       const code = text(src, /\.m?js$/i);
       if (code == null) return null;
-      const rest = attrs.filter(a => a !== src).map(a => a.raw).join('');
-      return `<script${rest}>${String(code).replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--')}</script>`;
+      const rest = kept(attrs.filter(a => a !== src));
+      const script = `<script${rest}>${String(code).replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--')}</script>`;
+      const type = attrOf(attrs, 'type');
+      if ((attrOf(attrs, 'defer') || attrOf(attrs, 'async')) && !(type && /^\s*module\s*$/i.test(type.value))) {
+        late.push(script);
+        return '';
+      }
+      return script;
     }
     const rel = attrOf(attrs, 'rel');
     if (!rel || !/(^|\s)stylesheet(\s|$)/i.test(rel.value)) return null;
     const css = text(attrOf(attrs, 'href'), /\.css$/i);
     if (css == null) return null;
     const media = attrOf(attrs, 'media');
-    return `<style${media ? media.raw : ''}>${String(css).replace(/<\/(style)/gi, '<\\/$1')}</style>`;
+    return `<style${media ? kept([media]) : ''}>${String(css).replace(/<\/(style)/gi, '<\\/$1')}</style>`;
   });
+  return out + late.join('');
 }
 
 function remoteScripts(html) {
