@@ -20,7 +20,7 @@ Needs Node 20+ and Python 3.10+, with no packages to install.
 
 ## Export baseline
 
-`export.test.js` hashes every file `populateConversationFolder` writes for the synthetic fixture and compares it with `fixtures/export-baseline.json`. A failure means an export's output changed. If the change is intended, refresh the manifest, then read the diff of the JSON to see which files moved:
+`export.test.js` hashes every file `populateConversationFolder` writes for the synthetic fixture and compares it with `fixtures/export-baseline.json`. The test runs the export with `TZ=UTC` (put back afterwards), because `formatTimestamp` prints local time, so it passes in any time zone. Regenerate the manifest in any zone. A failure means an export's output changed. If the change is intended, refresh the manifest, then read the diff of the JSON to see which files moved:
 
 ```sh
 UPDATE_EXPORT_BASELINE=1 node --test tests/export.test.js

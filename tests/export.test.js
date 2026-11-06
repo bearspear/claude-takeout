@@ -625,10 +625,19 @@ test('buildViewerDeliveries names each uuid after its first file', () => {
 const BASELINE = path.join(__dirname, 'fixtures', 'export-baseline.json');
 test('the export of the fixture is byte-for-byte what the stored baseline says', async () => {
   const crypto = require('crypto');
-  const popup = exportPopup({ failing: ['up-gone'], routes: projectResponses() });
-  const data = withUploads();
-  data.project_uuid = 'P';
-  const { written } = await runFolder(popup, data);
+  // formatTimestamp prints local time, so the export runs in UTC whatever the machine's zone is.
+  // Tests in a file run one at a time, and the zone is put back in finally.
+  const zone = process.env.TZ;
+  process.env.TZ = 'UTC';
+  let written;
+  try {
+    const popup = exportPopup({ failing: ['up-gone'], routes: projectResponses() });
+    const data = withUploads();
+    data.project_uuid = 'P';
+    ({ written } = await runFolder(popup, data));
+  } finally {
+    if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone;
+  }
   const files = everyFile(written);
   delete files['viewer.html'];
   delete files['viewer-check.gif'];
