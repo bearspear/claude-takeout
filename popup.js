@@ -2932,6 +2932,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // artifacts map itself un-substituted so downstream consumers (code_snippets,
   // full_chat embedded markdown) aren't bloated with giant base64 strings —
   // only the on-disk artifact files become self-contained.
+  const viewerArtifacts = {};  // Inlined text, so viewer previews match the files on disk
   if (Object.keys(uploadDataUris).length > 0) {
     for (const [filename, content] of Object.entries(artifacts)) {
       if (!isInlineableArtifact(filename)) continue;
@@ -2939,6 +2940,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       if (replacements > 0) {
         // folder.file() with the same path overwrites the existing entry.
         addFileWithBOM(folder, `artefacts/${filename}`, substituted);
+        viewerArtifacts[filename] = substituted;
         console.log(`[Claude Takeout] Inlined ${replacements} upload reference(s) in artefacts/${filename}`);
       }
     }
@@ -3118,7 +3120,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       folder: folderName,
       model: getModelName(data),
       fixText: fixMojibake,
-      artifacts,
+      artifacts: { ...artifacts, ...viewerArtifacts },
       artifactIndex,
       uploads: viewerUploads,
       deliveries: viewerDeliveries,

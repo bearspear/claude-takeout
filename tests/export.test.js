@@ -406,6 +406,30 @@ test('project: a document over the embed limit is cut in the viewer and whole on
   assert.match(chat.project.docs[0].text, /truncated.*project\/Long\.md/);
 });
 
+test('viewer previews show the inlined artifact on disk, and the Markdown keeps the sandbox path', async () => {
+  const upload = '/mnt/user-data/uploads/x.png';
+  const page = (n) => `<p>${n}</p><img src="${upload}">`;
+  const data = Object.assign(twoMessages(
+    [use('1', 'create_file', { path: '/h/one.html', file_text: page('one') }), use('2', 'create_file', { path: '/h/both.html', file_text: page('first') })],
+    [use('3', 'create_file', { path: '/h/both.html', file_text: page('second') })],
+  ), { uuid: 'c1', name: 'n' });
+  data.chat_messages.unshift({ uuid: 'h', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'hi' }], files: [], files_v2: [{ success: true, file_name: 'x.png', file_uuid: 'up-x', file_kind: 'image', path: upload }] });
+  data.chat_messages[1].parent_message_uuid = 'h';
+  const popup = exportPopup({ texts: { 'up-x': { ...textBlob('png', 'image/png'), arrayBuffer: async () => new ArrayBuffer(3) } } });
+  const { chat, written, output } = await runFolder(popup, data);
+  const files = Object.values(chat.files);
+  const preview = (name) => files.find((f) => f.name === name);
+  const onDisk = (name) => String(written[`artefacts/${name}`]).replace(/^﻿/, '');
+  assert.ok(onDisk('one.html').includes('data:image/png;base64,AAAA'), 'the disk copy is inlined');
+  assert.strictEqual(preview('one.html').versions[0].text, onDisk('one.html'));
+  assert.deepStrictEqual(Array.from(preview('both.html').versions, (v) => v.text), [onDisk('both_v1.html'), onDisk('both_v2.html')]);
+  assert.ok(onDisk('both_v2.html').includes('data:image/png;base64,AAAA'));
+  assert.ok(output.artifacts['one.html'].includes(upload), 'the artifacts map stays un-inlined');
+  const fullChat = written['full_chat.md'];
+  assert.ok(typeof fullChat === 'string' && fullChat.includes(`<img src="${upload}">`), 'full_chat.md keeps the sandbox path');
+  assert.ok(!fullChat.includes('data:image/png;base64,AAAA'));
+});
+
 const everyFile = (written) => {
   const stable = {};
   for (const [name, content] of Object.entries(written).sort()) {
