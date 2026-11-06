@@ -252,6 +252,15 @@ function panelChat() {
     { name: 'uses-sibling.html', versions: ['<!doctype html><link href="./sibling.css" rel="stylesheet"><body><p id="s">before</p><script type="module" src=sibling.js></script></body>'] },
     { name: 'sibling.js', versions: ["console.log('SIBLING ran $&');\ndocument.getElementById('s').textContent = 'changed by sibling';\nconst closing = '</script>';\nconsole.log('SIBLING after ' + closing);\n"] },
     { name: 'sibling.css', versions: ['p { color: rgb(1, 2, 3); }'] },
+    { name: 'notes.txt', versions: ['SECRET-NOTES\n'] },
+    { name: 'other.html', versions: ['<!doctype html><p>SECRET-OTHER</p>'] },
+    { name: 'thief.html', versions: [`<!doctype html><link rel=stylesheet href=notes.txt><script type=text/plain src=other.html><\/script><link rel=stylesheet href=sibling.css><script>
+const said = [...document.querySelectorAll('style, script')].map(n => n.textContent).join(' ');
+console.log('THIEF ran');
+console.log('THIEF css ' + said.includes('rgb(1, 2, 3)'));
+console.log('THIEF notes ' + said.includes('SECRET-' + 'NOTES'));
+console.log('THIEF other ' + said.includes('SECRET-' + 'OTHER'));
+<\/script>`] },
     { name: 'remote-lib.html', versions: ["<!doctype html><script src=\"https://remote.test/lib.js\"></script><script>console.log('REMOTE page ran')</script><p>uses a library</p>"] },
     { name: 'drawing.svg', versions: ['<?xml version="1.0"?><!DOCTYPE svg PUBLIC "x" "y"><svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" onload="console.log(\'SVG ran\')"><circle r="20" cx="20" cy="20" fill="#c96442"/></svg>'] },
     { name: 'tool.py', versions: [`print("<b>hi</b>")\n# <img src=x onerror=${HIT}>\n`] },
@@ -684,6 +693,16 @@ function panelChat() {
     check('a sibling stylesheet applies', (await sf.$eval('#s', n => getComputedStyle(n).color)) === 'rgb(1, 2, 3)');
     check('no note without a remote script', (await note(sib)) === null);
     clean('sibling flow', sib.seen);
+
+    const thief = await open({}, purl);
+    await openFile(thief, 'thief.html');
+    await frameIn(thief);
+    check('thief: the script ran', await waitLog(thief, 'THIEF ran'), thief.seen.logs.join(' | '));
+    check('thief: a real stylesheet still arrives', thief.seen.logs.includes('THIEF css true'), thief.seen.logs.join(' | '));
+    check('thief: a text file is not inlined as a stylesheet', thief.seen.logs.includes('THIEF notes false'), thief.seen.logs.join(' | '));
+    check('thief: an HTML file is not inlined as a script', thief.seen.logs.includes('THIEF other false'), thief.seen.logs.join(' | '));
+    const stolen = await thief.page.$eval('#panel iframe', f => f.getAttribute('srcdoc'));
+    check('thief: neither file is in the frame', !stolen.includes('SECRET-NOTES') && !stolen.includes('SECRET-OTHER'));
 
     const rem = await open({}, purl);
     await openFile(rem, 'remote-lib.html');

@@ -37,14 +37,14 @@ Opening it feels like being on claude.ai. Getting that feel is the top priority,
 ## Anti-goals
 
 - Looks like a generic document viewer rather than claude.ai.
-- Generated content gaining access to the user's files, the network or the viewer itself.
+- Generated content reaching the viewer page, other chats or files on disk, or making any network request the browser lets the viewer block. A few routes can't be blocked; the owner accepted them on 2026-11-06, as listed under **Generated file previews**.
 - Any sign of Anthropic's logo or wordmark as if this were the official product. It reads "Claude Takeout", is marked read-only, and uses the look and layout only.
 - Any change to what existing export files contain.
 
 ## Constraints
 
 - **Offline from `file://`.** Page code can't `fetch` local files, so chat data is embedded in `viewer.html`. Binary files stay as relative links, so the page stays small. Users must unzip first, as with NotebookLM. A viewer opened from inside an unextracted ZIP must say so, not fail silently.
-- **Generated content is untrusted.** Chat content can be shaped by prompt injection. Generated HTML and SVG run in a sandboxed `iframe` with no same-origin access and a content policy blocking network requests. Markdown is sanitized before display. Nothing from a chat runs in the viewer's own page.
+- **Generated content is untrusted.** Chat content can be shaped by prompt injection. Generated HTML and SVG run in a sandboxed `iframe` with no same-origin access and a content policy that blocks ordinary requests, but not every route out (see **Generated file previews**). Markdown is sanitized before display. Nothing from a chat runs in the viewer's own page.
 - **Extension rules.** Nothing `_`-prefixed in the repo. `tests/run.sh` must pass. New code follows `CLAUDE.md`, and the manifest and changelog move together. New standalone files are justified here, as a non-trivial addition.
 - **Private data.** Tests use the synthetic fixture only.
 - **Size.** Must cope with a mega-ZIP like the owner's: 18 chats, one chat with 127 messages, and a 3 MB `original.json`. Artifact text and chat text can be large, so rendering a chat must not freeze the page.
@@ -77,7 +77,17 @@ Opening it feels like being on claude.ai. Getting that feel is the top priority,
 
 **Rendering:** Markdown with code fences, tables and math. Citations appear as numbered links with their sources. Tool calls show as a collapsed line that expands to input and result.
 
-**Generated file previews:** the network is always blocked, with no button to allow it. (Owner's decision.) Across the owner's 61 generated HTML files, there's no React or Mermaid:
+**Generated file previews:** previews run scripts, because 55 of the owner's 61 generated HTML files use them. The content policy blocks ordinary requests, with no button to allow them. (Owner's decision, 2026-11-06.)
+
+The browser doesn't let the viewer block these routes, and the owner accepted them:
+
+- `<link rel=prerender>`, which sends its full URL
+- WebRTC STUN and TURN
+- a connection opened by a blocked navigation
+
+So a malicious file could send out its own text, and any exported `.js` and `.css` files from the same chat, which is why only those are fed into the sandbox. It can't reach the viewer page, other chats or files on disk.
+
+Across the owner's 61 generated HTML files, there's no React or Mermaid:
 
 | Files | Preview |
 |---|---|

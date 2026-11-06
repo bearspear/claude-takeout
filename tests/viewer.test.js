@@ -459,6 +459,27 @@ test('inlineSiblings leaves everything but a plain sibling name alone', () => {
   assert.strictEqual(inlineSiblings('<link rel="preload" href="a.css"><link href="a.css">', look), '<link rel="preload" href="a.css"><link href="a.css">');
 });
 
+test('inlineSiblings only feeds in scripts and stylesheets', () => {
+  const any = () => 'SHOULD NOT APPEAR';
+  for (const html of [
+    '<link rel=stylesheet href=notes.txt>',
+    '<script type=text/plain src=other.html></script>',
+    '<script src="notes.txt"></script>',
+    '<script src="data.json"></script>',
+    '<script src="app"></script>',
+    '<script src="app.js.txt"></script>',
+    '<script src="a.css"></script>',
+    '<link rel="stylesheet" href="other.html">',
+    '<link rel="stylesheet" href="app.js">',
+    '<link rel="stylesheet" href="a.css.md">',
+    '<link rel="stylesheet" href="css">',
+  ]) assert.strictEqual(inlineSiblings(html, any), html);
+  const asked = [];
+  inlineSiblings('<link rel=stylesheet href=notes.txt><script src=other.html></script>', n => { asked.push(n); return null; });
+  assert.deepStrictEqual(asked, []);
+  assert.strictEqual(inlineSiblings('<script src="a.mjs"></script><script src="B.JS"></script><link rel="stylesheet" href="C.CSS">', () => 'x'), '<script>x</script><script>x</script><style>x</style>');
+});
+
 test('inlineSiblings only touches real tags', () => {
   for (const html of [
     '<!-- <script src="app.js"></script> -->',

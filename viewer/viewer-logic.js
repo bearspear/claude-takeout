@@ -382,23 +382,25 @@ function siblingName(url) {
 const attrOf = (attrs, name) => attrs.find(a => a.name === name);
 
 // Puts files from the export into the document, since a sandboxed frame can't load them.
+// Only scripts and stylesheets, by name: a script can read what lands in its document, so any other file
+// in the chat would be a file it could read and send out.
 // lookup(name): the sibling's text or null. What can't be found stays as it is, for the policy to block.
 function inlineSiblings(html, lookup) {
-  const text = attr => {
+  const text = (attr, type) => {
     const name = attr ? siblingName(attr.value) : null;
-    return name === null ? null : lookup(name);
+    return name !== null && type.test(name) ? lookup(name) : null;
   };
   return rewriteTags(String(html), (tag, attrs) => {
     if (tag === 'script') {
       const src = attrOf(attrs, 'src');
-      const code = text(src);
+      const code = text(src, /\.m?js$/i);
       if (code == null) return null;
       const rest = attrs.filter(a => a !== src).map(a => a.raw).join('');
       return `<script${rest}>${String(code).replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--')}</script>`;
     }
     const rel = attrOf(attrs, 'rel');
     if (!rel || !/(^|\s)stylesheet(\s|$)/i.test(rel.value)) return null;
-    const css = text(attrOf(attrs, 'href'));
+    const css = text(attrOf(attrs, 'href'), /\.css$/i);
     if (css == null) return null;
     const media = attrOf(attrs, 'media');
     return `<style${media ? media.raw : ''}>${String(css).replace(/<\/(style)/gi, '<\\/$1')}</style>`;
