@@ -155,7 +155,7 @@ function renderThinking(block) {
   }
   const body = el('div', 'line-body');
   const steps = block.summaries || [];
-  if (block.text) body.append(el('div', 'line-text', block.text));
+  if (block.text.trim()) body.append(el('div', 'line-text', block.text));
   else {
     // claude.ai leaves the full text out of what it sends, often keeping only summaries.
     for (const step of steps) body.append(el('p', 'line-step', step));
@@ -369,30 +369,30 @@ function renderProject(chat) {
   ] : [];
   const instructions = project && typeof project.instructions === 'string' ? project.instructions : '';
   box.hidden = !items.length && !instructions;
-  box.open = false;
   box.replaceChildren();
   if (box.hidden) return;
-  const summary = el('summary');
-  const count = `${items.length} item${items.length === 1 ? '' : 's'}`;
-  summary.append(icon('chevron'), el('span', '', `Project · ${project.name || 'Untitled'}${items.length || !instructions ? ' · ' + count : ''}`));
-  summary.firstChild.classList.add('chev');
-  box.append(summary);
-  if (instructions) {
-    // Folded by default, because a project's prompt can be long. Plain text,
-    // scrolling on its own once opened.
-    const fold = el('details', 'instructions');
+  const name = project.name || 'Untitled';
+  // Two folds, closed by default, because a project's prompt can be long.
+  const fold = (kind, label) => {
+    const details = el('details', kind);
     const head = el('summary');
-    head.append(icon('chevron'), el('span', '', 'Project instructions'));
+    head.append(icon('chevron'), el('span', '', label));
     head.firstChild.classList.add('chev');
+    details.append(head);
+    box.append(details);
+    return details;
+  };
+  if (instructions) {
     const text = el('div', 'instructions-text', instructions);
     text.tabIndex = 0;
-    fold.append(head, text);
-    box.append(fold);
+    text.setAttribute('role', 'region');
+    text.setAttribute('aria-label', 'Project instructions text');
+    fold('instructions', items.length ? 'Project instructions' : `Project instructions · ${name}`).append(text);
   }
   if (items.length) {
     const row = el('div', 'chips');
     row.append(...items.map(item => fileChip(item, fileNote(item.name, item.text))));
-    box.append(row);
+    fold('project-files', `Project · ${name} · ${items.length} item${items.length === 1 ? '' : 's'}`).append(row);
   }
 }
 
@@ -804,7 +804,7 @@ function highlightIn(node, query) {
   if (!q) return null;
   const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
   for (let text = walker.nextNode(); text; text = walker.nextNode()) {
-    if (text.parentElement.closest('button, time, .branch, script, style')) continue;
+    if (text.parentElement.closest('button, time, .branch, .code-head, script, style')) continue;
     const lower = text.data.toLowerCase();
     if (lower.length !== text.data.length) continue;
     const at = lower.indexOf(q);

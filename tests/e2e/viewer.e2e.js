@@ -916,7 +916,7 @@ async function unzipMegaZip(out) {
       await frameIn(nav);
       // A zero-delay refresh can replace the page before its script logs. The refusal
       // naming the target proves the attempt, so it counts too, for this file only.
-      const refused = () => name === 'nav-refresh.html' && nav.seen.logs.some(l => l.includes("Refused to frame 'https://remote.test/"));
+      const refused = () => name === 'nav-refresh.html' && nav.seen.logs.some(l => l.includes("Refused to frame 'https://remote.test/refresh"));
       const ran = await waitLog(nav, `NAV ran ${name}`) || refused();
       await nav.page.waitForTimeout(500);
       check(`${name}: the attempt ran`, ran, nav.seen.logs.join(' | '));
@@ -1015,9 +1015,9 @@ async function unzipMegaZip(out) {
     check('popup: opening and closing leaves the hash alone', (await atHash(pop)) === hashBefore && await pop.page.$eval('#panel', n => n.hidden));
 
     const project = pop.page.locator('#project');
-    check('project: the section is under the top bar', await project.evaluate(n => n.tagName === 'DETAILS' && !n.hidden && !n.open && n.getBoundingClientRect().top >= document.getElementById('top').getBoundingClientRect().bottom - 1));
-    check('project: it names the project', (await project.locator('> summary').textContent()).includes('Budget project'));
-    await project.locator('> summary').click();
+    check('project: the section is under the top bar', await project.evaluate(n => !n.hidden && [...n.querySelectorAll('details')].every(d => !d.open) && n.getBoundingClientRect().top >= document.getElementById('top').getBoundingClientRect().bottom - 1));
+    check('project: it names the project', (await project.locator('details.project-files > summary').textContent()).includes('Budget project'));
+    await project.locator('details.project-files > summary').click();
     check('project: it lists files and documents', (await project.locator('button.chip').allTextContents()).join('|').includes('spec.pdf') && (await project.locator('button.chip').count()) === 3);
     await project.locator('button.chip:has(b:text-is("spec.pdf"))').click();
     await dialog(pop).waitFor();
@@ -1035,7 +1035,8 @@ async function unzipMegaZip(out) {
 
 
     // Project instructions: first, folded, as text, and scrollable when long.
-    check('instructions: folded first, above the files', await project.evaluate(n => { const f = n.querySelector('details.instructions'), c = n.querySelector('.chips'); return !!f && !f.open && !!(f.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING) && f.querySelector('summary').textContent.trim() === 'Project instructions'; }));
+    check('instructions: a separate fold, above the files', await project.evaluate(n => { const f = n.children[0], c = n.children[1]; return n.children.length === 2 && f.matches('details.instructions') && !f.open && c.matches('details.project-files') && !f.contains(c) && f.querySelector('summary').textContent.trim() === 'Project instructions'; }));
+    check('instructions: the two folds open apart', await project.evaluate(n => { const [a, b] = n.children; return !a.open && b.open; }));
     check('instructions: its arrow stays closed', await project.locator('details.instructions .chev').evaluate(n => getComputedStyle(n).transform === 'none'));
     check('instructions: the text stays hidden until opened', await project.locator('.instructions-text').evaluate(n => !n.checkVisibility()));
     await project.locator('details.instructions summary').click();
@@ -1049,14 +1050,13 @@ async function unzipMegaZip(out) {
     const onlyFile = path.join(dir, 'only-instructions.html');
     fs.writeFileSync(onlyFile, buildHtml([plainChat('oi', 'Only rules', 2, '2026-05-01T00:00:00Z')], '2026-11-05T12:00:00Z', () => ({ project: { name: 'Rules only', fileDir: 'project/files', fileNames: [], docs: [], instructions: 'Just rules.' } })));
     const only = await open({}, 'file://' + onlyFile);
-    check('instructions: a project with only instructions still shows', await only.page.$eval('#project', n => !n.hidden) && (await only.page.textContent('#project > summary')).startsWith('Project · Rules only'));
-    await only.page.click('#project > summary');
+    check('instructions: a project with only instructions still shows', await only.page.$eval('#project', n => !n.hidden) && (await only.page.textContent('#project details.instructions > summary')).trim() === 'Project instructions · Rules only');
     await only.page.click('#project details.instructions summary');
     check('instructions: and shows them', (await only.page.textContent('#project .instructions-text')) === 'Just rules.' && (await only.page.locator('#project .chips').count()) === 0);
     const bare = path.join(dir, 'no-instructions.html');
     fs.writeFileSync(bare, buildHtml([plainChat('ni', 'No rules', 2, '2026-05-01T00:00:00Z')], '2026-11-05T12:00:00Z', () => ({ project: { name: 'Quiet', fileDir: 'project/files', fileNames: ['a.pdf'], docs: [], instructions: '' } })));
     const quiet = await open({}, 'file://' + bare);
-    await quiet.page.click('#project > summary');
+    await quiet.page.click('#project details.project-files > summary');
     check('instructions: none, no heading', (await quiet.page.locator('#project h2, #project .instructions').count()) === 0 && (await quiet.page.locator('#project button.chip').count()) === 1);
     clean('instructions', only.seen);
 
@@ -1079,7 +1079,12 @@ async function unzipMegaZip(out) {
       check('prompt fence: no raw backticks', !(await bubble.textContent()).includes('```'));
       check('prompt fence: the code is literal', (await bubble.locator('.code code').textContent()) === 'print("<img src=x onerror=window.__hit=1>")' && !(await fp.page.evaluate(() => !!window.__hit)));
       check('prompt fence: other text stays as typed', (await bubble.locator('.typed').nth(1).textContent()) === 'After *as typed*');
-      check('prompt fence: Copy still gives the prompt as typed', await fp.page.locator('.msg[data-id="h"] .copy-msg').count() === 1);
+      await fp.page.evaluate(() => { window.__got = []; navigator.clipboard.writeText = async t => { window.__got.push(t); }; });
+      await fp.page.click('.msg[data-id="h"] .copy-msg');
+      await bubble.locator('.code .copy').click();
+      const got = await fp.page.evaluate(() => window.__got);
+      check('prompt fence: Copy gives the prompt as typed', got[0] === prompt, JSON.stringify(got));
+      check('prompt fence: the block Copy gives only the code', got[1] === 'print("<img src=x onerror=window.__hit=1>")', JSON.stringify(got));
       await fp.page.close();
     }
     {
@@ -1242,7 +1247,7 @@ async function unzipMegaZip(out) {
       await mega.page.locator(`.item:has-text("${title}")`).click();
       await mega.page.waitForFunction(t => document.getElementById('title').textContent === t, title);
       await mega.page.waitForFunction(() => !document.getElementById('project').hidden);
-      await mega.page.$eval('#project', n => { n.open = true; });
+      await mega.page.$eval('#project details.project-files', n => { n.open = true; });
       await mega.page.locator('#project button.chip:has(b:text-is("Paper.pdf"))').click();
       await dialog(mega).waitFor();
       const src = await mega.page.$eval('[role="dialog"] iframe', f => f.getAttribute('src'));

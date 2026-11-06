@@ -366,7 +366,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 - **Copy in the viewer** - Every prompt and response has a Copy button. A prompt copies as you typed it; a response copies its Markdown text, without thinking, tool steps, file cards or citation markers. The button says "Copy failed" if the browser refused, and code blocks do the same.
 - **Thought process** - Shows every summary claude.ai provides, and says so when the full thinking isn't in the export.
 - **Code in prompts** - Fenced code in a prompt shows as a code block in the viewer, as it does in a response.
-- **Project instructions in the viewer** - A project's instructions sit in their own fold at the top of the project section, above its files, even for a project with no files. Very long instructions are cut in the viewer, with the whole text still in `project/prompt_template.md`.
+- **Project instructions in the viewer** - A project's instructions sit in their own fold at the top of the chat, above a separate fold for its files, even for a project with no files. Very long instructions are cut in the viewer, with the whole text still in `project/prompt_template.md`.
 
 ### v1.5.10
 

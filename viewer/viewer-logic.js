@@ -477,26 +477,33 @@ function splitFences(text) {
   const lines = String(text).split('\n');
   const parts = [];
   let plain = [];
-  const flush = () => {
-    const body = plain.join('\n').replace(/^\n+|\n+$/g, '');
-    if (body) parts.push({ t: 'text', text: body });
+  const flush = beforeFence => {
+    if (!plain.length) return;
+    const body = plain.join('\n');
+    if (body.trim() || !parts.length && !beforeFence) parts.push({ t: 'text', text: body });
     plain = [];
   };
+  // The shortest opener of each kind already known to have no closer. A longer one
+  // can't have one either, so thousands of unclosed fences stay fast.
+  const unclosed = { '`': Infinity, '~': Infinity };
   for (let i = 0; i < lines.length; i++) {
     const open = /^ {0,3}(`{3,}|~{3,})\s*([^\s`]*)[^`]*$/.exec(lines[i]);
     if (!open) { plain.push(lines[i]); continue; }
     const mark = open[1];
     let end = -1;
-    for (let k = i + 1; k < lines.length; k++) {
-      const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(lines[k]);
-      if (close && close[1][0] === mark[0] && close[1].length >= mark.length) { end = k; break; }
+    if (mark.length < unclosed[mark[0]]) {
+      for (let k = i + 1; k < lines.length; k++) {
+        const close = /^ {0,3}(`{3,}|~{3,})\s*$/.exec(lines[k]);
+        if (close && close[1][0] === mark[0] && close[1].length >= mark.length) { end = k; break; }
+      }
+      if (end < 0) unclosed[mark[0]] = mark.length;
     }
     if (end < 0) { plain.push(lines[i]); continue; }
-    flush();
-    parts.push({ t: 'code', lang: open[2], text: lines.slice(i + 1, end).join('\n') });
+    flush(true);
+    parts.push({ t: 'code', lang: open[2], text: lines.slice(i + 1, end).map(l => l.replace(/\r$/, '')).join('\n') });
     i = end;
   }
-  flush();
+  flush(false);
   return parts;
 }
 

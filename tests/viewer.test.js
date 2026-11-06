@@ -795,12 +795,18 @@ test('splitFences turns only closed fences into code', () => {
   const { splitFences } = require('../viewer/viewer-logic.js');
   assert.deepStrictEqual(splitFences('plain *text*'), [{ t: 'text', text: 'plain *text*' }]);
   assert.deepStrictEqual(splitFences('see:\n\n```js\nlet a = 1;\n\nlet b;\n```\nafter'), [
-    { t: 'text', text: 'see:' }, { t: 'code', lang: 'js', text: 'let a = 1;\n\nlet b;' }, { t: 'text', text: 'after' }]);
+    { t: 'text', text: 'see:\n' }, { t: 'code', lang: 'js', text: 'let a = 1;\n\nlet b;' }, { t: 'text', text: 'after' }]);
   assert.deepStrictEqual(splitFences('```\nno language\n```'), [{ t: 'code', lang: '', text: 'no language' }]);
   assert.deepStrictEqual(splitFences('````\n```\ninner\n```\n````'), [{ t: 'code', lang: '', text: '```\ninner\n```' }]);
   assert.deepStrictEqual(splitFences('~~~\nx\n~~~'), [{ t: 'code', lang: '', text: 'x' }]);
   assert.deepStrictEqual(splitFences('never closed\n```\nstill typed'), [{ t: 'text', text: 'never closed\n```\nstill typed' }]);
   assert.deepStrictEqual(splitFences('inline ```code``` stays'), [{ t: 'text', text: 'inline ```code``` stays' }]);
+  assert.deepStrictEqual(splitFences('\n\nhi\n\n\n'), [{ t: 'text', text: '\n\nhi\n\n\n' }]);
+  assert.deepStrictEqual(splitFences('a\n\n\n```\nx\n```\n\n\nb'), [{ t: 'text', text: 'a\n\n' }, { t: 'code', lang: '', text: 'x' }, { t: 'text', text: '\n\nb' }]);
+  assert.deepStrictEqual(splitFences('```\r\nx\r\n```\r\n'), [{ t: 'code', lang: '', text: 'x' }]);
+  const started = Date.now();
+  assert.strictEqual(splitFences('```js\n'.repeat(40000)).length, 1);
+  assert.ok(Date.now() - started < 500, 'many unclosed fences stay fast');
   assert.deepStrictEqual(splitFences('```\n<script>x</script>\n```'), [{ t: 'code', lang: '', text: '<script>x</script>' }]);
 });
 

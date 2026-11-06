@@ -231,17 +231,15 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
 .file-open { margin-top: 10px; padding: 5px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 13px; color: var(--ink); text-decoration: none; }
 .file-open:hover { background: var(--hover); }
 .file-missing { margin: auto; padding: 24px; font-size: 13.5px; color: var(--mute); text-align: center; }
-/* Project files, collapsed under the top bar */
+/* Project instructions and files, each collapsed under the top bar */
 #project { flex: none; border-bottom: 1px solid var(--line); background: var(--bg); padding: 0 20px; position: relative; z-index: 2; }
 #project[hidden] { display: none; }
 #project summary { display: flex; align-items: center; gap: 7px; list-style: none; cursor: pointer; padding: 7px 0; font-size: 13px; color: var(--mute); }
 #project summary::-webkit-details-marker { display: none; }
 #project summary:hover { color: var(--ink); }
 #project .chev { width: 13px; height: 13px; transition: transform .14s; }
-#project[open] > summary .chev, #project .instructions[open] > summary .chev { transform: rotate(90deg); }
-#project .instructions { padding: 0 0 6px; }
-#project .instructions summary { padding: 3px 0; font-size: 12.5px; }
-#project .instructions-text { max-height: 28vh; overflow-y: auto; padding: 2px 0 8px 22px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.5; color: var(--ink); }
+#project details[open] > summary .chev { transform: rotate(90deg); }
+#project .instructions-text { max-height: 28vh; overflow-y: auto; padding: 2px 0 10px 20px; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.5; color: var(--ink); }
 #project .chips { justify-content: flex-start; padding: 2px 0 12px; max-height: 40vh; overflow-y: auto; }
 button.chip { font: inherit; color: inherit; text-align: left; cursor: pointer; }
 button.chip:hover { border-color: var(--line-strong); }
@@ -305,7 +303,7 @@ button.chip:hover { border-color: var(--line-strong); }
       <h1 id="title"></h1>
       <span id="meta"></span>
     </header>
-    <details id="project" hidden></details>
+    <div id="project" hidden></div>
     <div id="scroll"><div id="chat"></div></div>
   </main>
   <aside id="panel" aria-label="File" hidden>

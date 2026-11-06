@@ -89,7 +89,6 @@
       .sort((a, b) => a.end - b.end);
   }
 
-  // Same rule as getThinkingSummary in popup.js.
   // Every step's summary, oldest first. claude.ai often sends only these, with the
   // thinking text itself empty and thinking_hidden set.
   function thinkingSummaries(block) {
@@ -97,6 +96,7 @@
     return list.map(s => (s && typeof s.summary === 'string' ? s.summary.trim() : '')).filter(Boolean);
   }
 
+  // Same rule as getThinkingSummary in popup.js.
   function thinkingSummary(block) {
     const s = (Array.isArray(block.summaries) ? block.summaries : []).filter(Boolean);
     if (s.length && s[s.length - 1].summary) return s[s.length - 1].summary;
