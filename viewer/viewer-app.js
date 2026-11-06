@@ -434,19 +434,22 @@ function renderMessage(m, sib, chat) {
   }
   if (!node) return null;
   node.dataset.id = m.id;
-  // One row under the message: other versions, the time, and Copy.
+  // One row under the message: other versions, then the time and Copy, with
+  // Copy on the outer edge of the bubble or response.
   const foot = el('div', 'foot');
   if (sib && sib.ids.length > 1) foot.append(branchControl(sib));
   const stamp = timeStamp(m.at);
-  if (stamp) foot.append(stamp);
+  const human = m.sender === 'human';
+  if (stamp && human) foot.append(stamp);
   const text = copyText(m);
   if (text && !node.classList.contains('failed')) {
     const copy = copyButton();
     copy.classList.add('copy-msg');
-    copy.setAttribute('aria-label', m.sender === 'human' ? 'Copy prompt' : 'Copy response');
+    copy.setAttribute('aria-label', human ? 'Copy prompt' : 'Copy response');
     copy.addEventListener('click', () => copyWithFeedback(copy, text));
     foot.append(copy);
   }
+  if (stamp && !human) foot.append(stamp);
   if (foot.hasChildNodes()) node.append(foot);
   return node;
 }
