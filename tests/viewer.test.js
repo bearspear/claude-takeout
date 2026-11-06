@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, restoreMath, addCitations, toolInputText } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -163,4 +163,77 @@ test('assembleViewer keeps hostile data inert and fills every placeholder', () =
 
 test('VIEWER_ASSETS lists the six viewer files', () => {
   assert.deepStrictEqual(VIEWER_ASSETS, ['viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js', 'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css']);
+});
+
+test('protectMath takes math and leaves money and code alone', () => {
+  assert.deepStrictEqual(protectMath('costs $5 and $10').math, []);
+  assert.deepStrictEqual(protectMath('`$x$` and ```\n$y$\n```').math, []);
+  assert.deepStrictEqual(protectMath('so $x^2$ and\n$$y$$').math, ['$x^2$', '$$y$$']);
+  assert.deepStrictEqual(protectMath('```\n$a$\n').math, [], 'unclosed fence runs to the end');
+  assert.deepStrictEqual(protectMath('~~~\n$a$\n~~~\n$b$').math, ['$b$']);
+  assert.deepStrictEqual(protectMath('``$a$`` $b$').math, ['$b$']);
+  assert.deepStrictEqual(protectMath('a \\$5 b$').math, [], 'escaped dollar is not an opener');
+  assert.deepStrictEqual(protectMath('a ` lone\n\n$b$ ` c').math, ['$b$'], 'a stray backtick is not a span across paragraphs');
+  assert.deepStrictEqual(protectMath('$$\na\nb\n$$').math, ['$$\na\nb\n$$']);
+});
+
+test('protectMath placeholders round trip through restoreMath', () => {
+  const p = protectMath('so $x$ and $$y$$');
+  assert.ok(!p.text.includes('$'));
+  const html = restoreMath(p.text, p.math, (src, display) => `[${src}|${display}]`);
+  assert.strictEqual(html, 'so [x|false] and [y|true]');
+});
+
+test('restoreMath only replaces text, never inside tags or comments', () => {
+  const math = ['$x$'];
+  const render = () => '<span class="katex">k</span>';
+  const inAttr = '<a title="XMATHX0XEND <img src=x onerror=alert(1)>">t</a>';
+  assert.strictEqual(restoreMath(inAttr, math, render), inAttr);
+  const inComment = '<!-- " XMATHX0XEND -->';
+  assert.strictEqual(restoreMath(inComment, math, render), inComment);
+  assert.strictEqual(restoreMath('<b>XMATHX0XEND</b>', math, render), '<b><span class="katex">k</span></b>');
+  assert.strictEqual(restoreMath('XMATHX7XEND', math, render), 'XMATHX7XEND');
+});
+
+test('restoreMath falls back to escaped source when the renderer throws', () => {
+  const html = restoreMath('XMATHX0XEND', ['$<b>$'], () => { throw new Error('bad'); });
+  assert.strictEqual(html, '$&lt;b&gt;$');
+});
+
+test('addCitations marks the text and numbers each source once', () => {
+  const c = addCitations('Hello world', [{ end: 5, url: 'https://a.test', title: 'A' }]);
+  assert.strictEqual(c.sources[0].n, 1);
+  assert.ok(c.text.startsWith('Hello<sup class="cite">'));
+  assert.ok(c.text.endsWith(' world'));
+  const two = addCitations('one two three', [
+    { end: 3, url: 'https://a.test', title: 'A' }, { end: 7, url: 'https://b.test', title: 'B' }, { end: 13, url: 'https://a.test', title: 'A' }]);
+  assert.deepStrictEqual(two.sources.map(s => s.n), [1, 2]);
+  assert.strictEqual((two.text.match(/<sup/g) || []).length, 3);
+  assert.ok(/>1<\/a><\/sup>$/.test(two.text));
+});
+
+test('addCitations escapes its values and tolerates a bad offset', () => {
+  const c = addCitations('Hi', [{ end: 99, url: 'https://a.test/?a="b"&c=<d>', title: '"><img src=x>' }, { url: 'https://b.test', title: 'B' }]);
+  assert.ok(!/<img/.test(c.text));
+  assert.ok(c.text.includes('&quot;'));
+  assert.ok(c.text.startsWith('Hi<sup'));
+  assert.strictEqual(addCitations('Hi', []).text, 'Hi');
+  assert.strictEqual(addCitations('Hi').sources.length, 0);
+});
+
+test('addCitations continues numbering across blocks of one message', () => {
+  const seen = [];
+  addCitations('a', [{ end: 1, url: 'https://a.test', title: 'A' }], seen);
+  const c = addCitations('b', [{ end: 1, url: 'https://b.test', title: 'B' }, { end: 1, url: 'https://a.test', title: 'A' }], seen);
+  assert.deepStrictEqual(c.sources.map(s => s.n), [1, 2]);
+  assert.ok(/>2<\/a><\/sup>/.test(c.text) && />1<\/a><\/sup>/.test(c.text));
+});
+
+test('toolInputText shows commands bare and everything else as JSON', () => {
+  assert.strictEqual(toolInputText('ls'), 'ls');
+  assert.strictEqual(toolInputText({ command: 'ls\n-l' }), 'ls\n-l');
+  assert.strictEqual(toolInputText({ query: 'x' }), 'x');
+  assert.strictEqual(toolInputText({ path: 'a', file_text: 'b' }), '{\n  "path": "a",\n  "file_text": "b"\n}');
+  assert.strictEqual(toolInputText({}), '');
+  assert.strictEqual(toolInputText(null), '');
 });
