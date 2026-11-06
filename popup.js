@@ -526,7 +526,9 @@ function failedToolUseIds(messages) {
   return ids;
 }
 
-function extractArtifacts(data, errorCollector = null) {
+// index, when given, is filled as index[key] = { path, filename, versions: [filename...],
+// messages: [msg uuid that made each version] } for the viewer; the return value is unchanged.
+function extractArtifacts(data, errorCollector = null, index = null) {
   const artifacts = {};
   const messages = getMessageChain(data);
   const failedIds = failedToolUseIds(messages);
@@ -574,7 +576,7 @@ function extractArtifacts(data, errorCollector = null) {
 
   function setContent(key, content, basename) {
     if (!state[key]) {
-      state[key] = { current: content, basename, versions: [], editedThisTurn: true };
+      state[key] = { current: content, basename, versions: [], versionMsgs: [], editedThisTurn: true };
     } else {
       state[key].current = content;
       state[key].editedThisTurn = true;
@@ -689,6 +691,7 @@ function extractArtifacts(data, errorCollector = null) {
         const s = state[key];
         if (s.editedThisTurn) {
           s.versions.push(s.current);
+          s.versionMsgs.push(msg.uuid);
           s.editedThisTurn = false;
         }
       }
@@ -702,6 +705,7 @@ function extractArtifacts(data, errorCollector = null) {
     const s = state[key];
     if (s.editedThisTurn) {
       s.versions.push(s.current);
+      s.versionMsgs.push(messages.length ? messages[messages.length - 1].uuid : null);
       s.editedThisTurn = false;
     }
   }
@@ -730,6 +734,13 @@ function extractArtifacts(data, errorCollector = null) {
         `Two distinct paths produced files with the same basename "${base}${ext}". This artifact was renamed to "${outBase}${ext}" to avoid overwriting.`,
         { path: key, note: 'Check that both artifacts are intended; the renamed copy still preserves all versions.' }
       );
+    }
+
+    if (index) {
+      const names = s.versions.length <= 1
+        ? [`${outBase}${ext}`]
+        : s.versions.map((_, i) => `${outBase}_v${i + 1}${ext}`);
+      index[key] = { path: key, filename: `${outBase}${ext}`, versions: names, messages: s.versionMsgs.slice() };
     }
 
     if (s.versions.length <= 1) {

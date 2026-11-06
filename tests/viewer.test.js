@@ -65,7 +65,8 @@ test('buildViewerChat keeps every branch, sets the leaf, and leaves data alone',
   assert.strictEqual(chat.id, fixture.uuid);
   assert.strictEqual(chat.title, 'Synthetic fixture');
   assert.strictEqual(chat.model, 'claude-x');
-  assert.deepStrictEqual(chat.files, {});
+  // No ctx: only the inactive branch's own create_file can be shown.
+  assert.deepStrictEqual(Object.values(chat.files).map(f => f.name), ['abandoned.py']);
   assert.strictEqual(chat.project, null);
   const m = chat.messages.find(x => x.id === 'x01');
   assert.strictEqual(m.parent, 'm05');
@@ -253,4 +254,167 @@ test('toolInputText shows commands bare and everything else as JSON', () => {
   assert.strictEqual(toolInputText({ path: 'a', file_text: 'b' }), '{\n  "path": "a",\n  "file_text": "b"\n}');
   assert.strictEqual(toolInputText({}), '');
   assert.strictEqual(toolInputText(null), '');
+});
+
+// ---- generated-file cards ----
+const { loadPopup } = require('./helpers');
+const popup = loadPopup();
+const ctxFor = (data, extra = {}) => {
+  const artifactIndex = {};
+  const artifacts = popup.fn('extractArtifacts')(data, null, artifactIndex);
+  const deliveries = {};
+  for (const f of popup.fn('extractDeliveredFiles')(data, Object.keys(artifacts))) {
+    if (!deliveries[f.uuid]) deliveries[f.uuid] = { filename: f.filename, path: f.path };
+  }
+  const plain = {};
+  for (const k of Object.keys(artifacts)) plain[k] = artifacts[k];
+  const HEREDOC_RE = popup.fn('HEREDOC_RE');
+  const heredocPath = popup.fn('heredocPath');
+  const heredocPaths = command => Array.from(String(command).matchAll(new RegExp(HEREDOC_RE.source, 'g')), heredocPath);
+  return Object.assign({ folder: '', artifacts: plain, artifactIndex, deliveries, heredocPaths }, extra);
+};
+const cardsOf = (chat, id) => chat.messages.find(m => m.id === id).blocks.filter(b => b.t === 'card');
+const fileOf = (chat, card) => chat.files[card.file];
+const dataClone = () => JSON.parse(JSON.stringify(fixture));
+
+test('a versioned artifact is one file with one entry per version and cards pointing at the version as of that message', () => {
+  const chat = buildViewerChat(fixture, ctxFor(fixture));
+  const [c2] = cardsOf(chat, 'm02').filter(c => fileOf(chat, c).name === 'report.html');
+  const f = fileOf(chat, c2);
+  assert.strictEqual(f.kind, 'html');
+  assert.deepStrictEqual(f.versions.map(v => v.label), ['v1', 'v2', 'v3']);
+  assert.deepStrictEqual(f.versions.map(v => v.text), ['<p>first draft</p>', '<p>second draft old</p>', '<p>second draft new</p>']);
+  assert.deepStrictEqual(f.versions.map(v => v.href), ['artefacts/report_v1.html', 'artefacts/report_v2.html', 'artefacts/report_v3.html']);
+  assert.strictEqual(c2.version, 0);
+  assert.strictEqual(cardsOf(chat, 'm04').filter(c => c.file === c2.file)[0].version, 1);
+  assert.strictEqual(cardsOf(chat, 'm06').filter(c => c.file === c2.file)[0].version, 2);
+  assert.strictEqual(Object.values(chat.files).filter(g => g.name === 'report.html').length, 1);
+});
+
+test('file ids are a1, a2... in order of first appearance and stable', () => {
+  const a = buildViewerChat(fixture, ctxFor(fixture));
+  const b = buildViewerChat(fixture, ctxFor(fixture));
+  assert.deepStrictEqual(a.files, b.files);
+  const order = [];
+  for (const m of a.messages) for (const bl of m.blocks) if (bl.t === 'card' && !order.includes(bl.file)) order.push(bl.file);
+  assert.deepStrictEqual(order, order.map((_, i) => 'a' + (i + 1)));
+  assert.deepStrictEqual(Object.keys(a.files).sort(), order.slice().sort());
+});
+
+test('cards follow the block that made them, once per file per message, and tool blocks stay', () => {
+  const chat = buildViewerChat(fixture, ctxFor(fixture));
+  const m02 = chat.messages.find(m => m.id === 'm02');
+  const names = m02.blocks.map(b => b.t === 'card' ? 'card:' + chat.files[b.file].name : b.t === 'tool' ? b.name : b.t);
+  // build.py is touched by create_file and then str_replace: one card, after the str_replace.
+  assert.deepStrictEqual(names, ['thinking', 'text', 'create_file', 'card:report.html', 'create_file', 'str_replace', 'card:build.py']);
+  const m06 = chat.messages.find(m => m.id === 'm06');
+  assert.ok(m06.blocks.filter(b => b.t === 'card').length === new Set(m06.blocks.filter(b => b.t === 'card').map(b => b.file)).size);
+});
+
+test('a failed tool leaves no card; a failed edit of a file still made earlier does not either', () => {
+  const chat = buildViewerChat(fixture, ctxFor(fixture));
+  const m04 = chat.messages.find(m => m.id === 'm04');
+  const cardFiles = m04.blocks.filter(b => b.t === 'card').map(b => chat.files[b.file].name);
+  assert.deepStrictEqual(cardFiles, ['report.html']); // only the bash heredoc; t04 and t06 failed
+  const t04Index = m04.blocks.findIndex(b => b.t === 'tool' && b.error);
+  assert.notStrictEqual(m04.blocks[t04Index + 1] && m04.blocks[t04Index + 1].t, 'card');
+});
+
+test('Bash heredocs get a card per file and Write/Edit versions line up', () => {
+  const chat = buildViewerChat(fixture, ctxFor(fixture));
+  const m06 = cardsOf(chat, 'm06').map(c => chat.files[c.file].name);
+  assert.deepStrictEqual(m06.sort(), ['a.txt', 'b.txt', 'notes.py', 'report.html']);
+  const notes = Object.values(chat.files).find(f => f.name === 'notes.py');
+  assert.deepStrictEqual(notes.versions.map(v => v.text), ['one one\n', 'two two\n']);
+  assert.strictEqual(cardsOf(chat, 'm08').find(c => fileOf(chat, c).name === 'notes.py').version, 1);
+  assert.strictEqual(Object.values(chat.files).find(f => f.name === 'build.py').versions.length, 1);
+  assert.strictEqual(Object.values(chat.files).find(f => f.name === 'build.py').versions[0].label, '');
+});
+
+test('without ctx.heredocPaths, Bash blocks yield no cards', () => {
+  const ctx = ctxFor(fixture);
+  delete ctx.heredocPaths;
+  const chat = buildViewerChat(fixture, ctx);
+  assert.ok(!Object.values(chat.files).some(f => f.name === 'a.txt'));
+});
+
+test('an inactive branch card holds the create_file text; its str_replace is missing', () => {
+  const chat = buildViewerChat(fixture, ctxFor(fixture));
+  const [c] = cardsOf(chat, 'x01');
+  const f = fileOf(chat, c);
+  assert.strictEqual(f.name, 'abandoned.py');
+  assert.strictEqual(f.kind, 'code');
+  assert.strictEqual(f.versions[0].text, 'off branch');
+  const data = dataClone();
+  data.chat_messages.find(m => m.uuid === 'x01').content.push(
+    { type: 'tool_use', id: 't91', name: 'str_replace', input: { path: '/home/claude/other.py', old_str: 'a', new_str: 'b' } });
+  const chat2 = buildViewerChat(data, ctxFor(data));
+  const missing = cardsOf(chat2, 'x01').map(c => fileOf(chat2, c)).find(g => g.name === 'other.py');
+  assert.strictEqual(missing.kind, 'missing');
+  assert.strictEqual(missing.versions[0].text, null);
+});
+
+test('a SendUserFile delivery of a binary links to artefacts and has no text', () => {
+  const data = fixture;
+  const ctx = ctxFor(data);
+  assert.strictEqual(ctx.artifacts['Minutes.odt'], undefined);
+  ctx.artifacts['Minutes.odt'] = '';
+  ctx.artifacts['Minutes_v1.odt'] = '';
+  const chat = buildViewerChat(data, ctx);
+  const cards = cardsOf(chat, 'm08').map(c => ({ c, f: fileOf(chat, c) })).filter(x => /^Minutes/.test(x.f.name));
+  assert.ok(cards.length >= 1);
+  const f = cards[0].f;
+  assert.strictEqual(f.kind, 'binary');
+  assert.strictEqual(f.name, 'Minutes.odt');
+  assert.deepStrictEqual(f.versions.map(v => v.label), ['v1', 'v2']);
+  assert.deepStrictEqual(f.versions.map(v => v.href), ['artefacts/Minutes_v1.odt', 'artefacts/Minutes_v2.odt']);
+  assert.ok(Object.values(chat.files).some(x => x.name === 'report_delivered.html'));
+  assert.ok(f.versions.every(v => v.text === null && /^artefacts\/Minutes/.test(v.href)));
+  const ctxFolder = ctxFor(data, { folder: 'A B' });
+  ctxFolder.artifacts['Minutes.odt'] = '';
+  ctxFolder.artifacts['Minutes_v1.odt'] = '';
+  const chat2 = buildViewerChat(data, ctxFolder);
+  const g = Object.values(chat2.files).find(x => /^Minutes/.test(x.name));
+  assert.ok(g.versions.every(v => v.href.startsWith('A%20B/artefacts/Minutes')));
+});
+
+test('present_files resolves through the index, then by basename in ctx.artifacts', () => {
+  const data = {
+    uuid: 'c', name: 'n', current_leaf_message_uuid: 'b',
+    chat_messages: [
+      { uuid: 'a', parent_message_uuid: null, sender: 'assistant', content: [
+        { type: 'tool_use', id: 'u1', name: 'create_file', input: { path: '/out/p.html', file_text: '<b>x</b>' } },
+        { type: 'tool_result', tool_use_id: 'u1', content: [] }] },
+      { uuid: 'b', parent_message_uuid: 'a', sender: 'assistant', content: [
+        { type: 'tool_use', id: 'u2', name: 'present_files', input: { filepaths: ['/out/p.html', '/elsewhere/pic.png', '/nowhere/gone.bin'] } },
+        { type: 'tool_result', tool_use_id: 'u2', content: [] }] }
+    ]
+  };
+  const ctx = ctxFor(data);
+  ctx.artifacts['pic.png'] = '';
+  const chat = buildViewerChat(data, ctx);
+  const cards = cardsOf(chat, 'b').map(c => ({ c, f: fileOf(chat, c) }));
+  assert.deepStrictEqual(cards.map(x => x.f.name), ['p.html', 'pic.png', 'gone.bin']);
+  assert.deepStrictEqual(cards.map(x => x.f.kind), ['html', 'image', 'missing']);
+  assert.strictEqual(cards[0].f.versions[0].text, '<b>x</b>');
+  assert.strictEqual(cards[1].f.versions[0].href, 'artefacts/pic.png');
+  assert.strictEqual(cards[1].f.versions[0].text, null);
+});
+
+test('kind comes from the extension and the artifacts type', () => {
+  const mk = (name, input) => ({
+    uuid: 'c', name: 'n', current_leaf_message_uuid: 'a',
+    chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant', content: [{ type: 'tool_use', id: 'u', name, input }] }]
+  });
+  const kindOf = (data) => { const chat = buildViewerChat(data, ctxFor(data)); return Object.values(chat.files).map(f => f.kind); };
+  const cf = (p, t = 'x') => mk('create_file', { path: p, file_text: t });
+  assert.deepStrictEqual(kindOf(cf('/a/b.svg')), ['svg']);
+  assert.deepStrictEqual(kindOf(cf('/a/b.md')), ['md']);
+  assert.deepStrictEqual(kindOf(cf('/a/b.htm')), ['html']);
+  assert.deepStrictEqual(kindOf(cf('/a/b.jsx')), ['react']);
+  assert.deepStrictEqual(kindOf(cf('/a/b.mmd')), ['mermaid']);
+  assert.deepStrictEqual(kindOf(cf('/a/b.pdf')), ['pdf']);
+  assert.deepStrictEqual(kindOf(cf('/a/b.JPG')), ['image']);
+  assert.deepStrictEqual(kindOf(mk('artifacts', { command: 'create', id: 'r', title: 'App', type: 'application/vnd.ant.react', content: 'x' })), ['react']);
+  assert.deepStrictEqual(kindOf(mk('artifacts', { command: 'create', id: 'm', title: 'Flow', type: 'application/vnd.ant.mermaid', content: 'x' })), ['mermaid']);
 });

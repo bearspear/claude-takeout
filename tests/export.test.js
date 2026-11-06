@@ -14,7 +14,7 @@ const { fn, sandbox } = loadPopup({
     return { ok: false, status: 404 };
   },
 });
-const artifacts = (data, collector = null) => fn('extractArtifacts')(data, collector);
+const artifacts = (data, collector = null, index = null) => fn('extractArtifacts')(data, collector, index);
 const collector = () => { const warnings = []; return { warnings, addWarning: (type, filename, message, details) => warnings.push({ type, filename, message, details }), addError() {} }; };
 
 test('both implementations skip failed file tools', () => {
@@ -280,4 +280,19 @@ test('nothing in the repo uses a name Chrome reserves', () => {
     }
   };
   walk(REPO);
+});
+
+test('artifact index records the file, its version names and the messages that made them', () => {
+  const data = loadFixture();
+  const raw = {};
+  assert.deepStrictEqual(Object.keys(artifacts(data, null, raw)), Object.keys(artifacts(data)));
+  const index = JSON.parse(JSON.stringify(raw)); // out of the VM realm for deepStrictEqual
+  const notes = index['/tmp/work/notes.py'];
+  assert.deepStrictEqual(notes.messages, ['m06', 'm08']);
+  assert.deepStrictEqual(notes.versions, ['notes_v1.py', 'notes_v2.py']);
+  assert.strictEqual(notes.filename, 'notes.py');
+  assert.strictEqual(notes.path, '/tmp/work/notes.py');
+  assert.deepStrictEqual(index['/mnt/user-data/outputs/report.html'].messages, ['m02', 'm04', 'm06']);
+  assert.deepStrictEqual(index['/home/claude/build.py'].versions, ['build.py']);
+  assert.ok(!('/home/claude/abandoned.py' in index));
 });
