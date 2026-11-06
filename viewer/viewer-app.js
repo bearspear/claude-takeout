@@ -342,16 +342,30 @@ function renderProject(chat) {
     ...(project.files || []).map(f => ({ name: f.name, href: f.href, text: null })),
     ...(project.docs || []).map(d => ({ name: d.name, href: null, text: d.text })),
   ] : [];
-  box.hidden = !items.length;
+  const instructions = project && typeof project.instructions === 'string' ? project.instructions : '';
+  box.hidden = !items.length && !instructions;
   box.open = false;
   box.replaceChildren();
-  if (!items.length) return;
+  if (box.hidden) return;
   const summary = el('summary');
-  summary.append(icon('chevron'), el('span', '', `Project · ${project.name || 'Untitled'} · ${items.length} item${items.length === 1 ? '' : 's'}`));
+  const count = `${items.length} item${items.length === 1 ? '' : 's'}`;
+  summary.append(icon('chevron'), el('span', '', `Project · ${project.name || 'Untitled'}${items.length || !instructions ? ' · ' + count : ''}`));
   summary.firstChild.classList.add('chev');
-  const row = el('div', 'chips');
-  row.append(...items.map(item => fileChip(item, fileNote(item.name, item.text))));
-  box.append(summary, row);
+  box.append(summary);
+  if (instructions) {
+    // Plain text, scrolling on its own when long.
+    const body = el('div', 'instructions');
+    body.tabIndex = 0;
+    body.setAttribute('role', 'region');
+    body.setAttribute('aria-label', 'Project instructions');
+    body.append(el('h2', '', 'Project instructions'), el('div', 'instructions-text', instructions));
+    box.append(body);
+  }
+  if (items.length) {
+    const row = el('div', 'chips');
+    row.append(...items.map(item => fileChip(item, fileNote(item.name, item.text))));
+    box.append(row);
+  }
 }
 
 function renderCard(block, chat) {
@@ -417,9 +431,20 @@ function renderMessage(m, sib, chat) {
   }
   if (!node) return null;
   node.dataset.id = m.id;
-  if (sib && sib.ids.length > 1) node.append(branchControl(sib));
+  // One row under the message: other versions, Copy, and the time.
+  const foot = el('div', 'foot');
+  if (sib && sib.ids.length > 1) foot.append(branchControl(sib));
+  const text = copyText(m);
+  if (text && !node.classList.contains('failed')) {
+    const copy = copyButton();
+    copy.classList.add('copy-msg');
+    copy.setAttribute('aria-label', m.sender === 'human' ? 'Copy prompt' : 'Copy response');
+    copy.addEventListener('click', () => copyWithFeedback(copy, text));
+    foot.append(copy);
+  }
   const stamp = timeStamp(m.at);
-  if (stamp) node.append(stamp);
+  if (stamp) foot.append(stamp);
+  if (foot.hasChildNodes()) node.append(foot);
   return node;
 }
 
@@ -484,28 +509,44 @@ function renderChat(chat, leaf = chat.leaf, anchor = null) {
   batch();
 }
 
-async function copyText(text) {
+// True only when the text really reached the clipboard.
+async function writeClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
+    return true;
   } catch (e) {
     const area = el('textarea');
-    area.value = text;
-    document.body.append(area);
-    area.select();
-    document.execCommand('copy');
-    area.remove();
+    try {
+      area.value = text;
+      document.body.append(area);
+      area.select();
+      return document.execCommand('copy') === true;
+    } catch (e2) {
+      return false;
+    } finally {
+      area.remove();
+    }
   }
 }
 
-async function onCopy(button) {
-  await copyText(button.closest('.code').querySelector('pre').textContent);
+// Shows "Copied" or "Copy failed" on a Copy button for a moment, then puts it back.
+async function copyWithFeedback(button, text) {
+  const ok = await writeClipboard(text);
   const label = button.querySelector('span');
-  button.replaceChild(icon('check'), button.firstChild);
-  label.textContent = 'Copied';
-  setTimeout(() => {
+  if (!label) return;
+  clearTimeout(button.copyTimer);
+  button.replaceChild(icon(ok ? 'check' : 'copy'), button.firstChild);
+  label.textContent = ok ? 'Copied' : 'Copy failed';
+  button.copyTimer = setTimeout(() => {
     button.replaceChild(icon('copy'), button.firstChild);
     label.textContent = 'Copy';
   }, 1500);
+}
+
+async function onCopy(button) {
+  const code = button.closest('.code');
+  const pre = code && code.querySelector('pre');
+  if (pre) await copyWithFeedback(button, pre.textContent);
 }
 
 function setDrawer(open) {
@@ -843,7 +884,7 @@ function start() {
     if (button) onCopy(button);
   });
   document.getElementById('chat').addEventListener('click', e => {
-    const button = e.target.closest('.copy');
+    const button = e.target.closest('.code .copy');
     if (button) { onCopy(button); return; }
     const card = e.target.closest('.art');
     if (card) { navigate({ ...parseHash(location.hash), file: card.dataset.file, version: Number(card.dataset.version) }); return; }

@@ -591,3 +591,49 @@ test('artifact index records the file, its version names and the messages that m
   assert.deepStrictEqual(index['/home/claude/build.py'].versions, ['build.py']);
   assert.ok(!('/home/claude/abandoned.py' in index));
 });
+
+// ---- project instructions ----
+const instructionRoutes = (template) => [
+  [/\/projects\/P$/, () => ({ ok: true, status: 200, json: async () => ({ name: 'My Project', prompt_template: template, docs_count: 0, files_count: 0 }) })],
+  [/\/projects\/P\/docs$/, () => ({ ok: true, status: 200, json: async () => [] })],
+  [/\/projects\/P\/files$/, () => ({ ok: true, status: 200, json: async () => [] })],
+];
+const chatIn = (uuid) => Object.assign(oneMessage([{ type: 'text', text: 'hi' }]), { uuid, name: 'n', project_uuid: 'P' });
+
+test('project instructions: the prompt template reaches the viewer, cleaned, and no export file changes', async () => {
+  const { chat, written } = await runFolder(exportPopup({ routes: instructionRoutes('Be \u00e2\u0080\u0094 brief <script>x</script>') }), chatIn('c1'));
+  assert.strictEqual(chat.project.instructions, 'Be \u2014 brief <script>x</script>');
+  assert.ok('project/prompt_template.md' in written);
+});
+
+test('project instructions: empty when the project has none', async () => {
+  const { chat } = await runFolder(exportPopup({ routes: instructionRoutes(undefined) }), chatIn('c1'));
+  assert.strictEqual(chat.project.instructions, '');
+  const none = await runFolder(exportPopup(), Object.assign(oneMessage([{ type: 'text', text: 'hi' }]), { uuid: 'c2', name: 'n' }));
+  assert.strictEqual(none.chat.project, null);
+});
+
+test('project instructions: every chat of a shared project gets them, even if its own fetch fails', async () => {
+  let calls = 0;
+  const routes = [
+    [/\/projects\/P$/, () => (++calls === 1
+      ? { ok: true, status: 200, json: async () => ({ name: 'My Project', prompt_template: 'House rules' }) }
+      : { ok: false, status: 500 })],
+    [/\/projects\/P\/docs$/, () => ({ ok: true, status: 200, json: async () => [] })],
+    [/\/projects\/P\/files$/, () => ({ ok: true, status: 200, json: async () => [{ file_uuid: 'pf1', file_name: 'Paper.pdf' }] })],
+  ];
+  const shared = { root: zipStub(), byUuid: new Map(), usedDirs: new Set() };
+  const popup = exportPopup({ routes });
+  const first = await runFolder(popup, chatIn('c1'), { folderName: 'chat_a', shared });
+  const second = await runFolder(popup, chatIn('c2'), { folderName: 'chat_b', shared });
+  assert.strictEqual(first.chat.project.instructions, 'House rules');
+  assert.strictEqual(second.chat.project.instructions, 'House rules');
+});
+
+test('project instructions: over the embed limit they are cut with a note, whole in prompt_template.md', async () => {
+  const long = 'y'.repeat(3 * 1024 * 1024);
+  const { chat, written } = await runFolder(exportPopup({ routes: instructionRoutes(long) }), chatIn('c1'));
+  assert.ok(chat.project.instructions.length < long.length);
+  assert.match(chat.project.instructions, /truncated.*project\/prompt_template\.md/);
+  assert.ok(written['project/prompt_template.md'].includes(long));
+});

@@ -316,7 +316,7 @@ function uploadsChat() {
         'f-pdf': { path: 'uploads/p01_paper.pdf', text: null },
         'f-odt': { path: 'uploads/p01_minutes.odt', text: null },
       },
-      project: { name: 'Budget project', fileDir: 'project/files', fileNames: ['spec.pdf', 'data.zip'], docs: [{ name: 'Brief', text: 'Be <i>kind</i>.\nSecond line.' }] },
+      project: { name: 'Budget project', fileDir: 'project/files', fileNames: ['spec.pdf', 'data.zip'], docs: [{ name: 'Brief', text: 'Be <i>kind</i>.\nSecond line.' }], instructions: `Always answer in French.\n<img src=x onerror="${HIT}"><script>${HIT}</script>\n` + 'Line of rules. '.repeat(400) },
     },
   };
 }
@@ -1029,6 +1029,73 @@ async function unzipMegaZip(out) {
     await dialog(phoneP).waitFor();
     check('phone: the popup fits the screen', await phoneP.page.$eval('[role="dialog"]', n => { const r = n.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth && r.bottom <= innerHeight; }));
     check('phone: no sideways scroll with the popup', await phoneP.page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+
+
+    // Project instructions: shown first, as text, and scrollable when long.
+    check('instructions: the heading is above the files', await project.evaluate(n => { const h = n.querySelector('h2'), c = n.querySelector('.chips'); return !!h && h.textContent === 'Project instructions' && !!c && !!(h.compareDocumentPosition(c) & Node.DOCUMENT_POSITION_FOLLOWING); }));
+    check('instructions: the text is literal', await project.locator('.instructions-text').evaluate(n => n.textContent.includes('<img src=x onerror=') && n.textContent.includes('<script>') && n.querySelector('img, script') === null && getComputedStyle(n).whiteSpace === 'pre-wrap'));
+    check('instructions: nothing ran', !(await pop.page.evaluate(() => !!window.__hit)));
+    check('instructions: a long text scrolls inside a bounded box', await project.locator('.instructions').evaluate(n => n.scrollHeight > n.clientHeight && n.clientHeight <= innerHeight * 0.3 && getComputedStyle(n).overflowY === 'auto'));
+    check('instructions: the whole text is there', (await project.locator('.instructions-text').textContent()).endsWith('Line of rules. '));
+    check('instructions: files still follow', (await project.locator('button.chip').count()) === 3);
+    const onlyFile = path.join(dir, 'only-instructions.html');
+    fs.writeFileSync(onlyFile, buildHtml([plainChat('oi', 'Only rules', 2, '2026-05-01T00:00:00Z')], '2026-11-05T12:00:00Z', () => ({ project: { name: 'Rules only', fileDir: 'project/files', fileNames: [], docs: [], instructions: 'Just rules.' } })));
+    const only = await open({}, 'file://' + onlyFile);
+    check('instructions: a project with only instructions still shows', await only.page.$eval('#project', n => !n.hidden) && (await only.page.textContent('#project summary')).startsWith('Project · Rules only'));
+    await only.page.click('#project summary');
+    check('instructions: and shows them', (await only.page.textContent('#project .instructions-text')) === 'Just rules.' && (await only.page.locator('#project .chips').count()) === 0);
+    const bare = path.join(dir, 'no-instructions.html');
+    fs.writeFileSync(bare, buildHtml([plainChat('ni', 'No rules', 2, '2026-05-01T00:00:00Z')], '2026-11-05T12:00:00Z', () => ({ project: { name: 'Quiet', fileDir: 'project/files', fileNames: ['a.pdf'], docs: [], instructions: '' } })));
+    const quiet = await open({}, 'file://' + bare);
+    await quiet.page.click('#project summary');
+    check('instructions: none, no heading', (await quiet.page.locator('#project h2, #project .instructions').count()) === 0 && (await quiet.page.locator('#project button.chip').count()) === 1);
+    clean('instructions', only.seen);
+
+    // Copy buttons
+    const grant = { permissions: ['clipboard-read', 'clipboard-write'] };
+    const cp = await open(grant, url);
+    const rich = richChat();
+    const textOf = uuid => rich.chat_messages.find(m => m.uuid === uuid).content.filter(b => b.type === 'text').map(b => b.text).join('\n\n');
+    const clip = () => cp.page.evaluate(() => navigator.clipboard.readText());
+    const copyIn = id => cp.page.locator(`.msg[data-id="${id}"] .foot .copy-msg`);
+    check('copy: a prompt has a labelled Copy', (await copyIn('m01').getAttribute('aria-label')) === 'Copy prompt' && (await copyIn('m01').textContent()) === 'Copy');
+    check('copy: a response has a labelled Copy', (await copyIn('m02').getAttribute('aria-label')) === 'Copy response');
+    check('copy: always visible, beside the time', await cp.page.$eval('.msg[data-id="m01"]', n => { const c = n.querySelector('.copy-msg'), t = n.querySelector('time.when'); return getComputedStyle(c).opacity === '1' && c.getBoundingClientRect().height > 0 && Math.abs(c.getBoundingClientRect().top - t.getBoundingClientRect().top) < 20 && c.closest('.foot') === t.closest('.foot'); }));
+    await copyIn('m01').click();
+    check('copy: the prompt is copied exactly', (await clip()) === textOf('m01'), JSON.stringify(await clip()));
+    check('copy: the button says Copied', (await copyIn('m01').textContent()) === 'Copied');
+    await copyIn('m02').click();
+    const got = await clip();
+    check('copy: the response is its Markdown source', got === textOf('m02') && got.includes('**under plan**') && got.includes('| Team | Plan | Actual | Change |') && !got.includes('Budget guidance') && !/Sources/.test(got.slice(-40)), JSON.stringify(got.slice(0, 80)));
+    await cp.page.waitForFunction(() => document.querySelector('.msg[data-id="m02"] .copy-msg span').textContent === 'Copy', null, { timeout: 3000 });
+    check('copy: the button goes back to Copy', true);
+    const toolOnly = await cp.page.$$eval('.msg.assistant', ns => ns.filter(n => !n.querySelector('.prose') && !n.querySelector('.copy-msg')).length);
+    check('copy: a message with no text has no button', toolOnly > 0 && (await cp.page.$$eval('.msg', ns => ns.every(n => !n.querySelector('.copy-msg') || n.querySelector('.prose, .bubble')))));
+    await cp.page.locator('.code .copy').first().click();
+    check('copy: the code Copy still works', (await clip()).includes('def variance(actual, plan):') && (await cp.page.locator('.code .copy span').first().textContent()) === 'Copied');
+    clean('copy', cp.seen);
+
+    const hc = await open(grant, url);
+    await hc.page.click('.item >> nth=4');
+    await hc.page.waitForSelector('.msg.assistant .copy-msg');
+    await hc.page.locator('.msg.assistant .copy-msg').first().click();
+    check('copy: hostile text is copied literally', (await hc.page.evaluate(() => navigator.clipboard.readText())).includes('<script>window.__hit=1</script>') && !(await hc.page.evaluate(() => !!window.__hit)));
+
+    const fail = await open({}, url);
+    await fail.page.evaluate(() => {
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText: () => Promise.reject(new Error('denied')) }, configurable: true });
+      document.execCommand = () => false;
+    });
+    await fail.page.locator('.msg[data-id="m01"] .copy-msg').click();
+    check('copy: a failed copy says Copy failed', (await fail.page.locator('.msg[data-id="m01"] .copy-msg').textContent()) === 'Copy failed');
+    await fail.page.locator('.code .copy').first().click();
+    check('copy: a failed code copy says Copy failed', (await fail.page.locator('.code .copy span').first().textContent()) === 'Copy failed');
+    await fail.page.evaluate(() => { document.execCommand = () => { throw new Error('nope'); }; });
+    await fail.page.locator('.msg[data-id="m01"] .copy-msg').click();
+    check('copy: a throwing fallback also says Copy failed', (await fail.page.locator('.msg[data-id="m01"] .copy-msg').textContent()) === 'Copy failed');
+    await fail.page.evaluate(() => { document.execCommand = () => true; });
+    await fail.page.locator('.msg[data-id="m01"] .copy-msg').click();
+    check('copy: the fallback counts when it works', (await fail.page.locator('.msg[data-id="m01"] .copy-msg').textContent()) === 'Copied');
 
     // Search and project grouping
     const branchy = plainChat('branchy', 'Branchy chat', 2, '2026-04-01T00:00:00Z');

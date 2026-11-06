@@ -471,6 +471,14 @@ function openableHref(href) {
   return /\.[a-z0-9]{1,10}$/i.test(name) && !/\.(?:[sex]?html?|xht|svgz?|xml|xslt?|mht|mhtml|rss|atom|rdf)$/i.test(name);
 }
 
+// What the Copy button puts on the clipboard: the raw text of the message's text blocks, as sent or written
+// (before citations and math are touched), joined by a blank line. '' when there is nothing to copy.
+function copyText(msg) {
+  const parts = [];
+  for (const b of (msg && msg.blocks) || []) if (b && b.t === 'text' && b.text) parts.push(b.text);
+  return parts.join('\n\n');
+}
+
 // Search over every message on every branch, plus titles. One entry per message (and per title, msg null).
 function buildSearchIndex(chats) {
   const index = [];
@@ -542,5 +550,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats };
+  module.exports = { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
 }

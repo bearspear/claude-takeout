@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, groupChats } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, groupChats, copyText } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -688,10 +688,11 @@ test('attachments pass their text through fixText', () => {
 
 test('project files link under the chat folder or the shared projects folder', () => {
   const docs = [{ name: 'Brief', text: 'Be kind' }];
-  const own = buildViewerChat(fixture, { folder: '', project: { name: 'P', fileDir: 'project/files', fileNames: ['x.pdf', 'a b.txt'], docs } }).project;
-  assert.deepStrictEqual(own, { name: 'P', files: [{ name: 'x.pdf', href: 'project/files/x.pdf' }, { name: 'a b.txt', href: 'project/files/a%20b.txt' }], docs });
+  const own = buildViewerChat(fixture, { folder: '', project: { name: 'P', fileDir: 'project/files', fileNames: ['x.pdf', 'a b.txt'], docs, instructions: 'Rules' } }).project;
+  assert.deepStrictEqual(own, { name: 'P', instructions: 'Rules', files: [{ name: 'x.pdf', href: 'project/files/x.pdf' }, { name: 'a b.txt', href: 'project/files/a%20b.txt' }], docs });
   const shared = buildViewerChat(fixture, { folder: 'A', project: { name: 'P', fileDir: '../projects/P/files', fileNames: ['x.pdf'], docs: [] } }).project;
   assert.deepStrictEqual(shared.files, [{ name: 'x.pdf', href: 'projects/P/files/x.pdf' }]);
+  assert.strictEqual(shared.instructions, '');
   assert.strictEqual(buildViewerChat(fixture, {}).project, null);
 });
 
@@ -762,4 +763,30 @@ test('odd shapes drop the odd item, never the chat', () => {
   assert.deepStrictEqual(chat.messages[1].attachments, []);
   assert.deepStrictEqual(chat.project.docs, [{ name: 'd', text: 't' }]);
   assert.ok(chat.messages[3].blocks.some(b => b.t === 'thinking'));
+});
+
+test('copyText: a prompt is copied as typed', () => {
+  assert.strictEqual(copyText({ sender: 'human', blocks: [{ t: 'text', text: '  two\n\n  lines  ' }] }), '  two\n\n  lines  ');
+});
+
+test('copyText: a response is the raw text of its text blocks, joined by a blank line', () => {
+  const m = { sender: 'assistant', blocks: [
+    { t: 'thinking', text: 'secret', summary: 's' },
+    { t: 'text', text: 'Hello **bold** [1]', cites: [{ end: 5, url: 'https://x.test', title: 'X' }] },
+    { t: 'tool', name: 'bash', label: 'Ran', input: 'ls', result: 'out', error: false, images: [] },
+    { t: 'card', file: 'f1', version: 0 },
+    { t: 'text', text: '| a | b |\n|---|---|\n| 1 | 2 |', cites: [] },
+  ] };
+  assert.strictEqual(copyText(m), 'Hello **bold** [1]\n\n| a | b |\n|---|---|\n| 1 | 2 |');
+});
+
+test('copyText: nothing to copy gives an empty string', () => {
+  assert.strictEqual(copyText({ sender: 'assistant', blocks: [{ t: 'tool', name: 'x', label: 'x', input: '', result: '', error: false, images: [] }] }), '');
+  assert.strictEqual(copyText({ sender: 'human', blocks: [{ t: 'text', text: '' }] }), '');
+  assert.strictEqual(copyText({ sender: 'human' }), '');
+});
+
+test('copyText: hostile text stays literal', () => {
+  const text = '<script>window.__hit=1</script><img src=x onerror=alert(1)>';
+  assert.strictEqual(copyText({ sender: 'assistant', blocks: [{ t: 'text', text }] }), text);
 });

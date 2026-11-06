@@ -391,8 +391,8 @@ async function viewerUploadText(name, content) {
 }
 
 // One chat's project for the viewer, or null outside a project. A document too
-// long to embed is cut here and stays whole on disk.
-function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileNames) {
+// long to embed (or instructions too long) is cut here and stays whole on disk.
+function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileNames, instructions = '') {
   if (!data.project_uuid && !data.project?.uuid) return null;
   const limit = CTViewer.TEXT_EMBED_LIMIT;
   const docs = Object.entries(projectFiles).map(([filename, content]) => {
@@ -400,7 +400,9 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
     const text = String(content == null ? '' : content);
     return { name, text: text.length > limit ? `${text.slice(0, limit)}\n[... truncated: the whole text is in project/${name}]` : text };
   });
-  return { name: data.project?.name || '', fileDir, fileNames, docs };
+  const text = String(instructions == null ? '' : instructions);
+  const cut = text.length > limit ? `${text.slice(0, limit)}\n[... truncated: the whole text is in project/prompt_template.md]` : text;
+  return { name: data.project?.name || '', fileDir, fileNames, docs, instructions: cut };
 }
 
 // Add viewer.html and viewer-check.gif to the ZIP root, once per export. Returns
@@ -2424,6 +2426,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   let projectFilesFromApi = false;
   let projectDocsJson = null;
   let projectMetadataJson = null;
+  let projectInstructions = '';  // The project's prompt template, for the viewer
   let projectUploads = [];  // Names of the project's saved knowledge files
   let projectFilesPath = 'project/files';  // Where they are, relative to this folder
   if (data.project_uuid || data.project?.uuid) {
@@ -2431,6 +2434,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     const { files: apiDocs, docsJson, projectJson, failures: projectFailures, metadataError } = await fetchProjectDocs(data, organizationId);
     projectDocsJson = docsJson;
     projectMetadataJson = projectJson;
+    projectInstructions = projectJson?.prompt_template ? fixMojibake(String(projectJson.prompt_template)) : '';
 
     // Patch data.project.name if it wasn't populated by the original fetch,
     // so the project prefix is applied to the export filename.
@@ -2470,6 +2474,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     let saved = sharedProjects?.byUuid.get(projectUuid);
     if (saved) {
       // A shared download that failed is still missing from this chat.
+      if (!projectInstructions) projectInstructions = saved.instructions || '';
       projectUploads = saved.names;
       projectFilesPath = `../projects/${saved.dir}/files`;
     } else {
@@ -2491,7 +2496,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         target.file(`${basePath}/files.json`, JSON.stringify(knowledgeFiles, null, 2));
       }
       const { names, failures } = await saveProjectFiles(target, basePath, knowledgeFiles, organizationId, data.uuid, onProgress);
-      saved = { dir, names, count: knowledgeFiles.length, failures: listFailure ? [listFailure, ...failures] : failures };
+      saved = { dir, names, instructions: projectInstructions, count: knowledgeFiles.length, failures: listFailure ? [listFailure, ...failures] : failures };
       if (sharedProjects && !listFailure) {
         sharedProjects.byUuid.set(projectUuid, saved);
       }
@@ -3125,7 +3130,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       uploads: viewerUploads,
       deliveries: viewerDeliveries,
       heredocs: heredocFiles,
-      project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads)
+      project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions)
     });
   } catch (err) {
     console.error('Could not build the viewer chat:', err);

@@ -17,7 +17,8 @@
 //   TEXT_EMBED_LIMIT                   longest upload or project text a caller should pass in ctx
 //   VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64  a 1x1 GIF beside viewer.html: if it won't load, the ZIP wasn't unzipped
 //   ctx.uploads: file uuid (or file name when there is none) to { path: 'uploads/<name>', text: string|null }
-//   ctx.project: { name, fileDir, fileNames, docs: [{ name, text }] }, fileDir relative to the chat folder
+//   ctx.project: { name, fileDir, fileNames, docs: [{ name, text }], instructions }, fileDir relative to the chat folder;
+//                instructions: the project's prompt template ('' when none), cut at TEXT_EMBED_LIMIT
 (function (root) {
   'use strict';
 
@@ -316,6 +317,7 @@
     return {
       name: p.name || '',
       files: (Array.isArray(p.fileNames) ? p.fileNames : []).map(name => ({ name, href: relHref(dir, name) })),
+      instructions: typeof p.instructions === 'string' ? p.instructions : '',
       docs: (Array.isArray(p.docs) ? p.docs : []).filter(Boolean).map(d => ({ name: d.name || '', text: String(d.text == null ? '' : d.text) }))
     };
   }

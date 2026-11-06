@@ -154,6 +154,8 @@ Unzip the archive first, then open `viewer.html` in Chrome. Opening it from insi
 
 The viewer lists the chats, searches across them, and shows each message with its thinking, tool calls, artifacts, uploads and project files. Click a file to open it in the side panel, as a preview or as code.
 
+Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
+
 What to know about previews of generated HTML:
 
 - The file's scripts run in a sandbox, cut off from the viewer, from other chats and from files on disk.
