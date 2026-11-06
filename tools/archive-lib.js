@@ -198,17 +198,27 @@ function scanAdded(archive) {
 
 const looseKey = name => String(name).normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 
-// The name in `names` that stands for `expected`: exact, then NFC-equal, then equal after dropping case and
-// punctuation (older exports sanitised names differently). Two loose candidates are no match: null.
-function matchFile(expected, names) {
+const unnumbered = name => String(name).replace(/^p\d+_/, '');
+const nfc = name => String(name).normalize('NFC');
+
+// The name in `names` that stands for `expected`, trying four tiers in order: exact; NFC-equal; equal after
+// dropping case and punctuation (older exports sanitised names differently); the same with the leading
+// `p<N>_` prompt number dropped from both (older numbering differed). In the last two tiers two candidates
+// are no match: null. maxTier (0 to 3) stops the search early, so a caller can take every exact match first.
+function matchFile(expected, names, maxTier = 3) {
   if (names.includes(expected)) return expected;
-  const nfc = String(expected).normalize('NFC');
-  const same = names.find(n => n.normalize('NFC') === nfc);
+  if (maxTier < 1) return null;
+  const same = names.find(n => nfc(n) === nfc(expected));
   if (same !== undefined) return same;
-  const key = looseKey(expected);
-  if (!key) return null;
-  const hits = names.filter(n => looseKey(n) === key);
-  return hits.length === 1 ? hits[0] : null;
+  for (const [tier, key] of [[2, looseKey], [3, n => looseKey(unnumbered(n))]]) {
+    if (maxTier < tier) break;
+    const want = key(expected);
+    if (!want) continue;
+    const hits = names.filter(n => key(n) === want);
+    if (hits.length === 1) return hits[0];
+    if (hits.length > 1) return null;
+  }
+  return null;
 }
 
 // ===================================================================
@@ -270,17 +280,26 @@ function chatFromDisk(archive, chat) {
   const takenNames = Object.keys(artifacts);
 
   // artefacts/: text on disk wins over the replay (inlined uploads, replay_bash.py results); binaries are ''.
+  // Names are compared as NFC (a Mac may hand back a decomposed spelling), and the disk spelling is the one used.
   const artefactNames = fileNames(path.join(chat.dir, 'artefacts'));
+  const diskByNfc = new Map();
+  for (const name of artefactNames) if (!diskByNfc.has(nfc(name))) diskByNfc.set(nfc(name), name);
+  const diskName = name => diskByNfc.get(nfc(name)) || name;
+  for (const key of Object.keys(artifacts)) if (diskName(key) !== key) delete artifacts[key];
   for (const name of artefactNames) {
     const text = core.isTextFile(name) ? readText(path.join(chat.dir, 'artefacts', name)) : null;
     artifacts[name] = text === null ? '' : text;
   }
-  const onDisk = new Set(artefactNames);
+  for (const entry of Object.values(artifactIndex)) {
+    if (!entry) continue;
+    if (typeof entry.filename === 'string') entry.filename = diskName(entry.filename);
+    if (Array.isArray(entry.versions)) entry.versions = entry.versions.map(diskName);
+  }
 
   // Presented files the export downloads when the replay didn't produce them: gone from disk is missing.
   for (const file of safe('presented files', [], () => core.extractPresentedFiles(data))) {
-    if (!file.filename || (takenNames.includes(file.filename) && artifacts[file.filename])) continue;
-    if (onDisk.has(file.filename)) takenNames.push(file.filename);
+    if (!file.filename || (takenNames.includes(file.filename) && artifacts[diskName(file.filename)])) continue;
+    if (diskByNfc.has(nfc(file.filename))) takenNames.push(file.filename);
     else if (!missing.includes(file.filename)) missing.push(file.filename);
   }
 
@@ -288,13 +307,15 @@ function chatFromDisk(archive, chat) {
   const delivered = safe('delivered files', [], () => core.extractDeliveredFiles(data, takenNames));
   const savedDeliveries = [];
   for (const file of delivered) {
-    if (onDisk.has(file.filename)) savedDeliveries.push(file);
+    if (diskByNfc.has(nfc(file.filename))) savedDeliveries.push({ ...file, filename: diskName(file.filename) });
     else if (!missing.includes(file.filename)) missing.push(file.filename);
   }
 
-  // uploads/
+  // uploads/: exact matches across the whole chat first, then each looser tier on the files left, so a loose
+  // match never takes a file another upload names exactly.
   const uploadNames = fileNames(path.join(chat.dir, 'uploads'));
   const uploads = {};
+  const wanted = [];
   const used = new Set();
   for (const file of safe('uploads', [], () => core.extractUploadedFiles(data))) {
     let expected = file.filename;
@@ -305,10 +326,22 @@ function chatFromDisk(archive, chat) {
       counter++;
     }
     used.add(expected);
-    const found = matchFile(expected, uploadNames);
+    wanted.push({ file, expected, found: null });
+  }
+  let free = uploadNames.slice();
+  for (let tier = 0; tier <= 3; tier++) {
+    for (const w of wanted) {
+      if (w.found !== null) continue;
+      const hit = matchFile(w.expected, free, tier);
+      if (hit === null) continue;
+      w.found = hit;
+      free = free.filter(n => n !== hit);
+    }
+  }
+  for (const { file, expected, found } of wanted) {
     if (found === null) {
       missing.push(expected);
-      const candidates = uploadNames.filter(n => looseKey(n) === looseKey(expected));
+      const candidates = free.filter(n => looseKey(n) === looseKey(expected));
       if (candidates.length > 1) warnings.push(`upload ${expected} matches several files: ${candidates.join(', ')}`);
       continue;
     }
@@ -333,7 +366,7 @@ function chatFromDisk(archive, chat) {
     if (link) {
       let dir = link[1];
       try { dir = decodeURIComponent(dir); } catch (e) { /* keep it as written */ }
-      if (dir !== '.' && dir !== '..' && !/[\\/]/.test(dir)) fileDir = `../projects/${dir}/files`;
+      if (dir !== '.' && dir !== '..' && !/[\\/]/.test(dir) && isRealDir(path.join(archive.root, 'projects', dir))) fileDir = `../projects/${dir}/files`;
     }
     const docs = {};
     for (const name of fileNames(projectDir)) {

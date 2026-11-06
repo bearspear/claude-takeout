@@ -374,3 +374,75 @@ test('unreadable original.json throws with its path; odd shapes lose detail, not
   assert.strictEqual(got.viewerChat.id, 'u');
   assert.ok(got.viewerChat.messages.length >= 1);
 });
+
+// ---- disk names across every file kind ----
+const NFD = s => s.normalize('NFD');
+const sendFile = (id, p, uuid) => [
+  { type: 'tool_use', id, name: 'SendUserFile', input: { files: [p] } },
+  { type: 'tool_result', tool_use_id: id, is_error: false, name: 'SendUserFile', content: [], file_deliveries: [{ file_uuid: uuid, path: p }] },
+];
+const chatDir = (data) => {
+  const dir = tmpRoot();
+  put(dir, 'original.json', JSON.stringify(data));
+  return { dir, archive: singleOf(dir), chat: { dir, relDir: '.' } };
+};
+
+test('a decomposed artefact on disk wins over the replay and keeps its disk spelling in the href', () => {
+  const data = { uuid: 'u', current_leaf_message_uuid: 'a', chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant',
+    content: [{ type: 'tool_use', id: '1', name: 'create_file', input: { path: '/h/G\u00f6del.html', file_text: 'replay' } }] }] };
+  const { dir, archive, chat } = chatDir(data);
+  put(dir, `artefacts/${NFD('G\u00f6del.html')}`, 'disk text');
+  const files = Object.values(chatFromDisk(archive, chat).viewerChat.files);
+  assert.strictEqual(files.length, 1);
+  assert.strictEqual(files[0].versions[0].text, 'disk text');
+  assert.strictEqual(files[0].versions[0].href, 'artefacts/' + encodeURIComponent(NFD('G\u00f6del.html')));
+});
+
+test('a decomposed delivered binary on disk is found, not missing, and linked by its disk name', () => {
+  const data = { uuid: 'u', current_leaf_message_uuid: 'a', chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant',
+    content: sendFile('1', '/tmp/out/Prot\u00f3.odt', 'de1') }] };
+  const { dir, archive, chat } = chatDir(data);
+  put(dir, `artefacts/${NFD('Prot\u00f3.odt')}`, 'bin');
+  const got = chatFromDisk(archive, chat);
+  assert.deepStrictEqual(got.missing, []);
+  const f = Object.values(got.viewerChat.files)[0];
+  assert.strictEqual(f.versions[0].href, 'artefacts/' + encodeURIComponent(NFD('Prot\u00f3.odt')));
+});
+
+test('a decomposed presented binary is not reported missing', () => {
+  const data = { uuid: 'u', current_leaf_message_uuid: 'a', chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant',
+    content: [{ type: 'tool_result', name: 'present_files', content: [{ type: 'local_resource', file_path: '/o/Prot\u00f3.odt', uuid: 'p1' }] }] }] };
+  const { dir, archive, chat } = chatDir(data);
+  assert.deepStrictEqual(chatFromDisk(archive, chat).missing, ['Prot\u00f3.odt']);
+  put(dir, `artefacts/${NFD('Prot\u00f3.odt')}`, 'bin');
+  assert.deepStrictEqual(chatFromDisk(archive, chat).missing, []);
+});
+
+test('matchFile: a different prompt number still matches, two candidates do not', () => {
+  assert.strictEqual(matchFile('p02_a.pdf', ['p05_a.pdf']), 'p05_a.pdf');
+  assert.strictEqual(matchFile('p02_a.pdf', ['p05_a.pdf', 'p07_a.pdf']), null);
+});
+
+test('an upload already matched exactly to another expected upload is not matched again', () => {
+  const human = (files) => ({ uuid: 'h', parent_message_uuid: null, sender: 'human', content: [], files_v2: files });
+  const data = { uuid: 'u', current_leaf_message_uuid: 'h', chat_messages: [human([
+    { success: true, file_name: 'a b.pdf', file_uuid: 'x1' }, { success: true, file_name: 'a_b.pdf', file_uuid: 'x2' }])] };
+  const { dir, archive, chat } = chatDir(data);
+  put(dir, 'uploads/p01_a_b.pdf', 'pdf');
+  const got = chatFromDisk(archive, chat);
+  const ups = Object.fromEntries(got.viewerChat.messages.flatMap(m => m.uploads).map(u => [u.name, u]));
+  assert.strictEqual(ups['a_b.pdf'].href, 'uploads/p01_a_b.pdf');
+  assert.strictEqual(ups['a b.pdf'].href, null);
+  assert.deepStrictEqual(got.missing, ['p01_a b.pdf']);
+});
+
+test('README link to a projects/ folder that is not there falls back to project/files', () => {
+  const mega = tmpRoot();
+  put(mega, 'index.md');
+  put(mega, 'c/original.json', JSON.stringify({ uuid: 'u', project_uuid: 'P', chat_messages: [] }));
+  put(mega, 'c/README.md', '- [Paper.pdf](../projects/Gone/files/Paper.pdf)\n');
+  put(mega, 'c/project/files/Paper.pdf', 'pdf');
+  const archive = { root: mega, kind: 'mega', chats: [{ dir: `${mega}/c`, relDir: 'c' }] };
+  const p = chatFromDisk(archive, archive.chats[0]).viewerChat.project;
+  assert.deepStrictEqual(p.files.map(f => f.href), ['c/project/files/Paper.pdf']);
+});
