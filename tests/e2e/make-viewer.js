@@ -4,10 +4,9 @@
 const fs = require('fs');
 const path = require('path');
 const { buildViewerChat, modelLabel, buildViewerData, assembleViewer, VIEWER_ASSETS } = require('../../takeout-viewer.js');
-const { loadPopup } = require('../helpers');
+const { getModelName } = require('../../export-core.js');
 
 const REPO = path.resolve(__dirname, '..', '..');
-const getModelName = loadPopup().fn('getModelName'); // what a real export passes
 
 // conversations: claude.ai API payloads. ctxOf(conversation): extra buildViewerChat context, such as artifacts.
 function buildHtml(conversations, exported = new Date().toISOString(), ctxOf = () => ({})) {

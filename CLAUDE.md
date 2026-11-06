@@ -29,6 +29,7 @@ For deeper dives, two companion docs live alongside this one:
 | `background.js` | MV3 service worker. | Only manages side-panel "open on action click" preference. Listens to `chrome.storage.onChanged` for `useSidePanel` to re-apply behavior. |
 | `popup.html` | Popup UI (action click). | Buttons, status pill, settings drawer. Includes `.status.ready` / `.waiting` / `.error` / `.warning` styles. |
 | `sidepanel.html` | Side Panel UI. | Same buttons/handlers as the popup, just a different host. |
+| `export-core.js` | Shared pure extractors. | Classic script loaded before `popup.js` (plain top-level declarations, `module.exports` under Node only). Holds `fixMojibake`, `isTextFile`, `getMessageChain`, `extractArtifacts`, the heredoc helpers, `extractUploadedFiles`, `extractPresentedFiles`, `extractDeliveredFiles`, `getModelName`, `buildViewerDeliveries`. Used by `popup.js` and Node tools. |
 | `popup.js` | **The brain.** Over 4,000 lines. All export logic, all conversion, all UI wiring. Same script is loaded by both `popup.html` and `sidepanel.html`. | See §3 below for the internal layout. |
 | `jszip.min.js` | ZIP library (vendored). | Used by both single-ZIP and mega-ZIP exports. |
 | `extract_artifacts.py` | Stdlib-only Python port of `extractArtifacts`. | Reconstructs all per-turn artifact versions from `original.json` offline. Byte-identical output to the JS implementation. |
@@ -50,6 +51,7 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 
 | Section | What lives here |
 |---|---|
+| `export-core.js` (separate file) | Mojibake repair, `isTextFile`, `getMessageChain`, `extractArtifacts` (per-turn versioning + str_replace replay), `extractUploadedFiles`, `extractPresentedFiles`, `extractDeliveredFiles`, `getModelName`, `buildViewerDeliveries` live here, not in `popup.js`. Edit them there. |
 | `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`, `viewer`. |
 | Mojibake repair + BOM helpers | Builds a UTF-8→CP1252 corruption map covering Latin, Greek, Cyrillic, math, arrows, box drawing, super/subscripts, emojis. `fixMojibake(text)`, `withBOM(text)`, `addFileWithBOM(folder, path, content)`. |
 | Extractors and renderers | `getMessageChain`, `extractArtifacts` (per-turn versioning + str_replace replay), `extractTextAttachments`, `extractWebSources`, `extractUploadedFiles`, `extractPresentedFiles`, `extractBlobContent`, `extractProjectFiles`, `getLanguageFromFilename`, `processTextWithCitations`, `formatReferences`, `getLanguageFromType`, `getThinkingSummary`, `markdownToPlainText`. |

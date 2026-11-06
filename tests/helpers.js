@@ -39,6 +39,7 @@ function loadPopup({ fetch = async () => ({ ok: false, status: 404 }) } = {}) {
     fetch,
   };
   vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(REPO, 'export-core.js'), 'utf8'), sandbox);
   vm.runInContext(fs.readFileSync(path.join(REPO, 'takeout-viewer.js'), 'utf8'), sandbox);
   vm.runInContext(fs.readFileSync(path.join(REPO, 'popup.js'), 'utf8'), sandbox);
   return { sandbox, fn: (name) => vm.runInContext(name, sandbox) };

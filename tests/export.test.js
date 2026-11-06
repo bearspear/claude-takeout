@@ -637,3 +637,27 @@ test('project instructions: over the embed limit they are cut with a note, whole
   assert.match(chat.project.instructions, /truncated.*project\/prompt_template\.md/);
   assert.ok(written['project/prompt_template.md'].includes(long));
 });
+
+// ---- export-core.js ----
+test('export-core.js exports the shared extractors', () => {
+  const core = require('../export-core.js');
+  const names = ['fixMojibake', 'isTextFile', 'getMessageChain', 'failedToolUseIds', 'isBashTool', 'heredocPath', 'HEREDOC_RE', 'heredocFiles',
+    'extractArtifacts', 'extractUploadedFiles', 'extractPresentedFiles', 'extractDeliveredFiles', 'getModelName', 'buildViewerDeliveries'];
+  for (const name of names) assert.ok(name in core, `${name} is exported`);
+});
+
+test('popup.html and sidepanel.html load export-core.js, takeout-viewer.js, then popup.js', () => {
+  for (const page of ['popup.html', 'sidepanel.html']) {
+    const html = fs.readFileSync(path.join(REPO, page), 'utf8');
+    const scripts = Array.from(html.matchAll(/<script src="([^"]+)"/g), (m) => m[1]);
+    const order = ['export-core.js', 'takeout-viewer.js', 'popup.js'].map((s) => scripts.indexOf(s));
+    assert.ok(order.every((i) => i >= 0), `${page} loads all three`);
+    assert.deepStrictEqual(order, [...order].sort((a, b) => a - b), `${page} order`);
+  }
+});
+
+test('buildViewerDeliveries names each uuid after its first file', () => {
+  const { buildViewerDeliveries } = require('../export-core.js');
+  const files = [{ filename: 'a_v1.md', uuid: 'u1', path: '/p/a.md' }, { filename: 'a_v2.md', uuid: 'u2', path: '/p/a.md' }, { filename: 'a.md', uuid: 'u2', path: '/p/a.md' }];
+  assert.deepStrictEqual(buildViewerDeliveries(files), { u1: { filename: 'a_v1.md', path: '/p/a.md' }, u2: { filename: 'a_v2.md', path: '/p/a.md' } });
+});
