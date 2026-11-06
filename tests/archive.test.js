@@ -446,3 +446,146 @@ test('README link to a projects/ folder that is not there falls back to project/
   const p = chatFromDisk(archive, archive.chats[0]).viewerChat.project;
   assert.deepStrictEqual(p.files.map(f => f.href), ['c/project/files/Paper.pdf']);
 });
+
+// ---- ZIP extraction (tools/archive-zip.js) ----
+const JSZip = require('../jszip.min.js');
+const { extractZip, zipFreeSpaceOk } = require('../tools/archive-zip.js');
+
+const makeZip = async (tmp, build, name = 'a.zip') => {
+  const zip = new JSZip();
+  build(zip);
+  const p = path.join(tmp, name);
+  fs.writeFileSync(p, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  return p;
+};
+
+test('extractZip keeps a non-ASCII name and binary bytes', async () => {
+  const tmp = tmpRoot();
+  const bin = Buffer.from([0, 255, 1, 254, 80, 75, 3, 4, 0, 0]);
+  const zp = await makeZip(tmp, z => { z.file('chat/Übergröße.md', 'hallo'); z.file('chat/uploads/p01_x.pdf', bin); });
+  const dest = path.join(tmp, 'out');
+  const res = await extractZip(zp, dest);
+  assert.strictEqual(res.files, 2);
+  assert.deepStrictEqual(res.rejected, []);
+  assert.strictEqual(res.bytes, 5 + bin.length);
+  assert.strictEqual(fs.readFileSync(path.join(dest, 'chat/Übergröße.md'), 'utf8'), 'hallo');
+  assert.ok(fs.readFileSync(path.join(dest, 'chat/uploads/p01_x.pdf')).equals(bin));
+  assert.ok(!fs.existsSync(dest + '.partial'));
+});
+
+test('extractZip leaves the ZIP untouched and writes nothing beside it', async () => {
+  const tmp = tmpRoot();
+  const zp = await makeZip(tmp, z => z.file('a.txt', 'a'));
+  const before = fs.statSync(zp);
+  const bytes = fs.readFileSync(zp);
+  fs.mkdirSync(path.join(tmp, 'sub'));
+  await extractZip(zp, path.join(tmp, 'sub', 'out'));
+  const after = fs.statSync(zp);
+  assert.strictEqual(after.mtimeMs, before.mtimeMs);
+  assert.ok(fs.readFileSync(zp).equals(bytes));
+  assert.deepStrictEqual(fs.readdirSync(tmp).sort(), ['a.zip', 'sub']);
+});
+
+// JSZip normalizes '../x' away on write, so hand-build a stored ZIP with the exact names.
+const rawZip = entries => {
+  const zlib = require('zlib');
+  const locals = [], centrals = [];
+  let off = 0;
+  for (const [name, text] of entries) {
+    const n = Buffer.from(name), d = Buffer.from(text);
+    const crc = zlib.crc32 ? zlib.crc32(d) : 0;
+    const l = Buffer.alloc(30);
+    l.writeUInt32LE(0x04034b50, 0); l.writeUInt16LE(20, 4); l.writeUInt32LE(crc, 14);
+    l.writeUInt32LE(d.length, 18); l.writeUInt32LE(d.length, 22); l.writeUInt16LE(n.length, 26);
+    const c = Buffer.alloc(46);
+    c.writeUInt32LE(0x02014b50, 0); c.writeUInt16LE(20, 4); c.writeUInt16LE(20, 6); c.writeUInt32LE(crc, 16);
+    c.writeUInt32LE(d.length, 20); c.writeUInt32LE(d.length, 24); c.writeUInt16LE(n.length, 28); c.writeUInt32LE(off, 42);
+    locals.push(l, n, d); centrals.push(c, n);
+    off += 30 + n.length + d.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const e = Buffer.alloc(22);
+  e.writeUInt32LE(0x06054b50, 0); e.writeUInt16LE(entries.length, 8); e.writeUInt16LE(entries.length, 10);
+  e.writeUInt32LE(cd.length, 12); e.writeUInt32LE(off, 16);
+  return Buffer.concat([...locals, cd, e]);
+};
+
+test('extractZip refuses traversal, absolute, drive, backslash and NUL names', async () => {
+  const tmp = tmpRoot();
+  const bad = ['../escape.txt', 'a/../../escape2.txt', '/abs-escape.txt', 'C:/win.txt', '..\\back.txt', 'nul\0.txt'];
+  const zp = path.join(tmp, 'evil.zip');
+  fs.writeFileSync(zp, rawZip([['ok.txt', 'ok'], ...bad.map(n => [n, 'bad'])]));
+  // prove the hostile names really are in the ZIP, so the check below is exercised
+  const names = Object.values((await JSZip.loadAsync(fs.readFileSync(zp))).files).map(f => f.unsafeOriginalName || f.name);
+  for (const n of bad) assert.ok(names.includes(n), 'ZIP lacks ' + JSON.stringify(n));
+  const dest = path.join(tmp, 'x', 'out');
+  fs.mkdirSync(path.dirname(dest));
+  const res = await extractZip(zp, dest);
+  assert.strictEqual(res.files, 1);
+  assert.deepStrictEqual(res.rejected.sort(), [...bad].sort());
+  assert.ok(!fs.existsSync(path.join(tmp, 'x', 'escape.txt')));
+  assert.ok(!fs.existsSync(path.join(tmp, 'escape.txt')));
+  assert.ok(!fs.existsSync('/abs-escape.txt'));
+  assert.deepStrictEqual(fs.readdirSync(dest), ['ok.txt']);
+  assert.deepStrictEqual(fs.readdirSync(path.join(tmp, 'x')), ['out']);
+});
+
+test('extractZip refuses symlink entries', async () => {
+  const tmp = tmpRoot();
+  const zp = await makeZip(tmp, z => { z.file('ok.txt', 'ok'); z.file('link', '/etc/passwd', { unixPermissions: 0o120777 }); });
+  const dest = path.join(tmp, 'out');
+  const res = await extractZip(zp, dest);
+  assert.deepStrictEqual(res.rejected, ['link']);
+  assert.deepStrictEqual(fs.readdirSync(dest), ['ok.txt']);
+});
+
+test('extractZip skips __MACOSX and .DS_Store silently', async () => {
+  const tmp = tmpRoot();
+  const zp = await makeZip(tmp, z => { z.file('ok.txt', 'ok'); z.file('__MACOSX/._ok.txt', 'm'); z.file('d/.DS_Store', 'm', { createFolders: false }); });
+  const dest = path.join(tmp, 'out');
+  const res = await extractZip(zp, dest);
+  assert.strictEqual(res.files, 1);
+  assert.deepStrictEqual(res.rejected, []);
+  assert.deepStrictEqual(fs.readdirSync(dest), ['ok.txt']);
+});
+
+test('extractZip rejects an existing destDir or a .partial leftover and keeps them', async () => {
+  const tmp = tmpRoot();
+  const zp = await makeZip(tmp, z => z.file('ok.txt', 'ok'));
+  const dest = path.join(tmp, 'out');
+  fs.mkdirSync(dest);
+  await assert.rejects(extractZip(zp, dest), /already exists/);
+  assert.deepStrictEqual(fs.readdirSync(dest), []);
+  assert.ok(!fs.existsSync(dest + '.partial'));
+  const dest2 = path.join(tmp, 'out2');
+  fs.mkdirSync(dest2 + '.partial');
+  fs.writeFileSync(path.join(dest2 + '.partial', 'keep'), 'k');
+  await assert.rejects(extractZip(zp, dest2), /remove.*\.partial/is);
+  assert.ok(fs.existsSync(path.join(dest2 + '.partial', 'keep')));
+  assert.ok(!fs.existsSync(dest2));
+});
+
+test('extractZip rejects a corrupt ZIP clearly and leaves nothing', async () => {
+  const tmp = tmpRoot();
+  const zp = path.join(tmp, 'bad.zip');
+  fs.writeFileSync(zp, 'this is not a zip file at all');
+  const dest = path.join(tmp, 'out');
+  await assert.rejects(extractZip(zp, dest), /not a valid ZIP/i);
+  assert.ok(!fs.existsSync(dest) && !fs.existsSync(dest + '.partial'));
+});
+
+test('extractZip stops on a zip bomb and removes its partial folder', async () => {
+  const tmp = tmpRoot();
+  const zp = await makeZip(tmp, z => z.file('big.txt', Buffer.alloc(4 * 1024 * 1024)));
+  const dest = path.join(tmp, 'out');
+  await assert.rejects(extractZip(zp, dest, { maxBytes: 1024 }), /too large|zip bomb/i);
+  assert.ok(!fs.existsSync(dest) && !fs.existsSync(dest + '.partial'));
+});
+
+test('zipFreeSpaceOk reports needed (+10%) and free', async () => {
+  const tmp = tmpRoot();
+  const zp = await makeZip(tmp, z => z.file('a.txt', Buffer.alloc(1000)));
+  const r = await zipFreeSpaceOk(zp, path.join(tmp, 'not', 'yet', 'there'));
+  assert.strictEqual(r.needed, 1100);
+  assert.ok(r.free > 0 && r.ok === true);
+});
