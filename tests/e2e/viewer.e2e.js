@@ -231,6 +231,71 @@ function textChat() {
     check('messages use content-visibility', await page.$eval('.msg', m => getComputedStyle(m).contentVisibility === 'auto'));
     clean('main flow', seen);
 
+    // Branch arrows and the hash.
+    const br = await open();
+    const branchState = () => br.page.evaluate(() => ({
+      ids: [...document.querySelectorAll('.msg')].map(m => m.dataset.id), hash: location.hash,
+      label: document.querySelector('.msg[data-id="m06"] .branch .pos, .msg[data-id="x01"] .branch .pos')?.textContent,
+    }));
+    const first = await br.page.$eval('.msg[data-id="m06"] .branch', b => ({
+      pos: b.querySelector('.pos').textContent, prevOff: b.querySelector('button[data-dir="-1"]').disabled, nextOff: b.querySelector('button[data-dir="1"]').disabled,
+      labels: [...b.querySelectorAll('button')].map(x => x.getAttribute('aria-label')).join(),
+    })).catch(() => null);
+    check('branch arrows show 1 / 2 on m06', first && first.pos === '1 / 2', JSON.stringify(first));
+    check('first branch disables Previous only', first && first.prevOff && !first.nextOff, JSON.stringify(first));
+    check('arrow buttons have accessible labels', first && /Previous/.test(first.labels) && /Next/.test(first.labels), JSON.stringify(first));
+    check('messages with one version have no arrows', (await br.page.$$('.msg:not([data-id="m06"]) .branch')).length === 0);
+    check('the first chat load writes the hash', /chat=/.test(await br.page.evaluate(() => location.hash)));
+    await br.page.click('.msg[data-id="m06"] .branch button[data-dir="1"]', { timeout: 1500 }).catch(() => {});
+    await br.page.waitForSelector('.msg[data-id="x01"]', { timeout: 2000 }).catch(() => {});
+    const second = await branchState();
+    check('Next shows the other reply', second.ids.includes('x01') && !second.ids.includes('m06'), JSON.stringify(second));
+    check('second branch reads 2 / 2', second.label === '2 / 2', JSON.stringify(second));
+    check('the hash names the leaf', /leaf=x01/.test(second.hash), second.hash);
+    check('Next is disabled on the last branch', await br.page.$eval('.msg[data-id="x01"] .branch button[data-dir="1"]', b => b.disabled).catch(() => false));
+    await br.page.reload();
+    await br.page.waitForSelector('.msg');
+    check('reload keeps the branch', (await branchState()).ids.includes('x01'));
+    await br.page.goBack();
+    await br.page.waitForSelector('.msg[data-id="m06"]', { timeout: 2000 }).catch(() => {});
+    const back = await branchState();
+    check('Back returns to the first branch', back.ids.includes('m06') && !back.ids.includes('x01'), JSON.stringify(back));
+    await br.page.waitForTimeout(200);
+    check('hash changes do not render twice', (await br.page.$$('.msg[data-id="m06"]')).length === 1);
+    clean('branch flow', br.seen);
+
+    const unknown = await open({}, url + '#chat=no-such-chat&leaf=nope');
+    check('an unknown chat opens the newest chat', (await unknown.page.textContent('#title')) === 'Quarterly budget review');
+    const unknownHash = await unknown.page.evaluate(() => location.hash);
+    check('an unknown chat is replaced in the hash', /chat=/.test(unknownHash) && !/no-such/.test(unknownHash), unknownHash);
+    const keep = await open({}, url + '#chat=short&file=a.html&version=2');
+    check('a hash opens its chat', (await keep.page.textContent('#title')) === 'Short chat');
+    const keepHash = await keep.page.evaluate(() => location.hash);
+    check('file and version round-trip in the hash', /file=a\.html/.test(keepHash) && /version=2/.test(keepHash), keepHash);
+    const badLeaf = await open({}, url + '#chat=short&leaf=nope');
+    check('an unknown leaf still shows the chat', (await badLeaf.page.$$('.msg')).length === 2);
+    await keep.page.click('.item:has-text("Quarterly")');
+    const clickHash = await keep.page.evaluate(() => location.hash);
+    check('sidebar clicks go through the hash', /chat=/.test(clickHash) && !/short/.test(clickHash), clickHash);
+
+    // A branch near the end of a long chat keeps its place on screen.
+    const bc = plainChat('branchy', 'Branchy', 40, '2026-04-01T00:00:00Z');
+    bc.chat_messages.push({ ...clone(bc.chat_messages[39]), uuid: 'branchy-alt', content: [{ type: 'text', text: 'alternative ending' }] });
+    const bfile = path.join(dir, 'branchy.html');
+    fs.writeFileSync(bfile, buildHtml([bc], '2026-11-05T12:00:00Z'));
+    const pos = await open({}, 'file://' + bfile + '#chat=branchy');
+    await pos.page.waitForFunction(() => document.querySelectorAll('.msg').length === 40);
+    const topOf = () => pos.page.evaluate(() => { const b = document.querySelector('.branch'); return b ? b.closest('.msg').getBoundingClientRect().top : null; });
+    await pos.page.evaluate(() => { const s = document.getElementById('scroll'); s.scrollTop = s.scrollHeight; });
+    await pos.page.waitForTimeout(100);
+    const before = await topOf();
+    await pos.page.click('.branch button[data-dir="1"]', { timeout: 1500 }).catch(() => {});
+    await pos.page.waitForSelector('.msg[data-id="branchy-alt"]', { timeout: 2000 }).catch(() => {});
+    await pos.page.waitForTimeout(400);
+    const after = await topOf();
+    check('a switched message keeps its screen position', before !== null && after !== null && Math.abs(after - before) <= 2, `${before} -> ${after}`);
+    check('the alternative reply shows after a switch', (await pos.page.textContent('#chat')).includes('alternative ending'));
+
     const hostile = await open();
     await hostile.page.click('.item >> nth=4');
     await hostile.page.waitForSelector('.msg.assistant');

@@ -85,6 +85,16 @@ svg.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor
 .assistant .when { margin-top: 6px; }
 .human .when { margin-top: -4px; padding-right: 4px; }
 
+/* Branch arrows sit under a message that has other versions */
+.branch { display: flex; align-items: center; gap: 2px; margin-top: 6px; font: 12.5px/1 var(--sans); color: var(--mute); }
+.human .branch { margin-top: -2px; }
+.branch button { display: flex; align-items: center; justify-content: center; width: 24px; height: 24px; border: 0; border-radius: 6px; background: none; color: var(--mute); cursor: pointer; padding: 0; }
+.branch button:hover:not(:disabled) { background: var(--hover); color: var(--ink); }
+.branch button:disabled { opacity: .35; cursor: default; }
+.branch button svg.ic { width: 14px; height: 14px; }
+.branch .prev svg.ic { transform: scaleX(-1); }
+.branch .pos { min-width: 36px; text-align: center; font-variant-numeric: tabular-nums; }
+
 /* Assistant message */
 .assistant { margin-bottom: 20px; }
 .prose { font: 17px/1.6 var(--serif); color: var(--ink); overflow-wrap: break-word; }

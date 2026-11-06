@@ -230,7 +230,25 @@ function renderAssistant(m) {
   return node;
 }
 
-function renderMessage(m) {
+// The ‹ 1 / 2 › control under a message with other versions. Buttons carry data-dir, -1 or 1.
+function branchControl(sib) {
+  const box = el('div', 'branch');
+  box.setAttribute('role', 'group');
+  box.setAttribute('aria-label', 'Message versions');
+  const step = (dir, label) => {
+    const button = el('button', dir < 0 ? 'prev' : 'next');
+    button.type = 'button';
+    button.dataset.dir = String(dir);
+    button.setAttribute('aria-label', label);
+    button.disabled = dir < 0 ? sib.index <= 0 : sib.index >= sib.ids.length - 1;
+    button.append(icon('chevron'));
+    return button;
+  };
+  box.append(step(-1, 'Previous version'), el('span', 'pos', `${sib.index + 1} / ${sib.ids.length}`), step(1, 'Next version'));
+  return box;
+}
+
+function renderMessage(m, sib) {
   let node;
   try {
     node = m.sender === 'human' ? renderHuman(m) : renderAssistant(m);
@@ -240,6 +258,7 @@ function renderMessage(m) {
   }
   if (!node) return null;
   node.dataset.id = m.id;
+  if (sib && sib.ids.length > 1) node.append(branchControl(sib));
   const stamp = timeStamp(m.at);
   if (stamp) node.append(stamp);
   return node;
@@ -247,30 +266,59 @@ function renderMessage(m) {
 
 let renderGeneration = 0;
 
-// Any later call cancels the batches still pending from this one.
-function renderChat(chat) {
+// Messages that share a parent with another message, by parent id. Roots share the key null.
+function siblingCounts(messages) {
+  const ids = new Set(messages.map(m => m.id));
+  const counts = new Map();
+  for (const m of messages) {
+    const key = m.parent == null || !ids.has(m.parent) ? null : m.parent;
+    counts.set(key, (counts.get(key) || 0) + 1);
+  }
+  return counts;
+}
+
+// Any later call cancels the batches still pending from this one. leaf: the branch to show.
+// anchor: { id, top } keeps that message where it was on screen, top being its offset in the scroll box.
+function renderChat(chat, leaf = chat.leaf, anchor = null) {
   const generation = ++renderGeneration;
   const box = document.getElementById('chat');
+  const scroll = document.getElementById('scroll');
   const title = chat.title || 'Untitled';
   box.replaceChildren();
-  document.getElementById('scroll').scrollTop = 0;
+  if (!anchor) scroll.scrollTop = 0;
   document.getElementById('title').textContent = title;
   document.getElementById('meta').textContent = [chat.model, shortDate(chat.created)].filter(Boolean).join(' · ');
   document.title = `${title} - Claude Takeout`;
   document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
 
-  const chain = chainFrom(chat.messages, chat.leaf);
+  const chain = chainFrom(chat.messages, leaf);
+  const counts = siblingCounts(chat.messages);
+  const sibsOf = m => {
+    const key = m.parent == null || !counts.has(m.parent) ? null : m.parent;
+    return counts.get(key) > 1 ? siblingsOf(chat.messages, m.id) : null;
+  };
+  const place = () => {
+    const node = anchor && box.querySelector(`.msg[data-id="${CSS.escape(anchor.id)}"]`);
+    if (!node) return;
+    scroll.scrollTop += node.getBoundingClientRect().top - scroll.getBoundingClientRect().top - anchor.top;
+  };
+  const anchorAt = anchor ? chain.findIndex(m => m.id === anchor.id) : -1;
   let next = 0;
   const batch = () => {
     if (generation !== renderGeneration) return;
+    // The first batch reaches the anchor, so it can be put back in place at once.
+    const size = next === 0 && anchorAt >= 0 ? Math.max(BATCH_SIZE, anchorAt + 1) : BATCH_SIZE;
     const part = document.createDocumentFragment();
-    for (const m of chain.slice(next, next + BATCH_SIZE)) {
-      const node = renderMessage(m);
+    for (const m of chain.slice(next, next + size)) {
+      const node = renderMessage(m, sibsOf(m));
       if (node) part.append(node);
     }
-    next += BATCH_SIZE;
+    const first = next === 0;
+    next += size;
     box.append(part);
+    if (first) place();
     if (next < chain.length) requestAnimationFrame(batch);
+    else if (anchor) requestAnimationFrame(place);
   };
   batch();
 }
@@ -303,6 +351,44 @@ function setDrawer(open) {
   document.body.classList.toggle('drawer', open);
 }
 
+const chatsById = new Map();
+let allChats = [];
+let shown = ''; // the hash of what the page is showing, so a hashchange we caused isn't rendered again
+
+// The only way to change chat, leaf or file. Writes the hash, then renders. options.replace edits the
+// current history entry; options.anchor keeps a message in place; options.fromHash means the hash is already set.
+function navigate(state, options = {}) {
+  const chat = chatsById.get(state.chat) || allChats[0];
+  if (!chat) return;
+  const ids = new Set(chat.messages.map(m => m.id));
+  const chain = chainFrom(chat.messages, ids.has(state.leaf) ? state.leaf : (state.leaf ? null : chat.leaf));
+  const leaf = chain.length ? chain[chain.length - 1].id : null;
+  const hash = formatHash({ chat: chat.id, leaf, file: state.file, version: state.version });
+  if (!options.fromHash && hash !== location.hash) {
+    if (options.replace) history.replaceState(null, '', hash);
+    else location.hash = hash;
+  } else if (options.fromHash && hash !== location.hash) history.replaceState(null, '', hash);
+  shown = hash;
+  renderChat(chat, leaf, options.anchor);
+}
+
+function onHashChange() {
+  if (location.hash === shown) return;
+  navigate(parseHash(location.hash), { fromHash: true });
+}
+
+function switchTo(button) {
+  const msg = button.closest('.msg');
+  const hash = parseHash(location.hash);
+  const chat = chatsById.get(hash.chat);
+  if (!msg || !chat) return;
+  const leaf = switchBranch(chat.messages, msg.dataset.id, Number(button.dataset.dir));
+  if (leaf === null) return;
+  const top = msg.getBoundingClientRect().top - document.getElementById('scroll').getBoundingClientRect().top;
+  const next = chainFrom(chat.messages, leaf).find(m => m.parent === (chat.messages.find(x => x.id === msg.dataset.id) || {}).parent);
+  navigate({ ...hash, leaf }, { anchor: next ? { id: next.id, top } : null });
+}
+
 function renderSidebar(chats) {
   const list = document.getElementById('chat-list');
   for (const chat of chats) {
@@ -310,7 +396,7 @@ function renderSidebar(chats) {
     item.type = 'button';
     item.dataset.id = chat.id;
     item.title = chat.title || 'Untitled';
-    item.addEventListener('click', () => { setDrawer(false); renderChat(chat); });
+    item.addEventListener('click', () => { setDrawer(false); navigate({ chat: chat.id }); });
     list.append(item);
   }
   document.getElementById('archive').textContent = `Archive · ${chats.length} chat${chats.length === 1 ? '' : 's'} · read-only`;
@@ -318,14 +404,19 @@ function renderSidebar(chats) {
 
 function start() {
   const data = JSON.parse(document.getElementById('data').textContent);
+  allChats = data.chats;
+  allChats.forEach(chat => chatsById.set(chat.id, chat));
   renderSidebar(data.chats);
   document.getElementById('menu').addEventListener('click', () => setDrawer(true));
   document.getElementById('scrim').addEventListener('click', () => setDrawer(false));
   document.getElementById('chat').addEventListener('click', e => {
     const button = e.target.closest('.copy');
-    if (button) onCopy(button);
+    if (button) { onCopy(button); return; }
+    const arrow = e.target.closest('.branch button');
+    if (arrow && !arrow.disabled) switchTo(arrow);
   });
-  if (data.chats.length) renderChat(data.chats[0]);
+  window.addEventListener('hashchange', onHashChange);
+  if (data.chats.length) navigate(parseHash(location.hash), { replace: true });
   else document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
 }
 
