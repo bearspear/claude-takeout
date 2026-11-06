@@ -431,9 +431,11 @@ function renderMessage(m, sib, chat) {
   }
   if (!node) return null;
   node.dataset.id = m.id;
-  // One row under the message: other versions, Copy, and the time.
+  // One row under the message: other versions, the time, and Copy.
   const foot = el('div', 'foot');
   if (sib && sib.ids.length > 1) foot.append(branchControl(sib));
+  const stamp = timeStamp(m.at);
+  if (stamp) foot.append(stamp);
   const text = copyText(m);
   if (text && !node.classList.contains('failed')) {
     const copy = copyButton();
@@ -442,8 +444,6 @@ function renderMessage(m, sib, chat) {
     copy.addEventListener('click', () => copyWithFeedback(copy, text));
     foot.append(copy);
   }
-  const stamp = timeStamp(m.at);
-  if (stamp) foot.append(stamp);
   if (foot.hasChildNodes()) node.append(foot);
   return node;
 }

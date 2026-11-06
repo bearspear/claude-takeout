@@ -1060,6 +1060,7 @@ async function unzipMegaZip(out) {
     const copyIn = id => cp.page.locator(`.msg[data-id="${id}"] .foot .copy-msg`);
     check('copy: a prompt has a labelled Copy', (await copyIn('m01').getAttribute('aria-label')) === 'Copy prompt' && (await copyIn('m01').textContent()) === 'Copy');
     check('copy: a response has a labelled Copy', (await copyIn('m02').getAttribute('aria-label')) === 'Copy response');
+    check('copy: comes after the time', await cp.page.$eval('.msg[data-id="m01"] .foot', f => { const k = [...f.children]; return k.findIndex(c => c.matches('.copy-msg')) === k.findIndex(c => c.matches('time, .time')) + 1; }));
     check('copy: always visible, beside the time', await cp.page.$eval('.msg[data-id="m01"]', n => { const c = n.querySelector('.copy-msg'), t = n.querySelector('time.when'); return getComputedStyle(c).opacity === '1' && c.getBoundingClientRect().height > 0 && Math.abs(c.getBoundingClientRect().top - t.getBoundingClientRect().top) < 20 && c.closest('.foot') === t.closest('.foot'); }));
     await copyIn('m01').click();
     check('copy: the prompt is copied exactly', (await clip()) === textOf('m01'), JSON.stringify(await clip()));
