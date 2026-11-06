@@ -711,12 +711,22 @@ test('assembleViewer: fileScripts adds file: to the page policy only, and export
   const plain = CTViewer.assembleViewer(parts);
   const withFiles = CTViewer.assembleViewer({ ...parts, fileScripts: true });
   assert.strictEqual(CTViewer.assembleViewer({ ...parts, fileScripts: false }), plain);
-  assert.strictEqual(withFiles, plain.replace(`content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval';`, `content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' file:;`));
+  assert.strictEqual(withFiles, plain
+    .replace(`content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval';`, `content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' file:;`)
+    .replace(`img-src file: data: blob:; media-src data: blob:;`, `img-src file: data: blob:; media-src data: blob: file:;`));
   assert.notStrictEqual(withFiles, plain);
   assert.ok(!/<meta http-equiv="Content-Security-Policy"[^>]*script-src[^;]*file:/.test(plain));
   assert.ok(withFiles.includes(`const PREVIEW_CSP = "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src`), 'preview sandbox policy is untouched');
   // The template with no placeholders comes back as it went in.
   assert.strictEqual(CTViewer.assembleViewer({ ...parts, template: 'plain' }), 'plain');
+});
+
+test('assembleViewer: fileMedia opens media-src alone, so a viewer with no parts loads no scripts from disk', () => {
+  const [template, logic, app, marked, katex, css] = CTViewer.VIEWER_ASSETS.map(a => fs.readFileSync(path.resolve(__dirname, '..', a), 'utf8'));
+  const parts = { template, css, marked, katex, logic, app, data: { exported: 'x', chats: [] } };
+  const media = CTViewer.assembleViewer({ ...parts, fileMedia: true });
+  assert.strictEqual(media, CTViewer.assembleViewer(parts).replace(`img-src file: data: blob:; media-src data: blob:;`, `img-src file: data: blob:; media-src data: blob: file:;`));
+  assert.ok(media.includes(`img-src data: blob:; font-src data:; media-src data: blob:; base-uri 'none'`), 'preview sandbox policy is untouched');
 });
 
 test('kindFor is exported', () => {
@@ -773,7 +783,7 @@ test('buildParts: what embeds, what links, and that parts can go straight to dis
   const [md, large, pdf, csv, gone] = entries;
   assert.deepStrictEqual({ ...md, key: null }, { path: 'a b/Größe #1.md', chat: 'chat-1', kind: 'md', size: md.size, href: 'a%20b/Gr%C3%B6%C3%9Fe%20%231.md', part: 1, key: null });
   assert.strictEqual(data[md.key], 'café');
-  assert.deepStrictEqual(large, { path: 'big.txt', chat: null, kind: 'binary', size: big.length, href: 'big.txt', part: null, key: null });
+  assert.deepStrictEqual(large, { path: 'big.txt', chat: null, kind: 'code', size: big.length, href: 'big.txt', part: null, key: null });
   assert.deepStrictEqual(pdf, { path: 'paper.pdf', chat: null, kind: 'pdf', size: 4, href: 'paper.pdf', part: null, key: null });
   assert.strictEqual(csv.kind, 'code');
   assert.strictEqual(data[csv.key], 'a,b');
@@ -817,6 +827,18 @@ test('writeViewer: with no added text there is no parts folder, no file: policy 
   const html = fs.readFileSync(path.join(root, 'viewer.html'), 'utf8');
   assert.ok(!/<meta http-equiv="Content-Security-Policy"[^>]*script-src[^;]*file:/.test(html));
   assert.ok(!('added' in viewerData(root)));
+});
+
+test('writeViewer: added audio with no added text can play, and no script comes from disk', async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  put(root, 'original.json', chatJson('s1'));
+  put(root, 'audio/talk.mp3', 'bytes');
+  assert.strictEqual((await writeViewer(single(root), {})).status, 'written');
+  const policy = /<meta http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(fs.readFileSync(path.join(root, 'viewer.html'), 'utf8'))[1];
+  assert.match(policy, /media-src [^;]* file:;/);
+  assert.doesNotMatch(policy, /script-src [^;]*file:/);
+  assert.ok(!fs.existsSync(path.join(root, 'viewer-files')));
 });
 
 test('dry run writes nothing at all and says what would happen', () => {

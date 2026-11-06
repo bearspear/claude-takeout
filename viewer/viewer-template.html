@@ -223,15 +223,18 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
 .file-note { flex: none; padding: 8px 16px; font-size: 12.5px; line-height: 1.45; color: var(--soft); background: var(--bub); border-bottom: 1px solid var(--line); }
 .file-code { flex: 1 0 auto; margin: 0; padding: 14px 16px; font: 12.5px/1.55 var(--mono); color: var(--code-ink); background: var(--code-bg); white-space: pre; width: max-content; min-width: 100%; }
 .file-paper { flex: 1; display: flex; align-items: center; justify-content: center; padding: 16px; background: var(--bub); }
+.file-audio { width: min(420px, 100%); }
+.file-video { max-width: 100%; max-height: 100%; border-radius: 6px; }
 .file-image { max-width: 100%; max-height: 100%; object-fit: contain; border-radius: 6px; }
 .file-details { margin: auto; padding: 24px; display: flex; flex-direction: column; align-items: center; gap: 6px; text-align: center; max-width: 340px; }
 .file-details .tile { width: 44px; height: 44px; border-radius: 10px; background: var(--bub); color: var(--mute); display: flex; align-items: center; justify-content: center; margin-bottom: 4px; }
+.file-path { font-size: 12px; color: var(--mute); overflow-wrap: anywhere; }
 .file-details b { font-size: 14px; font-weight: 600; overflow-wrap: anywhere; }
 .file-details small { font-size: 12px; color: var(--mute); }
 .file-details p { margin: 8px 0 0; font-size: 13px; color: var(--mute); }
 .file-open { margin-top: 10px; padding: 5px 12px; border: 1px solid var(--line-strong); border-radius: 8px; font-size: 13px; color: var(--ink); text-decoration: none; }
 .file-open:hover { background: var(--hover); }
-.file-missing { margin: auto; padding: 24px; font-size: 13.5px; color: var(--mute); text-align: center; }
+.file-missing, .file-loading { margin: auto; padding: 24px; font-size: 13.5px; color: var(--mute); text-align: center; }
 /* Project instructions and files, each collapsed under the top bar */
 #project { flex: none; border-bottom: 1px solid var(--line); background: var(--bg); padding: 0 20px; position: relative; z-index: 2; }
 #project[hidden] { display: none; }
@@ -244,6 +247,22 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
 #project .chips { justify-content: flex-start; padding: 2px 0 12px; max-height: 40vh; overflow-y: auto; }
 button.chip { font: inherit; color: inherit; text-align: left; cursor: pointer; }
 button.chip:hover { border-color: var(--line-strong); }
+
+/* Files added to an archive: a filter over a folder tree, built as it opens */
+.add-box { padding: 2px 0 12px; max-height: 40vh; overflow-y: auto; }
+.add-filter { display: block; box-sizing: border-box; width: min(320px, 100%); margin: 0 0 8px; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--card); color: var(--ink); font: 13px var(--sans); outline: none; }
+.add-filter::placeholder { color: var(--mute); }
+.add-filter:focus { border-color: var(--acc); }
+.add-tree[hidden], .add-results[hidden] { display: none; }
+.add-count { padding: 0 0 4px; font-size: 12px; color: var(--mute); }
+.add-level .add-level { padding-left: 16px; }
+#project .add-level summary { padding: 4px 6px; border-radius: 6px; color: var(--soft); font-size: 13px; line-height: 1.25; overflow-wrap: anywhere; }
+#project .add-level summary:hover { background: var(--hover); color: var(--ink); }
+.add-file { display: flex; align-items: center; gap: 7px; width: 100%; padding: 4px 6px; border: 0; border-radius: 6px; background: none; color: var(--soft); font: 13px/1.25 var(--sans); text-align: left; cursor: pointer; }
+.add-file:hover { background: var(--hover); color: var(--ink); }
+.add-file.on { background: var(--active); color: var(--ink); }
+.add-file .ic { flex: none; width: 13px; height: 13px; color: var(--mute); }
+.add-file span { min-width: 0; overflow-wrap: anywhere; }
 
 /* A popup over the chat: uploads, pasted files and project files */
 .veil { position: fixed; inset: 0; z-index: 20; background: rgba(40, 35, 25, .42); display: flex; align-items: center; justify-content: center; }

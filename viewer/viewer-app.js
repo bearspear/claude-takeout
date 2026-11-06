@@ -363,16 +363,17 @@ function renderProject(chat) {
   projectFor = chat.id;
   const box = document.getElementById('project');
   const project = chat.project;
+  const added = addedForChat(allAdded, chat.id);
   const items = project ? [
     ...(project.files || []).map(f => ({ name: f.name, href: f.href, text: null })),
     ...(project.docs || []).map(d => ({ name: d.name, href: null, text: d.text })),
   ] : [];
   const instructions = project && typeof project.instructions === 'string' ? project.instructions : '';
-  box.hidden = !items.length && !instructions;
+  box.hidden = !items.length && !instructions && !added.length;
   box.replaceChildren();
   if (box.hidden) return;
-  const name = project.name || 'Untitled';
-  // Two folds, closed by default, because a project's prompt can be long.
+  const name = (project && project.name) || 'Untitled';
+  // Folds, closed by default, because a project's prompt can be long.
   const fold = (kind, label) => {
     const details = el('details', kind);
     const head = el('summary');
@@ -394,6 +395,115 @@ function renderProject(chat) {
     row.append(...items.map(item => fileChip(item, fileNote(item.name, item.text))));
     fold('project-files', `Project · ${name} · ${items.length} item${items.length === 1 ? '' : 's'}`).append(row);
   }
+  if (added.length) {
+    const details = fold('archive-files', `Archive files · ${added.length}`);
+    details.addEventListener('toggle', () => { if (details.open && details.childElementCount === 1) details.append(addedBox(chat, added)); });
+  }
+}
+
+// ---- Archive files ----
+const ADDED_ROW_LIMIT = 200;
+let allAdded = []; // ViewerData.added
+let addedIds = new Map(); // entry -> its x id
+const addedFiles = new Map(); // x id -> GenFile, holding its text once loaded
+
+function addedRow(entry, label) {
+  const row = el('button', 'add-file');
+  row.type = 'button';
+  row.title = entry.path;
+  row.dataset.file = addedIds.get(entry);
+  row.classList.toggle('on', openFile !== null && openFile.file === row.dataset.file);
+  row.append(icon('file'), el('span', '', label));
+  return row;
+}
+
+// One folder's rows, so a folder that stays closed costs nothing.
+function addedLevel(node) {
+  const level = el('div', 'add-level');
+  for (const folder of node.folders) {
+    const details = el('details');
+    const head = el('summary');
+    head.append(icon('chevron'), el('span', '', folder.name));
+    head.firstChild.classList.add('chev');
+    details.append(head);
+    details.addEventListener('toggle', () => { if (details.open && details.childElementCount === 1) details.append(addedLevel(folder)); });
+    level.append(details);
+  }
+  level.append(...node.files.map(entry => addedRow(entry, entry.path.split('/').pop())));
+  return level;
+}
+
+function addedBox(chat, added) {
+  const box = el('div', 'add-box');
+  const filter = el('input', 'add-filter');
+  filter.type = 'text';
+  filter.placeholder = 'Filter by name';
+  filter.autocomplete = 'off';
+  filter.setAttribute('aria-label', 'Filter archive files by name');
+  const tree = el('div', 'add-tree');
+  tree.append(...addedTree(added, chat.id).map(addedLevel));
+  const results = el('div', 'add-results');
+  results.hidden = true;
+  filter.addEventListener('input', () => {
+    const q = filter.value.trim();
+    tree.hidden = !!q;
+    results.hidden = !q;
+    results.replaceChildren();
+    if (!q) return;
+    const hits = filterAdded(added, q);
+    const note = !hits.length ? 'No matches' : hits.length > ADDED_ROW_LIMIT ? `Showing first ${ADDED_ROW_LIMIT} of ${hits.length}` : `${hits.length} file${hits.length === 1 ? '' : 's'}`;
+    results.append(el('div', 'add-count', note), ...hits.slice(0, ADDED_ROW_LIMIT).map(entry => addedRow(entry, entry.path)));
+  });
+  box.addEventListener('click', e => {
+    const row = e.target.closest('.add-file');
+    if (row) navigate({ ...parseHash(location.hash), file: row.dataset.file, version: 0 });
+  });
+  box.append(filter, results, tree);
+  return box;
+}
+
+// A part's text arrives through window.__archivePart, called by viewer-files/part-NNNN.js. Page code can't read files.
+const partsListed = new Set(); // the part numbers the data names
+const partsLoaded = new Map(); // n -> Promise<object|null>
+const partsWaiting = new Map(); // n -> resolve, only while its script is loading
+
+function setupAdded(added) {
+  allAdded = Array.isArray(added) ? added : [];
+  addedIds = new Map(allAdded.map((entry, i) => [entry, `x${i}`]));
+  for (const entry of allAdded) if (Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
+  if (!partsListed.size) return;
+  Object.defineProperty(window, '__archivePart', {
+    value(n, data) {
+      const done = partsWaiting.get(n);
+      if (!done || data === null || typeof data !== 'object') return;
+      partsWaiting.delete(n);
+      done(data);
+    },
+  });
+}
+
+// The part's { key: text }, or null when it can't be loaded. Only a number from the data ever becomes a src.
+function loadPart(n) {
+  if (!partsListed.has(n)) return Promise.resolve(null);
+  if (partsLoaded.has(n)) return partsLoaded.get(n);
+  const loading = new Promise(resolve => {
+    partsWaiting.set(n, resolve);
+    const script = el('script');
+    const finish = () => {
+      script.remove();
+      const done = partsWaiting.get(n);
+      if (!done) return; // the part called in, and this was its load event
+      partsWaiting.delete(n);
+      partsLoaded.delete(n); // so opening the file later tries again
+      done(null);
+    };
+    script.addEventListener('load', finish);
+    script.addEventListener('error', finish);
+    script.src = `viewer-files/part-${String(n).padStart(4, '0')}.js`;
+    document.head.append(script);
+  });
+  partsLoaded.set(n, loading);
+  return loading;
 }
 
 function renderCard(block, chat) {
@@ -613,13 +723,16 @@ function fileDetails(file, version) {
   const tile = el('span', 'tile');
   tile.append(icon('file'));
   box.append(tile, el('b', '', file.name || 'Untitled'), el('small', '', fileKindLabel(file)));
+  if (file.tooLarge) box.append(el('p', '', 'This file is too large to preview here'), el('small', 'file-path', file.path));
   if (openableHref(version.href)) {
     const link = el('a', 'file-open', 'Open file');
     link.setAttribute('href', version.href);
     link.setAttribute('target', '_blank');
     link.setAttribute('rel', 'noopener');
     box.append(link);
-  } else {
+  } else if (file.added && !file.tooLarge) {
+    box.append(el('p', '', "This file can't open from the viewer. It's in this archive's folder."), el('small', 'file-path', file.path));
+  } else if (!file.added) {
     box.append(el('p', '', "This file can't open from the viewer. It's in the artefacts folder of this export."));
   }
   return box;
@@ -635,6 +748,14 @@ function previewNodes(chat, file, version) {
     paper.append(img);
     return [paper];
   }
+  if (file.kind === 'audio' || file.kind === 'video') {
+    const media = el(file.kind, `file-${file.kind}`);
+    media.controls = true;
+    media.setAttribute('src', version.href);
+    const paper = el('div', 'file-paper');
+    paper.append(media);
+    return [paper];
+  }
   if (file.kind === 'pdf') {
     // Chrome's PDF viewer refuses a sandboxed frame. fileViews only gives this view to a .pdf link.
     const frame = el('iframe', 'preview');
@@ -642,7 +763,8 @@ function previewNodes(chat, file, version) {
     frame.setAttribute('src', version.href);
     return [frame];
   }
-  const doc = previewDoc(version.text, siblingLookup(chat));
+  // An added page is no part of the chat that happens to be open, so it gets none of that chat's files.
+  const doc = previewDoc(version.text, file.added ? () => null : siblingLookup(chat));
   const frame = previewFrame(doc.srcdoc, file.name || '');
   return doc.remote ? [el('div', 'file-note', REMOTE_NOTE), frame] : [frame];
 }
@@ -688,12 +810,44 @@ function renderPanelHead(chat, id, file, at, shape) {
   close.setAttribute('aria-label', 'Close file');
   close.append(icon('close'));
   close.addEventListener('click', () => {
-    const card = document.querySelector('.art.on');
+    const card = document.querySelector('.art.on, .add-file.on');
     navigate({ ...parseHash(location.hash), file: null, version: null });
     if (card) card.focus({ preventScroll: true });
   });
   head.replaceChildren(name, el('small', 'panel-kind', fileKindLabel(file)), ...tabs, row, close);
   if (focused) [...tabs, ...versions].find(b => b.textContent === focused)?.focus();
+}
+
+function panelFile(chat, id) {
+  if (!isAddedId(id)) return chat.files[id];
+  if (!addedFiles.has(id)) addedFiles.set(id, addedFile(allAdded, id));
+  return addedFiles.get(id);
+}
+
+function drawPanel(chat, open, file, version) {
+  const shape = fileViews(file.kind, version);
+  if (!shape.views.includes(panelView)) panelView = shape.views[0] || null;
+  renderPanelHead(chat, open.file, file, open.version, shape);
+  renderPanelBody(chat, file, version, shape);
+}
+
+let panelLoad = 0; // goes up with every change of the panel, so a slow part can't draw over what came after it
+
+// Shows Loading… until the part arrives. A part that can't be read leaves the file missing, as a generated one would be.
+function drawFromPart(chat, open, file, version) {
+  const load = panelLoad;
+  renderPanelHead(chat, open.file, file, open.version, { views: [] });
+  document.getElementById('panel-body').replaceChildren(el('div', 'file-loading', 'Loading…'));
+  loadPart(version.part).then(part => {
+    if (load !== panelLoad) return;
+    const text = part && Object.prototype.hasOwnProperty.call(part, version.key) ? part[version.key] : null;
+    if (typeof text === 'string') {
+      version.text = text;
+      drawPanel(chat, open, file, version);
+    } else {
+      drawPanel(chat, open, { ...file, kind: 'missing' }, { ...version, href: null });
+    }
+  });
 }
 
 // open: from resolveFile, or null to close. again: draw it even if it's what the panel already shows.
@@ -702,24 +856,26 @@ function showPanel(chat, open, again = false) {
   document.querySelectorAll('.art').forEach(card => {
     card.classList.toggle('on', open !== null && card.dataset.file === open.file && Number(card.dataset.version) === open.version);
   });
+  document.querySelectorAll('.add-file').forEach(row => {
+    row.classList.toggle('on', open !== null && row.dataset.file === open.file);
+  });
   const panel = document.getElementById('panel');
   const fileKey = open ? `${chat.id}\n${open.file}\n` : '';
   const key = open ? fileKey + open.version : '';
   if (key === panelFor && !again) return;
   if (!fileKey || !panelFor.startsWith(fileKey)) panelView = null; // a new file starts at its first view
   panelFor = key;
+  panelLoad++;
   panel.hidden = !open;
   if (!open) {
     document.getElementById('panel-head').replaceChildren();
     document.getElementById('panel-body').replaceChildren();
     return;
   }
-  const file = chat.files[open.file];
+  const file = panelFile(chat, open.file);
   const version = file.versions[open.version];
-  const shape = fileViews(file.kind, version);
-  if (!shape.views.includes(panelView)) panelView = shape.views[0] || null;
-  renderPanelHead(chat, open.file, file, open.version, shape);
-  renderPanelBody(chat, file, version, shape);
+  if (version.part != null && version.text === null) drawFromPart(chat, open, file, version);
+  else drawPanel(chat, open, file, version);
 }
 
 const chatsById = new Map();
@@ -738,7 +894,7 @@ function navigate(state, options = {}) {
   const ids = new Set(chat.messages.map(m => m.id));
   const chain = chainFrom(chat.messages, ids.has(want.leaf) ? want.leaf : chat.leaf);
   const leaf = chain.length ? chain[chain.length - 1].id : null;
-  const open = resolveFile(chat.files, want.file, want.version);
+  const open = resolveFile(chat.files, want.file, want.version, allAdded);
   const hash = formatHash({ chat: chat.id, leaf, file: open && open.file, version: open && open.version });
   if (!options.fromHash && hash !== location.hash) {
     if (options.replace) history.replaceState(null, '', hash);
@@ -904,6 +1060,7 @@ function checkUnzipped() {
 function start() {
   checkUnzipped();
   const data = JSON.parse(document.getElementById('data').textContent);
+  setupAdded(data.added);
   allChats = data.chats;
   allChats.forEach(chat => chatsById.set(chat.id, chat));
   renderSidebar(data.chats);

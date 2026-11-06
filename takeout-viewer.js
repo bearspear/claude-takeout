@@ -431,7 +431,8 @@
 
   // One pass with function replacers: '$&' or a placeholder inside a value stays literal.
   // data: object (escaped here) or an already-escaped JSON string.
-  function assembleViewer({ template, css, marked, katex, logic, app, data, fileScripts }) {
+  // fileScripts: the page may load viewer-files/ scripts and media from disk. fileMedia: only media.
+  function assembleViewer({ template, css, marked, katex, logic, app, data, fileScripts, fileMedia }) {
     const script = code => String(code).replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
     const values = {
       KATEX_CSS: () => String(css).replace(/<\/style/gi, '<\\/style'),
@@ -442,7 +443,10 @@
       APP_JS: () => script(app)
     };
     // On the template, before the scripts go in: the preview sandbox policy in logic must stay as it is.
-    const page = fileScripts ? String(template).replace(/(http-equiv="Content-Security-Policy" content="[^"]*script-src [^;"]*)/, '$1 file:') : String(template);
+    const allow = (html, directive) => html.replace(new RegExp(`(http-equiv="Content-Security-Policy" content="[^"]*${directive} [^;"]*)`), '$1 file:');
+    let page = String(template);
+    if (fileScripts) page = allow(page, 'script-src');
+    if (fileScripts || fileMedia) page = allow(page, 'media-src');
     return page.replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 

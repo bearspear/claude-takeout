@@ -78,7 +78,7 @@ async function buildParts(added, { root, onPart } = {}) {
     const name = file.path.split('/').pop();
     const text = addedText(root, file.path, file.size, warnings);
     const entry = {
-      path: file.path, chat: file.chat == null ? null : file.chat, kind: CTViewer.kindFor(name, null, text !== null),
+      path: file.path, chat: file.chat == null ? null : file.chat, kind: CTViewer.kindFor(name, null, core.isTextFile(name)),
       size: file.size, href: CTViewer.relHref(file.path), part: null, key: null,
     };
     if (text !== null) {
@@ -167,10 +167,10 @@ async function collectChats(archive, report) {
 }
 
 let assets = null;
-function viewerHtml(data, fileScripts) {
+function viewerHtml(data, policy) {
   assets = assets || CTViewer.VIEWER_ASSETS.map(a => fs.readFileSync(path.join(__dirname, '..', a), 'utf8'));
   const [template, logic, app, marked, katex, css] = assets;
-  return CTViewer.assembleViewer({ template, css, marked, katex, logic, app, data, fileScripts });
+  return CTViewer.assembleViewer({ template, css, marked, katex, logic, app, data, ...policy });
 }
 
 // Exclusive, so a name that is already there is never written to or claimed. temps lists what this run made.
@@ -273,7 +273,7 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
 
     const data = CTViewer.buildViewerData(chats, { exported: new Date().toISOString() });
     if (built.entries.length) data.added = built.entries;
-    writeNew(tmp.viewer, viewerHtml(data, built.partCount > 0), temps);
+    writeNew(tmp.viewer, viewerHtml(data, { fileScripts: built.partCount > 0, fileMedia: built.entries.length > 0 }), temps);
     if (!old.gif) {
       tmp.gif = name(CTViewer.VIEWER_CHECK_FILE);
       writeNew(tmp.gif, checkGif(), temps);
