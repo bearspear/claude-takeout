@@ -33,6 +33,8 @@ For deeper dives, two companion docs live alongside this one:
 | `jszip.min.js` | ZIP library (vendored). | Used by both single-ZIP and mega-ZIP exports. |
 | `extract_artifacts.py` | Stdlib-only Python port of `extractArtifacts`. | Reconstructs all per-turn artifact versions from `original.json` offline. Byte-identical output to the JS implementation. |
 | `replay_bash.py` | Stdlib-only Python CLI for post-export bash replay. | Reconstruction, isolated by `sandbox-exec` on macOS, of artifacts the declarative replay can't reach (anything Claude mutated via `bash_tool`). See §10 below and `docs/WASM_REPLAY_APPROACH.md`. |
+| `takeout-viewer.js` | Builds the offline viewer's data. | Classic script loaded by `popup.html` and `sidepanel.html`, exposing `CTViewer` (`buildViewerChat`, `buildViewerData`, `assembleViewer`, ...). Header comment documents the contract. |
+| `viewer/` | Viewer page sources. | `viewer-template.html`, `viewer-logic.js`, `viewer-app.js`, `marked.min.js`, `katex.min.js`, `katex-inline.css`, `THIRD-PARTY-NOTICES.txt`. `writeViewer` inlines them into one `viewer.html`. |
 | `tests/` | Regression tests. | `sh tests/run.sh`. Uses Node's and Python's built-in test runners, with a synthetic fixture only. Not used by the extension at runtime. |
 | `docs/WASM_REPLAY_APPROACH.md` | Architecture record. | Comprehensive evaluation of running Pyodide in the extension as an alternative to the CLI. We chose the CLI; this doc explains why and what would change the answer. |
 | `icon16.png` / `icon48.png` / `icon128.png` / `icon.svg` | Extension icons. | |
@@ -48,12 +50,13 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 
 | Section | What lives here |
 |---|---|
-| `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`. |
+| `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`, `viewer`. |
 | Mojibake repair + BOM helpers | Builds a UTF-8→CP1252 corruption map covering Latin, Greek, Cyrillic, math, arrows, box drawing, super/subscripts, emojis. `fixMojibake(text)`, `withBOM(text)`, `addFileWithBOM(folder, path, content)`. |
 | Extractors and renderers | `getMessageChain`, `extractArtifacts` (per-turn versioning + str_replace replay), `extractTextAttachments`, `extractWebSources`, `extractUploadedFiles`, `extractPresentedFiles`, `extractBlobContent`, `extractProjectFiles`, `getLanguageFromFilename`, `processTextWithCitations`, `formatReferences`, `getLanguageFromType`, `getThinkingSummary`, `markdownToPlainText`. |
 | ZIP/section builders | `extractCodeBlocks`, `extractUrls`, `sanitizeForFilename`, `extractFirstHeading`, `escapeMarkdown`, `extractResponseTextOnly`, `generateMeta`, `generatePrompts`, `generateResponsesTextOnly`, `generateCodeSnippets`, `generateLinksAndSources`. |
 | `populateConversationFolder` | The shared ZIP layout writer used by both single-ZIP and mega-ZIP. Constructs `ExportErrorCollector`, calls all extractors, fetches project docs + uploaded files, writes every file in the folder. |
 | `createZipExport` | Wraps `populateConversationFolder` for the single-conversation ZIP path; generates the filename + downloads the blob. |
+| Offline viewer: `viewerUploadText`, `viewerProject`, `writeViewer`, `heredocFiles` | Builds `viewer.html` for each export. `viewerUploadText` reads an upload's text for the viewer, `viewerProject` shapes project instructions, docs and files, `heredocFiles` finds files a bash heredoc wrote, and `writeViewer` assembles the page via `takeout-viewer.js` (`buildViewerChat`, `modelLabel`) and adds it to the ZIP. A failure here warns under `viewer` and never stops the export. |
 | Helpers: `formatTimestamp`, `getModelName` | Model name parsing handles `data.model` (e.g. `claude-sonnet-4-5-20250929` → "Claude 4.5 Sonnet") and falls back to `paprika_mode` / thinking-block detection. |
 | `convertToMarkdown` | The single-MD / embedded-MD renderer. Walks `getMessageChain`, formats prompts and responses, renders thinking blocks, tool uses (`create_file`, `present_files`, `web_search`, `bash_tool`, `str_replace`, `view`, etc.), citations, and references. Honors `embedArtifacts`, `seamlessMd`, `includeThinking`. |
 | `extractTextContent`, `download`, `safeFilename` | Small utilities. |
@@ -148,7 +151,7 @@ If you add a new tool extractor, follow the same shape: a function `extractFoo(d
 
 This is the part most likely to break or need extending. As of v1.5.2:
 
-**Algorithm** (`extractArtifacts(data, errorCollector?)`):
+**Algorithm** (`extractArtifacts(data, errorCollector?, index?)`):
 
 1. Walk `getMessageChain(data)` in order.
 2. Maintain `state[key] = { current, basename, versions: [], editedThisTurn }`. Key is:
@@ -165,6 +168,8 @@ This is the part most likely to break or need extending. As of v1.5.2:
 7. Disambiguate basename collisions across distinct keys: append `_2`, `_3`, … and emit `artifact_basename_collision` warning.
 
 **Why per-turn (not per-edit):** matches the natural "Claude finished editing for now" boundary. The bug-fixture conversation has 11 `str_replace` calls split across two assistant turns; per-turn gives 2 useful intermediate versions, per-edit would give 12 noisy ones. If a user requests per-edit later, the snapshot loop is the only place to change.
+
+`index` is optional. When passed an object, it is filled with `{ <state key>: { path, filename, versions, messages } }`, where `messages` is the uuid of the message that made each version. The viewer uses it to link tool calls to artifact versions. The return value is the same with or without it. `extract_artifacts.py` has no equivalent and doesn't need one.
 
 **Invariants the validator skill checks:**
 - `md5(_v1<ext>) == md5(initial create_file.file_text)`.
@@ -192,6 +197,8 @@ This is the part most likely to break or need extending. As of v1.5.2:
 ├── links_and_sources.md       # URLs + web search sources grouped by domain
 ├── errors.txt                 # Structured error/warning report (omitted if none)
 ├── original.json              # Raw API payload as fetched
+├── viewer.html                # Offline viewer (see below)
+├── viewer-check.gif           # 1x1 GIF; the viewer loads it to detect a ZIP that was not unzipped
 ├── responses/<NNN>_<title>_response.md       (pure text)
 ├── responses/<NNN>_<title>_response.full.md  (thinking/tools/embedded)
 ├── artefacts/<base>(_vN)?<ext>               (versioning — see §6)
@@ -201,6 +208,8 @@ This is the part most likely to break or need extending. As of v1.5.2:
 ```
 
 `p<NN>_` prefixes group files by the user prompt that introduced them (incremented on `sender === 'human'`).
+
+`viewer.html` and `viewer-check.gif` are written by `writeViewer` once per export, at the root. In a single ZIP that is beside the chat files; in a mega-ZIP, one viewer at the root covers all chats (`populateConversationFolder` returns `viewerChat`, built by `CTViewer.buildViewerChat`). Failure to build never blocks the download: a chat that fails to build gets a `viewer` warning, and a whole-viewer failure shows only in the status line.
 
 Mega-ZIP only:
 ```
@@ -284,6 +293,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - `artifact_basename_collision` — two paths produced the same basename; one was renamed.
 - `artifact_opaque_mutation` — a bash command changed an artifact in a way replay can't follow.
 - `delivered_file` — a `SendUserFile` delivery could not be downloaded.
+- `viewer` — one chat could not be added to `viewer.html` (`buildViewerChat` threw). A failure of `writeViewer` as a whole is not recorded here: the status line says "viewer.html could not be built." The export itself is complete.
 
 `errors.txt` is built by `generateErrorReport()` and embedded into the ZIP only when `hasAny()` is true. The status pill turns amber (`.status.warning`) when there are warnings but the export still succeeded.
 
@@ -311,6 +321,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - **No mass `git add .`** — stage the specific tracked files plus any new files that genuinely belong to the project. Never accidentally commit `.claude/`, transcripts, or `.DS_Store`.
 - **Tests:** run `sh tests/run.sh` before committing. See `tests/README.md`. Never put real conversations or exports in the repo, because they're private; add a synthetic case to `tests/fixtures/conversation.json` instead. Mocks have missed real claude.ai behavior here, so also export a real conversation for anything touching fetching or capture. `extract_artifacts.py` and the `validate-export` skill at `~/.claude/skills/validate-export/SKILL.md` must stay in sync with `popup.js`.
 - **No `_`-prefixed files or folders:** Chrome refuses to load an extension containing one, including `__pycache__`. Run Python with `-B`, and never import these scripts without `sys.dont_write_bytecode = True`.
+- **Viewer rendering:** the viewer renders chat text through escaped raw HTML, text-node placeholders and `sanitizeHtml`. Keep all three when changing it. `tests/e2e/viewer.e2e.js` is the only coverage for `sanitizeHtml`, so run it after viewer changes. The viewer page's CSP keeps `'unsafe-inline'` and `'unsafe-eval'` for scripts, and `'unsafe-inline'` for styles, because `srcdoc` previews inherit the page's policy and `PREVIEW_CSP` can only narrow it; removing either breaks previews (`new Function` in a generated file). Previews are sandboxed but not a security boundary for untrusted exports: a generated file's own text and that chat's `.js` and `.css` can leave, while the viewer, other chats and files on disk can't be reached (see `USAGE.md`).
 - **Syntax check after every edit:** `node --check popup.js`. Catches most copy/paste mistakes without launching Chrome.
 
 ---
@@ -339,6 +350,7 @@ If you make significant changes to any of those, update both `TECHNICAL.md` and 
 | Add a new API fetch with retry | Pattern-match `fetchUploadedFile`: primary URL, fallbacks, per-URL `urlsTried`, surface failures via `errorCollector`. |
 | Change versioning rules for artifacts | `extractArtifacts` (§6). Also update `extract_artifacts.py` to match. Re-run validation against the `Sudden_acid_reflux_in_young_adults` fixture if available locally. |
 | Adjust the ZIP layout | `populateConversationFolder`. README's "ZIP Archive" section is the user-facing contract — update it too. |
+| Change the offline viewer | `viewer/` (page), `takeout-viewer.js` (data contract), `writeViewer` in `popup.js`. Update `tests/viewer.test.js`, run `tests/e2e/viewer.e2e.js`, and keep the `USAGE.md` preview note accurate. |
 | Add a setting | Add to `defaultSettings`, `loadSettings`, `applySettings`, `popup.html` settings drawer markup, optional `sidepanel.html` markup, and the change handler block. |
 | Add a keyboard shortcut | The `keydown` switch and the `<span class="shortcut">` markup in the relevant button. |
 | Bump README's changelog | Add a `### v<next>` section at the top of the changelog, and bump `manifest.json` in the same PR. |

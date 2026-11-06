@@ -119,6 +119,8 @@ Unzip and you'll see something like this:
 ├── links_and_sources.md            URLs + web search sources grouped by domain
 ├── errors.txt                      ★ Recovery instructions if anything didn't come through (only present if there are warnings)
 ├── original.json                   The raw API payload — the source of truth for recovery
+├── viewer.html                     Offline viewer — see "Reading an export in the viewer" below
+├── viewer-check.gif                1x1 image the viewer uses to tell if you unzipped
 │
 ├── responses/
 │   ├── 001_response-title_response.md          Pure text
@@ -145,6 +147,23 @@ Unzip and you'll see something like this:
     ├── p01_diagram.png             Uploaded files (prefix = prompt number)
     └── p03_dataset.csv
 ```
+
+### Reading an export in the viewer
+
+Unzip the archive first, then open `viewer.html` in Chrome. Opening it from inside the ZIP won't work, because the previews need the files beside it; the viewer shows a notice if it can't find them. A mega-ZIP has one `viewer.html` at the root that covers every chat.
+
+The viewer lists the chats, searches across them, and shows each message with its thinking, tool calls, artifacts, uploads and project files. Click a file to open it in the side panel, as a preview or as code.
+
+Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
+
+What to know about previews of generated HTML:
+
+- The file's scripts run in a sandbox, cut off from the viewer, from other chats and from files on disk.
+- Normal web requests from the preview are blocked.
+- The browser doesn't let the viewer block every route. A generated file that contains injected code could still send out its own text, and the `.js` and `.css` files from that chat, when you preview it.
+- So the viewer is not a security boundary for untrusted exports. Be careful previewing files from someone else's export. Your own exports of your own chats are the intended use.
+
+If `viewer.html` couldn't be built at all, the export still downloads and the status line says "viewer.html could not be built." If only some chats couldn't be added to it, `errors.txt` lists them under a `viewer` warning. The Markdown files are unaffected either way.
 
 ### Per-turn artifact versions
 
@@ -185,6 +204,7 @@ Each entry includes:
 | `project_metadata` | Project metadata fetch failed. `project.json` may be incomplete. | Re-export when the Project endpoint works. |
 | `str_replace_failed` | A `str_replace` edit couldn't be applied to an artifact during reconstruction (the `old_str` didn't appear or appeared multiple times). | Usually mirrors what happened in Claude's actual sandbox — no action needed unless `original.json` shows the tool succeeded but the warning fired anyway. |
 | `artifact_basename_collision` | Two distinct artifact paths produced files with the same basename. The second was renamed to avoid overwriting. | Inspect both source paths to confirm they were intentionally distinct files. |
+| `viewer` | A chat couldn't be added to `viewer.html`. (If the whole viewer fails, only the status line says so.) | Nothing is lost: the chat data is all in the export and only the viewer is missing or incomplete. Use the Markdown files, or re-export. |
 | `artifact_opaque_mutation` | A `bash_tool` command mutated an artifact in a way the extension can't reconstruct (Python heredoc, sed, awk, multi-step pipeline, etc.). | **Run `replay_bash.py`** — see next section. |
 
 The Troubleshooting Guide at the bottom of `errors.txt` includes a copy-paste-ready `python3 replay_bash.py` command pointing at the export folder.

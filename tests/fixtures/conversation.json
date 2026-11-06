@@ -34,8 +34,28 @@
    "created_at": "2026-01-01T10:00:00Z",
    "content": [
     {
+     "type": "thinking",
+     "thinking": "Plan the report first.\nThen write it.",
+     "summaries": [
+      {
+       "summary": "Planning the report"
+      }
+     ]
+    },
+    {
      "type": "text",
-     "text": "Creating it."
+     "text": "Creating it.",
+     "citations": [
+      {
+       "start_index": 0,
+       "end_index": 8,
+       "url": "https://example.com/a",
+       "title": "Example A",
+       "metadata": {
+        "site_domain": "example.com"
+       }
+      }
+     ]
     },
     {
      "type": "tool_use",
@@ -117,7 +137,12 @@
      "text": "Rewrite it."
     }
    ],
-   "attachments": [],
+   "attachments": [
+    {
+     "file_name": "notes.txt",
+     "extracted_content": "pasted notes"
+    }
+   ],
    "files": [],
    "files_v2": []
   },

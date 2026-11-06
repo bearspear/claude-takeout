@@ -1,0 +1,72 @@
+<h2>Offline viewer: does this feel right?</h2>
+<p class="subtitle">Made-up content. Top: a generated file open in the side panel. Bottom: an upload open in a popup.</p>
+
+<style>
+.v{--bg:#faf9f5;--side:#f5f4ed;--ink:#3d3929;--mute:#83827d;--line:#e8e6dc;--bub:#f0eee6;--acc:#c96442;--card:#fff;
+ display:flex;height:430px;background:var(--bg);color:var(--ink);border:1px solid var(--line);border-radius:12px;overflow:hidden;position:relative;font:14px/1.55 ui-sans-serif,-apple-system,system-ui,sans-serif;text-align:left}
+.v *{box-sizing:border-box}
+.v .s{width:200px;flex:none;background:var(--side);border-right:1px solid var(--line);padding:12px 8px;display:flex;flex-direction:column;gap:2px;overflow:hidden}
+.v .brand{font:600 16px Georgia,serif;padding:2px 8px 10px}
+.v .find{background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px 9px;color:var(--mute);font-size:12.5px;margin-bottom:8px}
+.v .lab{font-size:11px;color:var(--mute);padding:6px 8px 3px}
+.v .it{padding:5px 8px;border-radius:7px;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v .it.on{background:#e8e6dc}
+.v .pill{margin-top:auto;font-size:11px;color:var(--mute);padding:6px 8px}
+.v .m{flex:1;min-width:0;display:flex;flex-direction:column}
+.v .t{height:40px;flex:none;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;padding:0 16px;font-size:13px}
+.v .t small{color:var(--mute)}
+.v .c{flex:1;overflow:hidden;padding:16px 22px;max-width:640px;width:100%;margin:0 auto}
+.v .u{display:flex;flex-direction:column;align-items:flex-end;gap:6px;margin-bottom:14px}
+.v .ub{background:var(--bub);border-radius:14px;padding:8px 13px;max-width:82%}
+.v .a{font:15px/1.6 Georgia,'Times New Roman',serif;margin-bottom:10px}
+.v .th{font:12.5px ui-sans-serif,system-ui;color:var(--mute);margin-bottom:8px}
+.v .att{display:flex;gap:6px}
+.v .chip{display:flex;align-items:center;gap:7px;background:#fff;border:1px solid var(--line);border-radius:9px;padding:6px 10px;font-size:12px;cursor:pointer}
+.v .chip i{width:22px;height:26px;border-radius:4px;background:#ddd6c8;display:block;flex:none}
+.v .art{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--line);border-radius:10px;padding:9px 12px;font:13px ui-sans-serif,system-ui;margin:8px 0;cursor:pointer}
+.v .art.on{border-color:var(--acc)}
+.v .art b{font-weight:600;display:block}
+.v .art span{color:var(--mute);font-size:11.5px}
+.v .art i{width:30px;height:30px;border-radius:7px;background:var(--bub);display:block;flex:none}
+.v .p{width:43%;flex:none;border-left:1px solid var(--line);background:var(--card);display:flex;flex-direction:column}
+.v .pt{height:40px;flex:none;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:8px;padding:0 12px;font-size:12.5px}
+.v .pt b{font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v .tb{border:1px solid var(--line);border-radius:6px;padding:2px 7px;font-size:11px;color:var(--mute)}
+.v .tb.on{background:var(--bub);color:var(--ink)}
+.v .pb{flex:1;padding:16px;overflow:hidden}
+.v .pb h4{margin:0 0 6px;font:600 16px Georgia,serif}
+.v .ln{height:8px;background:#efece4;border-radius:4px;margin:8px 0}
+.v .bx{height:80px;background:#f0eee6;border-radius:8px;margin:12px 0}
+.v .veil{position:absolute;inset:0;background:rgba(40,35,25,.42);display:flex;align-items:center;justify-content:center}
+.v .pop{width:60%;height:82%;background:#fff;border-radius:12px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 40px rgba(0,0,0,.25)}
+.v .paper{flex:1;background:#f0eee6;display:flex;align-items:center;justify-content:center}
+.v .sheet{width:190px;height:230px;background:#fff;border:1px solid var(--line);padding:14px}
+</style>
+
+<div class="section">
+<p class="label">Generated file opens in side panel</p>
+<div class="v">
+ <div class="s"><div class="brand">Claude Takeout</div><div class="find">Search all chats</div>
+  <div class="lab">Recents</div>
+  <div class="it on">Quarterly budget review</div><div class="it">Trip planning for May</div><div class="it">Sourdough troubleshooting</div><div class="it">Lease agreement questions</div><div class="it">Python date parsing</div><div class="it">Book club notes</div><div class="lab">Test Project</div><div class="it">Context request</div>
+  <div class="pill">Archive · 18 chats · read-only</div></div>
+ <div class="m"><div class="t"><span>Quarterly budget review</span><small>Opus 4.8 · Oct 12</small></div>
+  <div class="c">
+   <div class="u"><div class="att"><div class="chip"><i></i>budget-q3.pdf</div></div><div class="ub">Can you turn this into a one-page summary?</div></div>
+   <div class="th">▸ Thought process</div>
+   <div class="a">Here's a one-page summary of the third quarter, with spending by team and the three items to watch.</div>
+   <div class="art on"><i></i><div><b>Q3 budget summary</b><span>Document · HTML</span></div></div>
+   <div class="a">The largest change was travel, which rose 12% over the plan.</div>
+  </div></div>
+ <div class="p"><div class="pt"><b>Q3 budget summary</b><span class="tb on">Preview</span><span class="tb">Code</span><span class="tb">v1</span><span class="tb">v2</span><span class="tb on">v3</span><span class="tb">✕</span></div>
+  <div class="pb"><h4>Q3 budget summary</h4><div class="ln"></div><div class="ln" style="width:85%"></div><div class="bx"></div><div class="ln"></div><div class="ln" style="width:70%"></div><div class="ln" style="width:90%"></div></div></div>
+</div></div>
+
+<div class="section">
+<p class="label">Upload opens in popup</p>
+<div class="v">
+ <div class="s"><div class="brand">Claude Takeout</div><div class="find">Search all chats</div><div class="lab">Recents</div><div class="it on">Quarterly budget review</div><div class="it">Trip planning for May</div><div class="it">Sourdough troubleshooting</div></div>
+ <div class="m"><div class="t"><span>Quarterly budget review</span><small>Opus 4.8 · Oct 12</small></div>
+  <div class="c"><div class="u"><div class="att"><div class="chip"><i></i>budget-q3.pdf</div></div><div class="ub">Can you turn this into a one-page summary?</div></div></div></div>
+ <div class="veil"><div class="pop"><div class="pt"><b>budget-q3.pdf</b><span class="tb">Download</span><span class="tb">✕</span></div><div class="paper"><div class="sheet"><div class="ln"></div><div class="ln" style="width:80%"></div><div class="ln"></div><div class="ln" style="width:60%"></div></div></div></div></div>
+</div></div>
