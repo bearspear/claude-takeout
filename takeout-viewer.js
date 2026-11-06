@@ -90,6 +90,13 @@
   }
 
   // Same rule as getThinkingSummary in popup.js.
+  // Every step's summary, oldest first. claude.ai often sends only these, with the
+  // thinking text itself empty and thinking_hidden set.
+  function thinkingSummaries(block) {
+    const list = Array.isArray(block.summaries) ? block.summaries : [];
+    return list.map(s => (s && typeof s.summary === 'string' ? s.summary.trim() : '')).filter(Boolean);
+  }
+
   function thinkingSummary(block) {
     const s = (Array.isArray(block.summaries) ? block.summaries : []).filter(Boolean);
     if (s.length && s[s.length - 1].summary) return s[s.length - 1].summary;
@@ -335,7 +342,7 @@
       for (const b of Array.isArray(m.content) ? m.content : []) {
         if (!b) continue;
         if (b.type === 'text') blocks.push({ t: 'text', text: String(b.text || ''), cites: buildCites(b.citations) });
-        else if (b.type === 'thinking') blocks.push({ t: 'thinking', text: String(b.thinking || ''), summary: thinkingSummary(b) });
+        else if (b.type === 'thinking') blocks.push({ t: 'thinking', text: String(b.thinking || ''), summaries: thinkingSummaries(b), summary: thinkingSummary(b) });
         else if (b.type === 'tool_use') {
           const input = compactInput(b.input);
           const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), input, result: '', error: false, images: [], missingImages: 0 };

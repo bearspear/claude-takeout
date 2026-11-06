@@ -154,7 +154,13 @@ function renderThinking(block) {
     label.append(el('span', 'gist', block.summary));
   }
   const body = el('div', 'line-body');
-  body.append(el('div', 'line-text', block.text));
+  const steps = block.summaries || [];
+  if (block.text) body.append(el('div', 'line-text', block.text));
+  else {
+    // claude.ai leaves the full text out of what it sends, often keeping only summaries.
+    for (const step of steps) body.append(el('p', 'line-step', step));
+    body.append(el('p', 'line-note', steps.length ? "Claude's full thinking isn't in this export, only these summaries." : "Claude's thinking isn't in this export."));
+  }
   return foldLine('thinking', [label], body);
 }
 

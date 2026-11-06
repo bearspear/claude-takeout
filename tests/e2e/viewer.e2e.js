@@ -1082,6 +1082,24 @@ async function unzipMegaZip(out) {
       check('prompt fence: Copy still gives the prompt as typed', await fp.page.locator('.msg[data-id="h"] .copy-msg').count() === 1);
       await fp.page.close();
     }
+    {
+      const hidden = path.join(dir, 'hidden-thinking.html');
+      fs.writeFileSync(hidden, buildHtml([{ ...plainChat('ht', 'Hidden', 2, '2026-05-01T00:00:00Z'), current_leaf_message_uuid: 'a', chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant', created_at: '2026-05-01T00:00:00Z', content: [
+        { type: 'thinking', thinking: '', thinking_hidden: true, summaries: [{ summary: 'Step <b>one</b>.' }, { summary: 'Step two.' }] },
+        { type: 'thinking', thinking: '', thinking_hidden: true },
+        { type: 'thinking', thinking: 'Real thinking text.', summaries: [{ summary: 'Short.' }] },
+        { type: 'text', text: 'Done.' }], attachments: [], files: [], files_v2: [] }] }], '2026-11-05T12:00:00Z'));
+      const hp = await open({}, 'file://' + hidden);
+      const lines = hp.page.locator('details.thinking');
+      await lines.nth(0).locator('summary').click();
+      await lines.nth(1).locator('summary').click();
+      await lines.nth(2).locator('summary').click();
+      check('thinking: every summary shows, as text', (await lines.nth(0).locator('.line-step').allTextContents()).join('|') === 'Step <b>one</b>.|Step two.');
+      check('thinking: says the full text is missing', (await lines.nth(0).locator('.line-note').textContent()).includes('only these summaries'));
+      check('thinking: no summaries still says so', (await lines.nth(1).locator('.line-note').textContent()) === "Claude's thinking isn't in this export.");
+      check('thinking: real text shows with no note', (await lines.nth(2).locator('.line-text').textContent()) === 'Real thinking text.' && (await lines.nth(2).locator('.line-note').count()) === 0);
+      await hp.page.close();
+    }
     const footOrder = id => cp.page.$eval(`.msg[data-id="${id}"] .foot`, f => [...f.children].map(c => c.matches('.copy-msg') ? 'copy' : c.matches('time.when') ? 'time' : 'other').join());
     check('copy: a prompt shows the time, then Copy', (await footOrder('m01')) === 'time,copy', await footOrder('m01'));
     check('copy: a response shows Copy, then the time', (await footOrder('m02')) === 'copy,time', await footOrder('m02'));

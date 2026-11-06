@@ -82,7 +82,7 @@ test('ctx.model overrides and ctx.fixText applies to attachments', () => {
 
 test('thinking, citations and tool results become blocks', () => {
   const m02 = buildViewerChat(fixture, {}).messages.find(x => x.id === 'm02');
-  assert.deepStrictEqual(m02.blocks[0], { t: 'thinking', text: 'Plan the report first.\nThen write it.', summary: 'Planning the report' });
+  assert.deepStrictEqual(m02.blocks[0], { t: 'thinking', text: 'Plan the report first.\nThen write it.', summaries: ['Planning the report'], summary: 'Planning the report' });
   assert.deepStrictEqual(m02.blocks[1], { t: 'text', text: 'Creating it.', cites: [{ end: 8, url: 'https://example.com/a', title: 'Example A' }] });
   const tools = m02.blocks.filter(b => b.t === 'tool');
   assert.strictEqual(tools.length, 3);
@@ -802,4 +802,16 @@ test('splitFences turns only closed fences into code', () => {
   assert.deepStrictEqual(splitFences('never closed\n```\nstill typed'), [{ t: 'text', text: 'never closed\n```\nstill typed' }]);
   assert.deepStrictEqual(splitFences('inline ```code``` stays'), [{ t: 'text', text: 'inline ```code``` stays' }]);
   assert.deepStrictEqual(splitFences('```\n<script>x</script>\n```'), [{ t: 'code', lang: '', text: '<script>x</script>' }]);
+});
+
+test('thinking keeps every summary when the text is hidden', () => {
+  const { buildViewerChat } = require('../takeout-viewer.js');
+  const data = { uuid: 'c', current_leaf_message_uuid: 'a', chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant', content: [
+    { type: 'thinking', thinking: '', thinking_hidden: true, summaries: [{ summary: ' First step. ' }, null, { summary: 'Second step.' }] },
+    { type: 'thinking', thinking: '', thinking_hidden: true },
+  ] }] };
+  const [one, two] = buildViewerChat(data, {}).messages[0].blocks;
+  assert.deepStrictEqual(one.summaries, ['First step.', 'Second step.']);
+  assert.strictEqual(one.text, '');
+  assert.deepStrictEqual(two.summaries, []);
 });
