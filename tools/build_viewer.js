@@ -11,7 +11,7 @@ const CTViewer = require('../takeout-viewer.js');
 const lib = require('./archive-lib.js');
 const zipLib = require('./archive-zip.js'); // called through the module, so tests can stub free space
 
-const PART_LIMIT = 4 * 1024 * 1024;
+const PART_LIMIT = CTViewer.PART_LIMIT;
 const PART_OVERHEAD = 64; // the window.__archivePart(n, {...}); around a part's entries
 const PART_HEAD = 'window.__archivePart(';
 const SYSTEM_JUNK = ['.DS_Store', 'Thumbs.db'];
@@ -264,23 +264,25 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
     const name = base => path.join(archive.root, `${base}.tmp-${process.pid}`);
     const tmp = { parts: null, gif: null, viewer: name(VIEWER_FILE) };
     const added = scan.files.map(f => ({ path: f.path, size: f.size, chat: idByDir.get(f.chatDir) }));
-    const built = await buildParts(added, {
-      root: archive.root,
-      onPart: part => {
-        if (!tmp.parts) {
-          const dir = name(PARTS_DIR);
-          fs.mkdirSync(dir);
-          temps.push(dir);
-          tmp.parts = dir;
-        }
-        writeNew(path.join(tmp.parts, part.name), part.body, temps);
-      },
-    });
+    const writePart = part => {
+      if (!tmp.parts) {
+        const dir = name(PARTS_DIR);
+        fs.mkdirSync(dir);
+        temps.push(dir);
+        tmp.parts = dir;
+      }
+      writeNew(path.join(tmp.parts, part.name), part.body, temps);
+    };
+    const built = await buildParts(added, { root: archive.root, onPart: writePart });
     report.warnings.push(...built.warnings);
 
-    const data = CTViewer.buildViewerData(chats, { exported: new Date().toISOString() });
+    // Large upload text goes in parts numbered after the added files' parts.
+    const moved = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString() }), { firstPart: built.partCount + 1 });
+    moved.parts.forEach(writePart);
+    const data = moved.data;
     if (built.entries.length) data.added = built.entries;
-    writeNew(tmp.viewer, viewerHtml(data, { fileScripts: built.partCount > 0, fileMedia: built.entries.length > 0 }), temps);
+    const fileScripts = built.partCount + moved.parts.length > 0;
+    writeNew(tmp.viewer, viewerHtml(data, { fileScripts, fileMedia: built.entries.length > 0 }), temps);
     if (!old.gif) {
       tmp.gif = name(CTViewer.VIEWER_CHECK_FILE);
       writeNew(tmp.gif, checkGif(), temps);
