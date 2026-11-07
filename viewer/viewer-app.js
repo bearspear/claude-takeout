@@ -315,16 +315,17 @@ function fileChip(item, note) {
   return chip;
 }
 
-function fileNote(name, text) {
+// lines: the count kept for upload text that is in a part.
+function fileNote(name, text, known) {
   const ext = (/\.([a-z0-9]{1,6})$/i.exec(name || '') || [])[1];
-  const lines = text ? text.split('\n').length : 0;
+  const lines = text ? text.split('\n').length : (Number.isSafeInteger(known) ? known : 0);
   return [ext && ext.toUpperCase(), lines ? `${lines} line${lines === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
 }
 
 function renderHuman(m) {
   const node = el('section', 'msg human');
   const chips = [
-    ...(m.uploads || []).map(u => fileChip(u, fileNote(u.name, u.text))),
+    ...(m.uploads || []).map(u => fileChip(u, fileNote(u.name, u.text, u.lines))),
     ...(m.attachments || []).map(a => fileChip({ name: a.name, href: null, text: a.text }, fileNote(a.name, a.text))),
   ];
   if (chips.length) {
@@ -368,6 +369,7 @@ function openLink(href) {
 // Returns the body nodes and, for a file the header can offer, a link.
 function popupContent(item) {
   const name = item.name || 'Untitled';
+  if (item.text === null && partsListed.has(item.part)) return { nodes: [el('div', 'file-loading', 'Loading…')], part: item.part };
   if (typeof item.text === 'string') {
     const code = el('pre', 'file-code');
     code.textContent = item.text;
@@ -422,7 +424,7 @@ function popupKeys(e) {
 
 function openPopup(item, trigger) {
   closePopup();
-  const { nodes, link } = popupContent(item);
+  const { nodes, link, part } = popupContent(item);
   const pop = el('div', 'pop');
   pop.setAttribute('role', 'dialog');
   pop.setAttribute('aria-modal', 'true');
@@ -444,8 +446,15 @@ function openPopup(item, trigger) {
   veil.addEventListener('keydown', popupKeys);
   document.body.append(veil);
   document.getElementById('app').inert = true;
-  popup = { veil, trigger };
+  const mine = popup = { veil, trigger };
   pop.focus({ preventScroll: true });
+  // Large upload text is in a part. It lands only in the popup that asked for it.
+  if (part) loadPart(part).then(loaded => {
+    if (popup !== mine) return;
+    const text = loaded && Object.prototype.hasOwnProperty.call(loaded, item.key) ? loaded[item.key] : null;
+    if (typeof text === 'string') item.text = text;
+    body.replaceChildren(...(typeof text === 'string' ? popupContent(item).nodes : [el('div', 'file-missing', 'This file is not in this export.')]));
+  });
 }
 
 // The project's files and documents, under the top bar. Rebuilt only for another chat, so it stays open.
@@ -559,10 +568,12 @@ const partsListed = new Set(); // the part numbers the data names
 const partsLoaded = new Map(); // n -> Promise<object|null>
 const partsWaiting = new Map(); // n -> resolve, only while its script is loading
 
-function setupAdded(added) {
-  allAdded = Array.isArray(added) ? added : [];
+// Parts hold the text of added files and of large uploads.
+function setupParts(data) {
+  allAdded = Array.isArray(data.added) ? data.added : [];
   addedIds = new Map(allAdded.map((entry, i) => [entry, `x${i}`]));
-  for (const entry of allAdded) if (Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
+  const uploads = (data.chats || []).flatMap(chat => (chat.messages || []).flatMap(m => m.uploads || []));
+  for (const entry of [...allAdded, ...uploads]) if (entry && Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
   if (!partsListed.size) return;
   Object.defineProperty(window, '__archivePart', {
     value(n, data) {
@@ -1164,7 +1175,7 @@ function checkUnzipped() {
 function start() {
   checkUnzipped();
   const data = JSON.parse(document.getElementById('data').textContent);
-  setupAdded(data.added);
+  setupParts(data);
   allChats = linkProjects(data);
   allChats.forEach(chat => chatsById.set(chat.id, chat));
   renderSidebar(data.chats);
