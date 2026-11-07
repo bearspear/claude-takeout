@@ -77,6 +77,7 @@ Creates a comprehensive archive:
 ├── original.json                # Original JSON export
 ├── viewer.html                  # Offline viewer (unzip first, then open it)
 ├── viewer-check.gif             # 1x1 image the viewer uses to detect an unzipped folder
+├── viewer-files/part-NNNN.js    # text of large uploads, only when there are some
 ├── responses/
 │   ├── 001_title_response.md       # Pure text response
 │   ├── 001_title_response.full.md  # Response with thinking/tools/embedded artifacts
@@ -363,6 +364,10 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.6.4
+
+- **Large uploads load when opened** - Upload text over 64 KB is no longer stored inside `viewer.html`. It goes into `viewer-files/` beside it, and loads when you open the upload. Search works as before, since it never read upload text. A test archive's viewer shrank from 81 to 44 MB and opens in under a second. Older archives get this when their viewer is rebuilt with `--force`.
 
 ### v1.6.3
 
