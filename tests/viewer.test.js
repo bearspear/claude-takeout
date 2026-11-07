@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, groupChats, copyText } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, groupChats, linkProjects, copyText } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -156,6 +156,38 @@ test('buildViewerData sorts newest first', () => {
   const d = buildViewerData([mk('old', '2026-01-01'), mk('new', '2026-03-01'), mk('mid', '2026-02-01')], { exported: 'x' });
   assert.deepStrictEqual(d.chats.map(c => c.id), ['new', 'mid', 'old']);
   assert.strictEqual(d.exported, 'x');
+});
+
+test('buildViewerData keeps an identical project once, and linkProjects puts it back', () => {
+  const docs = [{ name: 'Brief', text: 'x'.repeat(5000) }];
+  const planets = { name: 'Planets', files: [{ name: 'a.pdf', href: 'projects/Planets/files/a.pdf' }], instructions: 'Be brief.', docs };
+  const mk = (id, updated, project) => ({ id, title: id, updated, messages: [], ...(project === undefined ? {} : { project }) });
+  const chats = [
+    mk('p1', '2026-01-01', planets), mk('p2', '2026-02-01', JSON.parse(JSON.stringify(planets))), mk('p3', '2026-03-01', { ...planets, instructions: 'Changed.' }),
+    mk('solo', '2026-04-01', null), mk('none', '2026-05-01')
+  ];
+  const before = JSON.stringify(chats);
+  const d = buildViewerData(chats, { exported: 'x' });
+  assert.strictEqual(JSON.stringify(chats), before);
+  assert.strictEqual(d.projects.length, 2);
+  assert.strictEqual(JSON.stringify(d).split('x'.repeat(5000)).length - 1, 2);
+  assert.deepStrictEqual(d.chats.map(c => c.project), [undefined, null, 0, 1, 1]);
+  const back = linkProjects(JSON.parse(JSON.stringify(d)));
+  const byId = Object.fromEntries(back.map(c => [c.id, c.project]));
+  assert.deepStrictEqual(byId.p1, planets);
+  assert.deepStrictEqual(byId.p2, planets);
+  assert.strictEqual(byId.p3.instructions, 'Changed.');
+  assert.strictEqual(byId.solo, null);
+  assert.strictEqual(byId.none, null);
+  assert.deepStrictEqual(buildViewerData([], {}).projects, []);
+});
+
+test('linkProjects turns an index that names no project into no project', () => {
+  const p = { name: 'P', files: [], instructions: '', docs: [] };
+  const chats = [-1, 1, 1.5, '0', '__proto__', true, {}, 0].map((project, i) => ({ id: 'c' + i, project }));
+  const out = linkProjects({ chats, projects: [p] });
+  assert.deepStrictEqual(out.map(c => c.project), [null, null, null, null, null, null, {}, p]);
+  assert.deepStrictEqual(linkProjects({ chats: [{ id: 'a', project: 0 }] }).map(c => c.project), [null]);
 });
 
 test('relHref encodes each segment and refuses escapes; joinPath resolves ..', () => {

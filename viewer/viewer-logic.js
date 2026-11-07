@@ -666,6 +666,17 @@ function searchChats(index, query, limit = 50) {
   return hits;
 }
 
+// Gives each chat its project back from data.projects. An index that names no project means no project.
+function linkProjects(data) {
+  const projects = Array.isArray(data.projects) ? data.projects : [];
+  for (const chat of data.chats) {
+    const at = chat.project;
+    if (at && typeof at === 'object') continue;
+    chat.project = Number.isInteger(at) && at >= 0 && at < projects.length ? projects[at] : null;
+  }
+  return data.chats;
+}
+
 // Chats outside any project, and the projects sorted by name. Both keep the order of `chats`.
 function groupChats(chats) {
   const recents = [];
@@ -680,5 +691,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, linkProjects, copyText };
 }

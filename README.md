@@ -364,6 +364,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.3
+
+- **Smaller viewers for mega-ZIPs** - A project shared by several chats is stored once in `viewer.html`, instead of once per chat. A test archive with four chats in one project shrank from 97 to 81 MB. Older archives get this when their viewer is rebuilt with `--force`.
+
 ### v1.6.2
 
 - **Syntax colors in the viewer** - Labeled code blocks, plus files in Code view and text uploads, now have colors, in light and dark themes. Blocks are colored as they scroll into view, in the background, so a long chat stays quick. Blocks with no language label stay plain, as do blocks over 200 KB and any that take too long. Older archives get colors when their viewer is rebuilt with `--force`.

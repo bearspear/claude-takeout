@@ -1165,7 +1165,7 @@ function start() {
   checkUnzipped();
   const data = JSON.parse(document.getElementById('data').textContent);
   setupAdded(data.added);
-  allChats = data.chats;
+  allChats = linkProjects(data);
   allChats.forEach(chat => chatsById.set(chat.id, chat));
   renderSidebar(data.chats);
   setupSearch();
