@@ -7,7 +7,8 @@
 //                                      (state key to { path, filename, versions, messages }). deliveries: file uuid to
 //                                      { filename, path }. heredocs(command): [{ path, text }], the files a Bash command
 //                                      writes with a heredoc; without it Bash blocks yield no cards.
-//   buildViewerData(chats, {exported}) { exported, chats }, newest update first
+//   buildViewerData(chats, {exported}) { exported, chats, projects }, newest update first. A chat's project is an
+//                                      index into projects, where identical projects are kept once
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
 //   joinPath(folder, rel)              folder + rel with '..' resolved
 //   escapeJson(data)                   JSON that is safe inside a <script> tag
@@ -394,8 +395,18 @@
     return `${family[0].toUpperCase()}${family.slice(1)} ${major}${minor ? '.' + minor : ''}`;
   }
 
+  // Identical projects are kept once in `projects`, and each chat's project becomes its index there,
+  // so a mega-ZIP doesn't carry a project's docs once per chat. The viewer puts them back on load.
   function buildViewerData(chats, { exported } = {}) {
-    return { exported, chats: chats.slice().sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || ''))) };
+    const projects = [], indexOf = new Map();
+    const sorted = chats.slice().sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+    const out = sorted.map(chat => {
+      if (!chat.project || typeof chat.project !== 'object') return chat;
+      const key = JSON.stringify(chat.project);
+      if (!indexOf.has(key)) { indexOf.set(key, projects.length); projects.push(chat.project); }
+      return { ...chat, project: indexOf.get(key) };
+    });
+    return { exported, chats: out, projects };
   }
 
   // Each '/'-separated part is encoded per segment. '..' or '.' anywhere: null (never leave the export).

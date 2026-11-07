@@ -72,7 +72,8 @@ let projectDownloads=0;
   const mv=await viewerOf(await dl.path());
   check('mega-ZIP: one viewer at the root',Object.keys(g).filter(k=>k.endsWith('viewer.html')).join()==='viewer.html'&&Object.keys(g).filter(k=>k.endsWith('viewer-check.gif')).join()==='viewer-check.gif');
   check('mega-ZIP: the viewer has every chat',mv.data.chats.length===3,String(mv.data.chats.length));
-  const hrefs=[];for(const c of mv.data.chats){for(const m of c.messages)for(const u of m.uploads)hrefs.push(u.href);for(const x of Object.values(c.files))for(const v of x.versions)hrefs.push(v.href);for(const x of c.project?.files||[])hrefs.push(x.href)}
+  const hrefs=[];for(const c of mv.data.chats){for(const m of c.messages)for(const u of m.uploads)hrefs.push(u.href);for(const x of Object.values(c.files))for(const v of x.versions)hrefs.push(v.href);for(const x of mv.data.projects[c.project]?.files||[])hrefs.push(x.href)}
+  check('mega-ZIP: a shared project is stored once in the viewer',mv.data.projects.length===1&&mv.data.chats.filter(c=>c.project===0).length===2&&JSON.stringify(mv.data).split('"Shared Project"').length===2,JSON.stringify(mv.data.chats.map(c=>c.project)));
   check('mega-ZIP: every link lands on a file',hrefs.length>=6&&hrefs.every(h=>h&&decodeURIComponent(h) in g),hrefs.join());
   check('mega-ZIP: uploaded binary unchanged',g[Object.keys(g).find(k=>k.endsWith('uploads/p01_Uploaded.odt'))].split('|')[2]===sha(bin));
   check('mega-ZIP: status is clean',(await panel.$eval('#status',s=>s.className)).includes('ready'),await panel.textContent('#status'));
