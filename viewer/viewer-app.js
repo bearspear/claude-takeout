@@ -324,9 +324,14 @@ function fileNote(name, text, known) {
 
 function renderHuman(m) {
   const node = el('section', 'msg human');
+  const pasted = attachmentNames(m.attachments);
   const chips = [
-    ...(m.uploads || []).map(u => fileChip(u, fileNote(u.name, u.text, u.lines))),
-    ...(m.attachments || []).map(a => fileChip({ name: a.name, href: null, text: a.text }, fileNote(a.name, a.text))),
+    ...(m.uploads || []).map(u => {
+      const item = u.name ? u : { ...u, name: uploadName(u) };
+      return fileChip(item, fileNote(item.name, item.text, item.lines));
+    }),
+    ...(m.attachments || []).map((a, i) => fileChip({ name: pasted[i], href: null, text: a.text },
+      a.name ? fileNote(a.name, a.text) : ['Pasted', fileNote('', a.text)].filter(Boolean).join(' · '))),
   ];
   if (chips.length) {
     const row = el('div', 'chips');

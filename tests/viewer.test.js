@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, groupChats, linkProjects, copyText } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, groupChats, linkProjects, copyText, attachmentNames, uploadName } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -1112,3 +1112,19 @@ test('fileViews gives audio and video a preview from a link', () => {
     assert.deepStrictEqual(out, data);
   });
 }
+
+test('attachmentNames calls unnamed pasted text Pasted text, numbered when there are several', () => {
+  assert.deepStrictEqual(attachmentNames([{ name: '', text: 'a' }]), ['Pasted text']);
+  assert.deepStrictEqual(attachmentNames([{ name: '', text: 'a' }, { name: 'notes.txt', text: 'b' }, { text: 'c' }]), ['Pasted text 1', 'notes.txt', 'Pasted text 2']);
+  assert.deepStrictEqual(attachmentNames([{ name: 'Untitled', text: 'a' }]), ['Untitled']);
+  assert.deepStrictEqual(attachmentNames([]), []);
+  assert.deepStrictEqual(attachmentNames(undefined), []);
+});
+
+test('uploadName falls back to the saved file name, never to Untitled itself', () => {
+  assert.strictEqual(uploadName({ name: 'Untitled', href: 'uploads/p01_x.md' }), 'Untitled');
+  assert.strictEqual(uploadName({ name: 'a.md', href: 'uploads/p01_a.md' }), 'a.md');
+  assert.strictEqual(uploadName({ name: '', href: 'Chat%20A/uploads/p01_my%20file.md' }), 'p01_my file.md');
+  assert.strictEqual(uploadName({ name: '', href: 'uploads/%E0%A4%A' }), '%E0%A4%A');
+  assert.strictEqual(uploadName({ name: '', href: null }), '');
+});

@@ -368,6 +368,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 ### v1.6.4
 
 - **Large uploads load when opened** - Upload text over 64 KB is no longer stored inside `viewer.html`. It goes into `viewer-files/` beside it, and loads when you open the upload. Search works as before, since it never read upload text. A test archive's viewer shrank from 81 to 44 MB and opens in under a second. Older archives get this when their viewer is rebuilt with `--force`.
+- **Pasted text is labeled** - Text pasted into a prompt shows as "Pasted text" in the viewer, numbered when a prompt has several, instead of "Untitled". An upload with no name shows the name of its saved file.
 
 ### v1.6.3
 

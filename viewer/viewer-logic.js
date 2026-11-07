@@ -666,6 +666,21 @@ function searchChats(index, query, limit = 50) {
   return hits;
 }
 
+// Chip names for pasted text: claude.ai gives it no name. Numbered when a prompt has several.
+function attachmentNames(attachments) {
+  const list = Array.isArray(attachments) ? attachments : [];
+  const unnamed = list.filter(a => !(a && a.name)).length;
+  let n = 0;
+  return list.map(a => (a && a.name ? a.name : unnamed > 1 ? `Pasted text ${++n}` : 'Pasted text'));
+}
+
+// An upload with no name is called by the file it was saved as. '' when there is none.
+function uploadName(u) {
+  if (u && u.name) return u.name;
+  const last = u && typeof u.href === 'string' ? u.href.split('/').pop() : '';
+  try { return decodeURIComponent(last); } catch (e) { return last; }
+}
+
 // Gives each chat its project back from data.projects. An index that names no project means no project.
 function linkProjects(data) {
   const projects = Array.isArray(data.projects) ? data.projects : [];
@@ -691,5 +706,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, linkProjects, copyText };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, linkProjects, copyText, attachmentNames, uploadName };
 }

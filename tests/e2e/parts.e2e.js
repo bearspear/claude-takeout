@@ -13,7 +13,7 @@ function conversation() {
   const human = {
     uuid: 'h', parent_message_uuid: null, sender: 'human', created_at: '2026-05-01T10:00:00Z',
     content: [{ type: 'text', text: 'prompt with zebrafinch' }],
-    attachments: [{ file_name: 'paste.txt', extracted_content: PASTE }], files: [],
+    attachments: [{ file_name: 'paste.txt', extracted_content: PASTE }, { file_name: '', extracted_content: 'first paste\nline two' }, { extracted_content: 'second paste' }], files: [],
     files_v2: [{ file_uuid: 'f-py', file_name: 'big.py', success: true }, { file_uuid: 'f-md', file_name: 'big.md', success: true }, { file_uuid: 'f-small', file_name: 'small.txt', success: true }],
   };
   const reply = { uuid: 'a', parent_message_uuid: 'h', sender: 'assistant', created_at: '2026-05-01T10:01:00Z', content: [{ type: 'text', text: 'Read them.' }], attachments: [], files: [], files_v2: [] };
@@ -59,6 +59,11 @@ const ctx = () => ({ folder: '', uploads: {
   await close();
   await chip('paste.txt').click();
   check('a large attachment stays inline', (await popupText()) === PASTE && partLoads.length === 0);
+  await close();
+
+  check('unnamed pastes are Pasted text, numbered', (await chip('Pasted text 1').textContent()).includes('Pasted · 2 lines') && (await chip('Pasted text 2').count()) === 1 && (await page.locator('button.chip', { hasText: 'Untitled' }).count()) === 0, await page.locator('.msg[data-id="h"] .chips, .msg[data-id="h"]').first().textContent());
+  await chip('Pasted text 1').click();
+  check('a paste popup is titled Pasted text', (await page.textContent('.pop .pop-title')) === 'Pasted text 1' && (await popupText()) === 'first paste\nline two');
   await close();
 
   await chip('big.py').click();
