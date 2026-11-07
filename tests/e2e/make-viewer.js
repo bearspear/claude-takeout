@@ -11,9 +11,9 @@ const REPO = path.resolve(__dirname, '..', '..');
 // conversations: claude.ai API payloads. ctxOf(conversation): extra buildViewerChat context, such as artifacts.
 function buildHtml(conversations, exported = new Date().toISOString(), ctxOf = () => ({})) {
   const read = f => fs.readFileSync(path.join(REPO, f), 'utf8');
-  const [template, logic, app, marked, katex, css] = VIEWER_ASSETS.map(read);
+  const [template, logic, app, marked, katex, css, highlight] = VIEWER_ASSETS.map(read);
   const chats = conversations.map(c => buildViewerChat(c, { model: modelLabel(c.model, getModelName(c)), ...ctxOf(c) }));
-  return assembleViewer({ template, css, marked, katex, logic, app, data: buildViewerData(chats, { exported }) });
+  return assembleViewer({ template, css, marked, katex, highlight, logic, app, data: buildViewerData(chats, { exported }) });
 }
 
 if (require.main === module) {

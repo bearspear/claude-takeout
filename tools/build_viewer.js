@@ -175,8 +175,8 @@ async function collectChats(archive, report) {
 let assets = null;
 function viewerHtml(data, policy) {
   assets = assets || CTViewer.VIEWER_ASSETS.map(a => fs.readFileSync(path.join(__dirname, '..', a), 'utf8'));
-  const [template, logic, app, marked, katex, css] = assets;
-  return CTViewer.assembleViewer({ template, css, marked, katex, logic, app, data, ...policy });
+  const [template, logic, app, marked, katex, css, highlight] = assets;
+  return CTViewer.assembleViewer({ template, css, marked, katex, highlight, logic, app, data, ...policy });
 }
 
 // Exclusive, so a name that is already there is never written to or claimed. temps lists what this run made.

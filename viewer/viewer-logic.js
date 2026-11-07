@@ -303,6 +303,17 @@ function sanitizeHtml(html, parser) {
   return collapseNoImage(doc.body.innerHTML);
 }
 
+// Longest text that gets syntax colors. Past this the page gains too many elements to stay quick.
+const HIGHLIGHT_LIMIT = 200000;
+
+// The highlighter's language name for a file. Its names cover most extensions as they are.
+function languageOfFile(name) {
+  const ext = /\.([a-z0-9+#-]+)$/i.exec(String(name || ''));
+  if (!ext) return '';
+  const lower = ext[1].toLowerCase();
+  return lower === 'htm' ? 'xml' : lower;
+}
+
 // Plain text for an expanded tool call: the one thing it was given, or its whole input as JSON.
 function toolInputText(input) {
   if (input == null) return '';
@@ -669,5 +680,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, copyText };
 }
