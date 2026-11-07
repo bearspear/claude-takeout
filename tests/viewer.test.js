@@ -1052,3 +1052,63 @@ test('fileViews gives audio and video a preview from a link', () => {
   assert.strictEqual(fileKindLabel({ kind: 'audio', name: 'a.mp3' }), 'Audio · MP3');
   assert.strictEqual(fileKindLabel({ kind: 'video', name: 'a.mov' }), 'Video · MOV');
 });
+
+// ---- upload text parts (moveUploadText) ----
+{
+  const { moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT } = V;
+  const KB = n => 'a'.repeat(n * 1024);
+  const upload = (name, text) => ({ name, href: 'uploads/' + name, text });
+  const chatWith = (id, uploads, attachments = []) => ({ id, title: id, updated: id, messages: [{ id: id + '-m', sender: 'human', blocks: [{ t: 'text', text: 'prompt about ' + id }], uploads, attachments }] });
+  const runPart = body => { let got = null; new Function('window', body)({ __archivePart: (n, d) => { got = { n, d }; } }); return got; };
+
+  test('moveUploadText moves only large upload text, numbered from firstPart', () => {
+    assert.strictEqual(PART_LIMIT, 4 * 1024 * 1024);
+    assert.strictEqual(UPLOAD_INLINE_LIMIT, 64 * 1024);
+    const big1 = KB(70) + '\nline2', big2 = KB(70);
+    const data = buildViewerData([
+      chatWith('c3', [upload('small.md', KB(10))]),
+      chatWith('c2', [upload('big1.md', big1)], [{ name: 'paste.txt', text: KB(70) }]),
+      chatWith('c1', [upload('big2.py', big2)]),
+    ], { exported: 'x' });
+    const before = JSON.stringify(data);
+    const { data: out, parts } = moveUploadText(data, { firstPart: 3 });
+    assert.strictEqual(JSON.stringify(data), before);
+    const ups = out.chats.flatMap(c => c.messages[0].uploads);
+    assert.deepStrictEqual(ups.map(u => [u.name, u.text === null, u.part, u.key, u.lines]), [
+      ['small.md', false, undefined, undefined, undefined], ['big1.md', true, 3, 'u0', 2], ['big2.py', true, 3, 'u1', 1]]);
+    assert.strictEqual(ups[1].href, 'uploads/big1.md');
+    assert.strictEqual(out.chats[1].messages[0].attachments[0].text, KB(70));
+    assert.deepStrictEqual(parts.map(p => p.name), ['part-0003.js']);
+    assert.deepStrictEqual(runPart(parts[0].body), { n: 3, d: { u0: big1, u1: big2 } });
+  });
+
+  test('moveUploadText leaves the search index unchanged', () => {
+    const data = buildViewerData([chatWith('c1', [upload('big.md', KB(80) + ' quokka')], [{ name: 'p.txt', text: KB(70) + ' wombat' }])], {});
+    const index = d => buildSearchIndex(linkProjects(JSON.parse(JSON.stringify(d))));
+    assert.deepStrictEqual(index(moveUploadText(data).data), index(data));
+  });
+
+  test('moveUploadText splits at partLimit and keeps hostile text intact', () => {
+    const hostile = '</script><!-- ' + '😀'.repeat(40000);
+    assert.ok(hostile.length < 100 * 1024 && new TextEncoder().encode(hostile).length > 64 * 1024);
+    const texts = [KB(70), KB(70), hostile];
+    const data = buildViewerData([chatWith('c1', texts.map((t, i) => upload(`f${i}.md`, t)))], {});
+    const { data: out, parts } = moveUploadText(data, { partLimit: 100 * 1024 });
+    assert.strictEqual(parts.length, 3);
+    const got = {};
+    parts.forEach((p, i) => {
+      const r = runPart(p.body);
+      assert.strictEqual(r.n, i + 1);
+      assert.ok(Buffer.byteLength(p.body) <= 100 * 1024 || Object.keys(r.d).length === 1);
+      Object.assign(got, r.d);
+    });
+    out.chats[0].messages[0].uploads.forEach((u, i) => assert.strictEqual(got[u.key], texts[i]));
+  });
+
+  test('moveUploadText with nothing to move returns no parts', () => {
+    const data = buildViewerData([chatWith('c1', [upload('a.md', KB(1)), upload('b.png', null)])], {});
+    const { data: out, parts } = moveUploadText(data);
+    assert.deepStrictEqual(parts, []);
+    assert.deepStrictEqual(out, data);
+  });
+}
