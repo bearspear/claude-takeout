@@ -317,9 +317,9 @@ async function writeViewer(zip, chats) {
       if (!response.ok) throw new Error(`${asset}: HTTP ${response.status}`);
       return response.text();
     }));
-    const [template, logic, app, marked, katex, css] = assets;
+    const [template, logic, app, marked, katex, css, highlight] = assets;
     const html = CTViewer.assembleViewer({
-      template, css, marked, katex, logic, app,
+      template, css, marked, katex, highlight, logic, app,
       data: CTViewer.buildViewerData(chats, { exported: new Date().toISOString() })
     });
     zip.file('viewer.html', html);

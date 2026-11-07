@@ -14,7 +14,7 @@ Needs Node 20+ and Python 3.10+, with no packages to install.
 | `test_replay_bash.py` | `replay_bash.py` replay order and containment |
 | `viewer.test.js` | Viewer tree, hash, Markdown steps and data building |
 | `archive.test.js` | Old-archive tool: finding archives, ZIP extraction, added files, `--force`, and that existing files stay unchanged |
-| `e2e/` | Real extension in Chromium against a mock claude.ai, and the viewer page over `file://` (`viewer.e2e.js`: rendering, previews, `sanitizeHtml`) (optional, see below). `archive.e2e.js` opens a viewer the old-archive tool built |
+| `e2e/` | Real extension in Chromium against a mock claude.ai, and the viewer page over `file://` (`viewer.e2e.js`: rendering, previews, `sanitizeHtml`; `colors.e2e.js`: syntax colors) (optional, see below). `archive.e2e.js` opens a viewer the old-archive tool built |
 
 `test_replay_bash.py` makes real attempts to escape the sandbox, so its replay tests run only where `sandbox-exec` exists.
 
@@ -45,6 +45,7 @@ PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/panel.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/viewer.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/archive.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/colors.e2e.js
 ```
 
 `viewer.e2e.js` is the only coverage for `sanitizeHtml`, so run it after changing anything in the viewer.

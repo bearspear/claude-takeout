@@ -54,7 +54,7 @@ const V = require('../takeout-viewer.js');
 const { buildViewerChat, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, TOOL_TEXT_LIMIT } = V;
 const fixture = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/conversation.json'), 'utf8'));
 const template = fs.readFileSync(path.join(__dirname, '../viewer/viewer-template.html'), 'utf8');
-const assets = { template, css: '.k{}', marked: 'var marked=1;', katex: 'var katex=1;', logic: 'var logic=1;', app: 'var app=1;' };
+const assets = { template, css: '.k{}', marked: 'var marked=1;', katex: 'var katex=1;', highlight: 'var hljs=1;', logic: 'var logic=1;', app: 'var app=1;' };
 
 test('buildViewerChat keeps every branch, sets the leaf, and leaves data alone', () => {
   const before = JSON.stringify(fixture);
@@ -173,14 +173,42 @@ test('assembleViewer keeps hostile data inert and fills every placeholder', () =
   const html = assembleViewer({ ...assets, data: buildViewerData([{ ...chat, title: hostile }], { exported: 'x' }) });
   const raw = /<script id="data"[^>]*>([\s\S]*?)<\/script>/.exec(html)[1];
   assert.strictEqual(JSON.parse(raw).chats[0].title, hostile);
-  assert.strictEqual((html.match(/<\/script>/g) || []).length, 5);
-  assert.ok(!/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|LOGIC_JS|APP_JS)\*\//.test(html.replace(raw, '')));
-  for (const s of ['var marked=1;', 'var katex=1;', 'var logic=1;', 'var app=1;', '.k{}']) assert.ok(html.includes(s));
+  assert.strictEqual((html.match(/<\/script>/g) || []).length, 6);
+  assert.ok(!/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|APP_JS)\*\//.test(html.replace(raw, '')));
+  for (const s of ['var marked=1;', 'var katex=1;', 'var hljs=1;', 'var logic=1;', 'var app=1;', '.k{}']) assert.ok(html.includes(s));
   assert.strictEqual(escapeJson({ a: '</x' }), '{"a":"<\\/x"}');
 });
 
-test('VIEWER_ASSETS lists the six viewer files', () => {
-  assert.deepStrictEqual(VIEWER_ASSETS, ['viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js', 'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css']);
+test('VIEWER_ASSETS lists the seven viewer files', () => {
+  assert.deepStrictEqual(VIEWER_ASSETS, ['viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js', 'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js']);
+});
+
+const Logic = require('../viewer/viewer-logic.js');
+
+test('the highlighter survives being inlined, and the worker can use it', () => {
+  const highlight = fs.readFileSync(path.join(__dirname, '../viewer/highlight.min.js'), 'utf8');
+  const html = assembleViewer({ ...assets, highlight, data: { chats: [] } });
+  const source = /<script id="highlighter" type="text\/plain">([\s\S]*?)<\/script>/.exec(html)[1];
+  const hljs = new Function(`${source}\nreturn hljs;`)();
+  assert.match(hljs.highlight('def f(): pass', { language: 'py', ignoreIllegals: true }).value, /hljs-keyword/);
+  assert.match(hljs.highlight('<!-- x --><script>a</script>', { language: 'xml', ignoreIllegals: true }).value, /hljs-comment/);
+  assert.strictEqual(hljs.getLanguage('__proto__'), undefined);
+  assert.strictEqual(hljs.getLanguage('constructor'), undefined);
+});
+
+test('the page allows blob workers, and previews still do not', () => {
+  const policy = /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(template)[1];
+  assert.match(policy, /worker-src blob:/);
+  assert.ok(!/worker-src|child-src|blob:\s*;?\s*script/.test(Logic.PREVIEW_CSP) && !/script-src[^;]*blob:/.test(Logic.PREVIEW_CSP));
+});
+
+test('languageOfFile takes the extension, in lower case', () => {
+  assert.strictEqual(Logic.languageOfFile('a/b.PY'), 'py');
+  assert.strictEqual(Logic.languageOfFile('page.htm'), 'xml');
+  assert.strictEqual(Logic.languageOfFile('archive.tar.gz'), 'gz');
+  assert.strictEqual(Logic.languageOfFile('Makefile'), '');
+  assert.strictEqual(Logic.languageOfFile(''), '');
+  assert.strictEqual(Logic.languageOfFile(null), '');
 });
 
 test('protectMath takes math and leaves money and code alone', () => {

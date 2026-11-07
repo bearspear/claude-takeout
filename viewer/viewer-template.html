@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src file: data: blob:; media-src data: blob:; font-src data:; frame-src file:; object-src 'none'; base-uri 'none'; form-action 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src file: data: blob:; media-src data: blob:; font-src data:; worker-src blob:; frame-src file:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <meta name="generator" content="Claude Takeout">
@@ -14,6 +14,7 @@
   --line: #e8e6dc; --line-strong: #dedcd1; --bub: #f0eee6; --card: #fff; --tile: #e8e6dc;
   --acc: #c96442; --err: #b53333; --hover: rgba(61, 57, 41, .06); --active: #e8e6dc;
   --code-bg: #f5f4ed; --code-head: #efede4; --code-ink: #3d3929; --tick: #b3372c; --tick-bg: rgba(61, 57, 41, .06);
+  --hl-keyword: #8b2f9e; --hl-string: #3f7a2e; --hl-comment: #6f6e66; --hl-number: #955300; --hl-title: #2f64b8; --hl-name: #b3372c; --hl-type: #76620a;
   --serif: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, "Times New Roman", serif;
   --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -25,6 +26,7 @@
     --line: #3a3936; --line-strong: #4a4945; --bub: #141413; --card: #30302e; --tile: #3e3e3a;
     --acc: #d97757; --err: #e5806f; --hover: rgba(236, 233, 224, .06); --active: #141413;
     --code-bg: #1f1e1d; --code-head: #2b2a28; --code-ink: #dcd9cf; --tick: #eb9184; --tick-bg: rgba(236, 233, 224, .07);
+    --hl-keyword: #d19ae8; --hl-string: #a5cf7f; --hl-comment: #94928a; --hl-number: #e0a86e; --hl-title: #7fb2f0; --hl-name: #eb9184; --hl-type: #d9c26a;
     color-scheme: dark;
   }
 }
@@ -156,6 +158,15 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
 .copy svg.ic { width: 13px; height: 13px; }
 .code pre { margin: 0; padding: 13px 14px; overflow-x: auto; }
 .code code { font: 13px/1.55 var(--mono); color: var(--code-ink); }
+.hljs-keyword, .hljs-selector-tag, .hljs-meta .hljs-keyword, .hljs-doctag { color: var(--hl-keyword); }
+.hljs-string, .hljs-regexp, .hljs-addition, .hljs-char.escape_ { color: var(--hl-string); }
+.hljs-comment, .hljs-quote { color: var(--hl-comment); font-style: italic; }
+.hljs-number, .hljs-literal, .hljs-symbol, .hljs-attr, .hljs-attribute, .hljs-selector-attr, .hljs-selector-pseudo { color: var(--hl-number); }
+.hljs-title, .hljs-section, .hljs-built_in, .hljs-selector-id, .hljs-selector-class, .hljs-link { color: var(--hl-title); }
+.hljs-tag .hljs-name, .hljs-name, .hljs-deletion, .hljs-bullet, .hljs-variable, .hljs-template-variable { color: var(--hl-name); }
+.hljs-type, .hljs-meta { color: var(--hl-type); }
+.hljs-section, .hljs-strong { font-weight: 600; }
+.hljs-emphasis { font-style: italic; }
 .bubble .code { margin: 10px 0; max-width: 100%; }
 .bubble .code:first-child { margin-top: 2px; }
 .bubble .code:last-child { margin-bottom: 2px; }
@@ -334,6 +345,7 @@ button.chip:hover { border-color: var(--line-strong); }
 <script id="data" type="application/json">/*DATA_JSON*/</script>
 <script>/*MARKED_JS*/</script>
 <script>/*KATEX_JS*/</script>
+<script id="highlighter" type="text/plain">/*HIGHLIGHT_JS*/</script>
 <script>/*LOGIC_JS*/</script>
 <script>/*APP_JS*/</script>
 </body>

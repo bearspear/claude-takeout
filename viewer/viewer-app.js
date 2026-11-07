@@ -101,6 +101,94 @@ function codeBlock(lang) {
   return wrap;
 }
 
+// ---- Syntax colors ----
+// highlight.js can take minutes on some text, such as one very long word, so it runs in a worker
+// that can be stopped. Colors are only ever added: a block that fails or runs late stays plain.
+const HIGHLIGHT_TIMEOUT = 1500;
+const HIGHLIGHT_WORKER = `
+self.onmessage = e => {
+  let html = null;
+  try {
+    if (hljs.getLanguage(e.data.lang)) html = hljs.highlight(e.data.text, { language: e.data.lang, ignoreIllegals: true }).value;
+  } catch (err) { html = null; }
+  self.postMessage({ id: e.data.id, html });
+};`;
+const colorQueue = [];
+let colorWorker = null, colorUrl = '', colorJob = null, colorTimer = 0, colorJobs = 0, colorsOff = false;
+
+function stopColors() {
+  colorsOff = true;
+  colorQueue.length = 0;
+  colorJob = null;
+  clearTimeout(colorTimer);
+  if (colorWorker) colorWorker.terminate();
+  colorWorker = null;
+}
+
+function startColorWorker() {
+  const source = document.getElementById('highlighter');
+  colorUrl = colorUrl || URL.createObjectURL(new Blob([source.textContent, HIGHLIGHT_WORKER], { type: 'text/javascript' }));
+  colorWorker = new Worker(colorUrl);
+  colorWorker.onerror = stopColors;
+  colorWorker.onmessage = e => {
+    if (!colorJob || e.data.id !== colorJob.id) return;
+    clearTimeout(colorTimer);
+    const job = colorJob;
+    colorJob = null;
+    if (e.data.html !== null) applyColors(job, e.data.html);
+    nextColor();
+  };
+}
+
+function nextColor() {
+  if (colorsOff || colorJob) return;
+  const job = colorQueue.shift();
+  if (!job) return;
+  try {
+    if (!colorWorker) startColorWorker();
+    colorJob = job;
+    colorTimer = setTimeout(() => {
+      colorWorker.terminate();
+      colorWorker = null;
+      colorJob = null;
+      nextColor();
+    }, HIGHLIGHT_TIMEOUT);
+    colorWorker.postMessage({ id: job.id, text: job.text, lang: job.lang });
+  } catch (e) {
+    stopColors();
+  }
+}
+
+// The text must come back exactly as it went in, so Copy and search see what the chat holds.
+function applyColors(job, html) {
+  const { node, text } = job;
+  if (node.childElementCount || node.textContent !== text) return;
+  const colored = document.createElement('code');
+  colored.innerHTML = sanitizeHtml(`<span>${html}</span>`, new DOMParser());
+  if (colored.textContent !== text.replace(/\r\n?/g, '\n')) return;
+  node.replaceChildren(...colored.childNodes);
+  node.classList.add('colored');
+}
+
+const colorLanguages = new WeakMap();
+const colorWatch = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+  for (const entry of entries) {
+    if (!entry.isIntersecting) continue;
+    colorWatch.unobserve(entry.target);
+    const lang = colorLanguages.get(entry.target);
+    if (colorsOff || !lang) continue;
+    colorQueue.push({ id: ++colorJobs, node: entry.target, text: entry.target.textContent, lang });
+  }
+  nextColor();
+}, { scrollMargin: '400px' }) : null;
+
+// node: an element holding only text. Colors arrive once it scrolls into view.
+function colorWhenSeen(node, lang) {
+  if (!colorWatch || !lang || node.childElementCount || node.textContent.length > HIGHLIGHT_LIMIT) return;
+  colorLanguages.set(node, lang);
+  colorWatch.observe(node);
+}
+
 // Code fences become code blocks. Wide tables scroll on their own.
 function dressMarkdown(box) {
   box.querySelectorAll('pre').forEach(pre => {
@@ -109,6 +197,7 @@ function dressMarkdown(box) {
     const wrap = codeBlock(lang ? lang[1] : '');
     pre.replaceWith(wrap);
     wrap.append(pre);
+    if (lang) colorWhenSeen(code, lang[1]);
   });
   box.querySelectorAll('table').forEach(table => {
     const wrap = el('div', 'table');
@@ -250,9 +339,11 @@ function renderHuman(m) {
     for (const part of splitFences(text)) {
       if (part.t === 'text') { bubble.append(el('div', 'typed', part.text)); continue; }
       const pre = document.createElement('pre');
-      pre.append(el('code', '', part.text));
+      const code = el('code', '', part.text);
+      pre.append(code);
       const block = codeBlock(part.lang);
       block.append(pre);
+      colorWhenSeen(code, part.lang);
       bubble.append(block);
     }
     node.append(bubble);
@@ -280,6 +371,7 @@ function popupContent(item) {
   if (typeof item.text === 'string') {
     const code = el('pre', 'file-code');
     code.textContent = item.text;
+    colorWhenSeen(code, languageOfFile(name));
     return { nodes: [code] };
   }
   if (!item.href) return { nodes: [el('div', 'file-missing', 'This file is not in this export.')] };
@@ -791,6 +883,7 @@ function renderPanelBody(chat, file, version, shape) {
   else {
     const code = el('pre', 'file-code');
     code.textContent = version.text;
+    colorWhenSeen(code, languageOfFile(file.name));
     body.replaceChildren(...(shape.note ? [el('div', 'file-note', shape.note)] : []), code);
   }
   body.scrollTop = 0;
@@ -988,7 +1081,13 @@ function tryFind() {
   if (!node) return;
   const { query } = find;
   find = null;
-  (highlightIn(node, query) || node).scrollIntoView({ block: 'center' });
+  let mark = highlightIn(node, query);
+  if (!mark && node.querySelector('.colored')) {
+    // Colors split code into pieces, and a match across them is skipped.
+    node.querySelectorAll('.colored').forEach(code => { code.textContent = code.textContent; code.classList.remove('colored'); });
+    mark = highlightIn(node, query);
+  }
+  (mark || node).scrollIntoView({ block: 'center' });
 }
 
 function openHit(hit, query) {

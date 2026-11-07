@@ -16,7 +16,7 @@
 //                                      beside it and added audio and video. fileMedia adds it to media-src alone, for a
 //                                      viewer with no parts. Exports set neither
 //   kindFor(filename, mime, hasText)   a GenFile's kind
-//   VIEWER_ASSETS                      paths of the six viewer files
+//   VIEWER_ASSETS                      paths of the seven viewer files
 //   TOOL_TEXT_LIMIT                    longest tool result text kept
 //   TEXT_EMBED_LIMIT                   longest upload or project text a caller should pass in ctx
 //   VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64  a 1x1 GIF beside viewer.html: if it won't load, the ZIP wasn't unzipped
@@ -34,7 +34,7 @@
 
   const VIEWER_ASSETS = [
     'viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js',
-    'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css'
+    'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js'
   ];
 
   function cut(text) {
@@ -433,13 +433,15 @@
   // One pass with function replacers: '$&' or a placeholder inside a value stays literal.
   // data: object (escaped here) or an already-escaped JSON string.
   // fileScripts: the page may load viewer-files/ scripts and media from disk. fileMedia: only media.
-  function assembleViewer({ template, css, marked, katex, logic, app, data, fileScripts, fileMedia }) {
-    const script = code => String(code).replace(/<\/script/gi, '<\\/script').replace(/<!--/g, '<\\!--');
+  function assembleViewer({ template, css, marked, katex, highlight, logic, app, data, fileScripts, fileMedia }) {
+    // \x21 rather than \!, which a regular expression with the u flag rejects.
+    const script = code => String(code).replace(/<\/script/gi, '<\\/script').replace(/<!--/g, () => '<\\x21--');
     const values = {
       KATEX_CSS: () => String(css).replace(/<\/style/gi, '<\\/style'),
       DATA_JSON: () => (typeof data === 'string' ? data : escapeJson(data)),
       MARKED_JS: () => script(marked),
       KATEX_JS: () => script(katex),
+      HIGHLIGHT_JS: () => script(highlight),
       LOGIC_JS: () => script(logic),
       APP_JS: () => script(app)
     };
@@ -448,7 +450,7 @@
     let page = String(template);
     if (fileScripts) page = allow(page, 'script-src');
     if (fileScripts || fileMedia) page = allow(page, 'media-src');
-    return page.replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
+    return page.replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
   const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT };
