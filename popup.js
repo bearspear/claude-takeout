@@ -318,10 +318,10 @@ async function writeViewer(zip, chats) {
       return response.text();
     }));
     const [template, logic, app, marked, katex, css, highlight] = assets;
-    const html = CTViewer.assembleViewer({
-      template, css, marked, katex, highlight, logic, app,
-      data: CTViewer.buildViewerData(chats, { exported: new Date().toISOString() })
-    });
+    // Large upload text goes to viewer-files/, loaded when the upload is opened.
+    const { data, parts } = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString() }));
+    const html = CTViewer.assembleViewer({ template, css, marked, katex, highlight, logic, app, data, fileScripts: parts.length > 0 });
+    for (const part of parts) zip.file(`viewer-files/${part.name}`, part.body);
     zip.file('viewer.html', html);
     zip.file(CTViewer.VIEWER_CHECK_FILE, CTViewer.VIEWER_CHECK_BASE64, { base64: true });
     return true;

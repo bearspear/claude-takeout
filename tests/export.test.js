@@ -442,6 +442,25 @@ test('writeViewer writes viewer.html and the check image at the root', async () 
   assert.strictEqual(gif.content, popup.sandbox.CTViewer.VIEWER_CHECK_BASE64);
 });
 
+test('writeViewer puts large upload text in viewer-files', async () => {
+  const popup = exportPopup({ routes: assetRoutes() });
+  const { chat } = await runFolder(popup, withUploads());
+  const big = 'big upload line\n'.repeat(5000);
+  const withBig = JSON.parse(JSON.stringify(chat));
+  withBig.messages[0].uploads = [...(withBig.messages[0].uploads || []), { name: 'big.md', href: 'uploads/p01_big.md', text: big }];
+  const zip = zipStub();
+  popup.sandbox.__zip = zip;
+  popup.sandbox.__chats = [withBig];
+  assert.strictEqual(await vm.runInContext('writeViewer(__zip, __chats)', popup.sandbox), true);
+  assert.deepStrictEqual(Object.keys(zip.written).sort(), ['viewer-check.gif', 'viewer-files/part-0001.js', 'viewer.html']);
+  const html = zip.written['viewer.html'];
+  assert.ok(!html.includes('big upload line'));
+  assert.match(/http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(html)[1], /script-src[^;]* file:;/);
+  let got = null;
+  new Function('window', zip.written['viewer-files/part-0001.js'])({ __archivePart: (n, d) => { got = { n, d }; } });
+  assert.deepStrictEqual(got, { n: 1, d: { u0: big } });
+});
+
 test('writeViewer asks for each asset once, however many chats there are', async () => {
   const asked = [];
   const routes = assetRoutes();
