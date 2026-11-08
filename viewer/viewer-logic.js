@@ -730,8 +730,7 @@ function searchChats(index, query, limit = 50) {
   if (!q.all.length) return hits;
   for (const e of index) {
     if (hits.length >= limit) break;
-    if (!q.all.every(alts => alts.some(t => e.lower.includes(t)))) continue;
-    if (q.none.some(t => e.lower.includes(t))) continue;
+    if (!queryMatches(q, e.lower)) continue;
     const terms = q.all.flat().filter(t => e.lower.includes(t));
     let at = -1, len = 0;
     for (const t of terms) {
@@ -741,6 +740,41 @@ function searchChats(index, query, limit = 50) {
     hits.push({ chat: e.chat, msg: e.msg, snippet: snippetAt(e.text, e.lower, at, len), terms });
   }
   return hits;
+}
+
+// Whether lowercase text satisfies a parsed query: every word or phrase (or an OR alternative), none excluded.
+function queryMatches(q, lower) {
+  return q.all.length > 0 && q.all.every(alts => alts.some(t => lower.includes(t))) && !q.none.some(t => lower.includes(t));
+}
+
+// Occurrences of any of the (lowercase) terms in text, scanning left to right; where two start at one
+// spot the longer counts, and occurrences don't overlap. markTerms and the chat highlight scan the same way.
+function countTerms(text, terms) {
+  const lower = String(text).toLowerCase();
+  const wanted = (terms || []).filter(Boolean).slice().sort((a, b) => b.length - a.length);
+  if (!wanted.length) return 0;
+  let n = 0;
+  for (let i = 0; i < lower.length;) {
+    const term = wanted.find(w => lower.startsWith(w, i));
+    if (term) { n++; i += term.length; } else i++;
+  }
+  return n;
+}
+
+// What the in-chat stepper walks: the messages whose visible text (prompts and replies, not thinking,
+// tools, pasted text or upload names, which don't show in the conversation) matches the query, in the
+// chat's message order, each with how many occurrences it holds.
+function findPlan(chat, query) {
+  const q = parseQuery(query);
+  const terms = q.all.flat();
+  const items = [];
+  for (const m of (chat && chat.messages) || []) {
+    const text = (m.blocks || []).filter(b => b && b.t === 'text' && b.text).map(b => b.text).join('\n');
+    if (!text || !queryMatches(q, text.toLowerCase())) continue;
+    const count = countTerms(text, terms);
+    if (count) items.push({ msg: m.id, count });
+  }
+  return { terms, items, total: items.reduce((n, i) => n + i.count, 0) };
 }
 
 // Hits by chat, best first: chats whose title matched, then those with the most matching messages,
@@ -872,5 +906,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, groupChats, linkProjects, copyText, attachmentNames, uploadName };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName };
 }

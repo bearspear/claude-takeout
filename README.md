@@ -367,6 +367,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.15
+
+- **Step through every match in a chat** - Opening a search result shows a bar at the top of the conversation: “survey” · 1 of 144 · ‹ › ✕. The arrows, or Enter and Shift+Enter, go to the next or previous occurrence, highlighted, including matches on an earlier version of a response and far down a long chat. Escape or ✕ closes it, as does clearing the search or opening another chat. It counts the words the conversation shows: pasted text and file names still lead search to a chat, but aren't stepped through. Older exports get it when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+
 ### v1.6.14
 
 - **Files list in the viewer** - A Files button in each chat's top bar, with a count, lists everything in that chat in one place: Outputs (each file Claude made or sent, once, newest first, with how many versions it has) and Uploads (your uploads and pasted text). An output opens in the file panel at its latest version, an upload in the popup. Like claude.ai's own files panel, but it also lists the working files Claude wrote along the way. Older exports get it when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
