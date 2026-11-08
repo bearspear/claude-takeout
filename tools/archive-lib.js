@@ -302,6 +302,8 @@ function chatFromDisk(archive, chat) {
     const s = lstat(path.join(chat.dir, name));
     if (s && s.isSymbolicLink()) warnings.push(`${name}/ is a link to another folder, so it was not read`);
   }
+  // The shared projects/ folder of a mega-archive (or beside a chat), unless it is a link out of the archive.
+  const realProjects = p => { const s = lstat(p); return !!s && s.isDirectory(); };
   // An odd shape in one extractor costs that detail, never the chat.
   const safe = (label, fallback, fn) => {
     try { return fn(); } catch (e) { warnings.push(`${label}: ${e.message}`); return fallback; }
@@ -355,14 +357,14 @@ function chatFromDisk(archive, chat) {
   const wanted = [];
   const used = new Set();
   for (const file of safe('uploads', [], () => core.extractUploadedFiles(data))) {
+    // As the export names them (freeUploadName in popup.js): compared case-insensitively, and a name
+    // starting with a dot has no extension.
+    const dot = file.filename.lastIndexOf('.');
+    const base = dot > 0 ? file.filename.slice(0, dot) : file.filename;
+    const ext = dot > 0 ? file.filename.slice(dot) : '';
     let expected = file.filename;
-    let counter = 1;
-    while (used.has(expected)) {
-      const dot = file.filename.lastIndexOf('.');
-      expected = dot >= 0 ? `${file.filename.slice(0, dot)}_${counter}${file.filename.slice(dot)}` : `${file.filename}_${counter}`;
-      counter++;
-    }
-    used.add(expected);
+    for (let counter = 1; used.has(expected.toLowerCase()); counter++) expected = `${base}_${counter}${ext}`;
+    used.add(expected.toLowerCase());
     wanted.push({ file, expected, found: null });
   }
   let free = uploadNames.slice();
@@ -422,12 +424,16 @@ function chatFromDisk(archive, chat) {
       try { dir = decodeURIComponent(dir); } catch (e) { /* keep it as written */ }
       if (dir !== '.' && dir !== '..' && !/[\\/]/.test(dir)) {
         // A mega whose index.md was removed is read as single chats, so projects/ sits beside the chat folder.
-        const inside = isRealDir(path.join(archive.root, 'projects', dir));
-        const beside = !inside && archive.kind === 'single' && isRealDir(path.resolve(chat.dir, '..', 'projects', dir));
+        const rootProjects = path.join(archive.root, 'projects');
+        const besideProjects = path.resolve(chat.dir, '..', 'projects');
+        const linked = [rootProjects, besideProjects].some(p => { const s = lstat(p); return !!s && s.isSymbolicLink(); });
+        const inside = realProjects(rootProjects) && isRealDir(path.join(rootProjects, dir));
+        const beside = !inside && archive.kind === 'single' && realProjects(besideProjects) && isRealDir(path.join(besideProjects, dir));
         const shared = inside || beside;
         if (shared) fileDir = `../projects/${dir}/files`;
         if (beside) warnings.push(`project files are in ../projects/${dir}, outside this folder, so the viewer lists them without links`);
-        else warnings.push(`README.md links to projects/${dir}/files, which is not there, so project files are taken from project/files`);
+        else if (!shared && linked) warnings.push('projects/ is a link to another folder, so it was not read; project files are taken from project/files');
+        else if (!shared) warnings.push(`README.md links to projects/${dir}/files, which is not there, so project files are taken from project/files`);
       }
     }
     const docs = {};

@@ -1895,3 +1895,41 @@ test('an index.md added to a single-chat archive is listed; a mega root index.md
   assert.strictEqual(archive.kind, 'mega');
   assert.deepStrictEqual(scanAdded(archive).files.map(f => f.path), []);
 });
+
+// ---- second review: archive tool ----
+test('a mega chat whose shared projects/ folder is there gets no warning about it', () => {
+  const mega = tmpRoot();
+  put(mega, 'index.md');
+  put(mega, 'c/original.json', JSON.stringify({ uuid: 'u', project_uuid: 'P', project: { uuid: 'P', name: 'Shared' }, chat_messages: [] }));
+  put(mega, 'c/README.md', '- [a.pdf](../projects/P/files/a.pdf)\n');
+  put(mega, 'projects/P/files/a.pdf', 'pdf');
+  const archive = { root: mega, kind: 'mega', chats: [{ dir: path.join(mega, 'c'), relDir: 'c' }] };
+  const got = chatFromDisk(archive, archive.chats[0]);
+  assert.deepStrictEqual(got.viewerChat.project.files.map(f => f.href), ['projects/P/files/a.pdf']);
+  assert.deepStrictEqual(got.warnings.filter(w => /projects/.test(w)), []);
+});
+
+test('a linked projects/ folder at the archive root is not read', () => {
+  const tmp = tmpRoot();
+  put(tmp, 'elsewhere/P/files/secret-name.txt', 'x');
+  const mega = path.join(tmp, 'mega');
+  put(mega, 'index.md');
+  put(mega, 'c/original.json', JSON.stringify({ uuid: 'u', project_uuid: 'P', project: { uuid: 'P', name: 'Shared' }, chat_messages: [] }));
+  put(mega, 'c/README.md', '- [s](../projects/P/files/secret-name.txt)\n');
+  fs.symlinkSync(path.join(tmp, 'elsewhere'), path.join(mega, 'projects'));
+  const archive = { root: mega, kind: 'mega', chats: [{ dir: path.join(mega, 'c'), relDir: 'c' }] };
+  const got = chatFromDisk(archive, archive.chats[0]);
+  assert.ok(!JSON.stringify(got.viewerChat).includes('secret-name'), 'no names from outside the archive');
+  assert.ok(got.warnings.some(w => /projects\/ is a link/.test(w)), got.warnings.join('|'));
+});
+
+test('upload names that differ only in case are matched as the export names them', () => {
+  const up = (name, uuid) => ({ success: true, file_name: name, file_uuid: uuid, file_kind: 'image' });
+  const data = { uuid: 'u', current_leaf_message_uuid: 'h', chat_messages: [{ uuid: 'h', parent_message_uuid: null, sender: 'human',
+    content: [{ type: 'text', text: 'two' }], files_v2: [up('Photo.PNG', 'f1'), up('photo.png', 'f2')] }] };
+  const { dir, archive, chat } = chatDir(data);
+  put(dir, 'uploads/p01_Photo.PNG', 'a');
+  put(dir, 'uploads/p01_photo_1.png', 'b');
+  const got = chatFromDisk(archive, chat);
+  assert.deepStrictEqual(got.missing, []);
+});

@@ -294,8 +294,6 @@ async function addArtefactBlob(folder, artifacts, filename, blob) {
 // Offline viewer: viewer.html and its unzip check, at the ZIP root.
 // ============================================================================
 
-// An upload's text for the viewer. A failure here must never touch the export,
-// so it only ever costs the preview. content: a Blob, or a string from JSON.
 // A Claude Docs document as one self-contained page to read, print or share. Raw HTML in the Markdown is
 // shown as text, and only web and mail links and https images are kept; the page's CSP allows no
 // script at all, so nothing in it can run.
@@ -370,6 +368,8 @@ ${body}</main>
 `;
 }
 
+// An upload's text for the viewer. A failure here must never touch the export,
+// so it only ever costs the preview. content: a Blob, or a string from JSON.
 async function viewerUploadText(name, content) {
   try {
     if (!isTextFile(name)) return null;

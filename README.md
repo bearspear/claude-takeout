@@ -367,6 +367,17 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.21
+
+The last fixes from the second full review: the tool that adds a viewer to older archives, and the docs.
+
+- **No false projects warning** - `tools/build_viewer.js` no longer warns that a mega-archive's shared `projects/` folder "is not there" when it is.
+- **A linked `projects/` folder is not read** - When `projects/` at an archive's root is a link to another folder, the tool leaves it alone and says so, as it already did for `project/`, `uploads/` and `artefacts/`.
+- **Uploads that differ only in case** - `Photo.PNG` and `photo.png` in one prompt are matched to the files the export saved, instead of one being reported missing.
+- **Less memory for big ZIPs** - The tool lets go of a ZIP's bytes once it is extracted, before building the viewers.
+- **A file whose text can't load** - When `viewer-files/` is missing or blocked, a large generated file now says its text couldn't load and that it is in the artefacts folder, instead of "not in this export".
+- **Docs** - TECHNICAL.md and CLAUDE.md describe what `viewer-files/` parts hold, every warning type, and where the shared export code lives.
+
 ### v1.6.20
 
 Viewer fixes from the second full review. Rebuild an older export's viewer with `--force` to get them; see [Updating a viewer](USAGE.md#updating-a-viewer).

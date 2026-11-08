@@ -11,7 +11,10 @@
 //                                      index into projects, where identical projects are kept once
 //   moveUploadText(data, {firstPart, inlineLimit, partLimit})  { data, parts: [{ name, body }] }: upload text over
 //                                      UPLOAD_INLINE_LIMIT bytes moves into viewer-files parts; the upload keeps
-//                                      { text: null, lines, part, key }. Keys are u0, u1, ... Attachments stay
+//                                      { text: null, lines, part, key }. Keys are u0, u1, ... A generated file's
+//                                      version over the limit (not .css/.js/.mjs) moves too and keeps
+//                                      { text: null, part, key }, keys f0, f1, ...; code reading version.text
+//                                      must allow for null until the part is loaded. Attachments stay
 //   PART_LIMIT, UPLOAD_INLINE_LIMIT    4 MB per part; 64 KB of upload text stays in the page
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
 //   joinPath(folder, rel)              folder + rel with '..' resolved; null if it climbs above the folder
