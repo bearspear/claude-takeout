@@ -4,13 +4,13 @@ Candidate features for Claude Takeout after v1.6.12, with the problem each solve
 
 **Size:** S is one PR of about a day, M is one or two PRs, L is several PRs with a written design first.
 
-**Shipped since this list was written** (not on it, but the same kind of work): grouped and ranked search with operators (v1.6.13), the Files list in each chat's top bar (v1.6.14), and the in-chat "match N of M" bar (v1.6.15).
+**Shipped since this list was written** (not on it, but the same kind of work): grouped and ranked search with operators (v1.6.13), the Files list in each chat's top bar (v1.6.14), and the in-chat "match N of M" bar (v1.6.15). From this list: the export health check (v1.6.22).
 
 ## Recommended order
 
 1. [Export health check](#1-export-health-check) (S): protects every export against the biggest remaining risk, a silent change to claude.ai's API.
 2. [Incremental export](#2-incremental-export) (M): makes regular backups cheap.
-3. [Warning badges in the viewer](#3-warning-badges-in-the-viewer) (S): puts `errors.txt` where people actually look.
+3. [Warning badges in the viewer](#4-warning-badges-in-the-viewer) (S): puts `errors.txt` where people actually look.
 
 The rest follow when there is a need for them.
 

@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.21.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.22.
 
 ---
 
@@ -64,7 +64,7 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 | Section | What lives here |
 |---|---|
 | `export-core.js` (separate file) | Mojibake repair, `isTextFile`, `getMessageChain`, `extractArtifacts` (per-turn versioning + str_replace replay), `extractUploadedFiles`, `extractPresentedFiles`, `extractDeliveredFiles`, `getModelName`, `buildViewerDeliveries`, `viewerProject`, the heredoc helpers (`heredocMatches`, `heredocFiles`), `safeFileTitle`, and the Claude Docs rebuild (`claudeDocCreated`, `claudeDocKey`, `renderClaudeDoc`) live here, not in `popup.js`. Edit them there. |
-| `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `delivered_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`, `viewer`, `claude_doc_unreplayed`. |
+| `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `delivered_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`, `viewer`, `claude_doc_unreplayed`, `export_health`. |
 | BOM helpers | `withBOM(text)`, `addFileWithBOM(folder, path, content)`. The mojibake map and `fixMojibake` are in `export-core.js`. |
 | Extractors and renderers | `extractTextAttachments`, `extractWebSources`, `extractBlobContent`, `extractProjectFiles`, `getLanguageFromFilename`, `processTextWithCitations`, `formatReferences`, `getLanguageFromType`, `getThinkingSummary`, `markdownToPlainText`. |
 | ZIP/section builders | `extractCodeBlocks`, `extractUrls`, `sanitizeForFilename`, `extractFirstHeading`, `escapeMarkdown`, `extractResponseTextOnly`, `generateMeta`, `generatePrompts`, `generateResponsesTextOnly`, `generateCodeSnippets`, `generateLinksAndSources`. |
@@ -315,6 +315,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - `artifact_opaque_mutation` — a bash command changed an artifact in a way replay can't follow.
 - `delivered_file` — a `SendUserFile` delivery could not be downloaded.
 - `claude_doc_unreplayed` — a Claude Docs edit other than filling a pending section; the note links the live document.
+- `export_health` — claude.ai's data for the chat looks incomplete (`chatHealth` in export-core.js: no messages although the chat changed, messages with no content, an unknown current branch in a branched chat, content block types the export doesn't show; and in `populateConversationFolder`, none of several uploads downloaded). The status line turns amber; single Markdown and JSON exports run `chatHealth` too (`exportedStatus`). Keep the checks calibrated on real chats: a chat opened and never used has no messages and is healthy.
 - `viewer` — one chat could not be added to `viewer.html` (`buildViewerChat` threw). A failure of `writeViewer` as a whole is not recorded here: the status line says "viewer.html could not be built." The export itself is complete.
 
 `errors.txt` is built by `generateErrorReport()` and embedded into the ZIP only when `hasAny()` is true. The status pill turns amber (`.status.warning`) when there are warnings but the export still succeeded.
@@ -351,7 +352,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.21. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.22. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 

@@ -94,6 +94,44 @@ function isTextFile(filename) {
 
 // Trace message chain from current_leaf_message_uuid through parent_message_uuid
 // This handles branched conversations where user may have regenerated responses
+// ---- Export health ----
+// claude.ai's REST API is undocumented. When its shape changes, an export can come out thin with nothing
+// saying so. These checks look for what such a change leaves behind. Each problem: { check, message }.
+// Calibrated on real chats: a chat that was opened and never used has no messages and an unchanged
+// updated_at, and is healthy.
+const KNOWN_BLOCK_TYPES = new Set(['text', 'thinking', 'redacted_thinking', 'tool_use', 'tool_result', 'image']);
+
+function chatHealth(data) {
+  const problems = [];
+  const d = data && typeof data === 'object' ? data : {};
+  const messages = Array.isArray(d.chat_messages) ? d.chat_messages : null;
+  const changed = Date.parse(d.updated_at) - Date.parse(d.created_at) > 5000;
+  if (!messages || (!messages.length && changed)) {
+    problems.push({ check: 'no_messages', message: messages
+      ? 'claude.ai returned no messages for this chat, although it was changed after it was created.'
+      : 'claude.ai returned this chat without its messages.' });
+    return problems;
+  }
+  const hollow = messages.filter((m) => !m || !Array.isArray(m.content) || (!m.content.length && !m.text)).length;
+  if (hollow) problems.push({ check: 'empty_messages', message: `${hollow} of ${messages.length} messages came back with no content.` });
+  const ids = new Set(messages.map((m) => m && m.uuid));
+  const children = new Map();
+  for (const m of messages) if (m) children.set(m.parent_message_uuid, (children.get(m.parent_message_uuid) || 0) + 1);
+  const branched = [...children.values()].some((n) => n > 1);
+  if (branched && !ids.has(d.current_leaf_message_uuid)) {
+    problems.push({ check: 'unknown_branch', message: "claude.ai didn't say which branch of this chat is current, so messages from every branch are exported in one sequence." });
+  }
+  const unknown = new Map();
+  for (const m of messages) for (const b of (m && Array.isArray(m.content) ? m.content : [])) {
+    const type = b && typeof b === 'object' ? String(b.type) : typeof b;
+    if (!KNOWN_BLOCK_TYPES.has(type)) unknown.set(type, (unknown.get(type) || 0) + 1);
+  }
+  if (unknown.size) {
+    problems.push({ check: 'unknown_blocks', message: `Content the export doesn't show yet: ${[...unknown].map(([t, n]) => `${t} (${n})`).join(', ')}. It is kept in original.json.` });
+  }
+  return problems;
+}
+
 function getMessageChain(data) {
   const messages = data.chat_messages || [];
   const currentLeaf = data.current_leaf_message_uuid;
@@ -879,6 +917,6 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated,
-    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject,
+    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES,
   };
 }

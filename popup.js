@@ -90,6 +90,9 @@ class ExportErrorCollector {
       case 'viewer':
         return 'The chat data is all in this export. Only viewer.html is missing or incomplete; the Markdown files are unaffected.';
 
+      case 'export_health':
+        return "claude.ai's data for this chat looks incomplete, which usually means its API changed. The export holds everything that came back, and original.json has the raw data. Check the chat on claude.ai, and report it if the problem repeats so the exporter can be updated.";
+
       case 'claude_doc_unreplayed':
         return 'Claude edited this Claude Docs document in a way the export can\'t rebuild from the chat. The exported .md and .html hold what could be rebuilt; open the live document on claude.ai (link in the note) for the current version.';
 
@@ -1955,6 +1958,13 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   // Initialize error collector for comprehensive error tracking
   const errorCollector = new ExportErrorCollector(data.name, data.uuid);
+  // Signs that claude.ai's data came back incomplete, such as after an API change.
+  let healthIssues = 0;
+  const addHealth = (message, note = '') => {
+    healthIssues++;
+    errorCollector.addWarning('export_health', 'original.json', `This chat looks incomplete: ${message}`, { note });
+  };
+  for (const problem of chatHealth(data)) addHealth(problem.message, problem.check);
 
   const artifactIndex = {};
   const artifacts = extractArtifacts(data, errorCollector, artifactIndex);
@@ -2548,6 +2558,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
   }
 
+  if (uploadedFiles.length > 1 && downloadedFiles.length === 0) {
+    addHealth(`none of the ${uploadedFiles.length} uploads could be downloaded.`, 'uploads');
+  }
   // Self-contained HTML pass: rewrite sandbox-path references (e.g.
   // /mnt/user-data/uploads/foo.png) in text-based artifacts as base64 data
   // URIs, then re-write those entries into the zip. We deliberately keep the
@@ -2784,7 +2797,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
   }
 
-  return { messages, artifacts, textAttachments, uploadedFiles: downloadedFiles, failedFiles, errorCollector, codeBlocks, urls, responseFiles, viewerChat };
+  return { messages, artifacts, textAttachments, uploadedFiles: downloadedFiles, failedFiles, errorCollector, codeBlocks, urls, responseFiles, viewerChat, healthIssues };
 }
 
 // Create full zip export with progress callback
@@ -2835,6 +2848,7 @@ async function createZipExport(data, onProgress = null) {
     errorCount: result.errorCollector?.errors?.length || 0,
     warningCount: result.errorCollector?.warnings?.length || 0,
     hasErrors: result.errorCollector?.hasAny() || false,
+    healthIssues: result.healthIssues || 0,
     viewerBuilt
   };
 }
@@ -3565,6 +3579,7 @@ async function bulkExport(format) {
 
     let exported = 0;
     let errors = [];
+    let incomplete = 0;  // chats whose data looks incomplete (see chatHealth)
 
     for (const conv of conversations) {
       try {
@@ -3598,6 +3613,7 @@ async function bulkExport(format) {
 
         download(content, filename, format === 'json' ? 'application/json' : 'text/markdown');
         exported++;
+        if (chatHealth(data).length) incomplete++;
 
       } catch (e) {
         errors.push(`${conv.name || conv.uuid}: ${e.message}`);
@@ -3615,6 +3631,9 @@ async function bulkExport(format) {
       status.className = 'status error';
       status.textContent = `Exported ${exported}/${total}. ${errors.length} failed.`;
       console.error('Export errors:', errors);
+    } else if (incomplete) {
+      status.className = 'status warning';
+      status.textContent = `Exported ${exported} conversations, but ${incomplete} look${incomplete === 1 ? 's' : ''} incomplete; claude.ai's data may have changed. Export one as a ZIP for details in errors.txt.`;
     } else {
       status.className = 'status ready';
       status.textContent = `Exported ${exported} conversations!`;
@@ -3659,6 +3678,7 @@ async function bulkExportZip() {
     let errors = [];  // Conversation-level errors (failed to fetch/process entire conversation)
     let totalFileErrors = 0;  // File-level errors across all conversations
     let totalFileWarnings = 0;  // File-level warnings across all conversations
+    let incomplete = 0;  // chats whose data looks incomplete (export_health)
     // `projects` holds the shared project files, so no chat may take that name.
     const usedFolderNames = new Set(['projects']);
     const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set() };
@@ -3700,6 +3720,7 @@ async function bulkExportZip() {
           totalFileErrors += folderResult.errorCollector.errors?.length || 0;
           totalFileWarnings += folderResult.errorCollector.warnings?.length || 0;
         }
+        if (folderResult.healthIssues) incomplete++;
 
         // Add to index
         indexEntries.push({
@@ -3739,6 +3760,11 @@ async function bulkExportZip() {
       if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
       indexLines.push(`**Issues:** ${issueParts.join(', ')} (see errors.txt in affected folders)`);
     }
+    if (incomplete) {
+      indexLines.push(`**Looks incomplete:** ${incomplete} chat${incomplete === 1 ? '' : 's'}; claude.ai's data may have changed (see errors.txt in those folders)`);
+    }
+    // Chats listed against chats exported, so a list that came back short or a chat that failed shows.
+    indexLines.push(`**Listed by claude.ai:** ${total}`);
 
     indexLines.push(
       '',
@@ -3801,7 +3827,8 @@ async function bulkExportZip() {
         if (totalFileErrors > 0) issueParts.push(`${totalFileErrors} file error${totalFileErrors > 1 ? 's' : ''}`);
         if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
         status.className = 'status warning';
-        status.textContent = `Exported ${exported} conversations - ${issueParts.join(', ')}. See errors.txt${viewerBuilt ? '' : `.${viewerNote}`}`;
+        const looks = incomplete ? ` ${incomplete} chat${incomplete === 1 ? ' looks' : 's look'} incomplete.` : '';
+        status.textContent = `Exported ${exported} conversations - ${issueParts.join(', ')}.${looks} See errors.txt${viewerBuilt ? '' : `.${viewerNote}`}`;
       } else if (!viewerBuilt) {
         status.className = 'status warning';
         status.textContent = `Exported ${exported} conversations to mega-zip.${viewerNote}`;
@@ -3820,6 +3847,13 @@ async function bulkExportZip() {
 // Event listeners with settings-aware filenames
 // One export at a time: a second click, or a shortcut, while one runs does nothing,
 // and the export buttons are disabled meanwhile.
+// A finished single-chat export without errors.txt: ready, or amber when claude.ai's data looks incomplete.
+function exportedStatus(status, data, done) {
+  const problems = chatHealth(data);
+  status.className = problems.length ? 'status warning' : 'status ready';
+  status.textContent = problems.length ? `${done.replace(/!$/, '.')} But this chat looks incomplete: ${problems[0].message}` : done;
+}
+
 const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportAllJson'];
 let exportRunning = false;
 function exclusiveExport(run) {
@@ -3848,8 +3882,7 @@ onExport('exportMd', async () => {
     const md = convertToMarkdown(data, { includeThinking: settings.includeThinking });
     const filename = generateFilename(data.name, 'md', data.project?.name);
     download(md, filename, 'text/markdown');
-    status.className = 'status ready';
-    status.textContent = 'Markdown exported successfully!';
+    exportedStatus(status, data, 'Markdown exported successfully!');
   } catch (e) {
     console.error('Markdown export error:', e);
     status.className = 'status error';
@@ -3869,8 +3902,7 @@ onExport('exportMdEmbed', async () => {
     });
     const filename = generateFilename(data.name, 'md', data.project?.name, '_embedded');
     download(md, filename, 'text/markdown');
-    status.className = 'status ready';
-    status.textContent = 'Embedded markdown exported successfully!';
+    exportedStatus(status, data, 'Embedded markdown exported successfully!');
   } catch (e) {
     console.error('Embedded export error:', e);
     status.className = 'status error';
@@ -3899,7 +3931,10 @@ onExport('exportZip', async () => {
 
     // Show success with error/warning indicator if applicable
     const viewerNote = result.viewerBuilt ? '' : ' viewer.html could not be built.';
-    if (result.hasErrors) {
+    if (result.healthIssues) {
+      status.className = 'status warning';
+      status.textContent = `Exported zip, but this chat looks incomplete; claude.ai's data may have changed. See errors.txt.${viewerNote}`;
+    } else if (result.hasErrors) {
       const errorParts = [];
       if (result.errorCount > 0) errorParts.push(`${result.errorCount} error${result.errorCount > 1 ? 's' : ''}`);
       if (result.warningCount > 0) errorParts.push(`${result.warningCount} warning${result.warningCount > 1 ? 's' : ''}`);
@@ -3929,8 +3964,7 @@ onExport('exportJson', async () => {
     const json = JSON.stringify(data, null, 2);
     const filename = generateFilename(data.name, 'json', data.project?.name);
     download(json, filename, 'application/json');
-    status.className = 'status ready';
-    status.textContent = 'JSON exported successfully!';
+    exportedStatus(status, data, 'JSON exported successfully!');
   } catch (e) {
     console.error('JSON export error:', e);
     status.className = 'status error';
