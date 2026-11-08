@@ -96,6 +96,9 @@ mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; 
 #files-button svg.ic { width: 14px; height: 14px; }
 #files-menu { position: absolute; top: 46px; right: 16px; width: min(340px, calc(100vw - 32px)); max-height: 70vh; overflow-y: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 32px rgba(0, 0, 0, .18); padding: 6px; z-index: 5; }
 #files-menu[hidden] { display: none; }
+/* The project bar and the match bar share the top bar's layer and come after it, so while the list
+   hangs down over them the top bar goes above both. */
+#top:has(#files-menu:not([hidden])) { z-index: 3; }
 .files-lab { font-size: 12px; font-weight: 500; color: var(--mute); padding: 8px 10px 4px; }
 .files-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: 0; background: none; border-radius: 8px; padding: 6px 8px; cursor: pointer; font: inherit; color: inherit; }
 .files-row:hover, .files-row:focus-visible { background: var(--hover); outline: none; }
