@@ -369,27 +369,27 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.6.6
 
-- **Copy a whole file** - Upload and pasted-text popups, the file panel and the "Archive files" panel have a Copy button in their header. It copies the file's text, and in Preview it copies the source, not the rendered page. Images, PDFs and other non-text files have none. A large upload's Copy appears once its text has loaded.
-- **Underscores no longer turn Markdown italic** - A file named like `sept21_part1` in a Markdown heading made the rest of the file italic in Code view. An underscore inside a word now starts nothing, and italics or bold stop at a blank line, as in Markdown itself.
+- **Copy a whole file** - Upload and pasted-text popups, the file panel and the "Archive files" panel have a Copy button in their header. It copies the file's text, and in Preview it copies the source, not the rendered page. Images, PDFs and other non-text files have none. A large upload's Copy appears once its text has loaded. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+- **Underscores no longer turn Markdown italic** - A file named like `sept21_part1` in a Markdown heading made the rest of the file italic in Code view. An underscore inside a word now starts nothing, and italics or bold stop at a blank line, as in Markdown itself. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
 
 ### v1.6.5
 
-- **Preview scripts with `<!--` run** - A generated file whose script held `<!--` inside a regular expression with the `u` flag failed to run in the viewer's preview. It now runs.
-- **A large upload that can't load points to its copy** - If an upload's text can't load from `viewer-files/`, the popup says so and shows the upload's own file in `uploads/`, with an open link where the file type allows it.
-- **Reopening a large upload is instant** - Text that finished loading after its popup was closed is kept.
+- **Preview scripts with `<!--` run** - A generated file whose script held `<!--` inside a regular expression with the `u` flag failed to run in the viewer's preview. It now runs. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+- **A large upload that can't load points to its copy** - If an upload's text can't load from `viewer-files/`, the popup says so and shows the upload's own file in `uploads/`, with an open link where the file type allows it. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+- **Reopening a large upload is instant** - Text that finished loading after its popup was closed is kept. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
 
 ### v1.6.4
 
-- **Large uploads load when opened** - Upload text over 64 KB is no longer stored inside `viewer.html`. It goes into `viewer-files/` beside it, and loads when you open the upload. Search works as before, since it never read upload text. A test archive's viewer shrank from 81 to 44 MB and opens in under a second. Older archives get this when their viewer is rebuilt with `--force`.
-- **Pasted text is labeled** - Text pasted into a prompt shows as "Pasted text" in the viewer, numbered when a prompt has several, instead of "Untitled". An upload with no name shows the name of its saved file.
+- **Large uploads load when opened** - Upload text over 64 KB is no longer stored inside `viewer.html`. It goes into `viewer-files/` beside it, and loads when you open the upload. Search works as before, since it never read upload text. A test archive's viewer shrank from 81 to 44 MB and opens in under a second. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+- **Pasted text is labeled** - Text pasted into a prompt shows as "Pasted text" in the viewer, numbered when a prompt has several, instead of "Untitled". An upload with no name shows the name of its saved file. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
 
 ### v1.6.3
 
-- **Smaller viewers for mega-ZIPs** - A project shared by several chats is stored once in `viewer.html`, instead of once per chat. A test archive with four chats in one project shrank from 97 to 81 MB. Older archives get this when their viewer is rebuilt with `--force`.
+- **Smaller viewers for mega-ZIPs** - A project shared by several chats is stored once in `viewer.html`, instead of once per chat. A test archive with four chats in one project shrank from 97 to 81 MB. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
 
 ### v1.6.2
 
-- **Syntax colors in the viewer** - Labeled code blocks, plus files in Code view and text uploads, now have colors, in light and dark themes. Blocks are colored as they scroll into view, in the background, so a long chat stays quick. Blocks with no language label stay plain, as do blocks over 200 KB and any that take too long. Older archives get colors when their viewer is rebuilt with `--force`.
+- **Syntax colors in the viewer** - Labeled code blocks, plus files in Code view and text uploads, now have colors, in light and dark themes. Blocks are colored as they scroll into view, in the background, so a long chat stays quick. Blocks with no language label stay plain, as do blocks over 200 KB and any that take too long. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
 
 ### v1.6.1
 

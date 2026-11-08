@@ -158,7 +158,7 @@ The text of uploads over 64 KB is in `viewer-files/` beside `viewer.html`, and l
 
 Code blocks with a language label get syntax colors as they scroll into view, as do files in Code view and text uploads. Blocks with no label stay plain, as do blocks over 200 KB and any that take too long to color.
 
-Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
+Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". Popups and the file panel have a Copy button in their header for the whole file: it copies the file's text, and in Preview the source rather than the rendered page. When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
 
 What to know about previews of generated HTML:
 
@@ -166,6 +166,8 @@ What to know about previews of generated HTML:
 - Normal web requests from the preview are blocked.
 - The browser doesn't let the viewer block every route. A generated file that contains injected code could still send out its own text, and the `.js` and `.css` files from that chat, when you preview it.
 - So the viewer is not a security boundary for untrusted exports. Be careful previewing files from someone else's export. Your own exports of your own chats are the intended use.
+
+A viewer stays the version it was made with. To get later viewer fixes in an existing export, see [Updating a viewer](#updating-a-viewer).
 
 If `viewer.html` couldn't be built at all, the export still downloads and the status line says "viewer.html could not be built." If only some chats couldn't be added to it, `errors.txt` lists them under a `viewer` warning. The Markdown files are unaffected either way.
 
@@ -353,6 +355,23 @@ Things to know:
 - **Previews.** Added HTML and SVG get the same sandboxed preview as generated files, with the same limits listed under [Reading an export in the viewer](#reading-an-export-in-the-viewer). Be as careful with them as with files from someone else's export.
 - **Sibling files.** Pages added to an archive don't load their sibling files in the preview, so a page that links its own `.css`, `.js` or images shows without them.
 - **Open file.** The link appears only for documents, images, audio, video, archives and plain data files such as PDF, DOCX, PNG, MP4, ZIP, CSV and JSON. Other types, including HTML, can be previewed but not opened from the link.
+
+### Updating a viewer
+
+A `viewer.html` stays the version it was made with. When a newer release improves the viewer, such as syntax colors, Copy buttons or smaller files, exports you already have don't change. To bring one up to date, rebuild its viewer with the same tool:
+
+```bash
+# See what would be replaced: nothing is written
+node tools/build_viewer.js ~/Downloads/claude-takeout-2026-11-07 --force --dry-run
+
+# Replace it
+node tools/build_viewer.js ~/Downloads/claude-takeout-2026-11-07 --force
+```
+
+- **What it works on.** A single-chat export, a mega-ZIP or a folder holding many of either, as long as they are unzipped. For ZIPs, see [Adding a viewer to older archives](#adding-a-viewer-to-older-archives): they are extracted under `--out` first.
+- **What it changes.** Only `viewer.html`, `viewer-check.gif` and `viewer-files/`. Your chat files, Markdown, downloads and anything you added stay as they are.
+- **What it can't change.** The rebuilt viewer reads what the export already has on disk. Fixes to the export itself, such as a better Markdown file or a download that used to fail, need a fresh export from claude.ai.
+- **Which releases.** The changelog in `README.md` says "Older exports get this when their viewer is rebuilt with `--force`" on each viewer change.
 
 ---
 
