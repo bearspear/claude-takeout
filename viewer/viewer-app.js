@@ -152,7 +152,9 @@ function startColorWorker() {
 
 function nextColor() {
   if (colorsOff || colorJob) return;
-  const job = colorQueue.shift();
+  // A block that has left the page (another version, file or chat) isn't worth coloring.
+  let job;
+  do job = colorQueue.shift(); while (job && !job.node.isConnected);
   if (!job) return;
   try {
     if (!colorWorker) startColorWorker();
@@ -172,7 +174,7 @@ function nextColor() {
 // The text must come back exactly as it went in, so Copy and search see what the chat holds.
 function applyColors(job, html) {
   const { node, text } = job;
-  if (node.childElementCount || node.textContent !== text) return;
+  if (!node.isConnected || node.childElementCount || node.textContent !== text) return;
   const colored = document.createElement('code');
   colored.innerHTML = sanitizeHtml(`<span>${html}</span>`, new DOMParser());
   if (colored.textContent !== text.replace(/\r\n?/g, '\n')) return;
@@ -225,6 +227,7 @@ function renderText(block, sources) {
   if ((block.text.match(/[*_]/g) || []).length > EMPHASIS_LIMIT) {
     const plain = el('div', 'prose plain');
     plain.append(el('p', 'plain-note', PLAIN_NOTE), document.createTextNode(block.text));
+    addCitations(block.text, block.cites, sources);  // no markers in plain text, but the Sources list stays
     return plain;
   }
   const mark = placeholderMark(block.text);
@@ -590,7 +593,8 @@ function addedBox(chat, added) {
 
 // A part's text arrives through window.__archivePart, called by viewer-files/part-NNNN.js. Page code can't read files.
 const partsListed = new Set(); // the part numbers the data names
-const partsLoaded = new Map(); // n -> Promise<object|null>
+const partsLoaded = new Map(); // n -> Promise<object|null>, the most recently used last
+const PARTS_KEPT = 2; // a part is about 4 MB; older ones are dropped and load again if needed
 const partsWaiting = new Map(); // n -> resolve, only while its script is loading
 
 // Parts hold the text of added files and of large uploads.
@@ -614,7 +618,12 @@ function setupParts(data) {
 // The part's { key: text }, or null when it can't be loaded. Only a number from the data ever becomes a src.
 function loadPart(n) {
   if (!partsListed.has(n)) return Promise.resolve(null);
-  if (partsLoaded.has(n)) return partsLoaded.get(n);
+  if (partsLoaded.has(n)) {
+    const cached = partsLoaded.get(n);
+    partsLoaded.delete(n);
+    partsLoaded.set(n, cached);
+    return cached;
+  }
   const loading = new Promise(resolve => {
     partsWaiting.set(n, resolve);
     const script = el('script');
@@ -632,6 +641,7 @@ function loadPart(n) {
     document.head.append(script);
   });
   partsLoaded.set(n, loading);
+  while (partsLoaded.size > PARTS_KEPT) partsLoaded.delete(partsLoaded.keys().next().value);
   return loading;
 }
 
@@ -1059,7 +1069,15 @@ function switchTo(button) {
   if (leaf === null) return;
   const top = msg.getBoundingClientRect().top - document.getElementById('scroll').getBoundingClientRect().top;
   const next = chainFrom(chat.messages, leaf).find(m => m.parent === (chat.messages.find(x => x.id === msg.dataset.id) || {}).parent);
+  const hadFocus = button.contains(document.activeElement) || document.activeElement === button;
   navigate({ ...hash, leaf }, { anchor: next ? { id: next.id, top } : null });
+  // The control was rebuilt; keep keyboard focus on it, on the other arrow once this one is disabled.
+  if (hadFocus && next) {
+    const control = document.querySelector(`#chat .msg[data-id="${CSS.escape(next.id)}"] .branch`);
+    const same = control && control.querySelector(`button[data-dir="${button.dataset.dir}"]`);
+    const target = same && !same.disabled ? same : control && control.querySelector('button:not(:disabled)');
+    if (target) target.focus({ preventScroll: true });
+  }
 }
 
 function chatItem(chat) {
@@ -1120,6 +1138,12 @@ function tryFind() {
   if (!node) return;
   const { query } = find;
   find = null;
+  // An earlier search's highlight goes before this one is added.
+  for (const old of document.querySelectorAll('#chat mark')) {
+    const parent = old.parentNode;
+    old.replaceWith(...old.childNodes);
+    parent.normalize();
+  }
   let mark = highlightIn(node, query);
   if (!mark && node.querySelector('.colored')) {
     // Colors split code into pieces, and a match across them is skipped.

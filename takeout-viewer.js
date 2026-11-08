@@ -308,15 +308,18 @@
     return files;
   }
 
-  // files and files_v2 both list uploads; one may carry no UUID, so the name keys it. Once per key per message.
+  // files and files_v2 both list uploads. One with no UUID is keyed by its message and name, the name
+  // taken as extractUploadedFiles takes it (files: the path's name first; files_v2: file_name), so this
+  // matches viewerUploadKey in export-core.js. Once per key per message.
   function buildUploads(m, c) {
     const known = c.uploads || {};
     const seen = new Set();
     const out = [];
     const list = v => (Array.isArray(v) ? v : []).filter(Boolean);
-    for (const f of [...list(m.files), ...list(m.files_v2)]) {
+    const entries = [...list(m.files).map(f => [f, f.path ? baseName(f.path) : f.file_name]), ...list(m.files_v2).map(f => [f, f.file_name])];
+    for (const [f, keyName] of entries) {
       const name = f.file_name || baseName(f.path);
-      const key = f.file_uuid || name;
+      const key = f.file_uuid || (keyName ? `${m.uuid || ''}\n${keyName}` : '');
       if (!key || seen.has(key)) continue;
       seen.add(key);
       const hit = Object.prototype.hasOwnProperty.call(known, key) ? known[key] : null;

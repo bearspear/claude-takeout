@@ -817,7 +817,7 @@ test('uploads from files and files_v2 land on their message, once per key', () =
   const { c, of } = uploadChat(
     [{ file_uuid: 'u1', file_name: 'a.png' }, { path: '/mnt/user-data/uploads/old one.txt' }],
     [{ file_uuid: 'u1', file_name: 'a.png' }, { file_uuid: 'u2', file_name: 'b.pdf' }, { file_uuid: 'u3', file_name: 'gone.pdf' }]);
-  const ctx = { folder: 'A B', uploads: { u1: { path: 'uploads/p01_a.png', text: null }, u2: { path: 'uploads/p01_b.pdf', text: null }, 'old one.txt': { path: 'uploads/p01_old one.txt', text: 'hi' } } };
+  const ctx = { folder: 'A B', uploads: { u1: { path: 'uploads/p01_a.png', text: null }, u2: { path: 'uploads/p01_b.pdf', text: null }, 'm01\nold one.txt': { path: 'uploads/p01_old one.txt', text: 'hi' } } };  // no UUID: message and name
   const chat = buildViewerChat(c, ctx);
   assert.deepStrictEqual(of(chat).uploads, [
     { name: 'a.png', href: 'A%20B/uploads/p01_a.png', text: null },
@@ -884,6 +884,25 @@ test('snippets are about 80 characters with ellipses where cut', () => {
   const hit = searchChats(buildSearchIndex([{ id: 'l', title: 'L', project: null, messages: [T('l1', null, 'human', text)] }]), 'match')[0];
   assert.ok(hit.snippet.startsWith('\u2026') && hit.snippet.endsWith('\u2026') && hit.snippet.includes('MATCH'));
   assert.ok(hit.snippet.length <= 84);
+});
+
+test('groupChats keeps different projects with one name apart, and equal ones together', () => {
+  const chats = [
+    { id: 'a', title: 'a', project: { name: 'Research', instructions: '', docs: [{ name: 'x.md', text: 'one' }], files: [] }, messages: [] },
+    { id: 'b', title: 'b', project: { name: 'Research', instructions: '', docs: [{ name: 'y.md', text: 'two' }], files: [] }, messages: [] },
+    { id: 'c', title: 'c', project: { name: 'Research', instructions: '', docs: [{ name: 'x.md', text: 'one' }], files: [] }, messages: [] },
+  ];
+  const g = groupChats(chats);
+  assert.deepStrictEqual(g.projects.map(p => [p.name, p.chats.map(c => c.id)]), [['Research', ['a', 'c']], ['Research (2)', ['b']]]);
+});
+
+test('tree lookups stay fast on a long chat', () => {
+  const long = Array.from({ length: 4000 }, (_, i) => ({ id: 'm' + i, parent: i ? 'm' + (i - 1) : null, sender: i % 2 ? 'assistant' : 'human', at: String(i).padStart(6, '0') }));
+  const t0 = Date.now();
+  assert.strictEqual(leafUnder(long, 'm0'), 'm3999');
+  assert.strictEqual(switchBranch(long, 'm1', 1), null);
+  assert.deepStrictEqual(siblingsOf(long, 'm1'), { ids: ['m1'], index: 0 });
+  assert.ok(Date.now() - t0 < 150, `took ${Date.now() - t0} ms`);
 });
 
 test('groupChats puts project chats under their project only, by name', () => {

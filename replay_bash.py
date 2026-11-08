@@ -94,8 +94,10 @@ def message_chain(data: dict) -> list[dict]:
     if not leaf or leaf not in by_uuid:
         return messages
     chain = []
+    seen = set()
     u = leaf
-    while u and u in by_uuid:
+    while u and u in by_uuid and u not in seen:  # a parent loop ends the walk
+        seen.add(u)
         chain.append(by_uuid[u])
         u = by_uuid[u].get("parent_message_uuid")
     chain.reverse()

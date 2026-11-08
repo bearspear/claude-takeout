@@ -308,7 +308,7 @@ A chat that fails to build gets a `viewer` warning. A viewer that fails as a who
 - Popups and the file panel have a Copy button for a whole text file. It copies the source even in Preview.
 - Search reads titles, prompt and reply text, attachment names and text, and upload names. It never reads upload or file text, which is why that text can live in parts.
 - `start` parses the data script once and removes it, so the page doesn't keep the text beside the parsed copy.
-- A part loads when its upload is opened, through a `<script>` tag. A `file://` page can load scripts beside it but can't `fetch` them.
+- A part loads when its upload or file is opened, through a `<script>` tag. The last two loaded parts are kept (`PARTS_KEPT`); an older one loads again when needed. A `file://` page can load scripts beside it but can't `fetch` them.
 - Generated HTML and SVG files preview in a sandboxed `srcdoc` frame with a narrow CSP. Sibling `.js` and `.css` files are inlined by `inlineSiblings`.
 
 The page's CSP allows no network. `file:` is added to `script-src` only when parts exist (`fileScripts`).
