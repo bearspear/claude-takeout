@@ -1401,3 +1401,65 @@ test('uploadName falls back to the saved file name, never to Untitled itself', (
   assert.strictEqual(uploadName({ name: '', href: 'uploads/%E0%A4%A' }), '%E0%A4%A');
   assert.strictEqual(uploadName({ name: '', href: null }), '');
 });
+
+// ---- second review: viewer search, match bar and Files list ----
+test('countTerms jumps with indexOf and counts as the character scan did', () => {
+  const slow = (text, terms) => {
+    const lower = String(text).toLowerCase();
+    const wanted = terms.filter(Boolean).slice().sort((a, b) => b.length - a.length);
+    let n = 0;
+    for (let i = 0; i < lower.length;) { const t = wanted.find(w => lower.startsWith(w, i)); if (t) { n++; i += t.length; } else i++; }
+    return n;
+  };
+  const texts = ['aaaa', 'the theme then', 'surveys survey SURVEY', 'abcabcab', '', 'x'.repeat(50)];
+  const sets = [['a'], ['aa'], ['the', 'them'], ['survey', 'surveys'], ['bca', 'abc', 'cab'], ['xx', 'xxx']];
+  for (const t of texts) for (const s of sets) assert.strictEqual(countTerms(t, s), slow(t, s), `${t} / ${s}`);
+});
+
+test('findPlan leaves out math and link addresses, which the conversation does not show as text', () => {
+  const { shownText } = require('../viewer/viewer-logic.js');
+  assert.strictEqual(shownText('See [the docs](https://example.com/docs) for docs, and $x$ here'), 'See the docs for docs, and   here');
+  assert.strictEqual(shownText('`[a](b)` and ![pic](https://e.com/p.png)'), '`[a](b)` and  ');
+  assert.strictEqual(shownText('Bare https://github.com/x stays'), 'Bare https://github.com/x stays');
+  const chat = { messages: [{ id: 'm', blocks: [{ t: 'text', text: 'See [the docs](https://example.com/docs) for docs, and $x$ here' }] }] };
+  assert.strictEqual(findPlan(chat, 'docs').total, 2);
+  assert.strictEqual(findPlan(chat, 'example').total, 0);
+});
+
+test('foldCase maps lowercase offsets back to the text when lowercasing changes its length', () => {
+  const { foldCase } = require('../viewer/viewer-logic.js');
+  const { lower, at } = foldCase('İzmir trip');
+  const i = lower.indexOf('trip');
+  assert.strictEqual('İzmir trip'.slice(at[i], at[i + 4]), 'trip');
+  assert.strictEqual(foldCase('plain').at, null);
+});
+
+test('Files list: off-branch artifacts stay outputs, a written file that was sent is listed once, off-branch presents point at their own branch', () => {
+  const use = (id, name, input) => ({ type: 'tool_use', id, name, input });
+  const res = (id, name, extra = {}) => ({ type: 'tool_result', tool_use_id: id, name, content: [], ...extra });
+  const art = id => use(id, 'artifacts', { command: 'create', id: 'plan', title: 'Plan', type: 'text/markdown', content: '# ' + id });
+  const twoBranches = (off, on) => ({ uuid: 'c', name: 'c', current_leaf_message_uuid: 'a2', chat_messages: [
+    { uuid: 'h', parent_message_uuid: null, sender: 'human', created_at: '2026-01-01T00:00:00Z', content: [{ type: 'text', text: 'go' }] },
+    { uuid: 'a1', parent_message_uuid: 'h', sender: 'assistant', created_at: '2026-01-01T00:00:01Z', content: off },
+    { uuid: 'a2', parent_message_uuid: 'h', sender: 'assistant', created_at: '2026-01-01T00:00:02Z', content: on },
+  ] });
+  const lists = data => { const f = chatFiles(buildViewerChat(data, ctxFor(data))); return { outputs: f.outputs.map(o => o.name).sort(), working: f.working.map(o => o.name).sort() }; };
+  assert.deepStrictEqual(lists(twoBranches([art('1')], [art('2')])), { outputs: ['Plan', 'Plan.md'], working: [] });
+
+  const present = (id, p) => [use(id, 'present_files', { filepaths: [p] }), res(id, 'present_files')];
+  const page = (id, text) => use(id, 'create_file', { path: '/home/claude/page.html', file_text: text });
+  assert.deepStrictEqual(lists(twoBranches([page('1', 'old'), ...present('2', '/home/claude/page.html')], [page('3', 'new'), ...present('4', '/home/claude/page.html')])),
+    { outputs: ['page.html', 'page.html'], working: [] });
+  const old = [use('5', 'create_file', { path: '/home/claude/old.html', file_text: 'o' }), ...present('6', '/home/claude/old.html')];
+  assert.deepStrictEqual(lists(twoBranches(old, [page('7', 'new')])), { outputs: ['old.html'], working: ['page.html'] });
+
+  const sent = { uuid: 'c', name: 'c', current_leaf_message_uuid: 'a', chat_messages: [
+    { uuid: 'h', parent_message_uuid: null, sender: 'human', created_at: '2026-01-01T00:00:00Z', content: [{ type: 'text', text: 'go' }] },
+    { uuid: 'a', parent_message_uuid: 'h', sender: 'assistant', created_at: '2026-01-01T00:00:01Z', content: [
+      use('w', 'Write', { file_path: '/root/report.md', content: '# r' }),
+      use('s', 'SendUserFile', { files: ['/root/report.md'] }),
+      res('s', 'SendUserFile', { file_deliveries: [{ file_uuid: 'u-1', path: '/root/report.md' }] }),
+    ] },
+  ] };
+  assert.deepStrictEqual(lists(sent), { outputs: ['report.md'], working: [] });
+});

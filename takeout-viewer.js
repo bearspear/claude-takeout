@@ -211,7 +211,10 @@
     // Files Claude shared, as claude.ai's own Outputs list has them: sent, presented, saved under
     // /mnt/user-data/outputs, or made with the artifacts tool. The rest are working files.
     const sharedKeys = new Set();
-    const isShared = key => /^(artifact:|doc:|deliver:|name:|missing:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
+    // Off-branch keys are 'x:<message>:<key>', and count by the key they wrap.
+    const isShared = key => /^(x:[^:]*:)?(artifact:|doc:|deliver:|name:|missing:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
+    // Off the active branch: the last off-branch file at each path, for a present_files there.
+    const offBranch = new Map(); // path -> { key, build }
 
     source.forEach((m, mi) => {
       const message = messages[mi];
@@ -219,8 +222,13 @@
       const at = active ? pos.get(m.uuid) : null;
       const touches = new Map(); // fileKey -> { after, build, version }; the last block touching a file wins
       const touch = (after, fileKey, build, version) => { touches.delete(fileKey); touches.set(fileKey, { after, build, version }); };
-      const contentKey = (after, k, name, text, mime) => touch(after, k, () => ({ name, kind: kindFor(name, mime, true), versions: [{ label: '', text, href: null }] }), 0);
-      const missingKey = (after, k, name) => touch(after, k, () => missingFile(name), 0);
+      const offKey = (k, build) => { if (k.startsWith('x:')) offBranch.set(k.slice(k.indexOf(':', 2) + 1), { key: k, build }); };
+      const contentKey = (after, k, name, text, mime) => {
+        const build = () => ({ name, kind: kindFor(name, mime, true), versions: [{ label: '', text, href: null }] });
+        offKey(k, build);
+        touch(after, k, build, 0);
+      };
+      const missingKey = (after, k, name) => { const build = () => missingFile(name); offKey(k, build); touch(after, k, build, 0); };
 
       for (const b of Array.isArray(m.content) ? m.content : []) {
         if (!b || b.type !== 'tool_use') continue;
@@ -270,6 +278,13 @@
           for (const p of paths) {
             if (typeof p !== 'string' || !p) continue;
             const base = baseName(p);
+            // Off the active branch, a file that branch made is the one presented, not the active copy.
+            const off = active ? null : offBranch.get(p);
+            if (off) {
+              sharedKeys.add(off.key);
+              touch(after, off.key, off.build, 0);
+              continue;
+            }
             let entry = hasOwn(index, p) ? index[p] : null;
             if (!entry) entry = Object.values(index).find(e => e && e.filename === base) || null;
             if (entry) {
@@ -290,6 +305,13 @@
             if (!active || !hasOwn(deliveries, d.file_uuid)) {
               sharedKeys.add('x:' + m.uuid + ':' + d.path);
               missingKey(after, 'x:' + m.uuid + ':' + d.path, baseName(d.path));
+              continue;
+            }
+            // A file Claude wrote with a file tool and then sent is that file, listed once as an output.
+            const written = hasOwn(index, d.path) ? index[d.path] : null;
+            if (written) {
+              sharedKeys.add(written.path);
+              touch(after, written.path, () => entryFile(written.filename, written.versions, null), Math.max(versionAsOf(written, at), 0));
               continue;
             }
             const uuids = deliveredUuids.get(d.path) || [];
