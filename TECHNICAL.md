@@ -308,7 +308,7 @@ A chat that fails to build gets a `viewer` warning. A viewer that fails as a who
 - Math renders with KaTeX.
 - Syntax colors run in a blob worker, block by block as they scroll into view, and stop after `HIGHLIGHT_TIMEOUT`, since highlight.js can hang on some input. `tameMarkdown` keeps an underscore inside a word from turning the rest of a Markdown file italic.
 - Popups and the file panel have a Copy button for a whole text file. It copies the source even in Preview.
-- Search reads titles, prompt and reply text, attachment names and text, and upload names. It never reads upload or file text, which is why that text can live in parts.
+- Search reads titles, prompt and reply text, attachment names and text, and upload names. It never reads upload or file text, which is why that text can live in parts. `parseQuery` turns a query into words that must all appear, `"phrases"`, `OR` alternatives and `-exclusions`; `searchChats` matches each title or message against it; `groupHits` groups the hits by chat and ranks them (title match, then most messages, then newest).
 - `start` parses the data script once and removes it, so the page doesn't keep the text beside the parsed copy.
 - A part loads when its upload or file is opened, through a `<script>` tag. The last two loaded parts are kept (`PARTS_KEPT`); an older one loads again when needed. A `file://` page can load scripts beside it but can't `fetch` them.
 - Generated HTML and SVG files preview in a sandboxed `srcdoc` frame with a narrow CSP. Sibling `.js` and `.css` files are inlined by `inlineSiblings`.

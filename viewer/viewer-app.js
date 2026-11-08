@@ -1105,20 +1105,25 @@ function renderSidebar(chats) {
 }
 
 // ---- Search ----
-const RESULT_LIMIT = 50;
+const GROUP_LIMIT = 200; // chats listed; each brings up to three snippets
 let searchIndex = null;
-let find = null; // { msg, query, gen }: the highlight waiting for its message to be drawn
+let find = null; // { msg, terms, gen }: the highlight waiting for its message to be drawn
 
 // Wraps the first match in a text node of the message with <mark>. A match across formatting is skipped.
-function highlightIn(node, query) {
-  const q = query.trim().toLowerCase();
-  if (!q) return null;
+// Marks the first occurrence in node of any of terms (lowercase), and returns the mark.
+function highlightIn(node, terms) {
+  const wanted = (terms || []).filter(Boolean);
+  if (!wanted.length) return null;
   const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
   for (let text = walker.nextNode(); text; text = walker.nextNode()) {
     if (text.parentElement.closest('button, time, .branch, .code-head, script, style')) continue;
     const lower = text.data.toLowerCase();
     if (lower.length !== text.data.length) continue;
-    const at = lower.indexOf(q);
+    let at = -1, q = '';
+    for (const t of wanted) {
+      const i = lower.indexOf(t);
+      if (i >= 0 && (at < 0 || i < at)) { at = i; q = t; }
+    }
     if (at < 0) continue;
     const middle = text.splitText(at);
     middle.splitText(q.length);
@@ -1136,7 +1141,7 @@ function tryFind() {
   if (find.gen !== renderGeneration) { find = null; return; }
   const node = document.getElementById('chat').querySelector(`.msg[data-id="${CSS.escape(find.msg)}"]`);
   if (!node) return;
-  const { query } = find;
+  const { terms } = find;
   find = null;
   // An earlier search's highlight goes before this one is added.
   for (const old of document.querySelectorAll('#chat mark')) {
@@ -1144,16 +1149,17 @@ function tryFind() {
     old.replaceWith(...old.childNodes);
     parent.normalize();
   }
-  let mark = highlightIn(node, query);
+  let mark = highlightIn(node, terms);
   if (!mark && node.querySelector('.colored')) {
     // Colors split code into pieces, and a match across them is skipped.
     node.querySelectorAll('.colored').forEach(code => { code.textContent = code.textContent; code.classList.remove('colored'); });
-    mark = highlightIn(node, query);
+    mark = highlightIn(node, terms);
   }
   (mark || node).scrollIntoView({ block: 'center' });
 }
 
-function openHit(hit, query) {
+// terms: the lowercase words to highlight in the message.
+function openHit(hit, terms) {
   const chat = chatsById.get(hit.chat);
   if (!chat) return;
   setDrawer(false);
@@ -1162,52 +1168,96 @@ function openHit(hit, query) {
   // A message on the branch already open stays on it; otherwise take the branch under the message.
   const onBranch = now.chat === chat.id && chainFrom(chat.messages, now.leaf).some(m => m.id === hit.msg);
   const leaf = onBranch ? now.leaf : leafUnder(chat.messages, hit.msg);
-  find = { msg: hit.msg, query, gen: null };
+  find = { msg: hit.msg, terms, gen: null };
   navigate({ chat: chat.id, leaf });
   if (!find) return;
   find.gen = renderGeneration;
   tryFind();
 }
 
+// text with the search words in <mark>, as nodes. Matched words are shown, never parsed as HTML.
+function withMarks(text, terms) {
+  return markTerms(text, terms).map(p => (p.hit ? el('mark', '', p.text) : document.createTextNode(p.text)));
+}
+
+// One group per chat, best first; a title button that opens its first match (or the chat), and up to
+// three snippets, each opening its message.
 function showResults(query) {
   const holder = document.getElementById('results');
   const q = query.trim();
   holder.hidden = !q;
   document.getElementById('recents').hidden = !!q;
+  document.querySelector('.find .clear').hidden = !query;
   if (!q) { holder.replaceChildren(); return; }
   if (!searchIndex) searchIndex = buildSearchIndex(allChats);
-  const hits = searchChats(searchIndex, q, RESULT_LIMIT + 1);
-  const shownHits = hits.slice(0, RESULT_LIMIT);
-  const note = !hits.length ? 'No matches' : hits.length > RESULT_LIMIT ? `Showing first ${RESULT_LIMIT} results` : `${hits.length} result${hits.length === 1 ? '' : 's'}`;
+  const groups = groupHits(searchChats(searchIndex, q, Infinity));
+  const messages = groups.reduce((n, g) => n + g.count, 0);
+  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
+  const note = !groups.length ? 'No matches' : `${plural(groups.length, 'chat')} · ${plural(messages, 'message')}`;
   const list = el('div', 'list');
-  for (const hit of shownHits) {
-    const chat = chatsById.get(hit.chat);
-    const button = el('button', 'hit');
-    button.type = 'button';
-    button.append(el('b', '', (chat && chat.title) || 'Untitled'));
-    if (hit.msg !== null) button.append(el('small', '', hit.snippet));
-    button.addEventListener('click', () => openHit(hit, q));
-    list.append(button);
+  for (const g of groups.slice(0, GROUP_LIMIT)) {
+    const chat = chatsById.get(g.chat);
+    const box = el('div', 'group');
+    const title = el('button', 'group-title');
+    title.type = 'button';
+    const name = el('b');
+    name.append(...withMarks((chat && chat.title) || 'Untitled', g.terms));
+    title.append(name);
+    if (g.count) title.append(el('small', '', plural(g.count, 'message')));
+    const first = g.snippets[0] || { chat: g.chat, msg: null };
+    title.addEventListener('click', () => openHit(first, g.terms));
+    box.append(title);
+    for (const hit of g.snippets) {
+      const snip = el('button', 'snip');
+      snip.type = 'button';
+      snip.append(...withMarks(hit.snippet, hit.terms));
+      snip.addEventListener('click', () => openHit(hit, hit.terms));
+      box.append(snip);
+    }
+    list.append(box);
   }
-  holder.replaceChildren(el('div', 'lab', note), list);
+  const shown = groups.length > GROUP_LIMIT ? [el('div', 'lab', `Showing the first ${GROUP_LIMIT} chats`)] : [];
+  holder.replaceChildren(el('div', 'lab', note), list, ...shown);
   holder.scrollTop = 0;
 }
 
 function setupSearch() {
   const input = document.querySelector('.find input');
+  const clear = document.querySelector('.find .clear');
   let timer = 0;
   input.disabled = false;
+  const reset = () => { clearTimeout(timer); input.value = ''; showResults(''); };
   input.addEventListener('focus', () => { if (!searchIndex) searchIndex = buildSearchIndex(allChats); });
   input.addEventListener('input', () => {
     clearTimeout(timer);
-    if (!input.value.trim()) showResults('');
+    if (!input.value.trim()) showResults(input.value);
     else timer = setTimeout(() => showResults(input.value), 120);
   });
+  clear.addEventListener('click', () => { reset(); input.focus(); });
+  // Escape clears; ArrowDown goes to the first result, and the arrows move between results.
+  const results = () => [...document.querySelectorAll('#results button')];
   input.addEventListener('keydown', e => {
-    if (e.key !== 'Escape') return;
-    clearTimeout(timer);
-    input.value = '';
-    showResults('');
+    if (e.key === 'Escape') { e.preventDefault(); reset(); }
+    else if (e.key === 'ArrowDown' && results().length) { e.preventDefault(); results()[0].focus(); }
+  });
+  document.getElementById('results').addEventListener('keydown', e => {
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp' && e.key !== 'Escape') return;
+    e.preventDefault();
+    if (e.key === 'Escape') { input.focus(); return; }
+    const all = results();
+    const at = all.indexOf(document.activeElement) + (e.key === 'ArrowDown' ? 1 : -1);
+    if (at < 0) input.focus();
+    else if (at < all.length) all[at].focus();
+  });
+  // / anywhere outside a text field puts the cursor in the search box.
+  document.addEventListener('keydown', e => {
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+    const t = e.target;
+    if (t && (t.closest('input, textarea, select, [contenteditable]') || popup)) return;
+    e.preventDefault();
+    setDrawer(true);
+    input.focus();
+    input.select();
   });
 }
 

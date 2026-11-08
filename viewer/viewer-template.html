@@ -57,6 +57,18 @@ svg.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor
 .hit:hover { background: var(--hover); }
 .hit b { display: block; font: 500 13.5px/1.4 var(--sans); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .hit small { display: block; font-size: 12.5px; line-height: 1.4; color: var(--mute); overflow-wrap: anywhere; }
+.find .clear { all: unset; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px; color: var(--mute); cursor: pointer; }
+.find .clear[hidden] { display: none; }
+.find .clear:hover, .find .clear:focus-visible { background: var(--hover); color: var(--ink); }
+.find .clear svg.ic { width: 13px; height: 13px; }
+.group { padding: 2px 0 6px; }
+.group-title, .snip { display: block; width: 100%; text-align: left; border: 0; background: none; border-radius: 8px; cursor: pointer; font: inherit; }
+.group-title { padding: 6px 10px 2px; }
+.group-title b { display: block; font: 500 13.5px/1.4 var(--sans); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.group-title small { display: block; font-size: 11.5px; color: var(--mute); }
+.snip { padding: 3px 10px 3px 18px; font-size: 12.5px; line-height: 1.4; color: var(--mute); overflow-wrap: anywhere; }
+.group-title:hover, .snip:hover, .group-title:focus-visible, .snip:focus-visible { background: var(--hover); outline: none; }
+#results mark { background: none; color: var(--ink); font-weight: 600; }
 mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; padding: 0 1px; }
 .pill { font-size: 12px; color: var(--mute); padding: 11px 20px 13px; border-top: 1px solid var(--line); }
 
@@ -317,6 +329,7 @@ button.chip:hover { border-color: var(--line-strong); }
     <label class="find">
       <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.4-4.4"/></svg>
       <input type="text" placeholder="Search all chats" aria-label="Search all chats" autocomplete="off">
+      <button class="clear" type="button" aria-label="Clear search" title="Clear search (Esc)" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </label>
     <div id="recents">
       <div class="lab">Recents</div>

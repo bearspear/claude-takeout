@@ -79,8 +79,8 @@ function conversation() {
   // Search highlights don't pile up.
   const search = async q => {
     await page.fill('.find input', q);
-    await page.waitForFunction(word => [...document.querySelectorAll('#results .hit small')].some(h => h.textContent.toLowerCase().includes(word)), q);
-    await page.locator('#results .hit', { has: page.locator('small') }).first().click();
+    await page.waitForFunction(word => [...document.querySelectorAll('#results .snip')].some(h => h.textContent.toLowerCase().includes(word)), q);
+    await page.locator('#results .snip').first().click();
     await page.waitForFunction(word => [...document.querySelectorAll('#chat mark')].some(m => m.textContent.toLowerCase() === word), q, { timeout: 4000 });
   };
   await search('zebrafinch');
