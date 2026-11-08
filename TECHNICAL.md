@@ -1,870 +1,368 @@
 # Claude Takeout - Technical Documentation
 
-> **Outdated on data capture:** claude.ai no longer loads conversations through requests the extension can read, so conversation capture was removed. Conversations now come from the REST API, and `injected.js` only provides an org ID fallback. See `CLAUDE.md` for the current design.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.5.
 
-This document provides a comprehensive technical writeup of how Claude Takeout extracts and processes conversation data from Claude.ai.
+This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
 ## Table of Contents
 
-1. [Data Capture Methods](#data-capture-methods)
-2. [JSON Structure Overview](#json-structure-overview)
-3. [Message Chain Resolution](#message-chain-resolution)
-4. [Content Block Types](#content-block-types)
-5. [Artifact Extraction](#artifact-extraction)
-6. [File Handling](#file-handling)
-7. [Web Search & Citations](#web-search--citations)
-8. [Metadata Extraction](#metadata-extraction)
+1. [Getting the data](#getting-the-data)
+2. [JSON structure](#json-structure)
+3. [Message chain resolution](#message-chain-resolution)
+4. [Content blocks](#content-blocks)
+5. [Artifact extraction and versioning](#artifact-extraction-and-versioning)
+6. [Files](#files)
+7. [Web search and citations](#web-search-and-citations)
+8. [Metadata](#metadata)
+9. [ZIP export](#zip-export)
+10. [Error reporting](#error-reporting)
+11. [Bash mutations and replay_bash.py](#bash-mutations-and-replay_bashpy)
+12. [The offline viewer](#the-offline-viewer)
+13. [Viewers for older archives](#viewers-for-older-archives)
+14. [Security](#security)
+15. [Limitations](#limitations)
+16. [API endpoints](#api-endpoints)
 
 ---
 
-## Data Capture Methods
+## Getting the data
 
-The extension uses two complementary methods to capture conversation data:
+claude.ai loads conversations over an RPC stream (`/claudeai-rpc/anthropic.bard.api.v1alpha.ConversationService/StreamTimeline`) that the extension can't read. Earlier versions captured conversations by wrapping the page's `fetch`; that no longer sees anything and was removed. All conversation data now comes from the REST API, called from the extension with the user's own session cookies (`credentials: 'include'`). There is no API key and no server of ours.
 
-### 1. Fetch Interception (Real-time Capture)
-
-**File:** `injected.js`
-
-The extension injects a script into the Claude.ai page that hooks into `window.fetch`:
-
-```javascript
-const originalFetch = window.fetch;
-window.fetch = async function(...args) {
-  const response = await originalFetch.apply(this, args);
-
-  // Clone response to read body without consuming it
-  const clone = response.clone();
-  const url = args[0]?.url || args[0];
-
-  // Intercept conversation data responses
-  if (url.includes('/chat_conversations/') && !url.includes('/conversations/')) {
-    const data = await clone.json();
-    // Post to content script
-    window.postMessage({ type: 'CLAUDE_CONVERSATION_DATA', data }, '*');
-  }
-
-  return response;
-};
+```
+claude.ai tab                           popup.js (popup or side panel)
+├─ injected.js (page world)             ├─ reads the chat ID from the tab URL
+│    reads the org ID from fetch URLs   ├─ asks content.js for that chat
+│         │ postMessage                 ├─ extracts, transforms, writes the ZIP
+│         ▼                             └─ downloads it
+└─ content.js (isolated world)  ◀── chrome messaging ──┘
+     resolves the org ID, calls the REST API
 ```
 
-This captures:
-- Full conversation loads (`GET /api/organizations/{orgId}/chat_conversations/{uuid}`)
-- Real-time updates as messages stream in
-
-### 2. Direct API Calls (Bulk Export)
-
-**File:** `popup.js`
-
-For bulk export, the extension makes authenticated requests using the user's session cookies:
-
-```javascript
-// List all conversations
-const listUrl = `https://claude.ai/api/organizations/${orgId}/chat_conversations`;
-const response = await fetch(listUrl, { credentials: 'include' });
-const conversations = await response.json();
-
-// Fetch each conversation's full data
-for (const conv of conversations) {
-  const fullUrl = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${conv.uuid}`;
-  const data = await fetch(fullUrl, { credentials: 'include' }).then(r => r.json());
-}
-```
+- **Org ID:** `content.js`'s `getActiveOrgId` reads the `lastActiveOrg` cookie first, then the ID `injected.js` saw in a request URL, then the one stored from an earlier visit.
+- **One chat:** `requestData` matches `/chat/<uuid>` in the tab URL. Each export button calls `loadConversationForExport`, which fetches the chat again through `content.js`'s `fetchConversation`, and fails rather than export an older copy.
+- **Full payload:** `fetchConversation` adds `?tree=True&rendering_mode=messages&render_all_tools=true`, which returns every branch and the rendered tool calls.
+- **Project name:** a payload often has `project_uuid` but no `project.name`. `ensureProjectName` fetches the project and sets `data.project = { uuid, name }` before the filename is made. Every single-chat handler and both bulk loops call it.
+- **All chats:** `fetchAllConversations` lists the chats, and the bulk exports fetch each one in turn, 300 ms apart.
+- **Stale tabs:** a tab open across an extension reload has no working content script. `sendToTab` injects `content.js` again on a connection error.
 
 ---
 
-## JSON Structure Overview
+## JSON structure
 
-A Claude conversation JSON has this top-level structure:
+Top level:
 
 ```javascript
 {
   "uuid": "7cdf01ac-dda9-4910-982c-fd498973a1c6",
   "name": "Conversation Title",
-  "model": "claude-sonnet-4-5-20250929",           // May be absent
+  "model": "claude-sonnet-4-5-20250929",       // may be absent
   "created_at": "2025-11-28T17:05:46.423148+00:00",
   "updated_at": "2025-11-28T17:11:07.540785+00:00",
-  "current_leaf_message_uuid": "019acb72-5e3e-77e7-97b9-edd3e3040574",
-  "is_starred": false,
+  "current_leaf_message_uuid": "019acb72-...",
   "settings": {
     "enabled_web_search": true,
-    "paprika_mode": "extended",      // "extended" = extended thinking, "normal" = thinking
-    "preview_feature_uses_artifacts": true,
-    // ... other feature flags
+    "paprika_mode": "extended",                // "extended", "normal", or absent
+    // other feature flags
   },
-  "chat_messages": [
-    // Array of all messages (including branches)
-  ]
+  "project_uuid": "...",                       // when the chat is in a project
+  "project": { "uuid": "...", "name": "..." }, // sometimes; see ensureProjectName
+  "chat_messages": [ /* every message, every branch */ ]
 }
 ```
 
-### Key Fields
-
-| Field | Description |
-|-------|-------------|
-| `uuid` | Unique conversation identifier |
-| `name` | Auto-generated or user-set title |
-| `model` | Model identifier (e.g., `claude-sonnet-4-5-20250929`) |
-| `current_leaf_message_uuid` | Points to the last message in the active branch |
-| `settings.paprika_mode` | Thinking mode: `"extended"`, `"normal"`, or absent |
-| `chat_messages` | Flat array of ALL messages, including regenerated/branched ones |
-
----
-
-## Message Chain Resolution
-
-### The Problem
-
-Claude supports message regeneration and conversation branching. The `chat_messages` array contains ALL messages ever created, including abandoned branches. Simply iterating through the array would include orphaned messages.
-
-### The Solution: Tree Traversal
-
-Each message has a `parent_message_uuid` field forming a tree structure:
+Each message:
 
 ```javascript
 {
-  "uuid": "019acb6d-93d9-74b9-836a-d7a259c0d110",
-  "parent_message_uuid": "019acb6d-93d9-74b9-836a-d7a11344302d",
-  "sender": "assistant",
-  // ...
+  "uuid": "msg-uuid",
+  "parent_message_uuid": "previous-msg-uuid",
+  "sender": "human" | "assistant",
+  "created_at": "ISO timestamp",
+  "content": [ /* content blocks */ ],
+  "attachments": [ /* pasted text, with extracted_content */ ],
+  "files": [ /* older uploads */ ],
+  "files_v2": [ /* newer uploads */ ]
 }
 ```
 
-The `current_leaf_message_uuid` at the conversation level points to the active branch's final message.
+| Field | Meaning |
+|---|---|
+| `current_leaf_message_uuid` | The last message of the branch the user is on. |
+| `settings.paprika_mode` | Thinking mode: `"extended"`, `"normal"`, or absent. |
+| `chat_messages` | A flat list of every message ever made, including regenerated ones. |
+
+---
+
+## Message chain resolution
+
+Regenerating a response makes a branch, so `chat_messages` holds a tree linked by `parent_message_uuid`. `getMessageChain(data)` in `export-core.js` returns the branch the user is on:
+
+1. Index the messages by `uuid`.
+2. Start at `current_leaf_message_uuid` and follow `parent_message_uuid` until it leaves the list.
+3. Reverse, for chronological order.
+
+If the leaf is missing or unknown, it returns `chat_messages` as given.
+
+Everything that renders the conversation uses this chain. A few whole-chat scans, such as finding uploads or project files Claude read, go through every message instead, since branch order doesn't matter there. The viewer keeps every branch and lets the reader switch between them.
+
+---
+
+## Content blocks
+
+Each message's `content` is a list of typed blocks:
+
+| `type` | Key fields | Notes |
+|---|---|---|
+| `text` | `text`, `citations[]` | See [citations](#web-search-and-citations). |
+| `thinking` | `thinking`, `summaries[]`, `cut_off` | The last summary is the label shown. Exported under "Thought process" when `includeThinking` is on. |
+| `tool_use` | `id`, `name`, `input` | Tool calls. |
+| `tool_result` | `tool_use_id`, `name`, `content[]`, `is_error` | Match a result to its call by `tool_use_id`, not by position. |
+
+Tools the exporter understands:
+
+| `name` | `input` | Used for |
+|---|---|---|
+| `create_file` | `path`, `file_text` | Starts or replaces an artifact. |
+| `str_replace` | `path`, `old_str`, `new_str` | Edits an artifact. |
+| `rewrite`, `create_or_overwrite` | `path`, `file_text` or `content` | Replaces an artifact. |
+| `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Newer names for the same two operations. |
+| `artifacts` | `command` (`create`, `update`), `id`, `title`, `type`, `content` | Older artifact tool, keyed `artifact:<id or title>`. |
+| `bash_tool` / `Bash` | `command` | A `cat > path << DELIM` heredoc counts as a file write. Other changes are flagged; see [bash mutations](#bash-mutations-and-replay_bashpy). |
+| `present_files` | `filepaths[]`; result has `local_resource` items | Files Claude showed the user; downloaded when replay didn't make them. |
+| `SendUserFile` | `files[]`; result has `file_deliveries[]` | Files Claude sent; downloaded by UUID. |
+| `view` / `read_file` | `path` | Its result may hold the text of an upload or project file. |
+| `web_search`, `web_fetch` | `query`, `url` | Sources and citations. |
+
+`convertToMarkdown` renders all of them, with fallbacks for tools it doesn't know.
+
+---
+
+## Artifact extraction and versioning
+
+`extractArtifacts(data, errorCollector?, index?)` in `export-core.js` rebuilds every file Claude wrote, at every turn where it changed. `extract_artifacts.py` is a stdlib-only Python port with byte-identical output. Keep the two in sync.
 
 **Algorithm:**
 
-```javascript
-function getMessageChain(data) {
-  const messages = data.chat_messages || [];
-  const leafUuid = data.current_leaf_message_uuid;
+1. Walk `getMessageChain(data)` in order.
+2. Keep `state[key] = { current, basename, versions, editedThisTurn }`. The key is the full path for file tools and heredocs, and `artifact:<id-or-title>` for the `artifacts` tool.
+3. Skip file tools whose `tool_result` has `is_error`, since they changed nothing. Bash commands are never skipped, because a failed command can still have written its heredoc.
+4. Apply each call:
+   - A write (`create_file`, `rewrite`, `Write`, `artifacts create|update`, heredoc) sets `current`.
+   - An edit (`str_replace`, `Edit`) needs `old_str` exactly once in `current`, as the real tool does. With 0 or more than 1 matches, the edit is skipped and a `str_replace_failed` warning is recorded. The warning is cleared if the file was later downloaded in its final state.
+5. At the end of each message, every key edited in it gets a snapshot pushed onto `versions`.
+6. Write out:
+   - one version → `<base><ext>`
+   - several → `<base>_v1<ext>` … `<base>_vN<ext>`, plus `<base><ext>` holding the final state
+7. Two keys with the same basename get `_2`, `_3`, … and an `artifact_basename_collision` warning.
 
-  // Build lookup maps
-  const byUuid = new Map();
-  const byParent = new Map();
+Snapshots are per turn, not per edit, because a turn is where Claude has "finished editing for now". A chat with 11 edits over 2 turns gives 2 useful versions instead of 12.
 
-  for (const msg of messages) {
-    byUuid.set(msg.uuid, msg);
-    if (!byParent.has(msg.parent_message_uuid)) {
-      byParent.set(msg.parent_message_uuid, []);
-    }
-    byParent.get(msg.parent_message_uuid).push(msg);
-  }
+`artifacts` tool filenames come from `typeToExt` (a MIME type to extension map, `.txt` when unknown) applied to the title or ID.
 
-  // Find leaf message
-  let leaf = byUuid.get(leafUuid);
-  if (!leaf) {
-    // Fallback: find message with highest index
-    leaf = messages.reduce((a, b) => (b.index > a.index ? b : a), messages[0]);
-  }
+When `index` is an object, it is filled with `{ key: { path, filename, versions, messages } }`, where `messages` lists the message that made each version. The viewer uses it to link tool calls to file versions.
 
-  // Walk backwards to root
-  const chain = [];
-  let current = leaf;
-  while (current) {
-    chain.unshift(current);
-    current = byUuid.get(current.parent_message_uuid);
-  }
-
-  return chain;
-}
-```
-
-**Root Message Detection:**
-
-The root's parent is always `"00000000-0000-4000-8000-000000000000"` (nil UUID with version 4 marker).
+**Invariants** (checked by the `validate-export` skill): `_v1` equals the first write, and the unversioned file equals `_vN`.
 
 ---
 
-## Content Block Types
+## Files
 
-Each message has a `content` array containing typed blocks:
+### Pasted text (`attachments`)
 
-```javascript
-{
-  "uuid": "...",
-  "sender": "assistant",
-  "content": [
-    { "type": "thinking", "thinking": "...", "summaries": [...] },
-    { "type": "text", "text": "...", "citations": [...] },
-    { "type": "tool_use", "name": "web_search", "input": {...} },
-    { "type": "tool_result", "name": "web_search", "content": [...] }
-  ]
-}
-```
+Text pasted into a prompt arrives with its text in `extracted_content`. `extractTextAttachments` writes each to `attachments/p<NN>_<name>`, where `NN` is the prompt number. A paste with no name gets a generated one. Office and PDF names whose text is all there is (`.pdf`, `.docx`, `.xlsx`, …) are saved as `.txt`. The viewer calls an unnamed paste "Pasted text".
 
-### Content Block Types Reference
+### Uploads (`files`, `files_v2`)
 
-| Type | Description | Key Fields |
-|------|-------------|------------|
-| `text` | Regular text response | `text`, `citations` |
-| `thinking` | Extended thinking block | `thinking`, `summaries`, `cut_off` |
-| `tool_use` | Tool invocation | `name`, `input`, `id` |
-| `tool_result` | Tool output | `name`, `content`, `tool_use_id` |
+`extractUploadedFiles` lists uploads from both arrays: `files` is the older form, with the name in `path`, and `files_v2` the newer, with `file_name`. Each is downloaded to `uploads/p<NN>_<name>`.
 
-### Thinking Blocks
+`fetchUploadedFile` tries these URLs in order and records every one it tried:
 
-```javascript
-{
-  "type": "thinking",
-  "thinking": "Let me analyze this step by step...",
-  "summaries": [
-    { "summary": "Analyzing the problem structure" },
-    { "summary": "Considering edge cases" }
-  ],
-  "cut_off": false  // true if thinking was truncated
-}
-```
+1. The asset URL from the JSON (`image_asset.url`, `document_asset.url`), when present. It may have expired.
+2. The wiggle endpoint by sandbox path: `/api/organizations/<org>/conversations/<chat>/wiggle/download-file?path=<path>`, with `(` and `)` encoded too.
+3. The same with the filename sanitized the way the sandbox does it (non-alphanumerics become `_`).
+4. By file UUID: `/api/organizations/<org>/files/<uuid>/contents`, then older shapes (`/api/<org>/files/<uuid>/preview`, `/content`, `/api/organizations/<org>/files/<uuid>/content`, and the bare file URL).
 
-The `summaries` array provides Claude's own summarization of the thinking process. The extension uses the last summary for display.
+If all fail, `extractBlobContent` looks for a `view` result where Claude read the file and rebuilds its text by stripping the line numbers. A file Claude never read and that the API no longer serves is lost; it is recorded as an `upload` error.
 
-### Tool Use Blocks
+Binary files keep their bytes. `isTextFile` decides by extension, and only text files are decoded. Decoding a PDF as text destroys it.
 
-Common tools and their input structures:
+### Sandbox paths inside artifacts
 
-**Web Search:**
-```javascript
-{
-  "type": "tool_use",
-  "name": "web_search",
-  "input": { "query": "search terms here" }
-}
-```
+An artifact that refers to an upload by its sandbox path (`<img src="/mnt/user-data/uploads/photo.png">`) gets that path replaced with the upload's `data:` URI (`inlineSandboxPaths`), so the file works when opened from the export. This is plain substitution, not a guess at what the code meant.
 
-**Artifacts (create/update):**
-```javascript
-{
-  "type": "tool_use",
-  "name": "artifacts",
-  "input": {
-    "command": "create",  // or "update"
-    "id": "artifact-id",
-    "title": "Document Title",
-    "type": "text/markdown",
-    "content": "# Markdown content..."
-  }
-}
-```
+### Files Claude made (`present_files`, `SendUserFile`)
 
-**File Creation:**
-```javascript
-{
-  "type": "tool_use",
-  "name": "create_file",
-  "input": {
-    "filename": "script.py",
-    "content": "print('hello')"
-  }
-}
-```
+`extractPresentedFiles` lists the files in `present_files` results (`local_resource` items). One the replay already rebuilt is kept as is; any other, such as a file a Python script wrote, is downloaded through `fetchUploadedFile` by its sandbox path into `artefacts/`. A download is the file's final state, so it clears that file's `str_replace_failed` warnings. `extractDeliveredFiles` lists `SendUserFile` deliveries, which are downloaded by UUID into `artefacts/`, with a `delivered_file` error on failure.
 
-### Tool Result Blocks
+### Project files
 
-Tool results contain nested content arrays:
+For a chat in a project, `populateConversationFolder` writes `project/`:
 
-```javascript
-{
-  "type": "tool_result",
-  "name": "web_search",
-  "content": [
-    {
-      "type": "knowledge",
-      "title": "Page Title",
-      "url": "https://example.com/page",
-      "text": "Extracted content...",
-      "is_citable": true,
-      "metadata": {
-        "site_domain": "example.com",
-        "site_name": "Example Site"
-      }
-    }
-  ]
-}
-```
+- `project.json` and `prompt_template.md` from `/projects/<uuid>` (metadata failure → `project_metadata` warning)
+- documents from `/projects/<uuid>/docs`, each read from `/docs/<doc>/content` (falling back to `/docs/<doc>`), as `<doc>.md` and `docs.json`
+- knowledge files such as PDFs from `/projects/<uuid>/files`, downloaded through `/files/<uuid>/contents` into `project/files/`, with `files.json`
+
+If the API doesn't return a document, `extractProjectFiles` falls back to the text of any `/mnt/project/...` file Claude read with `view` (a `project_doc` warning notes it may be partial). In a mega-ZIP, knowledge files go into one shared `projects/<project>/` folder at the root.
 
 ---
 
-## Artifact Extraction
+## Web search and citations
 
-Artifacts can come from two tool types:
+`extractWebSources` collects `knowledge` items from `web_search` results: title, URL, `metadata.site_domain`, `metadata.site_name`, `is_citable`, `is_missing`. Each URL is kept once. `links_and_sources.md` groups them by domain.
 
-### 1. `artifacts` Tool (Newer)
-
-```javascript
-function extractArtifacts(data) {
-  const artifacts = {};
-
-  for (const msg of data.chat_messages) {
-    for (const block of msg.content) {
-      if (block.type === 'tool_use' && block.name === 'artifacts') {
-        const input = block.input || {};
-        if (input.content && (input.id || input.title)) {
-          // Map content type to file extension
-          const ext = contentTypeToExt[input.type] || '.txt';
-          const filename = sanitize(input.title || input.id) + ext;
-          artifacts[filename] = input.content;
-        }
-      }
-    }
-  }
-
-  return artifacts;
-}
-```
-
-### 2. `create_file` Tool (Older)
-
-```javascript
-if (block.type === 'tool_use' && block.name === 'create_file') {
-  const filename = block.input?.filename;
-  const content = block.input?.content;
-  if (filename && content) {
-    artifacts[filename] = content;
-  }
-}
-```
-
-### Content Type Mapping
-
-```javascript
-const typeToExt = {
-  'text/markdown': '.md',
-  'text/html': '.html',
-  'text/css': '.css',
-  'text/javascript': '.js',
-  'application/json': '.json',
-  'text/x-python': '.py',
-  'text/x-typescript': '.ts',
-  'image/svg+xml': '.svg',
-  // ... 24+ mappings
-};
-```
+A `text` block's `citations[]` items carry `start_index`, `end_index`, `url`, `title` and `metadata`. `processTextWithCitations` numbers each distinct URL once, in order of first appearance, and inserts a linked marker at each citation's end, with backlinks from the reference list. `formatReferences` writes that list. The viewer does the same in `addCitations`.
 
 ---
 
-## File Handling
+## Metadata
 
-Claude conversations can contain four types of files:
-
-### 1. Text Attachments (`msg.attachments`)
-
-Pasted text files with extracted content:
-
-```javascript
-{
-  "attachments": [
-    {
-      "file_name": "notes.txt",
-      "extracted_content": "The full text content...",
-      "file_size": 1234
-    }
-  ]
-}
-```
-
-**Extraction:**
-
-```javascript
-function extractTextAttachments(data) {
-  const attachments = {};
-  const binaryExtensions = ['.pdf', '.doc', '.docx', '.xls', '.xlsx', ...];
-
-  for (const msg of data.chat_messages) {
-    for (const att of msg.attachments || []) {
-      let filename = att.file_name;
-      const content = att.extracted_content;
-
-      // Binary files only have extracted text - save as .txt
-      const ext = path.extname(filename).toLowerCase();
-      if (binaryExtensions.includes(ext)) {
-        filename = filename.replace(/\.[^.]+$/, '.txt');
-      }
-
-      attachments[filename] = content;
-    }
-  }
-
-  return attachments;
-}
-```
-
-### 2. Uploaded Files (`msg.files_v2`)
-
-Files uploaded via drag-drop or file picker:
-
-```javascript
-{
-  "files_v2": [
-    {
-      "file_name": "image.png",
-      "file_uuid": "d1c813c4-0661-4353-a8af-d103ce4d914a",
-      "file_kind": "image",  // "image", "document", "blob"
-      "success": true,
-      "created_at": "2026-01-04T02:08:30.812633+00:00",
-      "image_asset": {
-        "url": "https://..."  // May be absent!
-      },
-      "document_asset": {
-        "url": "https://...",
-        "page_count": 5
-      }
-    }
-  ]
-}
-```
-
-**URL Resolution Strategy:**
-
-The `image_asset.url` or `document_asset.url` may be:
-- Present and valid (signed URL)
-- Present but expired
-- Completely absent
-
-**Download Strategy (Priority Order):**
-
-```javascript
-async function fetchUploadedFile(url, fileUuid, orgId, conversationId, filePath) {
-  const urlsToTry = [];
-
-  // 1. Primary URL from JSON (if present)
-  if (url) urlsToTry.push(url);
-
-  // 2. Wiggle endpoint - works for ALL file types including blobs!
-  if (orgId && conversationId && filePath) {
-    const encodedPath = encodeURIComponent(filePath);
-    urlsToTry.push(`https://claude.ai/api/organizations/${orgId}/conversations/${conversationId}/wiggle/download-file?path=${encodedPath}`);
-  }
-
-  // 3. File UUID-based endpoints
-  if (fileUuid && orgId) {
-    urlsToTry.push(`https://claude.ai/api/${orgId}/files/${fileUuid}/preview`);
-    urlsToTry.push(`https://claude.ai/api/${orgId}/files/${fileUuid}/content`);
-    urlsToTry.push(`https://claude.ai/api/organizations/${orgId}/files/${fileUuid}/content`);
-  }
-
-  for (const tryUrl of urlsToTry) {
-    const response = await fetch(tryUrl, { credentials: 'include' });
-    if (response.ok) return await response.blob();
-  }
-
-  throw new Error('All API URLs failed');
-}
-```
-
-**Final Fallback - JSON Extraction:**
-
-If all API endpoints fail for blob files, the extension falls back to extracting content from the JSON (tool results where Claude read the file).
-
-### 3. Blob Files (Ephemeral)
-
-CSV, text files, and other "blob" types are **ephemeral** - they exist only during the active session:
-
-```javascript
-{
-  "file_kind": "blob",
-  "path": "/mnt/user-data/uploads/data.csv"
-  // No URL available - file is deleted after session
-}
-```
-
-**Content Recovery from Tool Results:**
-
-When Claude reads a blob file, the content appears in tool results:
-
-```javascript
-{
-  "type": "tool_result",
-  "name": "view",
-  "content": [
-    {
-      "type": "text",
-      "text": "Here's the content of /mnt/user-data/uploads/data.csv:\n     1\tname,value\n     2\tfoo,123\n..."
-    }
-  ]
-}
-```
-
-**Extraction Algorithm:**
-
-```javascript
-function extractBlobContent(data, blobPath) {
-  for (const msg of data.chat_messages) {
-    for (const block of msg.content) {
-      if (block.type === 'tool_result' && block.name === 'view') {
-        for (const content of block.content) {
-          if (content.text?.includes(blobPath)) {
-            // Parse out line numbers and extract raw content
-            const lines = content.text.split('\n');
-            return lines
-              .filter(l => l.match(/^\s*\d+\t/))
-              .map(l => l.replace(/^\s*\d+\t/, ''))
-              .join('\n');
-          }
-        }
-      }
-    }
-  }
-  return null;
-}
-```
-
-### 4. Project Files (`/mnt/project/`)
-
-When a conversation is part of a Claude Project, project files may be accessed during the conversation. These are stored at `/mnt/project/` and accessed via the `view` tool:
-
-```javascript
-// Tool use to read project file
-{
-  "type": "tool_use",
-  "name": "view",
-  "input": { "path": "/mnt/project/research_notes.md" }
-}
-
-// Tool result with file content
-{
-  "type": "tool_result",
-  "name": "view",
-  "content": [
-    {
-      "type": "text",
-      "text": "Here's the content of /mnt/project/research_notes.md with line numbers:\n     1\t# Research Notes\n     2\t\n     3\tKey findings..."
-    }
-  ]
-}
-```
-
-**Key Differences from Blob Files:**
-
-| Aspect | Blob Files | Project Files |
-|--------|------------|---------------|
-| Path | `/mnt/user-data/uploads/` | `/mnt/project/` |
-| Persistence | Ephemeral (session only) | Persistent (project lifetime) |
-| API Access | Wiggle endpoint works | Not downloadable via API |
-| Recovery | API or JSON fallback | JSON only (tool results) |
-
-**Extraction Algorithm:**
-
-```javascript
-function extractProjectFiles(data) {
-  const projectFiles = {};
-
-  for (const msg of data.chat_messages) {
-    for (const block of msg.content) {
-      if (block.type === 'tool_result' && block.name === 'view') {
-        for (const content of block.content) {
-          // Match project file content header
-          const match = content.text?.match(
-            /^Here's the content of (\/mnt\/project\/[^\s]+) with line numbers:/
-          );
-
-          if (match) {
-            const filePath = match[1];
-            const filename = filePath.split('/').pop();
-
-            // Extract content by parsing line numbers
-            const lines = content.text.split('\n');
-            const contentLines = lines
-              .filter(l => l.match(/^\s*\d+\t/))
-              .map(l => l.replace(/^\s*\d+\t/, ''));
-
-            projectFiles[filename] = contentLines.join('\n');
-          }
-        }
-      }
-    }
-  }
-
-  return projectFiles;
-}
-```
-
-**Note:** Only project files that Claude actually read during the conversation are recoverable. Files that exist in the project but weren't accessed won't appear in the export.
+- **Model:** `getModelName` turns `claude-sonnet-4-5-20250929` into "Claude 4.5 Sonnet". Without a `model` field it falls back to `paprika_mode` ("Claude (extended thinking)", "Claude (thinking)"), then to thinking blocks, then "Claude".
+- **Features** in `meta.md`: Web Search when a search ran, Artifacts when any were made, and the thinking mode.
+- **Stats** in `meta.md`: message, word and code-block counts, duration, files.
 
 ---
 
-## Web Search & Citations
+## ZIP export
 
-### Web Search Results
+`populateConversationFolder` writes one chat's folder. The single-chat ZIP is that folder; the all-chats mega-ZIP holds one per chat, plus `index.md`, the shared `projects/` folder, and one viewer for all of them.
 
-Web search tool results contain `knowledge` blocks:
-
-```javascript
-{
-  "type": "tool_result",
-  "name": "web_search",
-  "content": [
-    {
-      "type": "knowledge",
-      "title": "Article Title",
-      "url": "https://example.com/article",
-      "text": "Relevant excerpt...",
-      "is_citable": true,
-      "is_missing": false,
-      "metadata": {
-        "site_domain": "example.com",
-        "site_name": "Example News"
-      }
-    }
-  ]
-}
+```
+[<Project>-project]_<chat>_claude-chat.zip
+├── README.md                  table of contents
+├── meta.md                    stats, model, features
+├── prompts.md                 every prompt, with attachment links
+├── responses_text_only.md     the assistant's text only
+├── full_chat.md               everything, artifacts as code blocks
+├── integrated_chat.md         .md artifacts inline
+├── integrated_chat.txt        plain text
+├── code_snippets.md           every code block
+├── links_and_sources.md       URLs and sources by domain
+├── errors.txt                 only when something failed
+├── original.json              the payload as fetched
+├── viewer.html                offline viewer
+├── viewer-check.gif           detects a ZIP opened without unzipping
+├── viewer-files/part-NNNN.js  only when an upload's text is over 64 KB
+├── responses/NNN_<title>_response.md, .full.md
+├── artefacts/<base>(_vN)<ext>
+├── attachments/pNN_<name>
+├── uploads/pNN_<name>
+└── project/
 ```
 
-**Source Extraction:**
+Encoding rules:
 
-```javascript
-function extractWebSources(data) {
-  const sources = [];
-  const seenUrls = new Set();
-
-  for (const msg of data.chat_messages) {
-    for (const block of msg.content) {
-      if (block.type === 'tool_result' && block.name === 'web_search') {
-        for (const item of block.content) {
-          if (item.type === 'knowledge' && item.url && !seenUrls.has(item.url)) {
-            seenUrls.add(item.url);
-            sources.push({
-              title: item.title,
-              url: item.url,
-              domain: item.metadata?.site_domain,
-              siteName: item.metadata?.site_name,
-              isCitable: item.is_citable !== false,
-              isMissing: item.is_missing === true
-            });
-          }
-        }
-      }
-    }
-  }
-
-  return sources;
-}
-```
-
-### Citation Processing
-
-Text blocks may contain citations referencing web search results:
-
-```javascript
-{
-  "type": "text",
-  "text": "According to research, the sky is blue.",
-  "citations": [
-    {
-      "start": 24,
-      "end": 42,
-      "url": "https://example.com/sky",
-      "title": "Why is the Sky Blue?"
-    }
-  ]
-}
-```
-
-**Citation Conversion to Footnotes:**
-
-```javascript
-function processTextWithCitations(text, citations) {
-  // Sort citations by position (reverse order for safe replacement)
-  const sorted = [...citations].sort((a, b) => b.start - a.start);
-
-  const references = [];
-  let processedText = text;
-
-  for (const cite of sorted) {
-    const refNum = references.length + 1;
-
-    // Insert footnote marker after cited text
-    const before = processedText.slice(0, cite.end);
-    const after = processedText.slice(cite.end);
-    processedText = `${before}[[${refNum}]](#ref-${refNum})${after}`;
-
-    references.push({
-      num: refNum,
-      url: cite.url,
-      title: cite.title
-    });
-  }
-
-  return { text: processedText, references };
-}
-```
+- Every `.md` file gets a UTF-8 BOM (`addFileWithBOM`), because Chrome opens local Markdown as plain text and guesses the encoding.
+- Text goes through `fixMojibake`, which repairs UTF-8 that was read as Latin-1.
+- `getCodeFence` uses four backticks when the content already holds three.
 
 ---
 
-## Metadata Extraction
+## Error reporting
 
-### Model Name Parsing
+`ExportErrorCollector` collects errors (something is missing) and warnings (something may be incomplete) during one export. `generateErrorReport` writes them to `errors.txt` with a recovery hint per type, and the status pill turns amber.
 
-The `model` field contains raw identifiers like `claude-sonnet-4-5-20250929`:
+| Type | Meaning |
+|---|---|
+| `upload` | An upload could not be downloaded. |
+| `presented_file` | A `present_files` file could not be downloaded. |
+| `delivered_file` | A `SendUserFile` delivery could not be downloaded. |
+| `project_doc` | A project document is missing or only partly recovered. |
+| `project_metadata` | The project's metadata request failed. |
+| `str_replace_failed` | A successful edit could not be replayed. |
+| `artifact_basename_collision` | Two paths had the same filename; one was renamed. |
+| `artifact_opaque_mutation` | A bash command changed a file in a way replay can't follow. |
+| `viewer` | One chat could not be added to `viewer.html`. |
 
-```javascript
-function getModelName(data) {
-  if (data.model) {
-    const model = data.model.toLowerCase();
-
-    // Extract variant
-    let variant = '';
-    if (model.includes('opus')) variant = 'Opus';
-    else if (model.includes('sonnet')) variant = 'Sonnet';
-    else if (model.includes('haiku')) variant = 'Haiku';
-
-    // Extract version (e.g., "4-5" -> "4.5")
-    const versionMatch = model.match(/(\d+)-(\d+)/);
-    const version = versionMatch ? ` ${versionMatch[1]}.${versionMatch[2]}` : '';
-
-    if (variant) return `Claude${version} ${variant}`;
-    return data.model;
-  }
-
-  // Fallback to settings-based detection
-  const paprika = data.settings?.paprika_mode;
-  if (paprika === 'extended') return 'Claude (extended thinking)';
-  if (paprika === 'normal') return 'Claude (thinking)';
-
-  return 'Claude';
-}
-```
-
-### Feature Detection
-
-```javascript
-function getFeatures(data) {
-  const features = [];
-
-  if (data.settings?.enabled_web_search) {
-    features.push('Web Search');
-  }
-
-  if (data.settings?.preview_feature_uses_artifacts) {
-    features.push('Artifacts');
-  }
-
-  if (data.settings?.paprika_mode === 'extended') {
-    features.push('Extended Thinking');
-  } else if (data.settings?.paprika_mode === 'normal') {
-    features.push('Thinking');
-  }
-
-  return features;
-}
-```
-
-### Duration Calculation
-
-```javascript
-function getDuration(messages) {
-  if (messages.length < 2) return null;
-
-  const first = messages[0];
-  const last = messages[messages.length - 1];
-
-  const start = new Date(first.created_at);
-  const end = new Date(last.created_at);
-  const diffMs = end - start;
-
-  const hours = Math.floor(diffMs / 3600000);
-  const minutes = Math.floor((diffMs % 3600000) / 60000);
-
-  if (hours > 0) return `${hours}h ${minutes}m`;
-  return `${minutes}m`;
-}
-```
+Each error records the URLs tried, HTTP status and fallback result. A new kind of failure gets a new type and a `_getRecoveryHint` case.
 
 ---
 
-## File Generation Pipeline
+## Bash mutations and replay_bash.py
 
-### ZIP Export Structure
+The extension replays only file tools and heredocs. When a bash command changes a tracked file any other way (a Python script, `sed -i`, a pipeline), `detectOpaqueMutations` records `artifact_opaque_mutation` and points to `replay_bash.py`.
 
-```
-conversation_claude-chat.zip
-├── README.md              <- Table of contents with links
-├── meta.md                <- Statistics and metadata table
-├── prompts.md             <- All user messages with anchor links
-├── responses_text_only.md <- Pure text responses (no thinking/tools)
-├── full_chat.md           <- Complete conversation
-├── integrated_chat.md     <- Markdown artifacts inline (no code blocks)
-├── integrated_chat.txt    <- Plain text version (no markdown formatting)
-├── code_snippets.md       <- Extracted code blocks
-├── links_and_sources.md   <- URLs and web sources by domain
-├── original.json          <- Raw API response
-├── responses/
-│   ├── 001_title_response.md      <- Pure text
-│   └── 001_title_response.full.md <- With thinking/tools/artifacts
-├── artefacts/
-│   └── {extracted artifacts}
-├── attachments/
-│   └── {pasted text files}
-├── project/
-│   └── {project files viewed during conversation}
-└── uploads/
-    └── {downloaded PDFs/images}
-```
-
-### Processing Order
-
-1. **Parse JSON** - Load and validate structure
-2. **Resolve message chain** - Follow `parent_message_uuid` from leaf
-3. **Extract artifacts** - From `artifacts` and `create_file` tool uses
-4. **Extract attachments** - From `msg.attachments` with `extracted_content`
-5. **Extract project files** - From `view` tool results for `/mnt/project/` paths
-6. **Extract uploaded files** - From `msg.files_v2`, download via API
-7. **Extract web sources** - From `web_search` tool results
-8. **Process content** - Convert each block type to markdown
-9. **Generate files** - Create all markdown files and ZIP
+`replay_bash.py` reruns Claude's actual commands from `original.json` in a temporary folder, with `/home/claude`, `/mnt/user-data`, `/tmp` and `/root/.claude` mapped into it, asking before each command. Commands are untrusted. On macOS a deny-by-default `sandbox-exec` profile isolates them, paths leaving the folder are refused, and tokens are kept out of the environment. On Linux it refuses to run without `--no-isolation`. It updates the final file and its last `_vN`. `docs/WASM_REPLAY_APPROACH.md` explains why this is a CLI and not in-browser Python.
 
 ---
 
-## Security Considerations
+## The offline viewer
 
-### Authentication
+Every export includes `viewer.html`, a single page that shows the chats as they looked, opened from disk with no network.
 
-The extension uses the user's existing Claude.ai session:
-- No API keys stored
-- `credentials: 'include'` sends session cookies
-- Only works when logged into claude.ai
+**Building it.** `takeout-viewer.js` (`CTViewer`) holds the data contract:
 
-### Data Handling
+- `buildViewerChat` turns one payload into the viewer's shape: every branch, rendered tool calls, file versions, uploads, the project.
+- `buildViewerData` gathers the chats and stores each distinct project once in `data.projects`; a chat's `project` is an index into it.
+- `moveUploadText` moves upload text over `UPLOAD_INLINE_LIMIT` (64 KB of UTF-8) into parts of at most `PART_LIMIT` (4 MB). Each part is `viewer-files/part-NNNN.js`, which calls `window.__archivePart(n, { u0: text, ... })`.
+- `assembleViewer` inlines the template, the data (`<script id="data">`), the app, `marked`, KaTeX and highlight.js into one HTML string. `writeViewer` in `popup.js` adds it to the ZIP.
 
-- All processing happens locally in the browser
-- No external servers contacted
-- Downloaded files go directly to user's downloads folder
-- Original JSON preserved for verification
+A chat that fails to build gets a `viewer` warning. A viewer that fails as a whole is reported in the status line. Neither stops the export.
 
-### Content Security
+**Running it.** `viewer/viewer-app.js` renders the page, and `viewer/viewer-logic.js` holds its pure functions (tested in Node):
 
-- File content is escaped for markdown code blocks
-- Dynamic fence selection (``` vs ````) prevents injection
-- Filenames are sanitized before use in paths
+- Chat text goes through escaped HTML, text placeholders and `sanitizeHtml`.
+- Math renders with KaTeX.
+- Syntax colors run in a blob worker, block by block as they scroll into view, and stop after `HIGHLIGHT_TIMEOUT`, since highlight.js can hang on some input.
+- Search reads titles, prompt and reply text, attachment names and text, and upload names. It never reads upload text, which is why upload text can live in parts.
+- A part loads when its upload is opened, through a `<script>` tag. A `file://` page can load scripts beside it but can't `fetch` them.
+- Generated HTML and SVG files preview in a sandboxed `srcdoc` frame with a narrow CSP. Sibling `.js` and `.css` files are inlined by `inlineSiblings`.
+
+The page's CSP allows no network. `file:` is added to `script-src` only when parts exist (`fileScripts`).
+
+---
+
+## Viewers for older archives
+
+`tools/build_viewer.js` gives an export made before v1.6.0 a viewer, offline, from its `original.json` files:
+
+```
+node tools/build_viewer.js <folder> [--out <dir>] [--force] [--dry-run] [--json]
+```
+
+- `tools/archive-lib.js` finds archives and rebuilds each chat from disk (`chatFromDisk`). Artifacts, uploads and project files are read from the archive's own folders.
+- Files the owner added to an archive after export are listed under "Archive files". Their text and media go into `viewer-files/` parts.
+- `tools/archive-zip.js` extracts ZIPs into new folders under `--out`, refusing unsafe entries.
+- The tool writes only `viewer.html`, `viewer-check.gif`, `viewer-files/` and new folders under `--out`, through temporary names that are swapped in.
+
+The `build-archive-viewer` skill wraps it.
+
+---
+
+## Security
+
+- **Authentication:** the user's own claude.ai session cookies. No API key is stored.
+- **Locality:** all processing happens in the browser. Nothing is sent anywhere but claude.ai, and the download goes straight to the Downloads folder.
+- **Markdown:** filenames are sanitized, and code fences grow to fit their content.
+- **Viewer:** chat text is sanitized. Previews of generated files are sandboxed, but they are not a security boundary for untrusted exports: a generated file's own text, and that chat's `.js` and `.css` files, can leave the page. The viewer itself, other chats and other files on disk can't be reached. `USAGE.md` has the details.
+- **`replay_bash.py`:** see above.
 
 ---
 
 ## Limitations
 
-1. **Blob files** - Only recoverable if Claude read them during the conversation
-2. **Project files** - Only files that Claude read during the conversation are exported (not all project files)
-3. **Expired URLs** - Signed URLs for images/PDFs may expire; fallback URLs attempted
-4. **Rate limiting** - Bulk export adds 300ms delay between requests
-5. **Large conversations** - Very long conversations may be slow to process
-6. **Branched content** - Only the active branch is exported; other branches are ignored
+1. An upload Claude never read is lost if the API no longer serves it.
+2. A project document the API doesn't return is recovered only if Claude read it, and only as far as it read.
+3. Only the active branch goes into the Markdown files. `original.json` and the viewer keep every branch.
+4. Bash changes other than heredocs need `replay_bash.py`.
+5. Images in tool results are links in the payload, not data, and are not exported.
+6. Cowork sessions are not in the chat list and can't be exported.
+7. Bulk export waits 300 ms between chats.
 
 ---
 
-## API Endpoints Reference
+## API endpoints
 
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/api/organizations/{orgId}/chat_conversations` | GET | List all conversations |
-| `/api/organizations/{orgId}/chat_conversations/{uuid}` | GET | Get full conversation |
-| `/api/organizations/{orgId}/conversations/{convId}/wiggle/download-file?path={path}` | GET | Download any file by path (including blobs) |
-| `/api/{orgId}/files/{uuid}/preview` | GET | Download file (images) |
-| `/api/{orgId}/files/{uuid}/content` | GET | Download file (alternative) |
-| `/api/organizations/{orgId}/files/{uuid}/content` | GET | Download file (PDFs) |
+All `GET`, all authenticated by session cookie.
 
-All endpoints require session authentication via cookies.
-
-### Wiggle Endpoint
-
-The `wiggle/download-file` endpoint is particularly useful as it:
-- Works with the file's path (e.g., `/mnt/user-data/uploads/file.csv`)
-- Can download blob files that other endpoints cannot access
-- Requires both the organization ID and conversation UUID
-- Path must be URL-encoded
+| Endpoint | Used by | Purpose |
+|---|---|---|
+| `/api/organizations/<org>/chat_conversations` | `fetchAllConversations` | List chats. |
+| `/api/organizations/<org>/chat_conversations/<chat>?tree=True&rendering_mode=messages&render_all_tools=true` | `fetchConversation` | One chat, every branch, rendered tools. |
+| `/api/organizations/<org>/projects/<project>` | `ensureProjectName`, `fetchProjectDocs` | Project metadata. |
+| `/api/organizations/<org>/projects/<project>/docs` | `fetchProjectDocs` | Project documents. |
+| `/api/organizations/<org>/projects/<project>/docs/<doc>/content` | `fetchProjectDocs` | A document's text (falls back to `/docs/<doc>`). |
+| `/api/organizations/<org>/projects/<project>/files` | `fetchProjectFileList` | Project knowledge files. |
+| `/api/organizations/<org>/files/<file>/contents` | `fetchUploadedFile`, project files, deliveries | A file's bytes. |
+| `/api/organizations/<org>/conversations/<chat>/wiggle/download-file?path=<path>` | `fetchUploadedFile` | A sandbox file by path, including session-only uploads. |
+| `/api/<org>/files/<file>/preview`, `/content`; `/api/organizations/<org>/files/<file>/content`, `/files/<file>` | `fetchUploadedFile` | Older fallbacks. |

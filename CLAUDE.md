@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup of JSON structure, message-chain resolution, content blocks, and citations. *Partially outdated as of v1.5.2 — see "What TECHNICAL.md doesn't cover yet" below.*
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.5.
 
 ---
 
@@ -47,7 +47,7 @@ For deeper dives, two companion docs live alongside this one:
 | `tests/` | Regression tests. | `sh tests/run.sh`. Uses Node's and Python's built-in test runners, with a synthetic fixture only. Not used by the extension at runtime. |
 | `docs/WASM_REPLAY_APPROACH.md` | Architecture record. | Comprehensive evaluation of running Pyodide in the extension as an alternative to the CLI. We chose the CLI; this doc explains why and what would change the answer. |
 | `icon16.png` / `icon48.png` / `icon128.png` / `icon.svg` | Extension icons. | |
-| `README.md` / `USAGE.md` / `TECHNICAL.md` | Documentation. | TECHNICAL.md predates v1.5.x and doesn't describe per-turn versioning, `ExportErrorCollector`, or `ensureProjectName`. |
+| `README.md` / `USAGE.md` / `TECHNICAL.md` | Documentation. | TECHNICAL.md names functions rather than copying their code; keep it accurate when behavior changes (§14). |
 
 Files that are **not** part of the extension and may sit in the working tree: `transcript.en.vtt`, `transcript.txt` (stray), `.claude/settings.local.json` (Claude Code permission allowlist — local-only, don't commit), `.DS_Store`.
 
@@ -342,17 +342,9 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ---
 
-## 14. What TECHNICAL.md doesn't cover yet
+## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` is largely accurate for v1.4 and earlier. It does **not** describe:
-- Current data loading. Its data capture section describes a design that no longer exists (§4).
-- Per-turn artifact versioning (§6).
-- `ExportErrorCollector` / structured `errors.txt` (§10).
-- `ensureProjectName` and the project-prefix fallback (§4).
-- The `p<NN>_` prompt-number prefixing on attachments and uploads.
-- The blob-path normalization and sanitized-path fallback in `fetchUploadedFile`.
-
-If you make significant changes to any of those, update both `TECHNICAL.md` and this file. Otherwise, prefer extending this file — it's the entry point.
+`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.5. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 
@@ -390,4 +382,4 @@ A clean diff (or only the unversioned-final equivalent to `_vN`) means the JS ex
 
 ---
 
-*Last updated 2026-11-05. Keep this file accurate — it's the contract a future agent reads before touching anything.*
+*Last updated 2026-11-08. Keep this file accurate — it's the contract a future agent reads before touching anything.*
