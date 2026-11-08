@@ -43,7 +43,7 @@ const ctx = () => ({ folder: '', uploads: {
   await page.route('**/*', async r => {
     const u = r.request().url();
     if (!u.startsWith('file:') && !u.startsWith('data:')) { requests.push(u); return r.abort(); }
-    if (u.includes('/viewer-files/')) { partLoads.push(u); if (page.slowParts) await new Promise(res => setTimeout(res, 600)); }
+    if (u.includes('/viewer-files/')) partLoads.push(u);
     return r.continue();
   });
   await page.goto('file://' + path.join(dir, 'viewer.html'));
@@ -88,7 +88,6 @@ const ctx = () => ({ folder: '', uploads: {
   // A fresh page, so nothing is cached: close a slow upload, then open another.
   const slow = await context.newPage();
   slow.on('pageerror', e => errors.push(e.message));
-  slow.slowParts = true;
   await slow.route('**/*', async r => { if (r.request().url().includes('/viewer-files/')) await new Promise(res => setTimeout(res, 600)); return r.continue(); });
   await slow.goto('file://' + path.join(dir, 'viewer.html'));
   await slow.waitForSelector('.msg');
@@ -98,6 +97,13 @@ const ctx = () => ({ folder: '', uploads: {
   await slow.locator('button.chip', { hasText: 'small.txt' }).click();
   await slow.waitForTimeout(900);
   check('closing before the part arrives keeps the text out of the next popup', (await slow.locator('.pop .pop-body').textContent()) === SMALL);
+  await slow.locator('.pop .close').click();
+  // Read in the same tick as the click: a cached text shows at once, with no Loading… in between.
+  const reopened = await slow.evaluate(() => {
+    [...document.querySelectorAll('button.chip')].find(b => b.textContent.includes('big.py')).click();
+    return document.querySelector('.pop .pop-body').textContent;
+  });
+  check('the part that arrived after closing is kept, so reopening is instant', reopened === BIG_PY, reopened.slice(0, 40));
   await slow.close();
 
   const gone = path.join(dir, 'viewer-files.off');
@@ -109,7 +115,12 @@ const ctx = () => ({ folder: '', uploads: {
   await miss.waitForSelector('.msg');
   await miss.locator('button.chip', { hasText: 'big.py' }).click();
   await miss.waitForFunction(() => document.querySelector('.pop .pop-body')?.textContent !== 'Loading…', null, { timeout: 3000 }).catch(() => {});
-  check('a missing part says so', (await miss.locator('.pop .pop-body').textContent()) === 'This file is not in this export.');
+  const missText = await miss.locator('.pop .pop-body').textContent();
+  check('a missing part says so and points at the folder copy', missText.includes("The text couldn't load.") && missText.includes("It's in this export's folder."), missText);
+  await miss.locator('.pop .close').click();
+  await miss.locator('button.chip', { hasText: 'big.md' }).click();
+  await miss.waitForFunction(() => document.querySelector('.pop .pop-body')?.textContent !== 'Loading…', null, { timeout: 3000 }).catch(() => {});
+  check('a missing part offers the uploads copy when it can open', (await miss.locator('.pop .pop-body').textContent()).includes("The text couldn't load.") && (await miss.locator('.pop .pop-body a[href="uploads/p01_big.md"]').count()) === 1, await miss.locator('.pop .pop-body').innerHTML());
   await miss.locator('.pop .close').click();
   fs.renameSync(gone, path.join(dir, 'viewer-files'));
   await miss.locator('button.chip', { hasText: 'big.py' }).click();

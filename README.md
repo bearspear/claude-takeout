@@ -365,6 +365,12 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.5
+
+- **Preview scripts with `<!--` run** - A generated file whose script held `<!--` inside a regular expression with the `u` flag failed to run in the viewer's preview. It now runs.
+- **A large upload that can't load points to its copy** - If an upload's text can't load from `viewer-files/`, the popup says so and shows the upload's own file in `uploads/`, with an open link where the file type allows it.
+- **Reopening a large upload is instant** - Text that finished loading after its popup was closed is kept.
+
 ### v1.6.4
 
 - **Large uploads load when opened** - Upload text over 64 KB is no longer stored inside `viewer.html`. It goes into `viewer-files/` beside it, and loads when you open the upload. Search works as before, since it never read upload text. A test archive's viewer shrank from 81 to 44 MB and opens in under a second. Older archives get this when their viewer is rebuilt with `--force`.
