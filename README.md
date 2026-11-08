@@ -367,6 +367,20 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.11
+
+Smaller viewer fixes from the code review. Older exports get them when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+
+- **Keyboard version switching** - Pressing Enter on ‹ or › under a message kept focus on the control, so you can step through versions without tabbing back from the top.
+- **One search highlight at a time** - Opening a search result clears the previous one.
+- **Sources on long responses** - A response shown as plain text, because it was too complex to format, still lists its sources.
+- **Projects with the same name** - Two different projects with one name are listed apart in the sidebar, the second as "Name (2)".
+- **Uploads with no file ID** - Two uploads with the same name in different prompts each open their own file; before, both opened the later one. This needs a fresh export or a rebuilt viewer.
+- **Faster on long chats** - Switching versions or opening a search result in a chat with thousands of messages no longer freezes the page.
+- **Less memory** - Only the last two loaded `viewer-files/` parts are kept; an older one loads again when needed. Syntax coloring skips blocks that have left the screen.
+- **Phone layout** - The file panel's Copy button comes after the file name.
+- **A damaged chat can't hang an export** - A loop in the message parents in `original.json` ends the walk instead of running until memory runs out, in the extension, `extract_artifacts.py` and `replay_bash.py`.
+
 ### v1.6.10
 
 Fixes to `tools/build_viewer.js`, the tool that gives older exports a viewer, from the code review.

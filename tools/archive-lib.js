@@ -399,7 +399,7 @@ function chatFromDisk(archive, chat) {
       }
       continue;
     }
-    uploads[file.uuid || file.originalFilename] = { path: `uploads/${found}`, text: uploadText(path.join(chat.dir, 'uploads', found), found) };
+    uploads[core.viewerUploadKey(file)] = { path: `uploads/${found}`, text: uploadText(path.join(chat.dir, 'uploads', found), found) };
   }
 
   // project: this chat's project/ folder, or the shared projects/<dir> its README links to.

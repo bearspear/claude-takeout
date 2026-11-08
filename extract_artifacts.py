@@ -109,8 +109,11 @@ def get_message_chain(data: dict) -> list[dict]:
         return messages
 
     chain: list[dict] = []
+    seen: set[str] = set()
     uuid = current_leaf
-    while uuid and uuid in by_uuid:
+    # A parent loop (a damaged or crafted file) ends the walk.
+    while uuid and uuid in by_uuid and uuid not in seen:
+        seen.add(uuid)
         chain.append(by_uuid[uuid])
         uuid = by_uuid[uuid].get("parent_message_uuid")
     chain.reverse()

@@ -42,6 +42,9 @@ class Paths(unittest.TestCase):
     def test_clean(self):self.assertEqual(rb.clean('a\x1b[2Jb\tc'),'a?[2Jb\tc')
 @unittest.skipUnless(HAS_SANDBOX, 'needs sandbox-exec')
 class Replay(unittest.TestCase):
+    def test_parent_loop_ends(self):
+        d={'current_leaf_message_uuid':'a','chat_messages':[{'uuid':'a','parent_message_uuid':'b'},{'uuid':'b','parent_message_uuid':'a'}]}
+        self.assertEqual([m['uuid'] for m in rb.message_chain(d)],['b','a'])
     def test_literal_v1_name_kept_apart(self):
         # report.html edited over two turns, then Claude saves report_v1.html itself. The exporter
         # writes that one as report_v1_2.html, so a bash change to it must land there.

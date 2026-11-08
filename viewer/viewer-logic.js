@@ -8,16 +8,34 @@ function byAtThenIndex(a, b) {
   return a.i - b.i;
 }
 
+// Each message list's children, built once: { roots, kids: parent id -> children, byId }, both ordered
+// by `at` then array order. Rebuilt if the list changes length. Without it, walking a long chat's tree
+// rescans every message at each step.
+const treeIndex = new WeakMap();
+function treeOf(messages) {
+  const cached = treeIndex.get(messages);
+  if (cached && cached.length === messages.length) return cached;
+  const ids = new Set(messages.map(m => m.id));
+  const roots = [], kids = new Map();
+  messages.forEach((m, i) => {
+    const e = { m, i };
+    if (m.parent == null || !ids.has(m.parent)) roots.push(e);
+    if (m.parent != null) {
+      if (!kids.has(m.parent)) kids.set(m.parent, []);
+      kids.get(m.parent).push(e);
+    }
+  });
+  const order = list => list.sort(byAtThenIndex).map(e => e.m);
+  const tree = { length: messages.length, roots: order(roots), kids: new Map(), byId: new Map(messages.map(m => [m.id, m])) };
+  for (const [parent, list] of kids) tree.kids.set(parent, order(list));
+  treeIndex.set(messages, tree);
+  return tree;
+}
+
 // Children of a parent id (null for roots), ordered by `at` then array order.
 function childrenOf(messages, parentId) {
-  const ids = new Set(messages.map(m => m.id));
-  return messages
-    .map((m, i) => ({ m, i }))
-    .filter(e => parentId === null
-      ? (e.m.parent == null || !ids.has(e.m.parent))
-      : e.m.parent === parentId)
-    .sort(byAtThenIndex)
-    .map(e => e.m);
+  const tree = treeOf(messages);
+  return (parentId === null ? tree.roots : tree.kids.get(parentId) || []).slice();
 }
 
 // Root to leaf. An unknown leaf falls back to the message with the latest `at`.
@@ -40,7 +58,7 @@ function chainFrom(messages, leafId) {
 }
 
 function siblingsOf(messages, id) {
-  const msg = messages.find(m => m.id === id);
+  const msg = treeOf(messages).byId.get(id);
   if (!msg) return { ids: [], index: -1 };
   const ids = childrenOf(messages, msg.parent == null ? null : msg.parent)
     .filter(m => msg.parent == null || m.parent === msg.parent)
@@ -720,16 +738,28 @@ function linkProjects(data) {
 }
 
 // Chats outside any project, and the projects sorted by name. Both keep the order of `chats`.
+// Chats under their project. Two projects with one name but different instructions, docs or files are
+// two groups, the later labelled "Name (2)". Equal ones are one group: older viewers give each chat its
+// own copy of the project, so object identity alone can't tell.
 function groupChats(chats) {
   const recents = [];
-  const byName = new Map();
+  const groups = new Map();
+  const keyOf = p => JSON.stringify([p.name || '', typeof p.instructions === 'string' ? p.instructions.length : 0,
+    (Array.isArray(p.docs) ? p.docs : []).map(d => [d && d.name, d && typeof d.text === 'string' ? d.text.length : 0]),
+    (Array.isArray(p.files) ? p.files : []).map(f => f && f.name)]);
   for (const chat of chats) {
     if (!chat.project) { recents.push(chat); continue; }
-    const name = chat.project.name || 'Untitled project';
-    if (!byName.has(name)) byName.set(name, { name, chats: [] });
-    byName.get(name).chats.push(chat);
+    const key = keyOf(chat.project);
+    if (!groups.has(key)) groups.set(key, { name: chat.project.name || 'Untitled project', chats: [] });
+    groups.get(key).chats.push(chat);
   }
-  return { recents, projects: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name)) };
+  const named = new Map();
+  for (const g of groups.values()) {
+    const n = (named.get(g.name) || 0) + 1;
+    named.set(g.name, n);
+    if (n > 1) g.name = `${g.name} (${n})`;
+  }
+  return { recents, projects: [...groups.values()].sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
 if (typeof module === 'object' && module.exports) {

@@ -109,10 +109,12 @@ function getMessageChain(data) {
     return messages;
   }
 
-  // Trace back from leaf to root
+  // Trace back from leaf to root. A parent loop (a damaged or crafted file) ends the walk.
   const chain = [];
+  const seen = new Set();
   let uuid = currentLeaf;
-  while (uuid && byUuid[uuid]) {
+  while (uuid && byUuid[uuid] && !seen.has(uuid)) {
+    seen.add(uuid);
     chain.push(byUuid[uuid]);
     uuid = byUuid[uuid].parent_message_uuid;
   }
@@ -429,6 +431,12 @@ function zipSafeName(name) {
   return safe === '.' || safe === '..' ? '_' : safe;
 }
 
+// The viewer's key for one upload: its file UUID, or, when it has none, its message and name, so two
+// same-named uploads in different prompts stay apart. takeout-viewer.js's buildUploads uses the same rule.
+function viewerUploadKey(file) {
+  return file.uuid || `${file.messageUuid}\n${file.originalFilename}`;
+}
+
 function extractUploadedFiles(data, organizationId = null) {
   const files = [];
   const messages = getMessageChain(data);  // Use ordered message chain
@@ -451,6 +459,7 @@ function extractUploadedFiles(data, organizationId = null) {
           filename: prefixedFilename,
           originalFilename: file.file_name,  // Keep original for API calls
           promptNum: promptNum,
+          messageUuid: msg.uuid || '',
           uuid: file.file_uuid || '',
           kind: file.file_kind || 'unknown',
           createdAt: file.created_at || '',
@@ -498,6 +507,7 @@ function extractUploadedFiles(data, organizationId = null) {
         filename: prefixedFilename,
         originalFilename: originalFilename,
         promptNum: promptNum,
+        messageUuid: msg.uuid || '',
         uuid: file.file_uuid || '',
         kind: file.file_kind || 'unknown',
         createdAt: file.created_at || '',
@@ -678,7 +688,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, getMessageChain, failedToolUseIds, isBashTool, heredocPath, HEREDOC_RE, heredocFiles,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, getMessageChain, failedToolUseIds, isBashTool, heredocPath, HEREDOC_RE, heredocFiles,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject,
   };
 }

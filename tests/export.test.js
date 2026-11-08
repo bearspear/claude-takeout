@@ -967,3 +967,29 @@ test('a mega-ZIP fetches a project\'s documents once', async () => {
     assert.strictEqual(chat.project.instructions, 'be brief');
   }
 });
+
+test('a message chain with a parent loop ends', () => {
+  const data = { current_leaf_message_uuid: 'a', chat_messages: [
+    { uuid: 'a', parent_message_uuid: 'b', sender: 'assistant', content: [use('1', 'create_file', { path: '/h/x.md', file_text: 'x' })] },
+    { uuid: 'b', parent_message_uuid: 'a', sender: 'human', content: [] },
+  ] };
+  assert.deepStrictEqual(Array.from(fn('getMessageChain')(data), (m) => m.uuid), ['b', 'a']);
+  assert.deepStrictEqual(plain(artifacts(data)), { 'x.md': 'x' });
+  assert.deepStrictEqual(pythonArtifacts(data), { 'x.md': 'x' });
+});
+
+test('uploads without a file UUID are told apart by prompt in the viewer', async () => {
+  const data = chatOf([
+    { sender: 'human', content: [{ type: 'text', text: 'one' }], files: [{ success: true, file_name: 'notes.txt', file_kind: 'blob' }] },
+    { sender: 'assistant', content: [{ type: 'text', text: 'ok' }] },
+    { sender: 'human', content: [{ type: 'text', text: 'two' }], files: [{ success: true, file_name: 'notes.txt', file_kind: 'blob' }] },
+  ]);
+  const popup = exportPopup({ routes: [[/download-file\?path=/, () => ({ ok: true, status: 200, blob: async () => textBlob('n') })]] });
+  // The legacy entries have no path, so give them the sandbox one the export tries.
+  data.chat_messages[0].files[0].path = '/mnt/user-data/uploads/notes.txt';
+  data.chat_messages[2].files[0].path = '/mnt/user-data/uploads/notes.txt';
+  const { chat, written } = await runFolder(popup, data);
+  assert.ok('uploads/p01_notes.txt' in written && 'uploads/p02_notes.txt' in written, Object.keys(written).join());
+  const hrefs = chat.messages.filter((m) => m.sender === 'human').map((m) => (m.uploads || []).map((u) => u.href));
+  assert.deepStrictEqual(plain(hrefs), [['uploads/p01_notes.txt'], ['uploads/p02_notes.txt']]);
+});

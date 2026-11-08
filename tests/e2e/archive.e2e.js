@@ -449,6 +449,14 @@ function viewerDataOf(file) {
       return loadPart(1).then(d => d[k] !== 'forged');
     }, firstPart.key));
     check('__archivePart cannot be replaced', await parts.page.evaluate(() => { const was = window.__archivePart; window.__archivePart = null; return window.__archivePart === was; }));
+    // Only the last two parts stay in memory; an older one loads again when it is needed.
+    const listed = await parts.page.evaluate(() => [...partsListed]);
+    const partCount = listed.length;
+    for (const n of listed) await load(n);
+    check('at most two loaded parts are kept', partCount > 2 && (await parts.page.evaluate(() => partsLoaded.size)) <= 2, String(partCount));
+    const before = scriptCount();
+    const again = await load(1);
+    check('an evicted part loads again', again && again[firstPart.key] && scriptCount() === before + 1);
     clean('part flow', parts.seen);
     await parts.context.close();
 

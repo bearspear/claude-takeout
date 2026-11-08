@@ -2372,7 +2372,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         folder.file(`uploads/${finalName}`, blob);
         recordSaved(finalName);
         downloadedFiles.push({ name: finalName, fromJson: false });
-        viewerUploads[file.uuid || file.originalFilename] = { path: `uploads/${finalName}`, text: await viewerUploadText(finalName, blob) };
+        viewerUploads[viewerUploadKey(file)] = { path: `uploads/${finalName}`, text: await viewerUploadText(finalName, blob) };
         // Keep the blob by sandbox path, so the inline pass below can turn it into a
         // data URI if a text artifact refers to it. Most uploads are never referred
         // to, so nothing is encoded here.
@@ -2405,7 +2405,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
             folder.file(`uploads/${savedName}`, result.content);
             recordSaved(savedName);
             downloadedFiles.push({ name: savedName, fromJson: true });
-            viewerUploads[file.uuid || file.originalFilename] = { path: `uploads/${savedName}`, text: await viewerUploadText(savedName, result.content) };
+            viewerUploads[viewerUploadKey(file)] = { path: `uploads/${savedName}`, text: await viewerUploadText(savedName, result.content) };
           } else {
             fallbackResult = 'Content not found in JSON';
             // Create enhanced error with all context
