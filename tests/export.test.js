@@ -1309,3 +1309,58 @@ test('an export leaves disabled buttons disabled, and bulk exports hold the lock
   await run;
   assert.strictEqual(vm.runInContext('exportRunning', popup.sandbox), false);
 });
+
+// ---- export health check ----
+const { chatHealth } = require('../export-core.js');
+const healthOf = (data) => chatHealth(data).map((h) => h.check);
+
+test('chatHealth: a normal chat and a chat that was never used are healthy', () => {
+  assert.deepStrictEqual(healthOf(chatOf([{ sender: 'human', content: [{ type: 'text', text: 'hi' }] }, { sender: 'assistant', content: [{ type: 'text', text: 'yo' }] }])), []);
+  assert.deepStrictEqual(healthOf({ uuid: 'e', created_at: '2026-06-03T03:05:41Z', updated_at: '2026-06-03T03:05:41Z', chat_messages: [] }), []);
+});
+
+test('chatHealth flags what an API change would leave behind', () => {
+  assert.deepStrictEqual(healthOf({ uuid: 'x', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z' }), ['no_messages']);
+  assert.deepStrictEqual(healthOf({ uuid: 'x', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', chat_messages: [] }), ['no_messages']);
+  const hollow = chatOf([{ sender: 'human', content: [] }, { sender: 'assistant', content: [{ type: 'text', text: 'ok' }] }]);
+  const h = chatHealth(hollow);
+  assert.deepStrictEqual(h.map((x) => x.check), ['empty_messages']);
+  assert.match(h[0].message, /1 of 2 messages/);
+  const branched = chatOf([{ sender: 'human', content: [{ type: 'text', text: 'q' }] }, { sender: 'assistant', content: [{ type: 'text', text: 'a' }] }]);
+  branched.chat_messages.push({ uuid: 'alt', parent_message_uuid: 'm0', sender: 'assistant', content: [{ type: 'text', text: 'b' }] });
+  branched.current_leaf_message_uuid = 'gone';
+  assert.deepStrictEqual(healthOf(branched), ['unknown_branch']);
+  const unbranched = chatOf([{ sender: 'human', content: [{ type: 'text', text: 'q' }] }]);
+  delete unbranched.current_leaf_message_uuid;
+  assert.deepStrictEqual(healthOf(unbranched), [], 'one line of messages needs no leaf');
+  const odd = chatOf([{ sender: 'assistant', content: [{ type: 'text', text: 'a' }, { type: 'hologram', x: 1 }, { type: 'hologram' }, { type: 'voice_note' }] }]);
+  const u = chatHealth(odd);
+  assert.deepStrictEqual(u.map((x) => x.check), ['unknown_blocks']);
+  assert.match(u[0].message, /hologram \(2\), voice_note \(1\)/);
+});
+
+test('an export records health problems in errors.txt and says so in the result', async () => {
+  const data = Object.assign(chatOf([{ sender: 'human', content: [] }, { sender: 'assistant', content: [{ type: 'text', text: 'ok' }, { type: 'hologram' }] }]), { uuid: 'hc', name: 'hc' });
+  const { written, output } = await runFolder(exportPopup(), data);
+  const errors = String(written['errors.txt'] && (written['errors.txt'].content ?? written['errors.txt']));
+  assert.match(errors, /export_health|looks incomplete/i);
+  assert.match(errors, /hologram/);
+  assert.strictEqual(output.healthIssues, 2);
+});
+
+test('an export where every upload failed is a health problem', async () => {
+  const data = Object.assign(chatOf([{ sender: 'human', content: [{ type: 'text', text: 'see' }], files_v2: [
+    { success: true, file_name: 'a.pdf', file_uuid: 'gone-1', file_kind: 'document' }, { success: true, file_name: 'b.pdf', file_uuid: 'gone-2', file_kind: 'document' }] }]), { uuid: 'uf', name: 'uf' });
+  const { output, written } = await runFolder(exportPopup({ failing: ['gone-1', 'gone-2'] }), data);
+  assert.strictEqual(output.healthIssues, 1);
+  assert.match(String(written['errors.txt'].content ?? written['errors.txt']), /none of the 2 uploads/i);
+});
+
+test('a single export without errors.txt turns amber when the chat looks incomplete', () => {
+  const status = { className: '', textContent: '' };
+  fn('exportedStatus')(status, chatOf([{ sender: 'human', content: [{ type: 'text', text: 'hi' }] }]), 'JSON exported successfully!');
+  assert.deepStrictEqual([status.className, status.textContent], ['status ready', 'JSON exported successfully!']);
+  fn('exportedStatus')(status, { uuid: 'x', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-03T00:00:00Z', chat_messages: [] }, 'JSON exported successfully!');
+  assert.strictEqual(status.className, 'status warning');
+  assert.match(status.textContent, /^JSON exported successfully\. But this chat looks incomplete: claude\.ai returned no messages/);
+});

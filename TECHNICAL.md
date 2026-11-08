@@ -1,6 +1,6 @@
 # Claude Takeout - Technical Documentation
 
-How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.21.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.22.
 
 This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
@@ -279,6 +279,7 @@ Encoding rules:
 | `artifact_basename_collision` | Two paths had the same filename; one was renamed. |
 | `artifact_opaque_mutation` | A bash command changed a file in a way replay can't follow. |
 | `claude_doc_unreplayed` | A Claude Docs edit could not be rebuilt from the chat; the note links the live document. |
+| `export_health` | The chat's data looks incomplete, the likely sign of a change in claude.ai's API (`chatHealth`): no messages although the chat changed, messages with no content, no current branch in a branched chat, unknown content block types, or none of several uploads downloaded. A mega-ZIP's `index.md` counts these chats, and the chats claude.ai listed. |
 | `viewer` | One chat could not be added to `viewer.html`. |
 
 Each error records the URLs tried, HTTP status and fallback result. A new kind of failure gets a new type and a `_getRecoveryHint` case.
