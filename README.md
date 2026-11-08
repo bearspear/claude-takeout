@@ -367,6 +367,18 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.8
+
+More fixes from the code review, to the Markdown files and to file names. They need a fresh export from claude.ai.
+
+- **Pasted text in Markdown exports** - The single Markdown and Embedded Markdown exports left out text pasted into a prompt. It is now written under the prompt, and uploaded files are named. In a ZIP, `full_chat.md` and `integrated_chat.md` link to the files in `attachments/` and `uploads/` instead.
+- **Links in `prompts.md` work** - Upload links were rebuilt from the original names, so two pasted `image.png` files, names with accents, or an upload that failed gave broken links. They now point to the names actually saved, and a failed upload is named with a note instead of a link. `Photo.PNG` and `photo.png` no longer overwrite each other on macOS or Windows.
+- **Files Claude showed you are all kept** - Two shown files with one name from different folders (`en/index.html`, `de/index.html`) now become `index.html` and `index_2.html`, with a warning; before, one was lost. When a script changed a file in a way the export can't replay, the copy Claude showed is downloaded and used as the final version. `full_chat.md` links shown binary files such as `.docx` instead of saying "(not found)".
+- **`code_snippets.md` stays readable** - A file containing code fences no longer breaks the rest of the page, and code blocks inside Claude's files aren't listed twice.
+- **Project documents with the same title are all kept** - Two documents named `notes.md`, or one named `project.json`, overwrote each other or the project's own files. They now get `_2` names.
+- **Titles in any script** - Chats titled in Cyrillic, Japanese and other scripts get readable file and folder names instead of underscores or "untitled". English titles give the same names as before.
+- **Safe names** - A name from the chat containing `/`, `\`, `..` or control characters can no longer create folders or escape its place in the ZIP.
+
 ### v1.6.7
 
 Fixes from a full code review. These change what goes into a new export, so they need a fresh export from claude.ai; rebuilding a viewer doesn't apply them.

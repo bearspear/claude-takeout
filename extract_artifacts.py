@@ -128,8 +128,14 @@ def failed_tool_use_ids(messages: list[dict]) -> set[str]:
     return ids
 
 
+def zip_safe_name(name: str) -> str:
+    """zipSafeName in export-core.js: no separators or control characters, never . or .."""
+    safe = re.sub(r"[\\/\x00-\x1f\x7f]", "_", name or "")
+    return "_" if safe in (".", "..") else safe
+
+
 def basename_of(p: str) -> str:
-    return (p or "").rsplit("/", 1)[-1]
+    return zip_safe_name((p or "").rsplit("/", 1)[-1])
 
 
 def split_ext(name: str) -> tuple[str, str]:

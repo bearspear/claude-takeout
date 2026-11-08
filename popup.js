@@ -407,11 +407,17 @@ function inlineSandboxPaths(content, uploadDataUris) {
 // ============================================================================
 
 // Get appropriate code fence based on content (uses 4 backticks if content has 3)
+// One upload's key, the same from extractUploadedFiles and from the message: its file
+// UUID, or its prompt and name when it has none.
+function uploadNameKey(uuid, promptNum, originalName) {
+  return uuid ? `uuid:${uuid}` : `p${promptNum}:${String(originalName || '').normalize('NFC')}`;
+}
+
+// A fence one backtick longer than the longest run of backticks in the content, and never shorter than ```.
 function getCodeFence(content) {
-  if (content && content.includes('```')) {
-    return '````';
-  }
-  return '```';
+  const runs = String(content || '').match(/`+/g) || [];
+  const longest = runs.reduce((n, run) => Math.max(n, run.length), 0);
+  return '`'.repeat(Math.max(3, longest + 1));
 }
 
 // getMessageChain, isBashTool, the heredoc helpers and extractArtifacts are in export-core.js
@@ -630,6 +636,7 @@ function detectOpaqueMutations(data, errorCollector) {
 function extractTextAttachments(data) {
   const attachments = {};
   const idToFilename = {};  // Maps attachment id to final filename
+  const byMessage = {};  // message uuid -> [{ att, name }], saved attachments in order
   const messages = getMessageChain(data);  // Use ordered message chain
   let unnamedCounter = 1;
   let promptNum = 0;
@@ -667,7 +674,7 @@ function extractTextAttachments(data) {
 
       // Prefix with prompt number for grouping (p01_, p02_, etc.)
       const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
-      filename = promptPrefix + filename;
+      filename = promptPrefix + zipSafeName(filename);
 
       // Handle duplicate filenames by adding a suffix
       let finalName = filename;
@@ -685,10 +692,11 @@ function extractTextAttachments(data) {
       if (attId) {
         idToFilename[attId] = finalName;
       }
+      (byMessage[msg.uuid] = byMessage[msg.uuid] || []).push({ att, name: finalName });
     }
   }
 
-  return { attachments, idToFilename };
+  return { attachments, idToFilename, byMessage };
 }
 
 // Extract web search sources from conversation
@@ -1479,9 +1487,9 @@ function extractUrls(text) {
 // Sanitize text for use as filename
 function sanitizeForFilename(text, maxLen = 50) {
   let clean = text.replace(/\*+/g, '').replace(/#+\s*/g, '').trim();
-  clean = clean.replace(/[^\w\s-]/g, '').replace(/[\s-]+/g, '_');
+  clean = clean.replace(/[^\p{L}\p{N}\p{M}_\s-]/gu, '').replace(/[\s-]+/g, '_');
   clean = clean.replace(/^_+|_+$/g, '').toLowerCase();
-  return clean.substring(0, maxLen) || 'untitled';
+  return Array.from(clean).slice(0, maxLen).join('') || 'untitled';
 }
 
 // Extract first heading from markdown
@@ -1624,7 +1632,10 @@ function generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachmen
 }
 
 // Generate prompts.md content
-function generatePrompts(messages, responseFiles, attachmentIdMap = {}) {
+// uploadNames: from populateConversationFolder, uploadNameKey -> [saved name or null], in order.
+// attachmentFiles: from extractTextAttachments, message uuid -> [{ att, name }].
+function generatePrompts(messages, responseFiles, attachmentIdMap = {}, uploadNames = null, attachmentFiles = null) {
+  const takenUploads = {};
   const lines = ['# Prompts', ''];
   let promptNum = 0;
   let responseNum = 0;
@@ -1662,7 +1673,8 @@ function generatePrompts(messages, responseFiles, attachmentIdMap = {}) {
       for (const att of attachments) {
         // Use id-to-filename map for accurate filename, fall back to original file_name
         const attId = att.id || '';
-        const filename = (attId && attachmentIdMap[attId]) ? attachmentIdMap[attId] : (att.file_name || 'unknown');
+        const saved = attachmentFiles && (attachmentFiles[msg.uuid] || []).find((entry) => entry.att === att);
+        const filename = saved ? saved.name : (attId && attachmentIdMap[attId]) ? attachmentIdMap[attId] : (att.file_name || 'unknown');
         lines.push(`- [${filename}](attachments/${encodeURIComponent(filename)})`);
       }
       lines.push('');
@@ -1674,19 +1686,30 @@ function generatePrompts(messages, responseFiles, attachmentIdMap = {}) {
     if (uploadsV2.length > 0 || uploadsOld.length > 0) {
       lines.push('**Uploaded Files:**');
       // files_v2 format
+      // Link each upload to the name it was saved under; one that failed is named, not linked.
+      const uploadLine = (label, uuid, original, pageInfo) => {
+        if (!uploadNames) {
+          // No record of what was saved: link to the name an export would use.
+          const guessed = (`p${String(promptNum).padStart(2, '0')}_` + zipSafeName(original)).normalize('NFC');
+          return `- [${label}](uploads/${encodeURIComponent(guessed)})${pageInfo}`;
+        }
+        const key = uploadNameKey(uuid, promptNum, original);
+        const nth = takenUploads[key] || 0;
+        takenUploads[key] = nth + 1;
+        const saved = (uploadNames[key] || [])[nth];
+        return saved
+          ? `- [${label}](uploads/${encodeURIComponent(saved)})${pageInfo}`
+          : `- ${label}${pageInfo} *(not saved, see errors.txt)*`;
+      };
       for (const file of uploadsV2) {
         const pageInfo = file.document_asset?.page_count ? ` (${file.document_asset.page_count} pages)` : '';
-        const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
-        const prefixedName = promptPrefix + file.file_name;
-        lines.push(`- [${file.file_name}](uploads/${encodeURIComponent(prefixedName)})${pageInfo}`);
+        lines.push(uploadLine(file.file_name, file.file_uuid, file.file_name, pageInfo));
       }
       // files format (older) - get filename from path or file_name
       for (const file of uploadsOld) {
         const filename = file.path ? file.path.split('/').pop() : file.file_name;
         const pageInfo = file.document_asset?.page_count ? ` (${file.document_asset.page_count} pages)` : '';
-        const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
-        const prefixedName = promptPrefix + filename;
-        lines.push(`- [${filename}](uploads/${encodeURIComponent(prefixedName)})${pageInfo}`);
+        lines.push(uploadLine(filename, file.file_uuid, filename, pageInfo));
       }
       lines.push('');
     }
@@ -1755,9 +1778,10 @@ function generateCodeSnippets(codeBlocks) {
       : `## Snippet ${i + 1} (${block.lang})`;
     lines.push(header);
     lines.push('');
-    lines.push(`\`\`\`${block.lang}`);
+    const fence = getCodeFence(block.code);
+    lines.push(`${fence}${block.lang}`);
     lines.push(block.code);
-    lines.push('```');
+    lines.push(fence);
     lines.push('');
   });
 
@@ -1857,7 +1881,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   const artifactIndex = {};
   const artifacts = extractArtifacts(data, errorCollector, artifactIndex);
-  const { attachments: textAttachments, idToFilename: attachmentIdMap } = extractTextAttachments(data);
+  const { attachments: textAttachments, idToFilename: attachmentIdMap, byMessage: attachmentFiles } = extractTextAttachments(data);
   const uploadedFiles = extractUploadedFiles(data, organizationId);
   const presentedFiles = extractPresentedFiles(data);
   const webSources = extractWebSources(data);
@@ -1904,8 +1928,18 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
     if (apiDocs.length > 0) {
       projectFilesFromApi = true;
+      // Docs are named by their titles, which can repeat or match the metadata
+      // files written beside them, so each gets a free name, compared case-insensitively.
+      const taken = new Set(['project.json', 'docs.json', 'files.json', 'prompt_template.md', 'files']);
       for (const doc of apiDocs) {
-        projectFiles[doc.filename] = doc.content;
+        const name = zipSafeName(doc.filename) || 'document.md';
+        const dot = name.lastIndexOf('.');
+        const base = dot > 0 ? name.substring(0, dot) : name;
+        const ext = dot > 0 ? name.substring(dot) : '';
+        let finalName = name;
+        for (let n = 2; taken.has(finalName.toLowerCase()); n++) finalName = `${base}_${n}${ext}`;
+        taken.add(finalName.toLowerCase());
+        projectFiles[finalName] = doc.content;
       }
       console.log(`Fetched ${apiDocs.length} project files from API`);
     }
@@ -1977,15 +2011,18 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   // Collect all text for extraction
-  let allText = '';
+  let chatText = '';
   for (const msg of messages) {
-    allText += extractTextContent(msg.content) + '\n\n';
+    chatText += extractTextContent(msg.content) + '\n\n';
   }
+  let allText = chatText;
   for (const content of Object.values(artifacts)) {
     allText += content + '\n\n';
   }
 
-  const codeBlocks = extractCodeBlocks(allText);
+  // Code blocks from the chat itself. Artifacts are added whole below, so the
+  // blocks inside them aren't listed a second time.
+  const codeBlocks = extractCodeBlocks(chatText);
 
   // Also include artifacts themselves as code blocks
   for (const [filename, content] of Object.entries(artifacts)) {
@@ -2151,12 +2188,40 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     addFileWithBOM(folder, `artefacts/${filename}`, content);
   }
 
-  // Download and add presented files (files created via bash/Python and presented to user)
-  // Only download if not already in artifacts
+  // Flag any bash_tool command that mutates a tracked artifact in a way the
+  // declarative replay can't reconstruct. Emits `artifact_opaque_mutation`
+  // warnings in errors.txt pointing the user at the companion replay_bash.py
+  // CLI for recovery. See docs/WASM_REPLAY_APPROACH.md for
+  // why we don't try to interpret bash scripts in the extension. It runs before
+  // the presented files, which use its warnings.
+  detectOpaqueMutations(data, errorCollector);
+
+  // Download presented files (files Claude showed the user). One the replay
+  // already rebuilt is skipped, unless the replay is known to be off for it (an
+  // edit that couldn't be applied, or a script that changed it): then the
+  // presented copy is the real final state, and it replaces the replayed file
+  // and its last version. Two presented files with one name from different
+  // folders are kept apart as <base>_2<ext>.
+  const replayIsOff = (name) => errorCollector.warnings.some((w) =>
+    (w.type === 'str_replace_failed' || w.type === 'artifact_opaque_mutation') && w.filename === name);
+  const presentedNames = {};  // presented path -> its name in artefacts/
+  const presentedFrom = {};   // name in artefacts/ -> the presented path that took it
   for (let i = 0; i < presentedFiles.length; i++) {
     const file = presentedFiles[i];
-    // Skip if already in artifacts
-    if (artifacts[file.filename]) continue;
+    let name = file.filename;
+    if (presentedFrom[name] && presentedFrom[name] !== file.path) {
+      const dot = name.lastIndexOf('.');
+      const base = dot > 0 ? name.substring(0, dot) : name;
+      const ext = dot > 0 ? name.substring(dot) : '';
+      for (let n = 2; Object.prototype.hasOwnProperty.call(artifacts, name) || presentedFrom[name]; n++) name = `${base}_${n}${ext}`;
+      errorCollector.addWarning('artifact_basename_collision', name,
+        `Another presented file is already named "${file.filename}". This one was saved as "${name}" to avoid overwriting.`,
+        { path: file.path, note: 'Check that both files are intended.' });
+    }
+    const replayed = Object.prototype.hasOwnProperty.call(artifacts, name) && !presentedFrom[name];
+    presentedNames[file.path] = name;
+    presentedFrom[name] = file.path;
+    if (replayed && !replayIsOff(name)) continue;
 
     if (onProgress) {
       onProgress(15 + Math.floor((i / presentedFiles.length) * 5), 100, `Downloading: ${file.filename}`);
@@ -2165,13 +2230,18 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     try {
       const conversationId = data.uuid;
       const blob = await fetchUploadedFile(null, file.uuid, organizationId, conversationId, file.path);
-      await addArtefactBlob(folder, artifacts, file.filename, blob);
+      await addArtefactBlob(folder, artifacts, name, blob);
+      if (replayed) {
+        const entry = Object.values(artifactIndex).find((e) => e.filename === name);
+        if (entry && entry.versions.length > 1) await addArtefactBlob(folder, artifacts, entry.versions[entry.versions.length - 1], blob);
+        errorCollector.clearWarnings('artifact_opaque_mutation', name);
+      }
       // The download is the file's final state, so edits that couldn't be
       // replayed against it aren't missing.
-      errorCollector.clearWarnings('str_replace_failed', file.filename);
+      errorCollector.clearWarnings('str_replace_failed', name);
     } catch (err) {
       console.error(`Failed to download presented file ${file.filename}:`, err);
-      errorCollector.addError('presented_file', file.filename, err.message, {
+      errorCollector.addError('presented_file', name, err.message, {
         uuid: file.uuid,
         path: file.path,
         urlsTried: err.urlsTried || [],
@@ -2246,7 +2316,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // Fetch and add uploaded files (PDFs, images, etc.)
   const downloadedFiles = [];
   const failedFiles = [];  // Keep for README.md backward compatibility
-  const usedUploadNames = new Set();
+  const usedUploadNames = new Set();  // lowercase names already in uploads/
+  const savedUploadNames = {};  // uploadNameKey -> [saved name, or null when it failed], in order
   const viewerUploads = {};  // File UUID (or name) -> { path, text }, saved files only
   // sandboxPath -> "data:<mime>;base64,..." for inlining into text artifacts.
   const uploadDataUris = {};
@@ -2257,16 +2328,21 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       onProgress(20 + Math.floor((i / uploadedFiles.length) * 40), 100, `Processing: ${file.filename}`);
     }
 
-    // Handle duplicate filenames
-    let finalName = file.filename;
-    let counter = 1;
-    while (usedUploadNames.has(finalName)) {
-      const ext = file.filename.includes('.') ? file.filename.substring(file.filename.lastIndexOf('.')) : '';
-      const base = file.filename.includes('.') ? file.filename.substring(0, file.filename.lastIndexOf('.')) : file.filename;
-      finalName = `${base}_${counter}${ext}`;
-      counter++;
-    }
-    usedUploadNames.add(finalName);
+    // Handle duplicate filenames. Compared case-insensitively, because Photo.PNG and
+    // photo.png are one file once unzipped on macOS or Windows.
+    const freeUploadName = (name) => {
+      const dot = name.lastIndexOf('.');
+      const base = dot > 0 ? name.substring(0, dot) : name;
+      const ext = dot > 0 ? name.substring(dot) : '';
+      let free = name;
+      for (let counter = 1; usedUploadNames.has(free.toLowerCase()); counter++) free = `${base}_${counter}${ext}`;
+      usedUploadNames.add(free.toLowerCase());
+      return free;
+    };
+    const finalName = freeUploadName(file.filename);
+    const uploadKey = uploadNameKey(file.uuid, file.promptNum, file.originalFilename);
+    (savedUploadNames[uploadKey] = savedUploadNames[uploadKey] || []).push(null);
+    const recordSaved = (name) => { savedUploadNames[uploadKey][savedUploadNames[uploadKey].length - 1] = name; };
 
     try {
       const conversationId = data.uuid;
@@ -2283,6 +2359,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
           file.path
         );
         folder.file(`uploads/${finalName}`, blob);
+        recordSaved(finalName);
         downloadedFiles.push({ name: finalName, fromJson: false });
         viewerUploads[file.uuid || file.originalFilename] = { path: `uploads/${finalName}`, text: await viewerUploadText(finalName, blob) };
         // Also build a data URI keyed by sandbox path so we can inline this
@@ -2318,9 +2395,16 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
             fallbackResult = 'Content recovered from JSON';
             // Use the sanitized filename from view tool, but keep prompt prefix
             const promptPrefix = `p${String(file.promptNum).padStart(2, '0')}_`;
-            const baseName = result.filename || file.originalFilename || finalName;
-            const savedName = baseName.startsWith('p') && baseName[3] === '_' ? baseName : promptPrefix + baseName;
+            const baseName = zipSafeName(result.filename || file.originalFilename || '');
+            // The sandbox may have renamed the file; keep finalName unless the name differs.
+            const wanted = baseName ? (/^p\d{2}_/.test(baseName) ? baseName : promptPrefix + baseName).normalize('NFC') : finalName;
+            let savedName = finalName;
+            if (wanted.toLowerCase() !== finalName.toLowerCase()) {
+              usedUploadNames.delete(finalName.toLowerCase());
+              savedName = freeUploadName(wanted);
+            }
             folder.file(`uploads/${savedName}`, result.content);
+            recordSaved(savedName);
             downloadedFiles.push({ name: savedName, fromJson: true });
             viewerUploads[file.uuid || file.originalFilename] = { path: `uploads/${savedName}`, text: await viewerUploadText(savedName, result.content) };
           } else {
@@ -2364,13 +2448,6 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
   }
 
-  // Flag any bash_tool command that mutates a tracked artifact in a way the
-  // declarative replay can't reconstruct. Emits `artifact_opaque_mutation`
-  // warnings in errors.txt pointing the user at the companion replay_bash.py
-  // CLI for recovery. See docs/WASM_REPLAY_APPROACH.md for
-  // why we don't try to interpret bash scripts in the extension.
-  detectOpaqueMutations(data, errorCollector);
-
   // Self-contained HTML pass: rewrite sandbox-path references (e.g.
   // /mnt/user-data/uploads/foo.png) in text-based artifacts as base64 data
   // URIs, then re-write those entries into the zip. We deliberately keep the
@@ -2393,7 +2470,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   // Generate all markdown files (with BOM for proper browser encoding)
   addFileWithBOM(folder, 'meta.md', generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments, projectFiles, downloadedFiles, webSources, failedFiles.length, projectUploads.length));
-  addFileWithBOM(folder, 'prompts.md', generatePrompts(messages, responseFiles, attachmentIdMap));
+  addFileWithBOM(folder, 'prompts.md', generatePrompts(messages, responseFiles, attachmentIdMap, savedUploadNames, attachmentFiles));
   addFileWithBOM(folder, 'responses_text_only.md', generateResponsesTextOnly(messages, artifacts));
 
   if (codeBlocks.length > 0) {
@@ -2404,8 +2481,10 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     addFileWithBOM(folder, 'links_and_sources.md', linksAndSourcesContent);
   }
 
-  addFileWithBOM(folder, 'full_chat.md', convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking }));
-  const integratedChatMd = convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking });
+  // The Markdown links to what this export really saved.
+  const saved = { artifacts, attachmentFiles, uploadNames: savedUploadNames, presentedNames };
+  addFileWithBOM(folder, 'full_chat.md', convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking, ...saved }));
+  const integratedChatMd = convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking, ...saved });
   addFileWithBOM(folder, 'integrated_chat.md', integratedChatMd);
   folder.file('integrated_chat.txt', markdownToPlainText(integratedChatMd));
   folder.file('original.json', JSON.stringify(data, null, 2));
@@ -2660,13 +2739,20 @@ function formatTimestamp(isoString) {
 // getModelName is in export-core.js
 
 // Convert conversation to Markdown
+// options.artifacts, attachmentFiles, uploadNames and presentedNames come from
+// populateConversationFolder in a ZIP: what was really saved, so the Markdown links
+// to those files. A single Markdown file has none of them and embeds pasted text.
 function convertToMarkdown(data, options = {}) {
-  const { embedArtifacts = false, seamlessMd = false, includeThinking = true } = options;
+  const { embedArtifacts = false, seamlessMd = false, includeThinking = true,
+    attachmentFiles = null, uploadNames = null, presentedNames = {} } = options;
   const lines = [];
   const title = data.name || 'Claude Conversation';
 
-  // Extract artifacts for embedding or reference
-  const artifacts = extractArtifacts(data);
+  // Extract artifacts for embedding or reference. In a ZIP these include the
+  // presented and delivered files that were downloaded.
+  const artifacts = options.artifacts || extractArtifacts(data);
+  let promptNum = 0;
+  const takenUploads = {};
 
   // Header
   lines.push(`# ${title}`);
@@ -2697,6 +2783,48 @@ function convertToMarkdown(data, options = {}) {
       const text = extractTextContent(msg.content);
       lines.push(text);
       lines.push('');
+      promptNum++;
+
+      // Pasted text: linked to its saved file in a ZIP, written out otherwise.
+      const pasted = (msg.attachments || []).filter((a) => a.extracted_content);
+      const savedPastes = (attachmentFiles && attachmentFiles[msg.uuid]) || [];
+      // Unnamed pastes are "Pasted text", numbered when a prompt has several, as in the viewer.
+      const unnamed = pasted.filter((a) => !a.file_name).length;
+      let pasteNum = 0;
+      const pasteLabels = pasted.map((a) => a.file_name || (unnamed > 1 ? `Pasted text ${++pasteNum}` : 'Pasted text'));
+      pasted.forEach((att, i) => {
+        const saved = savedPastes.find((entry) => entry.att === att);
+        if (saved) {
+          lines.push(`**${pasteLabels[i]}:** [${saved.name}](attachments/${encodeURIComponent(saved.name)})`);
+          lines.push('');
+          return;
+        }
+        const body = fixMojibake(att.extracted_content);
+        const fence = getCodeFence(body);
+        lines.push(`**${pasteLabels[i]}:**`);
+        lines.push('');
+        lines.push(fence);
+        lines.push(body);
+        lines.push(fence);
+        lines.push('');
+      });
+
+      // Uploaded files, by name, linked where a ZIP saved them.
+      const uploads = [
+        ...(msg.files_v2 || []).filter((f) => f.success && f.file_name).map((f) => ({ uuid: f.file_uuid, name: f.file_name })),
+        ...(msg.files || []).filter((f) => f.success && (f.path || f.file_name)).map((f) => ({ uuid: f.file_uuid, name: f.path ? f.path.split('/').pop() : f.file_name })),
+      ];
+      if (uploads.length > 0) {
+        lines.push('**Uploaded files:**');
+        for (const upload of uploads) {
+          const key = uploadNameKey(upload.uuid, promptNum, upload.name);
+          const nth = takenUploads[key] || 0;
+          takenUploads[key] = nth + 1;
+          const saved = uploadNames && (uploadNames[key] || [])[nth];
+          lines.push(saved ? `- [${upload.name}](uploads/${encodeURIComponent(saved)})` : `- ${upload.name}`);
+        }
+        lines.push('');
+      }
       lines.push('');
 
     } else if (sender === 'assistant') {
@@ -2788,8 +2916,11 @@ function convertToMarkdown(data, options = {}) {
             // Present files - embed or reference artifacts
             const filepaths = input.filepaths || [];
             for (const filepath of filepaths) {
-              const filename = filepath.split('/').pop();
-              if (artifacts[filename]) {
+              const filename = presentedNames[filepath] || zipSafeName(filepath.split('/').pop());
+              if (Object.prototype.hasOwnProperty.call(artifacts, filename) && artifacts[filename] === '') {
+                // A binary file the ZIP saved: link it.
+                lines.push(`\n**Artifact: ${filename}** - [artefacts/${filename}](artefacts/${encodeURIComponent(filename)})\n`);
+              } else if (artifacts[filename]) {
                 if (embedArtifacts) {
                   // Embed the actual content
                   const content = artifacts[filename];
@@ -2986,18 +3117,6 @@ function convertToMarkdown(data, options = {}) {
       }
 
       // Check for attachments/files (legacy handling)
-      if (msg.attachments && msg.attachments.length > 0) {
-        for (const att of msg.attachments) {
-          const filename = att.file_name || att.filename || 'file.md';
-          lines.push('*Request*');
-          lines.push('');
-          lines.push('````javascript');
-          lines.push(JSON.stringify({ filepaths: [`/mnt/user-data/outputs/${filename}`] }, null, 2));
-          lines.push('````');
-          lines.push('');
-        }
-      }
-
       lines.push('');
     }
   }
@@ -3031,8 +3150,10 @@ function download(content, filename, type) {
 }
 
 // Safe filename
+// Letters and digits from any script are kept, so a Cyrillic or Japanese title stays
+// readable; everything else becomes _. ASCII titles come out as they always did.
 function safeFilename(name) {
-  return (name || 'conversation').replace(/[^a-z0-9]/gi, '_').substring(0, 50);
+  return Array.from((name || 'conversation').replace(/[^\p{L}\p{N}\p{M}]/gu, '_')).slice(0, 50).join('');
 }
 
 // Update UI based on data availability

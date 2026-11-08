@@ -1,6 +1,6 @@
 # Claude Takeout - Technical Documentation
 
-How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.7.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.8.
 
 This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
@@ -193,7 +193,7 @@ An artifact that refers to an upload by its sandbox path (`<img src="/mnt/user-d
 
 ### Files Claude made (`present_files`, `SendUserFile`)
 
-`extractPresentedFiles` lists the files in `present_files` results (`local_resource` items). One the replay already rebuilt is kept as is; any other, such as a file a Python script wrote, is downloaded through `fetchUploadedFile` by its sandbox path into `artefacts/`. A download is the file's final state, so it clears that file's `str_replace_failed` warnings. `extractDeliveredFiles` lists `SendUserFile` deliveries, which are downloaded by UUID into `artefacts/`, with a `delivered_file` error on failure.
+`extractPresentedFiles` lists the files in `present_files` results (`local_resource` items). One the replay already rebuilt is kept as is, unless that file has a `str_replace_failed` or `artifact_opaque_mutation` warning: then the presented copy is downloaded and replaces the final file and its last `_vN`. Any other, such as a file a Python script wrote, is downloaded through `fetchUploadedFile` by its sandbox path into `artefacts/`. Two presented files with one name from different folders become `<base>_2<ext>` with an `artifact_basename_collision` warning. A download is the file's final state, so it clears that file's `str_replace_failed` warnings. `extractDeliveredFiles` lists `SendUserFile` deliveries, which are downloaded by UUID into `artefacts/`, with a `delivered_file` error on failure.
 
 ### Project files
 
@@ -254,7 +254,8 @@ Encoding rules:
 
 - Every `.md` file gets a UTF-8 BOM (`addFileWithBOM`), because Chrome opens local Markdown as plain text and guesses the encoding.
 - Text goes through `fixMojibake`, which repairs UTF-8 that was read as Latin-1.
-- `getCodeFence` uses four backticks when the content already holds three.
+- `getCodeFence` makes a fence one backtick longer than the longest run in the content.
+- Every name from chat data that becomes a path in the ZIP goes through `zipSafeName` (`/`, `\\` and control characters become `_`; `.` and `..` become `_`). File and folder names from titles keep letters from any script.
 
 ---
 

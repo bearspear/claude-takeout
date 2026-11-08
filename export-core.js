@@ -212,7 +212,7 @@ function extractArtifacts(data, errorCollector = null, index = null) {
   // a list of post-turn snapshots, and whether the current turn edited it.
   const state = {};
 
-  const basenameOf = (p) => (p || '').split('/').pop();
+  const basenameOf = (p) => zipSafeName((p || '').split('/').pop());
   const splitExt = (name) => {
     const dot = name.lastIndexOf('.');
     return dot > 0
@@ -422,6 +422,13 @@ function extractArtifacts(data, errorCollector = null, index = null) {
 }
 
 // Extract uploaded file metadata from messages (PDFs, images, CSVs, etc. in files_v2)
+// A name from chat data, made safe as one ZIP entry name: no folder separators or
+// control characters, and never "." or "..". An empty name stays empty.
+function zipSafeName(name) {
+  const safe = String(name || '').replace(/[\\/\u0000-\u001f\u007f]/g, '_');
+  return safe === '.' || safe === '..' ? '_' : safe;
+}
+
 function extractUploadedFiles(data, organizationId = null) {
   const files = [];
   const messages = getMessageChain(data);  // Use ordered message chain
@@ -438,7 +445,7 @@ function extractUploadedFiles(data, organizationId = null) {
       if (file.success && file.file_name) {
         // Prefix filename with prompt number for grouping (p01_, p02_, etc.)
         const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
-        const prefixedFilename = (promptPrefix + file.file_name).normalize('NFC');
+        const prefixedFilename = (promptPrefix + zipSafeName(file.file_name)).normalize('NFC');
 
         const fileInfo = {
           filename: prefixedFilename,
@@ -485,7 +492,7 @@ function extractUploadedFiles(data, organizationId = null) {
       }
 
       const promptPrefix = `p${String(promptNum).padStart(2, '0')}_`;
-      const prefixedFilename = (promptPrefix + originalFilename).normalize('NFC');
+      const prefixedFilename = (promptPrefix + zipSafeName(originalFilename)).normalize('NFC');
 
       const fileInfo = {
         filename: prefixedFilename,
@@ -537,7 +544,7 @@ function extractPresentedFiles(data) {
             if (seen.has(path)) continue;
             seen.add(path);
 
-            const filename = path.split('/').pop();
+            const filename = zipSafeName(path.split('/').pop());
             files.push({
               filename: filename,
               path: path,
@@ -574,7 +581,7 @@ function extractDeliveredFiles(data, takenNames = []) {
   const taken = new Set(takenNames);
   const files = [];
   for (const [path, uuids] of byPath) {
-    const name = path.split('/').pop().normalize('NFC');
+    const name = zipSafeName(path.split('/').pop()).normalize('NFC');
     const dot = name.lastIndexOf('.');
     const base = dot > 0 ? name.substring(0, dot) : name;
     const ext = dot > 0 ? name.substring(dot) : '';
@@ -671,7 +678,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, getMessageChain, failedToolUseIds, isBashTool, heredocPath, HEREDOC_RE, heredocFiles,
+    fixMojibake, isTextFile, zipSafeName, getMessageChain, failedToolUseIds, isBashTool, heredocPath, HEREDOC_RE, heredocFiles,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject,
   };
 }
