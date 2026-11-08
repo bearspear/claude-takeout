@@ -150,13 +150,13 @@ function colorsChat() {
   check('dark theme has its own colors', light !== dark, light + ' ' + dark);
   await page.emulateMedia({ colorScheme: 'light' });
 
-  await page.fill('.find input', 'def variance');
+  await page.fill('.find input', '"def variance"');
   await page.waitForTimeout(300);
-  const hit = page.locator('#results .hit').nth(1);
+  const hit = page.locator('#results .snip').nth(1);
   if (await hit.count()) {
     await hit.click();
     await page.waitForTimeout(300);
-    const marks = await page.$$eval('mark', m => m.map(x => x.textContent)); check('search finds a phrase across tokens', marks.join() === 'def variance', JSON.stringify({ marks, hit: await page.evaluate(() => document.querySelector('#results')?.textContent.slice(0, 200)), hash: await page.evaluate(() => location.hash) }));
+    const marks = await page.$$eval('#chat mark', m => m.map(x => x.textContent)); check('search finds a phrase across tokens', marks.join() === 'def variance', JSON.stringify({ marks, hit: await page.evaluate(() => document.querySelector('#results')?.textContent.slice(0, 200)), hash: await page.evaluate(() => location.hash) }));
   } else check('search finds a phrase across tokens', false, 'no result row');
   check('zero console errors', errors.length === 0, errors.join(' | '));
 

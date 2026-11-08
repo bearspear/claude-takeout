@@ -92,10 +92,10 @@ const ctx = () => ({ folder: '', artifacts: { 'big.html': BIG_HTML }, artifactIn
 
   await page.fill('.find input', 'zebrafinch');
   await page.waitForTimeout(300);
-  check('search finds prompt text', (await page.locator('#results .hit').count()) === 1);
+  check('search finds prompt text', (await page.locator('#results .snip').count()) === 1);
   await page.fill('.find input', 'quokka_only');
   await page.waitForTimeout(300);
-  check('search does not read upload text, as before', (await page.locator('#results .hit').count()) === 0);
+  check('search does not read upload text, as before', (await page.locator('#results .snip').count()) === 0);
   await page.fill('.find input', '');
   await page.keyboard.press('Escape');
 

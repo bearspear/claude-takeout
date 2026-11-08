@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, groupChats, linkProjects, copyText, attachmentNames, uploadName } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, groupChats, linkProjects, copyText, attachmentNames, uploadName } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -877,6 +877,64 @@ test('search edge cases: blank, long, limit, odd lowercasing', () => {
   assert.ok(hit.snippet.length <= 90);
   assert.ok(searchChats(odd, 'needle x')[0].snippet.includes('needle x'));
   assert.ok(searchChats(buildSearchIndex([{ id: 'e', title: 'Hi', project: null, messages: [T('e1', null, 'human', 'a'.repeat(300) + 'Z')] }]), 'z')[0].snippet.startsWith('\u2026'));
+});
+
+test('parseQuery: words, "phrases", OR and -exclusions', () => {
+  const q = text => JSON.parse(JSON.stringify(parseQuery(text)));
+  assert.deepStrictEqual(q('Survey feedback'), { all: [['survey'], ['feedback']], none: [] });
+  assert.deepStrictEqual(q('"Survey feedback"'), { all: [['survey feedback']], none: [] });
+  assert.deepStrictEqual(q('survey OR poll'), { all: [['survey', 'poll']], none: [] });
+  assert.deepStrictEqual(q('minutes survey OR poll OR vote'), { all: [['minutes'], ['survey', 'poll', 'vote']], none: [] });
+  assert.deepStrictEqual(q('survey -draft -"old copy"'), { all: [['survey']], none: ['draft', 'old copy'] });
+  assert.deepStrictEqual(q('cats or dogs'), { all: [['cats'], ['or'], ['dogs']], none: [] }, 'only a capital OR is an operator');
+  assert.deepStrictEqual(q('OR survey OR'), { all: [['survey']], none: [] }, 'a stray OR is ignored');
+  assert.deepStrictEqual(q('"open phrase'), { all: [['open phrase']], none: [] });
+  assert.deepStrictEqual(q('- -- ""'), { all: [['--']], none: [] });
+  assert.deepStrictEqual(q('   '), { all: [], none: [] });
+});
+
+test('search matches every word in any order, with OR and exclusions', () => {
+  const idx = buildSearchIndex([
+    { id: 'a', title: 'Notes', project: null, messages: [T('a1', null, 'human', 'Please send the survey and collect feedback.'), T('a2', 'a1', 'assistant', 'Survey draft attached.')] },
+    { id: 'b', title: 'Poll', project: null, messages: [T('b1', null, 'human', 'Feedback from the survey came back.')] },
+    { id: 'c', title: 'Vote', project: null, messages: [T('c1', null, 'human', 'A quick poll for the board.')] },
+  ]);
+  const msgs = q => searchChats(idx, q, Infinity).map(h => h.msg);
+  assert.deepStrictEqual(msgs('survey feedback'), ['a1', 'b1']);
+  assert.deepStrictEqual(msgs('feedback survey'), ['a1', 'b1']);
+  assert.deepStrictEqual(msgs('"survey feedback"'), []);
+  assert.deepStrictEqual(msgs('"the survey"'), ['a1', 'b1']);
+  assert.deepStrictEqual(msgs('survey -draft'), ['a1', 'b1']);
+  assert.deepStrictEqual(msgs('survey OR poll'), ['a1', 'a2', null, 'b1', 'c1'], 'chat b: its title, Poll, then its message');
+  assert.deepStrictEqual(searchChats(idx, 'feedback survey', Infinity)[0].terms, ['feedback', 'survey']);
+  assert.ok(searchChats(idx, 'feedback survey', Infinity)[0].snippet.includes('survey'), 'the snippet starts near the first word found');
+  assert.deepStrictEqual(msgs('-draft'), [], 'exclusions alone find nothing');
+});
+
+test('groupHits: one entry per chat, title matches first, then most matches, then order', () => {
+  const hits = [
+    { chat: 'x', msg: 'x1', snippet: 's1', terms: ['survey'] },
+    { chat: 'y', msg: 'y1', snippet: 's2', terms: ['survey'] },
+    { chat: 'y', msg: 'y2', snippet: 's3', terms: ['survey'] },
+    { chat: 'z', msg: null, snippet: 'Survey title', terms: ['survey'] },
+    { chat: 'z', msg: 'z1', snippet: 's4', terms: ['survey'] },
+    { chat: 'y', msg: 'y3', snippet: 's5', terms: ['survey'] },
+    { chat: 'y', msg: 'y4', snippet: 's6', terms: ['survey'] },
+  ];
+  const groups = JSON.parse(JSON.stringify(groupHits(hits, 3)));
+  assert.deepStrictEqual(groups.map(g => [g.chat, g.title, g.count]), [['z', true, 1], ['y', false, 4], ['x', false, 1]]);
+  assert.deepStrictEqual(groups[1].snippets.map(s => s.msg), ['y1', 'y2', 'y3'], 'at most three snippets');
+  assert.deepStrictEqual(groups[0].snippets.map(s => s.msg), ['z1']);
+});
+
+test('markTerms splits text into plain and matched pieces', () => {
+  const pieces = JSON.parse(JSON.stringify(markTerms('Survey results: the survey feedback', ['survey', 'feedback'])));
+  assert.deepStrictEqual(pieces, [
+    { text: 'Survey', hit: true }, { text: ' results: the ', hit: false }, { text: 'survey', hit: true },
+    { text: ' ', hit: false }, { text: 'feedback', hit: true },
+  ]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(markTerms('nothing here', ['zebra']))), [{ text: 'nothing here', hit: false }]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(markTerms('\u0130 survey', ['survey']))).map(p => p.hit), [false, true]);
 });
 
 test('snippets are about 80 characters with ellipses where cut', () => {

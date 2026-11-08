@@ -697,18 +697,89 @@ function snippetAt(text, lower, at, length) {
   return (from > 0 ? '\u2026' : '') + body + (to < text.length ? '\u2026' : '');
 }
 
-// Literal, case-insensitive. At most `limit` hits, in index order.
+// A search query, case-insensitive: words must all appear, in any order; "a phrase" must appear as
+// written; a OR b takes either (a capital OR only); -word or -"a phrase" excludes. Returns
+// { all: [[alternatives]...], none: [terms] }, every term lowercase.
+function parseQuery(query) {
+  const all = [], none = [];
+  let orNext = false;
+  const re = /(-?)"([^"]*)"?|(\S+)/g;
+  for (let m; (m = re.exec(String(query || ''))) !== null;) {
+    let term, negative = false;
+    if (m[2] !== undefined) { term = m[2]; negative = m[1] === '-'; }
+    else if (m[3] === 'OR') { orNext = all.length > 0; continue; }
+    else if (/^-[^-]/.test(m[3])) { term = m[3].slice(1); negative = true; }
+    else if (m[3] === '-') continue;
+    else term = m[3];
+    term = term.trim().toLowerCase();
+    if (!term) continue;
+    if (negative) none.push(term);
+    else if (orNext) all[all.length - 1].push(term);
+    else all.push([term]);
+    orNext = false;
+  }
+  return { all, none };
+}
+
+// Up to `limit` hits, in index order: { chat, msg (null for a title), snippet, terms }. Each entry must
+// hold every word or phrase (or one of its OR alternatives) and none of the excluded ones. terms: the
+// query's words found in that entry, for highlighting; the snippet is cut around the first of them.
 function searchChats(index, query, limit = 50) {
-  const q = String(query || '').trim().toLowerCase();
+  const q = parseQuery(query);
   const hits = [];
-  if (!q) return hits;
+  if (!q.all.length) return hits;
   for (const e of index) {
     if (hits.length >= limit) break;
-    const at = e.lower.indexOf(q);
-    if (at < 0) continue;
-    hits.push({ chat: e.chat, msg: e.msg, snippet: snippetAt(e.text, e.lower, at, q.length) });
+    if (!q.all.every(alts => alts.some(t => e.lower.includes(t)))) continue;
+    if (q.none.some(t => e.lower.includes(t))) continue;
+    const terms = q.all.flat().filter(t => e.lower.includes(t));
+    let at = -1, len = 0;
+    for (const t of terms) {
+      const i = e.lower.indexOf(t);
+      if (at < 0 || i < at) { at = i; len = t.length; }
+    }
+    hits.push({ chat: e.chat, msg: e.msg, snippet: snippetAt(e.text, e.lower, at, len), terms });
   }
   return hits;
+}
+
+// Hits by chat, best first: chats whose title matched, then those with the most matching messages,
+// then index order (newest chats first). Each: { chat, title, count, snippets: up to perChat message hits }.
+function groupHits(hits, perChat = 3) {
+  const groups = new Map();
+  hits.forEach((h, i) => {
+    if (!groups.has(h.chat)) groups.set(h.chat, { chat: h.chat, title: false, count: 0, snippets: [], order: i, terms: [] });
+    const g = groups.get(h.chat);
+    for (const t of h.terms || []) if (!g.terms.includes(t)) g.terms.push(t);
+    if (h.msg === null) { g.title = true; return; }
+    g.count++;
+    if (g.snippets.length < perChat) g.snippets.push(h);
+  });
+  return [...groups.values()]
+    .sort((a, b) => (b.title - a.title) || (b.count - a.count) || (a.order - b.order))
+    .map(({ order, ...g }) => g);
+}
+
+// text split into [{ text, hit }] around every case-insensitive occurrence of the terms, longest first
+// where two start together.
+function markTerms(text, terms) {
+  const t = String(text);
+  const lower = t.toLowerCase();
+  const wanted = (terms || []).filter(Boolean).slice().sort((a, b) => b.length - a.length);
+  const out = [];
+  let from = 0, i = 0;
+  const offset = at => (lower.length === t.length ? at : originalOffset(t, at));
+  while (i < lower.length) {
+    const term = wanted.find(w => lower.startsWith(w, i));
+    if (!term) { i++; continue; }
+    const start = offset(i), end = offset(i + term.length);
+    if (start > from) out.push({ text: t.slice(from, start), hit: false });
+    out.push({ text: t.slice(start, end), hit: true });
+    from = end;
+    i += term.length;
+  }
+  if (from < t.length || !out.length) out.push({ text: t.slice(from), hit: false });
+  return out;
 }
 
 // Chip names for pasted text: claude.ai gives it no name. Numbered when a prompt has several.
@@ -763,5 +834,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, linkProjects, copyText, attachmentNames, uploadName };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, groupChats, linkProjects, copyText, attachmentNames, uploadName };
 }

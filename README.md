@@ -367,6 +367,16 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.13
+
+Better search in the viewer. Older exports get it when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+
+- **One result per chat, best first** - Results are grouped by chat, with how many messages match and up to three snippets. Chats whose title matches come first, then those with the most matches. Nothing is cut off at 50 rows any more.
+- **Matched words in bold** - In titles and snippets.
+- **Clear button** - A ✕ in the search box clears it; Escape still works. Press `/` anywhere to jump to the box.
+- **Words in any order** - `survey feedback` finds messages with both words wherever they are. `"survey feedback"` finds the exact phrase, `survey OR poll` either word, and `survey -draft` leaves out messages with "draft".
+- **Keyboard** - The arrow keys move from the box through the results, and Enter opens one.
+
 ### v1.6.12
 
 Cleanup and the last fixes from the code review.
