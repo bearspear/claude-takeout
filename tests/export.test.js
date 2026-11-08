@@ -6,7 +6,7 @@ const os = require('os');
 const { execFileSync } = require('child_process');
 const path = require('path');
 const vm = require('vm');
-const { REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads } = require('./helpers');
+const { DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads } = require('./helpers');
 
 const { fn, sandbox } = loadPopup({
   fetch: async (url) => {
@@ -1071,4 +1071,60 @@ test('extract_artifacts.py writes .md files with the BOM an export gives them', 
     assert.deepStrictEqual([...fs.readFileSync(path.join(dir, 'out', 'a.md')).subarray(0, 3)], [0xef, 0xbb, 0xbf]);
     assert.strictEqual(fs.readFileSync(path.join(dir, 'out', 'b.py'), 'utf8'), 'x');
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+// ---- Claude Docs documents ----
+const DOC_V1 = '# Lorber Notes\n\nA subtitle\n\n2026-11-08\n\n## Alpha\n\nalpha text\n\n*(This section wasn\'t written.)*\n\n---\n\n*Live document on claude.ai: ' + DOC_URL + '*\n';
+const DOC_V2 = '# Lorber Notes\n\nA subtitle\n\n2026-11-08\n\n## Alpha\n\nalpha text\n\n## Beta\n\n| a | b |\n| --- | --- |\n| 1 | 2 |\n\n---\n\n## Comments\n\n- On “Beta”: Table or prose?\n\n*Live document on claude.ai: ' + DOC_URL + '*\n';
+const docChat = (prefix) => {
+  const t = docTools(prefix);
+  return turns(
+    [t.batch, t.batchResult, t.update('u1', 'sess.10', '## Alpha\n\nalpha text'), t.result('u1', '{"verdict":"allow"}')],
+    [t.update('u2', 'sess.11', '## Beta\n\n| a | b |\n| --- | --- |\n| 1 | 2 |'), t.result('u2', '{"verdict":"allow"}'), t.comment, t.result('c1', '{"verdict":"allow"}')],
+  );
+};
+
+test('a Claude Docs document is rebuilt, one version per turn, in both implementations', () => {
+  const data = docChat();
+  const want = { 'Lorber_Notes_v1.md': DOC_V1, 'Lorber_Notes_v2.md': DOC_V2, 'Lorber_Notes.md': DOC_V2 };
+  assert.deepStrictEqual(plain(artifacts(data)), want);
+  assert.deepStrictEqual(pythonArtifacts(data), want);
+  const other = docChat('mcp__claude_ai_Claude_Docs__');
+  assert.deepStrictEqual(Object.keys(plain(artifacts(other))), Object.keys(want), 'any connector prefix');
+});
+
+test('a Claude Docs edit that is not filling a section warns', () => {
+  const t = docTools();
+  const odd = { type: 'tool_use', id: 'u9', name: 'mcp__Claude_Docs__update', input: { ref: { object: 'node', id: 'node-1' }, payload: JSON.stringify({ ops: [{ op: 'insert', target: { kind: 'after', id: 'sess.0' }, with: { from: { kind: 'inline', content: 'new' } } }] }) } };
+  const data = turns([t.batch, t.batchResult], [odd, t.result('u9', '{"verdict":"allow"}')]);
+  const warned = collector();
+  artifacts(data, warned);
+  assert.deepStrictEqual(plain(warned.warnings.map((w) => [w.type, w.filename])), [['claude_doc_unreplayed', 'Lorber_Notes.md']]);
+  assert.match(warned.warnings[0].details.note, /claude\.ai\/artifact/);
+});
+
+test('an export writes a Claude Docs document as .md and a safe standalone .html', async () => {
+  const t = docTools();
+  // Each on its own paragraph: a line starting with raw HTML would make the whole paragraph one escaped block.
+  const hostile = '## Gamma\n\n<script>window.__hit=1</script>\n\nSee [bad](javascript:alert(1)) and [ok](https://example.com).\n\nAn image ![x](javascript:alert(1)) and <img src=x onerror=alert(1)> inline.';
+  const data = Object.assign(turns(
+    [t.batch, t.batchResult, t.update('u1', 'sess.10', '## Alpha\n\n**bold** and *it*'), t.result('u1', '{"verdict":"allow"}')],
+    [t.update('u2', 'sess.11', hostile), t.result('u2', '{"verdict":"allow"}')],
+  ), { uuid: 'docs-chat', name: 'Docs chat' });
+  const { written } = await runFolder(exportPopup(), data);
+  const text = (k) => { const v = written[k]; return String(v && v.content !== undefined ? v.content : v).replace(/^﻿/, ''); };
+  assert.ok(text('artefacts/Lorber_Notes.md').startsWith('# Lorber Notes'));
+  const html = text('artefacts/Lorber_Notes.html');
+  assert.match(html, /<title>Lorber Notes<\/title>/);
+  assert.match(html, /<h2[^>]*>Alpha<\/h2>/);
+  assert.match(html, /<strong>bold<\/strong>/);
+  assert.match(html, /http-equiv="Content-Security-Policy" content="default-src 'none'/);
+  assert.ok(!/<script/i.test(html.replace(/&lt;script/gi, '')), 'no script element');
+  assert.ok(!/(href|src)="javascript:/i.test(html), 'no javascript: link or image');
+  assert.match(html, /See bad and <a href="https:\/\/example\.com"/, 'an unsafe link keeps only its text');
+  assert.ok(!/onerror=/i.test(html.replace(/&lt;img[^]*?&gt;/gi, '')), 'no event handler attribute');
+  assert.match(html, /href="https:\/\/example\.com"/);
+  const full = text('full_chat.md');
+  assert.ok(!full.includes('"ops"') && !full.includes('Claude_Docs__batch'), 'no raw tool JSON');
+  assert.match(full, /Document: Lorber Notes/);
 });

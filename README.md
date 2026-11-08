@@ -367,6 +367,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.17
+
+- **Claude Docs documents are exported** - When Claude writes a Claude Docs document (the editable docs on claude.ai), the export rebuilds it from the chat: `artefacts/<title>.md`, with Claude's comments and a link to the live document at the end, and a matching `artefacts/<title>.html` to read, print or share, styled for light and dark and with no scripts. A document written over several turns gets `_v1`, `_v2` versions like other files. In the viewer it has a card and appears under Outputs in the Files list; `full_chat.md` shows the document instead of raw tool calls, and the tool steps read "Created a document" and "Edited the document". Edits the chat can't rebuild are flagged in `errors.txt` with the link to the live document; edits made by hand on claude.ai aren't in the chat. `extract_artifacts.py` rebuilds the `.md` the same way. Needs a fresh export.
+
 ### v1.6.16
 
 - **Working files kept apart** - In the Files list, Outputs now holds only what Claude shared with you (sent, presented, saved to its outputs folder, or made as an artifact), as on claude.ai. Helper scripts and other files it wrote along the way are listed under a new Working files group.

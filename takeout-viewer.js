@@ -2,7 +2,7 @@
 // Classic script. Exposes globalThis.CTViewer (and module.exports for tests):
 //   buildViewerChat(data, ctx)         one conversation as the viewer's compact Chat (see the data contract).
 //                                      ctx: { folder, model, fixText, artifacts, artifactIndex, uploads,
-//                                      deliveries, heredocs, project }, all optional. data is never mutated.
+//                                      deliveries, heredocs, docKey, project }, all optional. data is never mutated.
 //                                      artifacts: filename to text ('' for binaries). artifactIndex: extractArtifacts' index
 //                                      (state key to { path, filename, versions, messages }). deliveries: file uuid to
 //                                      { filename, path }. heredocs(command): [{ path, text }], the files a Bash command
@@ -71,7 +71,12 @@
       case 'view': case 'read_file': case 'Read': return p ? `Viewed ${p}` : 'Viewed a file';
       case 'present_files': return 'Presented files';
       case 'artifacts': return i.title ? `Artifact: ${i.title}` : 'Artifact';
-      default: return `Used ${name || 'a tool'}`;
+      default: {
+        // Claude Docs tools come under a connector prefix, such as mcp__Claude_Docs__update.
+        const doc = /Claude_Docs__(\w+)$/.exec(String(name || ''));
+        if (doc) return ({ batch: 'Created a document', update: 'Edited the document', create: 'Commented on the document', guide: 'Read the Claude Docs guide' })[doc[1]] || 'Used Claude Docs';
+        return `Used ${name || 'a tool'}`;
+      }
     }
   }
 
@@ -185,6 +190,8 @@
     }
     const isBash = n => n === 'bash_tool' || n === 'Bash';
     const heredocs = command => (typeof c.heredocs === 'function' ? c.heredocs(String(command || '')) : []) || [];
+    // claudeDocKey from export-core.js: the 'doc:<node id>' a Claude Docs call writes to, or null.
+    const docKeyOf = (block, result) => (typeof c.docKey === 'function' ? c.docKey(block, result) : null);
 
     // Every delivered version of a path, in chain order, for the uuids the caller knows.
     const deliveredUuids = new Map();
@@ -202,7 +209,7 @@
     // Files Claude shared, as claude.ai's own Outputs list has them: sent, presented, saved under
     // /mnt/user-data/outputs, or made with the artifacts tool. The rest are working files.
     const sharedKeys = new Set();
-    const isShared = key => /^(artifact:|deliver:|name:|missing:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
+    const isShared = key => /^(artifact:|doc:|deliver:|name:|missing:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
 
     source.forEach((m, mi) => {
       const message = messages[mi];
@@ -227,6 +234,7 @@
         else if (b.name === 'Write') { key = input.file_path; text = input.content; }
         else if (b.name === 'rewrite' || b.name === 'create_or_overwrite') { key = input.path; text = input.file_text || input.content; }
         else if (b.name === 'str_replace' || b.name === 'Edit') { key = b.name === 'Edit' ? input.file_path : input.path; edit = true; }
+        else if (docKeyOf(b, resultOf.get(b.id))) { key = docKeyOf(b, resultOf.get(b.id)); edit = true; } // rebuilt by extractArtifacts
         else if (b.name === 'artifacts' && ['create', 'update', 'rewrite'].includes(input.command) && (input.id || input.title)) {
           key = 'artifact:' + (input.id || input.title); mime = input.type || null; name = String(input.title || input.id);
           if (input.content) text = input.content;

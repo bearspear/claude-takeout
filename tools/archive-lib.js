@@ -454,6 +454,7 @@ function chatFromDisk(archive, chat) {
     uploads,
     deliveries: core.buildViewerDeliveries(savedDeliveries),
     heredocs: core.heredocFiles,
+    docKey: core.claudeDocKey,
     project,
   });
   return { viewerChat, missing, warnings };

@@ -41,6 +41,7 @@ function loadPopup({ fetch = async () => ({ ok: false, status: 404 }) } = {}) {
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(REPO, 'export-core.js'), 'utf8'), sandbox);
   vm.runInContext(fs.readFileSync(path.join(REPO, 'takeout-viewer.js'), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(path.join(REPO, 'viewer', 'marked.min.js'), 'utf8'), sandbox);
   vm.runInContext(fs.readFileSync(path.join(REPO, 'popup.js'), 'utf8'), sandbox);
   return { sandbox, fn: (name) => vm.runInContext(name, sandbox) };
 }
@@ -125,4 +126,22 @@ const withUploads = () => {
   return data;
 };
 
-module.exports = { REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads };
+// A chat that writes a Claude Docs document, as claude.ai's Docs tools do: batch creates it with
+// pending sections, update fills them, create adds a comment. turns: [[blocks], ...] of extra content.
+const DOC_URL = 'https://claude.ai/artifact/TESTDOC123';
+function docTools(prefix = 'mcp__Claude_Docs__') {
+  const batchResult = JSON.stringify({ verdict: 'allow', acks: [{ verdict: 'allow', minted: 'm1' }, { verdict: 'allow', id: 'node-1', rev: 1, session: 'sess',
+    xml: "<doc><paragraph id='sess.0' heading='1'>Lorber …</paragraph><paragraph id='.5'><date id='.6' value='2026-11-08'/></paragraph><pending id='.10' intent='a'/><pending id='.11' intent='b'/></doc>" }],
+    frame: { url: DOC_URL } }) + '\n\nThe doc is NOT open for the user yet. Open it NOW.';
+  const docBlocks = { asof: { type: 'date', value: '2026-11-08' }, me: { type: 'mention', user: 'me' }, s1: { type: 'pending', intent: 'first' }, s2: { type: 'pending', intent: 'second' } };
+  const batch = { type: 'tool_use', id: 'd1', name: prefix + 'batch', input: { container: { kind: 'project', create: { name: 'Lorber Notes', doc: { blocks: docBlocks,
+    markdown: '# Lorber Notes\n\nA subtitle\n\n<?claude block asof?> · <?claude block me?>\n\n<?claude block s1?>\n\n<?claude block s2?>' } } }, batch: [] } };
+  const result = (id, text) => ({ type: 'tool_result', tool_use_id: id, name: batch.name, content: [{ type: 'text', text }] });
+  const update = (id, target, content) => ({ type: 'tool_use', id, name: prefix + 'update', input: { ref: { object: 'node', id: 'node-1' }, engine: 'prose', container: { kind: 'project', id: 'proj' },
+    payload: JSON.stringify({ ops: [{ op: 'replace', target: { kind: 'blocks', ids: [target] }, with: { from: { kind: 'inline', content } } }] }) } });
+  const comment = { type: 'tool_use', id: 'c1', name: prefix + 'create', input: { object: 'utterance', container: { kind: 'project', id: 'proj' },
+    payload: JSON.stringify({ value: { body: 'Table or prose?', parent: { object: 'node', id: 'node-1', anchor: { kind: 'find', text: 'Beta' } } } }) } };
+  return { batch, batchResult: result('d1', batchResult), update, comment, result };
+}
+
+module.exports = { DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads };

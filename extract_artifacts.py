@@ -192,6 +192,96 @@ def apply_replace_all(state: ArtifactState, old_str: str, new_str: str) -> tuple
     return True, ""
 
 
+# ---- Claude Docs documents (claudeDocsAction ... renderClaudeDoc in export-core.js) ----
+CLAUDE_DOCS_RE = re.compile(r"Claude_Docs__(\w+)$")
+
+
+def claude_docs_action(name) -> Optional[str]:
+    m = CLAUDE_DOCS_RE.search(str(name or ""))
+    return m.group(1) if m else None
+
+
+def leading_json(text):
+    """The JSON value at the start of text, which may go on with plain words."""
+    t = str(text or "").lstrip()
+    if not t[:1] in ("{", "["):
+        return None
+    try:
+        return json.JSONDecoder().raw_decode(t)[0]
+    except ValueError:
+        return None
+
+
+def result_text(result) -> str:
+    content = (result or {}).get("content")
+    if isinstance(content, str):
+        return content
+    for c in content or []:
+        if isinstance(c, dict) and c.get("type") == "text":
+            return str(c.get("text") or "")
+    return ""
+
+
+def doc_payload(payload):
+    if isinstance(payload, dict):
+        return payload
+    try:
+        return json.loads(payload)
+    except (TypeError, ValueError):
+        return None
+
+
+def claude_doc_created(inp, result) -> Optional[dict]:
+    create = ((inp or {}).get("container") or {}).get("create") or {}
+    doc = create.get("doc") or {}
+    if not isinstance(doc.get("markdown"), str):
+        return None
+    text = result_text(result)
+    parsed = leading_json(text)
+    parsed = parsed if isinstance(parsed, dict) else {}
+    ack = next((a for a in (parsed.get("acks") or []) if isinstance(a, dict) and a.get("id") and isinstance(a.get("xml"), str)), None)
+    if not ack:
+        return None
+    m = re.search(r"id='([^'.]+)\.", ack["xml"])
+    session = ack.get("session") or (m.group(1) if m else "")
+    pending_ids = [session + i if i.startswith(".") else i for i in re.findall(r"<pending id='([^']+)'", ack["xml"])]
+    blocks = doc.get("blocks") if isinstance(doc.get("blocks"), dict) else {}
+    pending_keys = [k for k in re.findall(r"<\?claude block (\w+)\?>", doc["markdown"])
+                    if isinstance(blocks.get(k), dict) and blocks[k].get("type") == "pending"]
+    idmap = {i: k for i, k in zip(pending_ids, pending_keys)}
+    url = (parsed.get("frame") or {}).get("url") or ""
+    if not url:
+        um = re.search(r"https://claude\.ai/artifact/[\w-]+", text)
+        url = um.group(0) if um else ""
+    hm = re.search(r"^#\s+(.+)$", doc["markdown"], re.M)
+    title = str(create.get("name") or (hm.group(1) if hm else "") or "Document")
+    return {"key": f"doc:{ack['id']}", "title": title, "markdown": doc["markdown"], "blocks": blocks, "url": url, "idmap": idmap}
+
+
+def render_claude_doc(d: dict) -> str:
+    def fill(m):
+        b = d["blocks"].get(m.group(1))
+        if not isinstance(b, dict):
+            return ""
+        if b.get("type") == "date":
+            return str(b.get("value") or "")
+        if b.get("type") == "mention":
+            return ""
+        if b.get("type") == "pending":
+            return d["contents"].get(m.group(1), "*(This section wasn't written.)*")
+        return f"*(A {b.get('type')} block isn't included in this export.)*"
+    out = re.sub(r"<\?claude block (\w+)\?>", fill, d["markdown"])
+    out = re.sub(r" · (?=\n|$)", "", out)
+    out = re.sub(r"(^|\n) · ", r"\1", out)
+    out = re.sub(r"\s+$", "", out)
+    tail = []
+    if d["comments"]:
+        tail.append("## Comments\n\n" + "\n".join(f"- On “{c['anchor']}”: {c['body']}" if c["anchor"] else f"- {c['body']}" for c in d["comments"]))
+    if d["url"]:
+        tail.append(f"*Live document on claude.ai: {d['url']}*")
+    return out + ("\n\n---\n\n" + "\n\n".join(tail) if tail else "") + "\n"
+
+
 def sanitize_artifact_basename(label: str) -> str:
     """Match the JS regex: keep [a-zA-Z0-9_\\-\\s], collapse whitespace to _,
     trim to 60 chars.
@@ -214,6 +304,9 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
     messages = get_message_chain(data)
     failed_ids = failed_tool_use_ids(messages)
     state: dict[str, ArtifactState] = {}
+    docs: dict[str, dict] = {}  # Claude Docs: 'doc:<node id>' -> document being rebuilt
+    results_by_id = {b.get("tool_use_id"): b for m in messages for b in (m.get("content") or [])
+                     if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id")}
 
     def set_content(key: str, content: str, basename: str) -> None:
         s = state.get(key)
@@ -304,6 +397,45 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
                             message=f"artifact update skipped: {reason}",
                             path=key,
                         ))
+
+            elif claude_docs_action(name):
+                action = claude_docs_action(name)
+                if action == "batch":
+                    made = claude_doc_created(inp, results_by_id.get(block.get("id")))
+                    if made:
+                        base = sanitize_artifact_basename(made["title"]) or "Document"
+                        docs[made["key"]] = {**made, "contents": {}, "comments": [], "filename": f"{base}.md", "warned": False}
+                        set_content(made["key"], render_claude_doc(docs[made["key"]]), docs[made["key"]]["filename"])
+                elif action in ("update", "create"):
+                    payload = doc_payload(inp.get("payload")) or {}
+                    value = payload.get("value") if isinstance(payload.get("value"), dict) else {}
+                    ref = inp.get("ref") if action == "update" else value.get("parent")
+                    key = f"doc:{ref['id']}" if isinstance(ref, dict) and ref.get("id") else None
+                    d = docs.get(key) if key else None
+                    if d and action == "create" and isinstance(value.get("body"), str):
+                        anchor = (value.get("parent") or {}).get("anchor") or {}
+                        d["comments"].append({"anchor": str(anchor.get("text") or ""), "body": value["body"]})
+                        set_content(key, render_claude_doc(d), d["filename"])
+                    elif d and action == "update":
+                        changed = unreplayed = False
+                        for op in payload.get("ops") or []:
+                            ids = ((op or {}).get("target") or {}).get("ids") or []
+                            content = (((op or {}).get("with") or {}).get("from") or {}).get("content")
+                            if (op or {}).get("op") == "replace" and len(ids) == 1 and ids[0] in d["idmap"] and isinstance(content, str):
+                                d["contents"][d["idmap"][ids[0]]] = content
+                                changed = True
+                            else:
+                                unreplayed = True
+                        if changed:
+                            set_content(key, render_claude_doc(d), d["filename"])
+                        if unreplayed and not d["warned"]:
+                            d["warned"] = True
+                            warnings.append(Warning(
+                                type="claude_doc_unreplayed",
+                                filename=d["filename"],
+                                message="An edit to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.",
+                                path=key,
+                            ))
 
             elif name in ("bash_tool", "Bash"):
                 command = inp.get("command") or ""

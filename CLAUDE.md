@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.9.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.17.
 
 ---
 
@@ -154,6 +154,7 @@ The user can regenerate a response, producing a tree. `current_leaf_message_uuid
 | `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Same replay as `create_file` / `str_replace`. Newer conversations use these names. |
 | `Bash` | `command` | Same as `bash_tool`, in the extension and `replay_bash.py`. Uploads live at `/root/.claude/uploads/<session>/<uuid8>-<name>`. |
 | `SendUserFile` | `files[]`; result has `file_deliveries[]` with `file_uuid`, `path` | `extractDeliveredFiles` lists them and `populateConversationFolder` downloads each by UUID into `artefacts/`. |
+| `<connector>Claude_Docs__batch` / `__update` / `__create` | batch: `container.create.{name, doc.{markdown, blocks}}`; its result's leading JSON gives the node id and the ids of the pending sections. update: `ref.id`, `payload.ops[]` replacing one pending id with Markdown. create: a comment (`payload.value.body`, `parent.anchor`) | A Claude Docs document. `extractArtifacts` rebuilds it under key `doc:<node id>` as `<sanitized title>.md` (`claudeDocCreated`, `renderClaudeDoc`); any other edit warns `claude_doc_unreplayed`. `populateConversationFolder` also writes `<title>.html` (`claudeDocHtml`, using `viewer/marked.min.js`, which popup.html and sidepanel.html load). `extract_artifacts.py` mirrors the `.md`. |
 | `web_search` | `query` (input) / `content[]` (result) | Renders the query + formatted result list; citations harvested via `processTextWithCitations`. |
 | `view` / `read_file` | `path` | Used by `extractBlobContent` to recover ephemeral upload content from tool_result blocks when the wiggle API 404s. |
 | `web_fetch`, `str_replace_based_edit_tool`, etc. | varies | Rendered with sensible fallbacks in `convertToMarkdown`; not all are first-class extractors. |
@@ -217,7 +218,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 ├── viewer-files/part-NNNN.js  # text of uploads and generated files over UPLOAD_INLINE_LIMIT (64 KB), only when there are some
 ├── responses/<NNN>_<title>_response.md       (pure text)
 ├── responses/<NNN>_<title>_response.full.md  (thinking/tools/embedded)
-├── artefacts/<base>(_vN)?<ext>               (versioning — see §6)
+├── artefacts/<base>(_vN)?<ext>               (versioning — see §6; a Claude Docs document also gets <title>.html)
 ├── attachments/p01_<filename>, p02_<filename>, ...  (prompt-numbered)
 ├── project/project.json, prompt_template.md, docs.json, files.json, <doc>.md, files/<name>
 └── uploads/p01_<filename>, p02_<filename>, ...
@@ -313,6 +314,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - `artifact_basename_collision` — two paths produced the same basename; one was renamed.
 - `artifact_opaque_mutation` — a bash command changed an artifact in a way replay can't follow.
 - `delivered_file` — a `SendUserFile` delivery could not be downloaded.
+- `claude_doc_unreplayed` — a Claude Docs edit other than filling a pending section; the note links the live document.
 - `viewer` — one chat could not be added to `viewer.html` (`buildViewerChat` threw). A failure of `writeViewer` as a whole is not recorded here: the status line says "viewer.html could not be built." The export itself is complete.
 
 `errors.txt` is built by `generateErrorReport()` and embedded into the ZIP only when `hasAny()` is true. The status pill turns amber (`.status.warning`) when there are warnings but the export still succeeded.
@@ -349,7 +351,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.9. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.17. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 
