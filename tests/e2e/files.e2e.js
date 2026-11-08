@@ -92,6 +92,18 @@ const empty = {
   check('a paste opens in the popup', (await page.textContent('.pop .pop-body')) === 'pasted agenda\nline two');
   await page.keyboard.press('Escape');
 
+  // Keyboard: Tab out closes the list; a file opened from it takes focus to the panel and back.
+  await button.click();
+  for (let i = 0; i < 12 && await menu.isVisible(); i++) await page.keyboard.press('Tab');
+  check('Tab out of the list closes it', !(await menu.isVisible()) && await page.evaluate(() => !document.activeElement.closest('#files-menu')));
+  await button.click();
+  await page.keyboard.press('Enter');
+  await page.waitForSelector('#panel:not([hidden])');
+  check('opening a file from the list focuses the panel', await page.evaluate(() => !!document.activeElement.closest('#panel-head')));
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(100);
+  check('closing it returns focus to the Files button', await page.evaluate(() => document.activeElement && document.activeElement.id === 'files-button'));
+
   // Closing: Escape, a click outside, the button again.
   await button.click();
   await page.keyboard.press('Escape');

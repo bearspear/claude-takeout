@@ -4,6 +4,7 @@
 // runs in a frame with sandbox="allow-scripts"; its text reaches that frame as an attribute value.
 
 const BATCH_SIZE = 10;
+const FAST_BATCH_SIZE = 100; // messages a frame on the way to a search hit
 
 const ICON_PATHS = {
   chevron: 'm9 6 6 6-6 6',
@@ -219,8 +220,7 @@ function dressMarkdown(box) {
 }
 
 // sources: shared across the message, so numbers don't restart in a later block.
-// marked's emphasis parsing is quadratic, so a block with this many * and _ would hang the tab.
-const EMPHASIS_LIMIT = 4000;
+// EMPHASIS_LIMIT (viewer-logic.js): a block with more * and _ than this is shown as plain text.
 const PLAIN_NOTE = "This message was too complex to format, so it's shown as plain text.";
 
 function renderText(block, sources) {
@@ -700,7 +700,11 @@ function openFilesMenu() {
     const note = [fileKindLabel(file), o.versions > 1 ? `${o.versions} versions` : ''].filter(Boolean).join(' · ');
     return filesRow(o.name, note, () => {
       closeFilesMenu(false);
+      panelReturn = button;
       navigate({ ...parseHash(location.hash), file: o.id, version: o.versions - 1 });
+      // Keyboard focus goes to the panel, and back to the Files button when it closes.
+      const close = document.querySelector('#panel-head .close');
+      if (close) close.focus({ preventScroll: true });
     });
   });
   if (outputs.length) parts.push(el('div', 'files-lab', 'Outputs'), ...outputRows(outputs));
@@ -750,6 +754,11 @@ function setupFilesMenu() {
   });
   document.addEventListener('mousedown', e => {
     if (!menu.hidden && !menu.contains(e.target) && !button.contains(e.target)) closeFilesMenu(false);
+  });
+  // Tab out of the list closes it, as a click elsewhere does.
+  menu.addEventListener('focusout', e => {
+    const to = e.relatedTarget;
+    if (!menu.hidden && to && !menu.contains(to) && !button.contains(to)) closeFilesMenu(false);
   });
 }
 
@@ -863,7 +872,10 @@ function renderChat(chat, leaf = chat.leaf, anchor = null) {
   const batch = () => {
     if (generation !== renderGeneration) return;
     // The first batch reaches the anchor, so it can be put back in place at once.
-    const size = next === 0 && anchorAt >= 0 ? Math.max(BATCH_SIZE, anchorAt + 1) : BATCH_SIZE;
+    let size = next === 0 && anchorAt >= 0 ? Math.max(BATCH_SIZE, anchorAt + 1) : BATCH_SIZE;
+    // A search hit or match far down is reached in bigger batches, not ten messages a frame.
+    const target = find && find.msg ? chain.findIndex(m => m.id === find.msg) : -1;
+    if (target >= next + size) size = Math.max(size, Math.min(target + 1 - next, FAST_BATCH_SIZE));
     const part = document.createDocumentFragment();
     for (const m of chain.slice(next, next + size)) {
       const node = renderMessage(m, sibsOf(m), chat);
@@ -1027,6 +1039,9 @@ function renderPanelBody(chat, file, version, shape) {
   body.scrollTop = 0;
 }
 
+// Where focus goes when the panel closes and no card shows its file: the Files button it was opened from.
+let panelReturn = null;
+
 function renderPanelHead(chat, id, file, at, shape) {
   const head = document.getElementById('panel-head');
   const focused = head.contains(document.activeElement) ? document.activeElement.textContent : null;
@@ -1047,8 +1062,11 @@ function renderPanelHead(chat, id, file, at, shape) {
   close.append(icon('close'));
   close.addEventListener('click', () => {
     const card = document.querySelector('.art.on, .add-file.on');
+    // Back where the file was opened from: the Files button, or else the card that shows it.
+    const back = (panelReturn && panelReturn.isConnected && !panelReturn.hidden ? panelReturn : null) || card;
+    panelReturn = null;
     navigate({ ...parseHash(location.hash), file: null, version: null });
-    if (card) card.focus({ preventScroll: true });
+    if (back) back.focus({ preventScroll: true });
   });
   const version = file.versions[at];
   const copy = !shape.missing && shape.views.length && version && typeof version.text === 'string' ? [fileCopyButton(file.name || 'Untitled', version.text)] : [];
@@ -1208,17 +1226,17 @@ function highlightIn(node, terms) {
   if (!wanted.length) return null;
   const walker = document.createTreeWalker(node, NodeFilter.SHOW_TEXT);
   for (let text = walker.nextNode(); text; text = walker.nextNode()) {
-    if (text.parentElement.closest('button, time, .branch, .code-head, script, style')) continue;
-    const lower = text.data.toLowerCase();
-    if (lower.length !== text.data.length) continue;
+    if (text.parentElement.closest('button, time, .branch, .code-head, .katex, script, style')) continue;
+    const { lower, at: map } = foldCase(text.data);
     let at = -1, q = '';
     for (const t of wanted) {
       const i = lower.indexOf(t);
-      if (i >= 0 && (at < 0 || i < at)) { at = i; q = t; }
+      if (i >= 0 && (at < 0 || i < at || (i === at && t.length > q.length))) { at = i; q = t; }
     }
     if (at < 0) continue;
-    const middle = text.splitText(at);
-    middle.splitText(q.length);
+    const start = map ? map[at] : at, end = map ? map[at + q.length] : at + q.length;
+    const middle = text.splitText(start);
+    middle.splitText(end - start);
     const mark = document.createElement('mark');
     middle.replaceWith(mark);
     mark.append(middle);
@@ -1236,26 +1254,43 @@ function tryFind() {
   const { terms, nth } = find;
   if (nth === undefined) find = null;
   // An earlier search's highlight goes before this one is added.
+  removeMarks();
+  // Colors split code into pieces, and an occurrence across them would be missed, so code holding a
+  // match goes plain first. Code without one keeps its colors; all get them back when the search ends.
+  for (const code of node.querySelectorAll('.colored')) {
+    const lower = code.textContent.toLowerCase();
+    if (!terms.some(t => t && lower.includes(t))) continue;
+    code.textContent = code.textContent;
+    code.classList.remove('colored');
+    plainForSearch.add(code);
+  }
+  if (nth !== undefined) {
+    const { mark, count } = markNth(node, terms, nth);
+    stepLanded(mark, count);
+    return;
+  }
+  const mark = highlightIn(node, terms);
+  (mark || node).scrollIntoView({ block: 'center' });
+}
+
+// Code blocks made plain so a match could be marked in them.
+const plainForSearch = new Set();
+
+function removeMarks() {
   for (const old of document.querySelectorAll('#chat mark')) {
     const parent = old.parentNode;
     old.replaceWith(...old.childNodes);
     parent.normalize();
   }
-  const uncolor = () => node.querySelectorAll('.colored').forEach(code => { code.textContent = code.textContent; code.classList.remove('colored'); });
-  if (nth !== undefined) {
-    // Colors split code into pieces, and an occurrence across them would be missed, so they go first.
-    if (node.querySelector('.colored')) uncolor();
-    const { mark, count } = markNth(node, terms, nth);
-    stepLanded(mark, count);
-    return;
+}
+
+// The search is over: its highlights go, and code made plain for it is colored again.
+function clearMarks() {
+  removeMarks();
+  for (const code of plainForSearch) {
+    if (code.isConnected && colorLanguages.has(code)) colorWhenSeen(code, colorLanguages.get(code));
   }
-  let mark = highlightIn(node, terms);
-  if (!mark && node.querySelector('.colored')) {
-    // Colors split code into pieces, and a match across them is skipped.
-    uncolor();
-    mark = highlightIn(node, terms);
-  }
-  (mark || node).scrollIntoView({ block: 'center' });
+  plainForSearch.clear();
 }
 
 // terms: the lowercase words to highlight in the message. query: the search, for the match bar.
@@ -1293,7 +1328,8 @@ let stepper = null; // { chat, query, terms, items: [{ msg, count }], total, i, 
 function stepTo(i, k, dir, tries = 0) {
   const s = stepper;
   const item = s && s.items[i];
-  if (!item || tries > s.items.length) return;
+  if (!s) return;
+  if (!item || tries > s.items.length + 1) { closeStepper(); return; }
   s.i = i; s.k = k;
   const chat = chatsById.get(s.chat);
   const now = parseHash(location.hash);
@@ -1323,13 +1359,26 @@ function stepLanded(mark, count) {
   const { dir, tries } = find;
   find = null;
   if (!mark) {
-    // Nothing to show here: move on in the same direction, or settle on the last one shown.
+    // Nothing to show here: move on in the same direction.
     if (dir > 0 && s.i + 1 < s.items.length) { stepTo(s.i + 1, 0, 1, tries + 1); return; }
     if (dir < 0 && s.i > 0) { stepTo(s.i - 1, -1, -1, tries + 1); return; }
+    // Nothing further this way: back to the last match shown, with this direction closed. With none
+    // shown yet, the bar closes and the message is shown without it.
+    const last = s.last;
+    if (!last || dir === 0) {
+      const msg = s.items[s.i] && s.items[s.i].msg;
+      closeStepper();
+      const node = msg && document.querySelector(`#chat .msg[data-id="${CSS.escape(msg)}"]`);
+      if (node) node.scrollIntoView({ block: 'center' });
+      return;
+    }
+    s.end = { at: `${last.i}:${last.k}`, dir };
+    stepTo(last.i, last.k, 0, tries + 1);
     return;
   }
   s.visible = count;
   if (s.k < 0) s.k = count - 1;
+  s.last = { i: s.i, k: s.k };
   showStepper();
   mark.scrollIntoView({ block: 'center' });
 }
@@ -1341,21 +1390,22 @@ function showStepper() {
   const at = Math.min(before + s.k + 1, s.total);
   bar.querySelector('.find-q').textContent = `“${s.query}”`;
   bar.querySelector('.find-pos').textContent = `${at} of ${s.total}`;
-  bar.querySelector('.find-prev').disabled = s.i === 0 && s.k === 0;
-  bar.querySelector('.find-next').disabled = s.i === s.items.length - 1 && s.k >= s.visible - 1;
+  // A direction found to hold nothing more on the page is closed at the match it came back to.
+  const here = `${s.i}:${s.k}`;
+  const ended = d => !!s.end && s.end.dir === d && s.end.at === here;
+  bar.querySelector('.find-prev').disabled = (s.i === 0 && s.k === 0) || ended(-1);
+  bar.querySelector('.find-next').disabled = (s.i === s.items.length - 1 && s.k >= s.visible - 1) || ended(1);
   bar.hidden = false;
 }
 
+// Ends the match bar, and any highlight a search left, with or without the bar.
 function closeStepper() {
-  if (!stepper) return;
-  stepper = null;
   if (find && find.nth !== undefined) find = null;
-  document.getElementById('findbar').hidden = true;
-  for (const old of document.querySelectorAll('#chat mark')) {
-    const parent = old.parentNode;
-    old.replaceWith(...old.childNodes);
-    parent.normalize();
+  if (stepper) {
+    stepper = null;
+    document.getElementById('findbar').hidden = true;
   }
+  clearMarks();
 }
 
 function setupStepper() {
@@ -1384,12 +1434,12 @@ function markNth(node, terms, nth) {
     if (region.closest('.line')) continue;
     const walker = document.createTreeWalker(region, NodeFilter.SHOW_TEXT);
     for (let text = walker.nextNode(); text; text = walker.nextNode()) {
-      if (text.parentElement.closest('button, time, .branch, .code-head, .plain-note, script, style')) continue;
-      const lower = text.data.toLowerCase();
-      if (lower.length !== text.data.length) continue;
+      if (text.parentElement.closest('button, time, .branch, .code-head, .plain-note, .katex, script, style')) continue;
+      const { lower, at: map } = foldCase(text.data);
+      const orig = j => (map ? map[j] : j);
       for (let i = 0; i < lower.length;) {
         const term = wanted.find(w => lower.startsWith(w, i));
-        if (term) { found.push({ text, at: i, len: term.length }); i += term.length; } else i++;
+        if (term) { found.push({ text, at: orig(i), len: orig(i + term.length) - orig(i) }); i += term.length; } else i++;
       }
     }
   }
@@ -1424,7 +1474,9 @@ function showResults(query) {
   const plans = new Map(groups.slice(0, GROUP_LIMIT).map(g => [g.chat, findPlan(chatsById.get(g.chat), q)]));
   const matches = [...plans.values()].reduce((n, p) => n + p.total, 0);
   const plural = (n, w, s = 's') => `${n} ${w}${n === 1 ? '' : s}`;
-  const note = !groups.length ? 'No matches' : `${plural(groups.length, 'chat')} · ${plural(matches, 'match', 'es')}`;
+  // Matches are counted in the chats listed, so past GROUP_LIMIT the summary says so.
+  const note = !groups.length ? 'No matches'
+    : `${plural(groups.length, 'chat')} · ${plural(matches, 'match', 'es')}${groups.length > GROUP_LIMIT ? ` in the first ${GROUP_LIMIT}` : ''}`;
   const list = el('div', 'list');
   for (const g of groups.slice(0, GROUP_LIMIT)) {
     const chat = chatsById.get(g.chat);
@@ -1437,7 +1489,8 @@ function showResults(query) {
     const plan = plans.get(g.chat);
     if (plan && plan.total) title.append(el('small', '', `${plural(plan.total, 'match', 'es')} in ${plural(plan.items.length, 'message')}`));
     else if (g.count) title.append(el('small', '', 'In pasted text or file names'));
-    const first = g.snippets[0] || { chat: g.chat, msg: null };
+    // The title opens the first match the conversation shows; a hit only in pasted text comes after.
+    const first = plan && plan.items.length ? { chat: g.chat, msg: plan.items[0].msg } : (g.snippets[0] || { chat: g.chat, msg: null });
     title.addEventListener('click', () => openHit(first, g.terms, q));
     box.append(title);
     for (const hit of g.snippets) {

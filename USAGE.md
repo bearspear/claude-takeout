@@ -158,7 +158,7 @@ The text of uploads, and of files Claude made, over 64 KB is in `viewer-files/` 
 
 Code blocks with a language label get syntax colors as they scroll into view, as do files in Code view and text uploads. Blocks with no label stay plain, as do blocks over 200 KB and any that take too long to color.
 
-The Files button in a chat's top bar lists every file in that chat: Outputs, the files Claude shared with you, each once with its version count; Uploads, what you uploaded or pasted; and Working files, what Claude wrote along the way without sharing, such as helper scripts. Click one to open it.
+The Files button in a chat's top bar lists every file in that chat: Outputs, the files Claude shared with you, each once with its version count; Uploads, what you uploaded or pasted; and Working files, what Claude wrote along the way without sharing, such as helper scripts. A file shared on another branch of the chat is listed under Outputs too. Click one to open it; Tab out of the list or press Escape to close it.
 
 Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". Popups and the file panel have a Copy button in their header for the whole file: it copies the file's text, and in Preview the source rather than the rendered page. When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
 

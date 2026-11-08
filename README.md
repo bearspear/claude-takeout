@@ -367,6 +367,20 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.20
+
+Viewer fixes from the second full review. Rebuild an older export's viewer with `--force` to get them; see [Updating a viewer](USAGE.md#updating-a-viewer).
+
+- **Match counts agree with the page** - Words in link addresses and in math are no longer counted, so the match bar no longer shows "3 of 3" with Next still on, or highlights inside hidden math.
+- **No dead steps** - When the next match turns out not to be on the page, the bar stays on the last one it showed and turns Next (or Previous) off, instead of losing the highlight. A result with nothing to show opens its message without the bar.
+- **Text with a Turkish İ** - Matches in a paragraph holding İ, or another letter that changes length in lowercase, are highlighted and stepped to.
+- **Faster search** - Counting matches for the results list is about ten times faster, so typing no longer freezes a large viewer.
+- **Search hits far down a long chat** open sooner: the messages before them are drawn in bigger batches.
+- **Results summary** - Past 200 chats, the summary says its match count covers the first 200.
+- **Group titles** open the first match the conversation shows, not a hit in a file name or pasted text.
+- **Highlights and colors** - Clearing the search removes every highlight. Stepping makes only code blocks that hold the word plain, and they get their colors back when the bar closes.
+- **Files list** - A regenerated reply's artifacts and documents stay under Outputs. A file Claude wrote and then sent is listed once. A file presented on another branch opens that branch's copy. Tab out of the list closes it, and a file opened from it takes keyboard focus to the panel and back to the Files button.
+
 ### v1.6.19
 
 Fixes from a second full review of the export code. None were critical.

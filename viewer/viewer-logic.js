@@ -750,28 +750,88 @@ function queryMatches(q, lower) {
 // Occurrences of any of the (lowercase) terms in text, scanning left to right; where two start at one
 // spot the longer counts, and occurrences don't overlap. markTerms and the chat highlight scan the same way.
 function countTerms(text, terms) {
-  const lower = String(text).toLowerCase();
-  const wanted = (terms || []).filter(Boolean).slice().sort((a, b) => b.length - a.length);
+  return countLower(String(text).toLowerCase(), terms);
+}
+
+// countTerms on text already in lowercase, jumping with indexOf from one occurrence to the next.
+function countLower(lower, terms) {
+  const wanted = [...new Set((terms || []).filter(Boolean))];
   if (!wanted.length) return 0;
+  const next = wanted.map(w => lower.indexOf(w));
   let n = 0;
-  for (let i = 0; i < lower.length;) {
-    const term = wanted.find(w => lower.startsWith(w, i));
-    if (term) { n++; i += term.length; } else i++;
+  for (let i = 0; ;) {
+    let best = -1, len = 0;
+    for (let j = 0; j < wanted.length; j++) {
+      if (next[j] >= 0 && next[j] < i) next[j] = lower.indexOf(wanted[j], i);
+      const p = next[j];
+      if (p >= 0 && (best < 0 || p < best || (p === best && wanted[j].length > len))) { best = p; len = wanted[j].length; }
+    }
+    if (best < 0) return n;
+    n++;
+    i = best + len;
   }
-  return n;
+}
+
+// text.toLowerCase(), and where that changes the length (a Turkish İ), at: the offset in text of each
+// offset in the lowercase text, so a match found in one can be cut out of the other. at is null otherwise.
+function foldCase(text) {
+  const t = String(text);
+  const lower = t.toLowerCase();
+  if (lower.length === t.length) return { lower, at: null };
+  const at = [];
+  let out = '';
+  for (let i = 0; i < t.length;) {
+    const ch = String.fromCodePoint(t.codePointAt(i));
+    const l = ch.toLowerCase();
+    for (let j = 0; j < l.length; j++) at.push(i);
+    out += l;
+    i += ch.length;
+  }
+  at.push(t.length);
+  return { lower: out, at };
+}
+
+// marked's emphasis parsing is quadratic, so a text block with this many * and _ is shown as plain text.
+const EMPHASIS_LIMIT = 4000;
+
+// The text a text block shows in the conversation, near enough for counting matches: math (drawn by
+// KaTeX) and link and image addresses left out, code and bare web addresses kept as written.
+function shownText(markdown) {
+  const md = String(markdown || '');
+  if ((md.match(/[*_]/g) || []).length > EMPHASIS_LIMIT) return md;
+  const code = [];
+  const kept = md.replace(MATH_OR_CODE, m => {
+    if (m[0] === '$') return ' ';
+    if (/^(?: {0,3}[`~]|`)/.test(m)) { code.push(m); return `\uE010${code.length - 1}\uE011`; }
+    return m;
+  });
+  return kept
+    .replace(/!\[[^\]\n]*\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+"[^"\n]*")?\)/g, ' ')
+    .replace(/\[([^\]\n]*)\]\((?:[^()\s]|\([^()\s]*\))*(?:\s+"[^"\n]*")?\)/g, '$1')
+    .replace(/\uE010(\d+)\uE011/g, (m, i) => code[i]);
+}
+
+// Each message's shown text in lowercase, kept for the next keystroke's search.
+const shownLower = new WeakMap();
+function messageShownLower(m) {
+  if (!shownLower.has(m)) {
+    const text = (m.blocks || []).filter(b => b && b.t === 'text' && b.text).map(b => shownText(b.text)).join('\n');
+    shownLower.set(m, text.toLowerCase());
+  }
+  return shownLower.get(m);
 }
 
 // What the in-chat stepper walks: the messages whose visible text (prompts and replies, not thinking,
 // tools, pasted text or upload names, which don't show in the conversation) matches the query, in the
-// chat's message order, each with how many occurrences it holds.
+// chat's message order, each with how many occurrences it shows (math and link addresses aside).
 function findPlan(chat, query) {
   const q = parseQuery(query);
   const terms = q.all.flat();
   const items = [];
   for (const m of (chat && chat.messages) || []) {
-    const text = (m.blocks || []).filter(b => b && b.t === 'text' && b.text).map(b => b.text).join('\n');
-    if (!text || !queryMatches(q, text.toLowerCase())) continue;
-    const count = countTerms(text, terms);
+    const lower = messageShownLower(m);
+    if (!lower || !queryMatches(q, lower)) continue;
+    const count = countLower(lower, terms);
     if (count) items.push({ msg: m.id, count });
   }
   return { terms, items, total: items.reduce((n, i) => n + i.count, 0) };
@@ -910,5 +970,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName };
 }
