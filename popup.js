@@ -1896,7 +1896,18 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   let projectFilesPath = 'project/files';  // Where they are, relative to this folder
   if (data.project_uuid || data.project?.uuid) {
     if (onProgress) onProgress('Fetching project files...');
-    const { files: apiDocs, docsJson, projectJson, failures: projectFailures, metadataError } = await fetchProjectDocs(data, organizationId);
+    // In a mega-ZIP, every chat in a project needs the same metadata and docs, so a
+    // complete fetch is kept for the next chat. One with failures is fetched again.
+    const docsKey = data.project_uuid || data.project?.uuid;
+    let fetched = sharedProjects?.docsByUuid?.get(docsKey);
+    if (!fetched) {
+      fetched = await fetchProjectDocs(data, organizationId);
+      if (sharedProjects && !fetched.metadataError && fetched.failures.length === 0) {
+        if (!sharedProjects.docsByUuid) sharedProjects.docsByUuid = new Map();
+        sharedProjects.docsByUuid.set(docsKey, fetched);
+      }
+    }
+    const { files: apiDocs, docsJson, projectJson, failures: projectFailures, metadataError } = fetched;
     projectDocsJson = docsJson;
     projectMetadataJson = projectJson;
     projectInstructions = projectJson?.prompt_template ? fixMojibake(String(projectJson.prompt_template)) : '';
@@ -2319,8 +2330,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   const usedUploadNames = new Set();  // lowercase names already in uploads/
   const savedUploadNames = {};  // uploadNameKey -> [saved name, or null when it failed], in order
   const viewerUploads = {};  // File UUID (or name) -> { path, text }, saved files only
-  // sandboxPath -> "data:<mime>;base64,..." for inlining into text artifacts.
-  const uploadDataUris = {};
+  // sandboxPath -> { blob, filename }, encoded as a data URI only when an artifact refers to it.
+  const uploadSources = {};
 
   for (let i = 0; i < uploadedFiles.length; i++) {
     const file = uploadedFiles[i];
@@ -2362,30 +2373,18 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         recordSaved(finalName);
         downloadedFiles.push({ name: finalName, fromJson: false });
         viewerUploads[file.uuid || file.originalFilename] = { path: `uploads/${finalName}`, text: await viewerUploadText(finalName, blob) };
-        // Also build a data URI keyed by sandbox path so we can inline this
-        // upload into any text artifact that references it. Best-effort —
-        // failures here don't block the export.
+        // Keep the blob by sandbox path, so the inline pass below can turn it into a
+        // data URI if a text artifact refers to it. Most uploads are never referred
+        // to, so nothing is encoded here.
         //
         // The older `files` array format doesn't carry an explicit path, so
         // we synthesize one from the conventional sandbox location
         // /mnt/user-data/uploads/<original filename>. We always register that
         // synthesized key, plus file.path when present (newer files_v2 entries
-        // carry it). Both point at the same data URI.
-        try {
-          const b64 = await blobToBase64(blob);
-          const mime = (blob.type && blob.type !== '' && blob.type !== 'application/octet-stream')
-            ? blob.type
-            : inferMimeFromFilename(file.filename);
-          const dataUri = `data:${mime};base64,${b64}`;
-          if (file.path) {
-            uploadDataUris[file.path] = dataUri;
-          }
-          if (file.originalFilename) {
-            uploadDataUris[`/mnt/user-data/uploads/${file.originalFilename}`] = dataUri;
-          }
-        } catch (encErr) {
-          console.warn(`Could not build data URI for ${file.filename}:`, encErr.message);
-        }
+        // carry it). Both point at the same upload.
+        const source = { blob, filename: file.filename };
+        if (file.path) uploadSources[file.path] = source;
+        if (file.originalFilename) uploadSources[`/mnt/user-data/uploads/${file.originalFilename}`] = source;
       } catch (apiErr) {
         // API failed - try JSON fallback for blob files
         if (file.isBlob && file.path) {
@@ -2455,6 +2454,24 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // full_chat embedded markdown) aren't bloated with giant base64 strings —
   // only the on-disk artifact files become self-contained.
   const viewerArtifacts = {};  // Inlined text, so viewer previews match the files on disk
+  // Encode only the uploads some inlineable artifact mentions, each once.
+  const uploadDataUris = {};
+  const encoded = new Map();  // source -> data URI, or null when encoding failed
+  for (const [sandboxPath, source] of Object.entries(uploadSources)) {
+    const used = Object.entries(artifacts).some(([filename, content]) => isInlineableArtifact(filename) && typeof content === 'string' && content.includes(sandboxPath));
+    if (!used) continue;
+    if (!encoded.has(source)) {
+      try {
+        const b64 = await blobToBase64(source.blob);
+        const mime = (source.blob.type && source.blob.type !== 'application/octet-stream') ? source.blob.type : inferMimeFromFilename(source.filename);
+        encoded.set(source, `data:${mime};base64,${b64}`);
+      } catch (encErr) {
+        console.warn(`Could not build data URI for ${source.filename}:`, encErr.message);
+        encoded.set(source, null);
+      }
+    }
+    if (encoded.get(source)) uploadDataUris[sandboxPath] = encoded.get(source);
+  }
   if (Object.keys(uploadDataUris).length > 0) {
     for (const [filename, content] of Object.entries(artifacts)) {
       if (!isInlineableArtifact(filename)) continue;

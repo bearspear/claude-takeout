@@ -1168,6 +1168,38 @@ test('fileViews gives audio and video a preview from a link', () => {
     out.chats[0].messages[0].uploads.forEach((u, i) => assert.strictEqual(got[u.key], texts[i]));
   });
 
+  test('moveUploadText also moves large file text, but not stylesheets or scripts a preview inlines', () => {
+    const file = (name, ...texts) => ({ name, kind: 'html', versions: texts.map((text, i) => ({ label: texts.length > 1 ? 'v' + (i + 1) : '', text, href: 'artefacts/' + name })) });
+    const chat = { ...chatWith('c1', [upload('big.md', KB(70))]), files: { a1: file('page.html', KB(70) + ' one', KB(70) + ' two'), a2: file('style.css', KB(70)), a3: file('app.js', KB(70)), a4: file('small.html', KB(1)) } };
+    const data = buildViewerData([chat], {});
+    const before = JSON.stringify(data);
+    const { data: out, parts } = moveUploadText(data);
+    assert.strictEqual(JSON.stringify(data), before, 'input untouched');
+    const files = out.chats[0].files;
+    assert.deepStrictEqual(files.a1.versions.map(v => [v.text, v.key]), [[null, 'f0'], [null, 'f1']]);
+    assert.ok(files.a1.versions.every(v => v.part === 1 && v.href === 'artefacts/page.html'));
+    assert.strictEqual(files.a2.versions[0].text, KB(70));
+    assert.strictEqual(files.a3.versions[0].text, KB(70));
+    assert.strictEqual(files.a4.versions[0].text, KB(1));
+    assert.strictEqual(out.chats[0].messages[0].uploads[0].key, 'u0');
+    const got = {};
+    for (const p of parts) Object.assign(got, runPart(p.body).d);
+    assert.deepStrictEqual([got.f0, got.f1], [KB(70) + ' one', KB(70) + ' two']);
+    const index = d => buildSearchIndex(linkProjects(JSON.parse(JSON.stringify(d))));
+    assert.deepStrictEqual(index(out), index(data));
+  });
+
+  test('buildViewerData keeps one copy of projects that are equal but not the same object', () => {
+    const docs = [{ name: 'a.md', text: 'x'.repeat(1000) }];
+    const project = () => ({ name: 'P', instructions: 'i', docs: docs.map(d => ({ ...d })), files: [] });
+    const chats = ['c1', 'c2', 'c3'].map(id => ({ ...chatWith(id, []), project: project() }));
+    chats.push({ ...chatWith('c4', []), project: { ...project(), docs: [{ name: 'a.md', text: 'y'.repeat(1000) }] } });
+    const out = buildViewerData(chats, {});
+    assert.strictEqual(out.projects.length, 2);
+    const byId = Object.fromEntries(out.chats.map(c => [c.id, c.project]));
+    assert.ok(byId.c1 === byId.c2 && byId.c2 === byId.c3 && byId.c4 !== byId.c1, JSON.stringify(byId));
+  });
+
   test('moveUploadText with nothing to move returns no parts', () => {
     const data = buildViewerData([chatWith('c1', [upload('a.md', KB(1)), upload('b.png', null)])], {});
     const { data: out, parts } = moveUploadText(data);

@@ -154,7 +154,7 @@ Unzip the archive first, then open `viewer.html` in Chrome. Opening it from insi
 
 The viewer lists the chats, searches across them, and shows each message with its thinking, tool calls, artifacts, uploads and project files. Click a file to open it in the side panel, as a preview or as code.
 
-The text of uploads over 64 KB is in `viewer-files/` beside `viewer.html`, and loads when you open the upload. Keep that folder with the viewer. Search covers prompts, responses, pasted text and file names, but not the text inside uploads.
+The text of uploads, and of files Claude made, over 64 KB is in `viewer-files/` beside `viewer.html`, and loads when you open the upload or file. Keep that folder with the viewer. Search covers prompts, responses, pasted text and file names, but not the text inside uploads.
 
 Code blocks with a language label get syntax colors as they scroll into view, as do files in Code view and text uploads. Blocks with no label stay plain, as do blocks over 200 KB and any that take too long to color.
 

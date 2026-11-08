@@ -403,20 +403,45 @@
 
   // Identical projects are kept once in `projects`, and each chat's project becomes its index there,
   // so a mega-ZIP doesn't carry a project's docs once per chat. The viewer puts them back on load.
+  // Projects are compared by a cheap key first (name, instructions, doc names and lengths, file names),
+  // then in full only against projects with that key. Comparing in full is quick when the docs are the
+  // same strings, as they are when an export reuses one fetch for every chat in a project.
+  function sameValue(a, b) {
+    if (a === b) return true;
+    if (typeof a !== 'object' || typeof b !== 'object' || a === null || b === null) return false;
+    if (Array.isArray(a) !== Array.isArray(b)) return false;
+    const ka = Object.keys(a), kb = Object.keys(b);
+    if (ka.length !== kb.length) return false;
+    return ka.every(k => Object.prototype.hasOwnProperty.call(b, k) && sameValue(a[k], b[k]));
+  }
+
+  function projectKey(p) {
+    const docs = Array.isArray(p.docs) ? p.docs.map(d => [d && d.name, d && typeof d.text === 'string' ? d.text.length : null]) : null;
+    const files = Array.isArray(p.files) ? p.files.map(f => f && f.name) : null;
+    return JSON.stringify([p.name, typeof p.instructions === 'string' ? p.instructions.length : null, docs, files, Object.keys(p).sort()]);
+  }
+
   function buildViewerData(chats, { exported } = {}) {
-    const projects = [], indexOf = new Map();
+    const projects = [], byKey = new Map();
     const sorted = chats.slice().sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
     const out = sorted.map(chat => {
       if (!chat.project || typeof chat.project !== 'object') return chat;
-      const key = JSON.stringify(chat.project);
-      if (!indexOf.has(key)) { indexOf.set(key, projects.length); projects.push(chat.project); }
-      return { ...chat, project: indexOf.get(key) };
+      const key = projectKey(chat.project);
+      const candidates = byKey.get(key) || [];
+      let index = candidates.find(i => sameValue(projects[i], chat.project));
+      if (index === undefined) {
+        index = projects.length;
+        projects.push(chat.project);
+        byKey.set(key, [...candidates, index]);
+      }
+      return { ...chat, project: index };
     });
     return { exported, chats: out, projects };
   }
 
-  // Large upload text leaves the page for viewer-files/part-NNNN.js, loaded when the upload is opened.
-  // Search never reads upload text, so it is unchanged. data is not mutated.
+  // Large upload text, and large text of files Claude made, leaves the page for viewer-files/part-NNNN.js,
+  // loaded when the upload or file is opened. Search reads neither, so it is unchanged. Stylesheets and
+  // scripts stay, because a preview inlines them from the page (inlineSiblings). data is not mutated.
   function moveUploadText(data, { firstPart = 1, inlineLimit = UPLOAD_INLINE_LIMIT, partLimit = PART_LIMIT } = {}) {
     const encoder = new TextEncoder();
     const parts = [];
@@ -429,27 +454,48 @@
       pending = [];
       pendingBytes = 0;
     };
+    let fileKeys = 0;
+    // Adds one text to the current part and returns where it went.
+    const place = (key, text) => {
+      const item = `${escapeJson(key)}:${escapeJson(text)}`;
+      const bytes = encoder.encode(item).length + 1;
+      if (pending.length && pendingBytes + bytes + head(number).length + 3 > partLimit) flush();
+      pending.push(item);
+      pendingBytes += bytes;
+      return number;
+    };
+    const big = text => typeof text === 'string' && text.length > inlineLimit / 4 && encoder.encode(text).length > inlineLimit;
     const chats = data.chats.map(chat => {
       let changed = false;
+      let files = chat.files;
+      if (files && typeof files === 'object') {
+        for (const [id, file] of Object.entries(chat.files)) {
+          if (!file || !Array.isArray(file.versions) || /\.(css|m?js)$/i.test(file.name || '')) continue;
+          if (!file.versions.some(v => v && big(v.text))) continue;
+          const versions = file.versions.map(v => {
+            if (!v || !big(v.text)) return v;
+            const key = 'f' + fileKeys++;
+            return { ...v, text: null, part: place(key, v.text), key };
+          });
+          if (files === chat.files) files = { ...chat.files };
+          files[id] = { ...file, versions };
+          changed = true;
+        }
+      }
       const messages = chat.messages.map(m => {
         if (!Array.isArray(m.uploads) || !m.uploads.some(u => u && typeof u.text === 'string')) return m;
         let moved = false;
         const uploads = m.uploads.map(u => {
           if (!u || typeof u.text !== 'string' || encoder.encode(u.text).length <= inlineLimit) return u;
           const key = 'u' + keys++;
-          const item = `${escapeJson(key)}:${escapeJson(u.text)}`;
-          const bytes = encoder.encode(item).length + 1;
-          if (pending.length && pendingBytes + bytes + head(number).length + 3 > partLimit) flush();
-          pending.push(item);
-          pendingBytes += bytes;
           moved = true;
-          return { ...u, text: null, lines: u.text.split('\n').length, part: number, key };
+          return { ...u, text: null, lines: u.text.split('\n').length, part: place(key, u.text), key };
         });
         if (!moved) return m;
         changed = true;
         return { ...m, uploads };
       });
-      return changed ? { ...chat, messages } : chat;
+      return changed ? { ...chat, messages, files } : chat;
     });
     flush();
     return { data: parts.length ? { ...data, chats } : data, parts };
@@ -479,12 +525,10 @@
     return out.join('/');
   }
 
+  // One pass over the JSON, which on a large archive is tens of megabytes.
+  const JSON_ESCAPES = { '</': '<\\/', '<!--': '\\u003c!--', '\u2028': '\\u2028', '\u2029': '\\u2029' };
   function escapeJson(data) {
-    return JSON.stringify(data)
-      .replace(/<\//g, '<\\/')
-      .replace(/<!--/g, '\\u003c!--')
-      .replace(/\u2028/g, '\\u2028')
-      .replace(/\u2029/g, '\\u2029');
+    return JSON.stringify(data).replace(/<\/|<!--|[\u2028\u2029]/g, m => JSON_ESCAPES[m]);
   }
 
   // One pass with function replacers: '$&' or a placeholder inside a value stays literal.

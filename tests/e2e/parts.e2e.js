@@ -8,6 +8,8 @@ const BIG_PY = 'def quokka_only():\n    return 1\n' + '# filler line\n'.repeat(6
 const BIG_MD = '# Notes\n' + 'wombat words here\n'.repeat(5000);
 const SMALL = 'small upload text';
 const PASTE = 'pasted text '.repeat(7000);
+// The marker is past the 20,000 characters a tool step keeps of its input.
+const BIG_HTML = '<!doctype html><h1>Rows</h1>' + '<p>row</p>\n'.repeat(8000) + '<p>numbat_page</p>';
 
 function conversation() {
   const human = {
@@ -16,10 +18,10 @@ function conversation() {
     attachments: [{ file_name: 'paste.txt', extracted_content: PASTE }, { file_name: '', extracted_content: 'first paste\nline two' }, { extracted_content: 'second paste' }], files: [],
     files_v2: [{ file_uuid: 'f-py', file_name: 'big.py', success: true }, { file_uuid: 'f-md', file_name: 'big.md', success: true }, { file_uuid: 'f-small', file_name: 'small.txt', success: true }],
   };
-  const reply = { uuid: 'a', parent_message_uuid: 'h', sender: 'assistant', created_at: '2026-05-01T10:01:00Z', content: [{ type: 'text', text: 'Read them.' }], attachments: [], files: [], files_v2: [] };
+  const reply = { uuid: 'a', parent_message_uuid: 'h', sender: 'assistant', created_at: '2026-05-01T10:01:00Z', content: [{ type: 'text', text: 'Read them.' }, { type: 'tool_use', id: 'cf', name: 'create_file', input: { path: '/mnt/user-data/outputs/big.html', file_text: BIG_HTML } }], attachments: [], files: [], files_v2: [] };
   return { uuid: 'parts', name: 'Parts', model: 'claude-x', created_at: '2026-05-01T10:00:00Z', updated_at: '2026-05-01T10:01:00Z', settings: {}, current_leaf_message_uuid: 'a', chat_messages: [human, reply] };
 }
-const ctx = () => ({ folder: '', uploads: {
+const ctx = () => ({ folder: '', artifacts: { 'big.html': BIG_HTML }, artifactIndex: { '/mnt/user-data/outputs/big.html': { path: '/mnt/user-data/outputs/big.html', filename: 'big.html', versions: ['big.html'], messages: ['a'] } }, uploads: {
   'f-py': { path: 'uploads/p01_big.py', text: BIG_PY }, 'f-md': { path: 'uploads/p01_big.md', text: BIG_MD }, 'f-small': { path: 'uploads/p01_small.txt', text: SMALL },
 } });
 
@@ -33,6 +35,7 @@ const ctx = () => ({ folder: '', uploads: {
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
   const check = (n, ok, x = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n} ${ok ? '' : x}`); };
+  check('the page holds no large file text', !html.includes('numbat_page'));
   check('the page holds no large upload text', !html.includes('wombat words here\\nwombat') && !html.includes('quokka_only') && html.includes('pasted text pasted'));
 
   const context = await browser.newContext({ viewport: { width: 1300, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
@@ -53,6 +56,7 @@ const ctx = () => ({ folder: '', uploads: {
   const close = () => page.locator('.pop .close').click();
 
   check('no part loads at start', partLoads.length === 0);
+  check('the data text is dropped once parsed', await page.evaluate(() => document.getElementById('data') === null));
   check('the chip still shows the line count', (await chip('big.py').textContent()).includes(`${BIG_PY.split('\n').length} lines`), await chip('big.py').textContent());
   await chip('small.txt').click();
   check('a small upload stays inline', (await popupText()) === SMALL && partLoads.length === 0);
@@ -77,6 +81,14 @@ const ctx = () => ({ folder: '', uploads: {
   await page.waitForFunction(t => document.querySelector('.pop .pop-body')?.textContent === t, BIG_MD, { timeout: 3000 }).catch(() => {});
   check('a second upload in the same part opens without another load', (await popupText()) === BIG_MD && partLoads.length === 1, partLoads.length);
   await close();
+
+  await page.click('.msg[data-id="a"] .art');
+  await page.waitForSelector('#panel iframe', { timeout: 3000 }).catch(() => {});
+  const frameDoc = await page.$eval('#panel iframe', f => f.getAttribute('srcdoc') || '').catch(() => '');
+  check('a large file opens from its part, in preview', frameDoc.includes('numbat_page'), frameDoc.slice(0, 80));
+  await page.click('#panel .tab:has-text("Code")');
+  check('and in Code view', (await page.textContent('#panel .file-code')) === BIG_HTML);
+  await page.click('#panel .close');
 
   await page.fill('.find input', 'zebrafinch');
   await page.waitForTimeout(300);
