@@ -797,3 +797,137 @@ test('integrated_chat.txt keeps code blocks as written', () => {
   assert.ok(out.includes('After that.'), out);
   assert.ok(!out.includes('```'), out);
 });
+
+// ---- Markdown and file names ----
+const chatOf = (messages) => {
+  const chat_messages = messages.map((m, i) => ({ uuid: `m${i}`, parent_message_uuid: i ? `m${i - 1}` : null, created_at: '2026-01-01T00:00:00Z', attachments: [], files: [], files_v2: [], ...m }));
+  return { uuid: 'conv-1', name: 'Test chat', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z', settings: {}, current_leaf_message_uuid: chat_messages[chat_messages.length - 1].uuid, chat_messages };
+};
+const presented = (id, paths) => [
+  use(id, 'present_files', { filepaths: paths }),
+  { type: 'tool_result', tool_use_id: id, name: 'present_files', content: paths.map((p, i) => ({ type: 'local_resource', file_path: p, uuid: `${id}-u${i}` })) },
+];
+
+test('Markdown export shows pasted text and names uploads; no fake request for assistant attachments', () => {
+  const data = chatOf([
+    { sender: 'human', content: [{ type: 'text', text: 'see these' }], attachments: [{ file_name: 'notes.txt', extracted_content: 'PASTED ```BODY```' }, { file_name: '', extracted_content: 'second paste' }], files_v2: [{ success: true, file_name: 'photo.png', file_uuid: 'u1' }] },
+    { sender: 'assistant', content: [{ type: 'text', text: 'ok' }], attachments: [{ file_name: 'ghost.md' }] },
+  ]);
+  const md = fn('convertToMarkdown')(data, { embedArtifacts: true });
+  assert.ok(md.includes('notes.txt') && md.includes('PASTED ```BODY```') && md.includes('second paste'), md);
+  assert.ok(md.includes('````'), 'a paste holding ``` gets a longer fence');
+  assert.ok(md.includes('photo.png'), md);
+  assert.ok(!md.includes('/mnt/user-data/outputs/ghost.md'), md);
+});
+
+test('prompts.md links each upload to the name it was saved under', async () => {
+  const nfd = 'Müller.pdf';
+  const data = chatOf([
+    { sender: 'human', content: [{ type: 'text', text: 'files' }], files_v2: [
+      { success: true, file_name: 'image.png', file_uuid: 'i1', file_kind: 'image' },
+      { success: true, file_name: 'image.png', file_uuid: 'i2', file_kind: 'image' },
+      { success: true, file_name: 'Photo.PNG', file_uuid: 'i3', file_kind: 'image' },
+      { success: true, file_name: 'photo.png', file_uuid: 'i4', file_kind: 'image' },
+      { success: true, file_name: nfd, file_uuid: 'n1', file_kind: 'document' },
+      { success: true, file_name: 'pdf_notes.txt', file_uuid: 'b1', file_kind: 'blob', path: '/mnt/user-data/uploads/pdf_notes.txt' },
+      { success: true, file_name: 'lost.pdf', file_uuid: 'gone', file_kind: 'document' },
+    ] },
+    { sender: 'assistant', content: [use('v1', 'view', { path: '/mnt/user-data/uploads/pdf_notes.txt' }), { type: 'tool_result', tool_use_id: 'v1', name: 'view', content: [{ type: 'text', text: "Here's the content of /mnt/user-data/uploads/pdf_notes.txt with line numbers:\n     1\tnote" }] }] },
+  ]);
+  const { written } = await runFolder(exportPopup({ failing: ['b1', 'gone', 'pdf_notes'] }), data);
+  const saved = Object.keys(written).filter((k) => k.startsWith('uploads/')).sort();
+  assert.deepStrictEqual(saved, ['uploads/p01_Müller.pdf', 'uploads/p01_Photo.PNG', 'uploads/p01_image.png', 'uploads/p01_image_1.png', 'uploads/p01_pdf_notes.txt', 'uploads/p01_photo_1.png'].sort());
+  const prompts = String(written['prompts.md'].content || written['prompts.md']);
+  const links = [...prompts.matchAll(/\]\((uploads\/[^)]+)\)/g)].map((m) => decodeURIComponent(m[1]));
+  assert.deepStrictEqual(links.slice().sort(), saved);
+  assert.ok(/lost\.pdf/.test(prompts) && !/\(uploads\/[^)]*lost/.test(prompts), 'a failed upload is named without a link');
+});
+
+test('a presented file is downloaded when replay is known to be wrong, and same-named ones are kept apart', async () => {
+  const data = chatOf([
+    { sender: 'human', content: [{ type: 'text', text: 'go' }] },
+    { sender: 'assistant', content: [
+      use('c1', 'create_file', { path: '/home/claude/page.html', file_text: 'replayed' }),
+      use('b1', 'bash_tool', { command: "python3 -c \"open('/home/claude/page.html','w', encoding='utf-8').write('real')\" && cp /home/claude/page.html /mnt/user-data/outputs/page.html" }),
+      use('c2', 'create_file', { path: '/home/claude/clean.html', file_text: 'clean' }),
+      ...presented('p1', ['/mnt/user-data/outputs/page.html', '/mnt/user-data/outputs/clean.html', '/mnt/user-data/outputs/en/index.html', '/mnt/user-data/outputs/de/index.html', '/mnt/user-data/outputs/a/report.docx', '/mnt/user-data/outputs/b/report.docx']),
+    ] },
+  ]);
+  const asked = [];
+  const popup = exportPopup({ routes: [[/download-file\?path=/, (url) => {
+    const p = decodeURIComponent(url.split('path=')[1]);
+    asked.push(p);
+    return { ok: true, status: 200, blob: async () => textBlob(`DISK ${p}`, 'text/html') };
+  }]] });
+  const { written } = await runFolder(popup, data);
+  const text = (k) => { const v = written[k]; return String(v && v.content !== undefined ? v.content : v).replace(/^﻿/, ''); };
+  assert.strictEqual(text('artefacts/page.html'), 'DISK /mnt/user-data/outputs/page.html');
+  assert.strictEqual(text('artefacts/clean.html'), 'clean');
+  assert.ok(!asked.includes('/mnt/user-data/outputs/clean.html'), 'a cleanly replayed file is not downloaded');
+  assert.strictEqual(text('artefacts/index.html'), 'DISK /mnt/user-data/outputs/en/index.html');
+  assert.strictEqual(text('artefacts/index_2.html'), 'DISK /mnt/user-data/outputs/de/index.html');
+  assert.ok('artefacts/report.docx' in written && 'artefacts/report_2.docx' in written);
+  const errors = written['errors.txt'] ? text('errors.txt') : '';
+  assert.ok(!/page\.html/.test(errors.split('## Warnings')[1] || ''), errors);
+  assert.ok(/index_2\.html/.test(errors) && /report_2\.docx/.test(errors), errors);
+  const full = text('full_chat.md');
+  assert.ok(!full.includes('(not found)'), full);
+  assert.ok(full.includes('artefacts/report_2.docx'), 'a binary presented file links to its saved copy');
+});
+
+test('code_snippets.md fences grow past any backtick run in the code', () => {
+  assert.strictEqual(fn('getCodeFence')('plain'), '```');
+  assert.strictEqual(fn('getCodeFence')('has ``` inside'), '````');
+  assert.strictEqual(fn('getCodeFence')('has ````` inside'), '``````');
+  const md = fn('generateCodeSnippets')([{ lang: 'markdown', code: '# Readme\n\n```bash\nls\n```\n', filename: 'README.md' }, { lang: 'python', code: 'print(1)' }]);
+  assert.ok(md.includes('````markdown\n# Readme\n\n```bash\nls\n```\n\n````\n'), md);
+  assert.ok(md.includes('```python\nprint(1)\n```\n'), md);
+});
+
+test('project docs with clashing names are all kept', async () => {
+  const docs = [
+    { uuid: 'd1', file_name: 'notes.md', content: 'first' },
+    { uuid: 'd2', file_name: 'notes.md', content: 'second' },
+    { uuid: 'd3', file_name: 'project.json', content: 'a doc, not metadata' },
+    { uuid: 'd4', file_name: 'Q3/Q4 plan.md', content: 'plan' },
+  ];
+  const data = loadFixture();
+  data.project_uuid = 'P';
+  data.project = { uuid: 'P', name: 'Proj' };
+  const popup = exportPopup({ routes: [
+    [/\/projects\/P$/, () => ({ ok: true, status: 200, json: async () => ({ name: 'Proj', prompt_template: '' }) })],
+    [/\/projects\/P\/docs$/, () => ({ ok: true, status: 200, json: async () => docs })],
+    [/\/projects\/P\/files$/, () => ({ ok: true, status: 200, json: async () => [] })],
+  ] });
+  const { written } = await runFolder(popup, data);
+  const text = (k) => { const v = written[k]; return String(v && v.content !== undefined ? v.content : v).replace(/^﻿/, ''); };
+  assert.strictEqual(text('project/notes.md'), 'first');
+  assert.strictEqual(text('project/notes_2.md'), 'second');
+  assert.strictEqual(text('project/project_2.json'), 'a doc, not metadata');
+  assert.strictEqual(text('project/Q3_Q4 plan.md'), 'plan');
+  assert.ok(JSON.parse(text('project/project.json')).name === 'Proj');
+});
+
+test('filenames keep letters from any script; ASCII names are unchanged', () => {
+  const safe = fn('safeFilename'), clean = fn('sanitizeForFilename');
+  assert.strictEqual(safe('Привет мир'), 'Привет_мир');
+  assert.strictEqual(safe('日本語の質問について'), '日本語の質問について');
+  assert.strictEqual(safe('My Chat: v2!'), 'My_Chat__v2_');
+  assert.strictEqual(safe('a/b\\c'), 'a_b_c');
+  assert.strictEqual(clean('# Привет, мир'), 'привет_мир');
+  assert.strictEqual(clean('日本語の質問について'), '日本語の質問について');
+  assert.strictEqual(clean('## Hello, World - Again'), 'hello_world_again');
+  assert.strictEqual(clean('!!!'), 'untitled');
+});
+
+test('names from chat data cannot form paths', () => {
+  const data = turns([
+    use('1', 'create_file', { path: '/h/a\\b.txt', file_text: 'x' }),
+    use('2', 'bash_tool', { command: "cat > /tmp/.. << 'EOF'\ny\nEOF" }),
+  ]);
+  const want = { 'a_b.txt': 'x', '_': 'y' };
+  assert.deepStrictEqual(plain(artifacts(data)), want);
+  assert.deepStrictEqual(pythonArtifacts(data), want);
+  assert.strictEqual(fn('zipSafeName')('..'), '_');
+  assert.strictEqual(fn('zipSafeName')('Q3/Q4\u0007.md'), 'Q3_Q4_.md');
+});

@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.7.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.8.
 
 ---
 
@@ -29,7 +29,7 @@ For deeper dives, two companion docs live alongside this one:
 | `background.js` | MV3 service worker. | Only manages side-panel "open on action click" preference. Listens to `chrome.storage.onChanged` for `useSidePanel` to re-apply behavior. |
 | `popup.html` | Popup UI (action click). | Buttons, status pill, settings drawer. Includes `.status.ready` / `.waiting` / `.error` / `.warning` styles. |
 | `sidepanel.html` | Side Panel UI. | Same buttons/handlers as the popup, just a different host. |
-| `export-core.js` | Shared pure extractors. | Classic script loaded before `popup.js` (plain top-level declarations, `module.exports` under Node only). Holds `fixMojibake`, `isTextFile`, `getMessageChain`, `extractArtifacts`, the heredoc helpers, `extractUploadedFiles`, `extractPresentedFiles`, `extractDeliveredFiles`, `getModelName`, `buildViewerDeliveries`, `viewerProject`, `heredocFiles`. Used by `popup.js` and Node tools. |
+| `export-core.js` | Shared pure extractors. | Classic script loaded before `popup.js` (plain top-level declarations, `module.exports` under Node only). Holds `fixMojibake`, `isTextFile`, `zipSafeName` (every name from chat data that becomes a ZIP path goes through it), `getMessageChain`, `extractArtifacts`, the heredoc helpers, `extractUploadedFiles`, `extractPresentedFiles`, `extractDeliveredFiles`, `getModelName`, `buildViewerDeliveries`, `viewerProject`, `heredocFiles`. Used by `popup.js` and Node tools. |
 | `popup.js` | **The brain.** Over 4,000 lines. All export logic, all conversion, all UI wiring. Same script is loaded by both `popup.html` and `sidepanel.html`. | See §3 below for the internal layout. |
 | `jszip.min.js` | ZIP library (vendored). | Used by both single-ZIP and mega-ZIP exports. |
 | `extract_artifacts.py` | Stdlib-only Python port of `extractArtifacts`. | Reconstructs all per-turn artifact versions from `original.json` offline. Byte-identical output to the JS implementation. |
@@ -145,7 +145,7 @@ The user can regenerate a response, producing a tree. `current_leaf_message_uuid
 | `rewrite` / `create_or_overwrite` | `path`, `file_text` or `content` | Defensive — overwrites artifact state; emits new version. |
 | `artifacts` (cmd: `create`/`update`/`rewrite`) | `id`, `title`, `type`, `content`, `command`, `old_str`, `new_str` | Keyed by `artifact:<id-or-title>`. Filename = sanitized(title or id) + `typeToExt[type]` (fallback `.txt`). `create`, `rewrite` and an `update` with `content` set the text; an `update` with `old_str`/`new_str` is replayed like `str_replace`. |
 | `bash_tool` (heredoc) | `command` matching `cat > <path> << DELIM ... DELIM`, any delimiter (`HEREDOC_RE`) | Treated as create_file. |
-| `present_files` | `filepaths[]` | In `convertToMarkdown`, looked up in the `artifacts` map for inline embedding. *Caveat:* with edited artifacts, lookup resolves to the FINAL versioned state, not the state at the moment of presentation. Acceptable trade-off; the per-turn versioned files exist on disk for cases where the precise moment matters. |
+| `present_files` | `filepaths[]` | `populateConversationFolder` downloads a presented file the replay didn't make, or one whose replay is known to be off (`str_replace_failed` or `artifact_opaque_mutation` for that name: the download then replaces the final file and its last `_vN`). Same-named files from different folders become `<base>_2<ext>`. In `convertToMarkdown`, looked up through `presentedNames` in the `artifacts` map for inline embedding; a binary one is linked. *Caveat:* with edited artifacts, lookup resolves to the FINAL versioned state, not the state at the moment of presentation. Acceptable trade-off; the per-turn versioned files exist on disk for cases where the precise moment matters. |
 | `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Same replay as `create_file` / `str_replace`. Newer conversations use these names. |
 | `Bash` | `command` | Same as `bash_tool`, in the extension and `replay_bash.py`. Uploads live at `/root/.claude/uploads/<session>/<uuid8>-<name>`. |
 | `SendUserFile` | `files[]`; result has `file_deliveries[]` with `file_uuid`, `path` | `extractDeliveredFiles` lists them and `populateConversationFolder` downloads each by UUID into `artefacts/`. |
@@ -344,7 +344,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.7. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.8. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 
