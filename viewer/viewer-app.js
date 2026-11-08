@@ -92,6 +92,14 @@ function copyButton() {
   return button;
 }
 
+// Copy for a whole file in a popup or the panel header. Always the file's text, even when a preview shows it rendered.
+function fileCopyButton(name, text) {
+  const button = copyButton();
+  button.setAttribute('aria-label', `Copy ${name}`);
+  button.addEventListener('click', () => copyWithFeedback(button, text));
+  return button;
+}
+
 // A code block's frame: a header with its language and a Copy button. The caller adds the pre.
 function codeBlock(lang) {
   const wrap = el('div', 'code');
@@ -106,6 +114,8 @@ function codeBlock(lang) {
 // that can be stopped. Colors are only ever added: a block that fails or runs late stays plain.
 const HIGHLIGHT_TIMEOUT = 1500;
 const HIGHLIGHT_WORKER = `
+${tameMarkdown}
+tameMarkdown(hljs);
 self.onmessage = e => {
   let html = null;
   try {
@@ -441,7 +451,8 @@ function openPopup(item, trigger) {
   close.append(icon('close'));
   close.addEventListener('click', closePopup);
   const head = el('div', 'pop-head');
-  head.append(el('b', 'pop-title', item.name || 'Untitled'), ...(link ? [link] : []), close);
+  const title = el('b', 'pop-title', item.name || 'Untitled');
+  head.append(title, ...(typeof item.text === 'string' ? [fileCopyButton(item.name || 'Untitled', item.text)] : []), ...(link ? [link] : []), close);
   const body = el('div', 'pop-body');
   body.append(...nodes);
   pop.append(head, body);
@@ -460,6 +471,7 @@ function openPopup(item, trigger) {
     if (typeof text === 'string') item.text = text;
     if (popup !== mine) return;
     body.replaceChildren(...(typeof text === 'string' ? popupContent(item).nodes : partMissing(item)));
+    if (typeof text === 'string') title.after(fileCopyButton(item.name || 'Untitled', text));
   });
 }
 
@@ -936,7 +948,9 @@ function renderPanelHead(chat, id, file, at, shape) {
     navigate({ ...parseHash(location.hash), file: null, version: null });
     if (card) card.focus({ preventScroll: true });
   });
-  head.replaceChildren(name, el('small', 'panel-kind', fileKindLabel(file)), ...tabs, row, close);
+  const version = file.versions[at];
+  const copy = !shape.missing && shape.views.length && version && typeof version.text === 'string' ? [fileCopyButton(file.name || 'Untitled', version.text)] : [];
+  head.replaceChildren(name, el('small', 'panel-kind', fileKindLabel(file)), ...tabs, row, ...copy, close);
   if (focused) [...tabs, ...versions].find(b => b.textContent === focused)?.focus();
 }
 

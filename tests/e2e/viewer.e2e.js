@@ -783,8 +783,8 @@ async function unzipMegaZip(out) {
     await openFile(kinds, 'notes.md');
     check('md renders as chat text does', (await kinds.page.$$('#panel .prose h2')).length === 1 && (await kinds.page.$$('#panel .prose .katex')).length === 1 && (await kinds.page.$$('#panel .prose .code')).length === 1);
     check('md is sanitized', !(await kinds.page.evaluate(() => !!window.__hit)) && (await kinds.page.$$('#panel iframe, #panel script')).length === 0);
-    await kinds.page.click('#panel .copy');
-    await kinds.page.waitForFunction(() => document.querySelector('#panel .copy span').textContent === 'Copied');
+    await kinds.page.click('#panel-body .copy');
+    await kinds.page.waitForFunction(() => document.querySelector('#panel-body .copy span').textContent === 'Copied');
     check('md code blocks copy', true);
     await openFile(kinds, 'drawing.svg');
     check('an SVG runs in the sandbox', await waitLog(kinds, 'SVG ran'));

@@ -1,6 +1,6 @@
 # Claude Takeout - Technical Documentation
 
-How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.5.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.6.
 
 This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
@@ -303,7 +303,8 @@ A chat that fails to build gets a `viewer` warning. A viewer that fails as a who
 
 - Chat text goes through escaped HTML, text placeholders and `sanitizeHtml`.
 - Math renders with KaTeX.
-- Syntax colors run in a blob worker, block by block as they scroll into view, and stop after `HIGHLIGHT_TIMEOUT`, since highlight.js can hang on some input.
+- Syntax colors run in a blob worker, block by block as they scroll into view, and stop after `HIGHLIGHT_TIMEOUT`, since highlight.js can hang on some input. `tameMarkdown` keeps an underscore inside a word from turning the rest of a Markdown file italic.
+- Popups and the file panel have a Copy button for a whole text file. It copies the source even in Preview.
 - Search reads titles, prompt and reply text, attachment names and text, and upload names. It never reads upload text, which is why upload text can live in parts.
 - A part loads when its upload is opened, through a `<script>` tag. A `file://` page can load scripts beside it but can't `fetch` them.
 - Generated HTML and SVG files preview in a sandboxed `srcdoc` frame with a narrow CSP. Sibling `.js` and `.css` files are inlined by `inlineSiblings`.

@@ -234,6 +234,41 @@ test('the page allows blob workers, and previews still do not', () => {
   assert.ok(!/worker-src|child-src|blob:\s*;?\s*script/.test(Logic.PREVIEW_CSP) && !/script-src[^;]*blob:/.test(Logic.PREVIEW_CSP));
 });
 
+// highlight.js as the worker runs it: the bundle, then tameMarkdown.
+function workerHljs() {
+  const vm = require('vm');
+  const { tameMarkdown } = require('../viewer/viewer-logic.js');
+  const ctx = {};
+  vm.createContext(ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '../viewer/highlight.min.js'), 'utf8'), ctx);
+  tameMarkdown(ctx.hljs);
+  return text => ctx.hljs.highlight(text, { language: 'markdown', ignoreIllegals: true }).value;
+}
+const spans = (html, kind) => [...html.matchAll(new RegExp(`<span class="hljs-${kind}">([\\s\\S]*?)</span>`, 'g'))].map(m => m[1]);
+
+test('tameMarkdown: an underscore inside a word starts no italics', () => {
+  const md = workerHljs();
+  const html = md('# sept21_part1.m4a\n\n## Content\n\nSo, we need one more.\n\nIs he?\n');
+  assert.deepStrictEqual(spans(html, 'emphasis'), []);
+  assert.ok(html.includes('<span class="hljs-section">## Content</span>'), html);
+  assert.deepStrictEqual(spans(md('a snake__case__name here\n'), 'strong'), []);
+  assert.deepStrictEqual(spans(md('a snake_case_name here\n'), 'emphasis'), []);
+});
+
+test('tameMarkdown: italics and bold still work, and stop at a blank line', () => {
+  const md = workerHljs();
+  assert.deepStrictEqual(spans(md('some _real_ and *star* text\n'), 'emphasis'), ['_real_', '*star*']);
+  assert.deepStrictEqual(spans(md('some __bold__ and **more** text\n'), 'strong'), ['__bold__', '**more**']);
+  assert.ok(spans(md('a * b and _open\n\nnext paragraph_ here\n'), 'emphasis').every(t => !t.includes('next paragraph')));
+  assert.ok(spans(md('**open\n\nnext paragraph** here\n'), 'strong').every(t => !t.includes('next paragraph')));
+});
+
+test('tameMarkdown leaves an hljs without markdown alone', () => {
+  const { tameMarkdown } = require('../viewer/viewer-logic.js');
+  tameMarkdown({ getLanguage: () => undefined });
+  tameMarkdown(undefined);
+});
+
 test('languageOfFile takes the extension, in lower case', () => {
   assert.strictEqual(Logic.languageOfFile('a/b.PY'), 'py');
   assert.strictEqual(Logic.languageOfFile('page.htm'), 'xml');

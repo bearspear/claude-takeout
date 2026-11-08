@@ -35,7 +35,7 @@ const ctx = () => ({ folder: '', uploads: {
   const check = (n, ok, x = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n} ${ok ? '' : x}`); };
   check('the page holds no large upload text', !html.includes('wombat words here\\nwombat') && !html.includes('quokka_only') && html.includes('pasted text pasted'));
 
-  const context = await browser.newContext({ viewport: { width: 1300, height: 900 } });
+  const context = await browser.newContext({ viewport: { width: 1300, height: 900 }, permissions: ['clipboard-read', 'clipboard-write'] });
   const page = await context.newPage();
   const errors = [], requests = [], partLoads = [];
   page.on('console', m => { if (m.type() === 'error') errors.push(m.text()); });
@@ -70,6 +70,8 @@ const ctx = () => ({ folder: '', uploads: {
   await page.locator('.pop .file-code .hljs-keyword').first().waitFor({ timeout: 3000 }).catch(() => {});
   check('a large upload opens from its part', (await popupText()) === BIG_PY && partLoads.length === 1);
   check('it gets colors', (await page.locator('.pop .file-code .hljs-keyword').count()) > 0);
+  await page.click('.pop-head .copy');
+  check('a large upload copies once loaded', (await page.evaluate(() => navigator.clipboard.readText())) === BIG_PY);
   await close();
   await chip('big.md').click();
   await page.waitForFunction(t => document.querySelector('.pop .pop-body')?.textContent === t, BIG_MD, { timeout: 3000 }).catch(() => {});
@@ -93,6 +95,7 @@ const ctx = () => ({ folder: '', uploads: {
   await slow.waitForSelector('.msg');
   await slow.locator('button.chip', { hasText: 'big.py' }).click();
   check('a slow part shows Loading', (await slow.locator('.pop .pop-body').textContent()) === 'Loading…');
+  check('no Copy while it loads', (await slow.locator('.pop-head .copy').count()) === 0);
   await slow.locator('.pop .close').click();
   await slow.locator('button.chip', { hasText: 'small.txt' }).click();
   await slow.waitForTimeout(900);
@@ -116,6 +119,7 @@ const ctx = () => ({ folder: '', uploads: {
   await miss.locator('button.chip', { hasText: 'big.py' }).click();
   await miss.waitForFunction(() => document.querySelector('.pop .pop-body')?.textContent !== 'Loading…', null, { timeout: 3000 }).catch(() => {});
   const missText = await miss.locator('.pop .pop-body').textContent();
+  check('a missing part offers no Copy', (await miss.locator('.pop-head .copy').count()) === 0);
   check('a missing part says so and points at the folder copy', missText.includes("The text couldn't load.") && missText.includes("It's in this export's folder."), missText);
   await miss.locator('.pop .close').click();
   await miss.locator('button.chip', { hasText: 'big.md' }).click();
