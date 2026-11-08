@@ -879,6 +879,41 @@ test('search edge cases: blank, long, limit, odd lowercasing', () => {
   assert.ok(searchChats(buildSearchIndex([{ id: 'e', title: 'Hi', project: null, messages: [T('e1', null, 'human', 'a'.repeat(300) + 'Z')] }]), 'z')[0].snippet.startsWith('\u2026'));
 });
 
+test('chatFiles puts files Claude never shared under working files', () => {
+  const card = (file, version) => ({ t: 'card', file, version });
+  const chat = {
+    files: {
+      a1: { name: 'build.py', kind: 'code', shared: false, versions: [{ label: '', text: 'x', href: 'a' }] },
+      a2: { name: 'Minutes.odt', kind: 'binary', shared: true, versions: [{ label: '', text: null, href: 'b' }] },
+    },
+    messages: [{ id: 'a', sender: 'assistant', blocks: [card('a1', 0), card('a2', 0)] }],
+  };
+  const f = JSON.parse(JSON.stringify(chatFiles(chat)));
+  assert.deepStrictEqual(f.outputs.map(o => o.name), ['Minutes.odt']);
+  assert.deepStrictEqual(f.working.map(o => o.name), ['build.py']);
+});
+
+test('buildViewerChat marks a file shared when Claude sent, presented, saved to outputs or made it as an artifact', () => {
+  const use = (id, name, input) => ({ type: 'tool_use', id, name, input });
+  const data = {
+    uuid: 'c', name: 'c', current_leaf_message_uuid: 'a',
+    chat_messages: [
+      { uuid: 'h', parent_message_uuid: null, sender: 'human', created_at: '2026-01-01T00:00:00Z', content: [{ type: 'text', text: 'go' }] },
+      { uuid: 'a', parent_message_uuid: 'h', sender: 'assistant', created_at: '2026-01-01T00:00:01Z', content: [
+        use('1', 'create_file', { path: '/home/claude/build.py', file_text: 'print(1)' }),
+        use('2', 'create_file', { path: '/home/claude/page.html', file_text: '<p>x</p>' }),
+        use('3', 'present_files', { filepaths: ['/home/claude/page.html'] }),
+        { type: 'tool_result', tool_use_id: '3', name: 'present_files', content: [] },
+        use('4', 'create_file', { path: '/mnt/user-data/outputs/report.md', file_text: '# r' }),
+        use('5', 'artifacts', { command: 'create', id: 'd', title: 'Doc', type: 'text/markdown', content: '# d' }),
+      ] },
+    ],
+  };
+  const chat = buildViewerChat(data, ctxFor(data));
+  const shared = Object.fromEntries(Object.values(chat.files).map(f => [f.name, f.shared]));
+  assert.deepStrictEqual(shared, { 'build.py': false, 'page.html': true, 'report.md': true, 'Doc.md': true });
+});
+
 test('countTerms counts every occurrence of any term, longest first, without overlaps', () => {
   assert.strictEqual(countTerms('survey Survey SURVEYS', ['survey']), 3);
   assert.strictEqual(countTerms('survey feedback, survey', ['survey', 'feedback']), 3);
@@ -923,7 +958,8 @@ test('chatFiles: outputs once each, newest first, and every upload and paste', (
   assert.deepStrictEqual(f.outputs.map(o => [o.id, o.name, o.versions]), [['a3', 'gone.html', 1], ['a2', 'notes.md', 2], ['a1', 'Minutes 09 21.odt', 1]]);
   assert.deepStrictEqual(f.uploads.map(u => [u.name, u.pasted]), [['photo.png', false], ['rec.m4a.md', false], ['Pasted text', true]]);
   assert.strictEqual(f.uploads[1].item.href, 'uploads/p01_rec.m4a.md', 'an upload is listed once');
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(chatFiles({ files: {}, messages: [] }))), { outputs: [], uploads: [] });
+  assert.deepStrictEqual(f.working, [], 'files from an older viewer, with no shared flag, are all outputs');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(chatFiles({ files: {}, messages: [] }))), { outputs: [], working: [], uploads: [] });
 });
 
 test('parseQuery: words, "phrases", OR and -exclusions', () => {

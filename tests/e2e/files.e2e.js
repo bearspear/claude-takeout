@@ -19,7 +19,7 @@ function withFiles() {
         attachments: [{ file_name: '', extracted_content: 'pasted agenda\nline two' }],
         files_v2: [{ file_uuid: 'u-rec', file_name: 'recording.m4a.md', success: true }],
       }),
-      msg('a1', 'h1', 'assistant', 2, [{ type: 'text', text: 'Here.' }, cf('t1', '/mnt/user-data/outputs/minutes.md', '# Minutes v1'), cf('t2', '/mnt/user-data/outputs/agenda.md', '# Agenda')]),
+      msg('a1', 'h1', 'assistant', 2, [{ type: 'text', text: 'Here.' }, cf('t0', '/home/claude/build.py', 'print(1)'), cf('t1', '/mnt/user-data/outputs/minutes.md', '# Minutes v1'), cf('t2', '/mnt/user-data/outputs/agenda.md', '# Agenda')]),
       msg('h2', 'a1', 'human', 3, [{ type: 'text', text: 'fix the date' }], { files_v2: [{ file_uuid: 'u-png', file_name: 'photo.png', success: true }] }),
       msg('a2', 'h2', 'assistant', 4, [{ type: 'text', text: 'Fixed.' }, sr('t3', '/mnt/user-data/outputs/minutes.md', 'v1', 'v2')]),
     ],
@@ -35,8 +35,9 @@ const empty = {
   const file = path.join(dir, 'viewer.html');
   fs.writeFileSync(path.join(dir, VIEWER_CHECK_FILE), Buffer.from(VIEWER_CHECK_BASE64, 'base64'));
   fs.writeFileSync(file, buildHtml([withFiles(), empty], '2026-11-08T12:00:00Z', c => (c.uuid !== 'f' ? {} : {
-    artifacts: { 'minutes_v1.md': '# Minutes v1', 'minutes_v2.md': '# Minutes v2', 'minutes.md': '# Minutes v2', 'agenda.md': '# Agenda' },
+    artifacts: { 'build.py': 'print(1)', 'minutes_v1.md': '# Minutes v1', 'minutes_v2.md': '# Minutes v2', 'minutes.md': '# Minutes v2', 'agenda.md': '# Agenda' },
     artifactIndex: {
+      '/home/claude/build.py': { path: '/home/claude/build.py', filename: 'build.py', versions: ['build.py'], messages: ['a1'] },
       '/mnt/user-data/outputs/minutes.md': { path: '/mnt/user-data/outputs/minutes.md', filename: 'minutes.md', versions: ['minutes_v1.md', 'minutes_v2.md'], messages: ['a1', 'a2'] },
       '/mnt/user-data/outputs/agenda.md': { path: '/mnt/user-data/outputs/agenda.md', filename: 'agenda.md', versions: ['agenda.md'], messages: ['a1'] },
     },
@@ -55,14 +56,14 @@ const empty = {
   await page.waitForSelector('.msg');
 
   const button = page.locator('#files-button');
-  check('the Files button shows how many files the chat has', (await button.isVisible()) && (await button.textContent()).trim() === '5', await button.textContent());
+  check('the Files button shows how many files the chat has', (await button.isVisible()) && (await button.textContent()).trim() === '6', await button.textContent());
   await button.click();
   const menu = page.locator('#files-menu');
   check('it opens the list', await menu.isVisible());
   const sections = await menu.locator('.files-lab').allTextContents();
-  check('outputs and uploads are listed apart', sections.join('|') === 'Outputs|Uploads', sections.join('|'));
+  check('outputs, uploads and working files are listed apart', sections.join('|') === 'Outputs|Uploads|Working files', sections.join('|'));
   const rows = await menu.locator('.files-row b').allTextContents();
-  check('outputs newest first, then uploads and pastes newest first', rows.join('|') === 'minutes.md|agenda.md|photo.png|recording.m4a.md|Pasted text', rows.join('|'));
+  check('outputs newest first, then uploads and pastes newest first', rows.join('|') === 'minutes.md|agenda.md|photo.png|recording.m4a.md|Pasted text|build.py', rows.join('|'));
   check('an edited file says how many versions it has', /2 versions/.test(await menu.locator('.files-row').first().textContent()));
   check('focus moves into the list', await page.evaluate(() => document.activeElement && document.activeElement.closest('#files-menu') !== null));
 

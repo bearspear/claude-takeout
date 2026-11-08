@@ -669,7 +669,7 @@ let filesOf = null; // chatFiles() for the chat on screen
 function renderFilesButton(chat) {
   closeFilesMenu(false);
   filesOf = { chat, ...chatFiles(chat) };
-  const count = filesOf.outputs.length + filesOf.uploads.length;
+  const count = filesOf.outputs.length + filesOf.uploads.length + filesOf.working.length;
   const button = document.getElementById('files-button');
   button.hidden = count === 0;
   button.querySelector('.n').textContent = String(count);
@@ -691,21 +691,19 @@ function filesRow(name, note, onOpen) {
 
 function openFilesMenu() {
   if (!filesOf) return;
-  const { chat, outputs, uploads } = filesOf;
+  const { chat, outputs, working, uploads } = filesOf;
   const menu = document.getElementById('files-menu');
   const button = document.getElementById('files-button');
   const parts = [];
-  if (outputs.length) {
-    parts.push(el('div', 'files-lab', 'Outputs'));
-    for (const o of outputs) {
-      const file = chat.files[o.id];
-      const note = [fileKindLabel(file), o.versions > 1 ? `${o.versions} versions` : ''].filter(Boolean).join(' · ');
-      parts.push(filesRow(o.name, note, () => {
-        closeFilesMenu(false);
-        navigate({ ...parseHash(location.hash), file: o.id, version: o.versions - 1 });
-      }));
-    }
-  }
+  const outputRows = list => list.map(o => {
+    const file = chat.files[o.id];
+    const note = [fileKindLabel(file), o.versions > 1 ? `${o.versions} versions` : ''].filter(Boolean).join(' · ');
+    return filesRow(o.name, note, () => {
+      closeFilesMenu(false);
+      navigate({ ...parseHash(location.hash), file: o.id, version: o.versions - 1 });
+    });
+  });
+  if (outputs.length) parts.push(el('div', 'files-lab', 'Outputs'), ...outputRows(outputs));
   if (uploads.length) {
     parts.push(el('div', 'files-lab', 'Uploads'));
     for (const u of uploads) {
@@ -716,6 +714,8 @@ function openFilesMenu() {
       }));
     }
   }
+  // Files Claude made along the way but didn't share, such as helper scripts.
+  if (working.length) parts.push(el('div', 'files-lab', 'Working files'), ...outputRows(working));
   menu.replaceChildren(...parts);
   menu.setAttribute('role', 'dialog');  // only while open, so a closed list is no dialog
   menu.hidden = false;
@@ -1420,9 +1420,11 @@ function showResults(query) {
   if (!q) { holder.replaceChildren(); closeStepper(); return; }
   if (!searchIndex) searchIndex = buildSearchIndex(allChats);
   const groups = groupHits(searchChats(searchIndex, q, Infinity));
-  const messages = groups.reduce((n, g) => n + g.count, 0);
-  const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-  const note = !groups.length ? 'No matches' : `${plural(groups.length, 'chat')} · ${plural(messages, 'message')}`;
+  // Matches are counted as the match bar counts them: in what the conversation shows.
+  const plans = new Map(groups.slice(0, GROUP_LIMIT).map(g => [g.chat, findPlan(chatsById.get(g.chat), q)]));
+  const matches = [...plans.values()].reduce((n, p) => n + p.total, 0);
+  const plural = (n, w, s = 's') => `${n} ${w}${n === 1 ? '' : s}`;
+  const note = !groups.length ? 'No matches' : `${plural(groups.length, 'chat')} · ${plural(matches, 'match', 'es')}`;
   const list = el('div', 'list');
   for (const g of groups.slice(0, GROUP_LIMIT)) {
     const chat = chatsById.get(g.chat);
@@ -1432,7 +1434,9 @@ function showResults(query) {
     const name = el('b');
     name.append(...withMarks((chat && chat.title) || 'Untitled', g.terms));
     title.append(name);
-    if (g.count) title.append(el('small', '', plural(g.count, 'message')));
+    const plan = plans.get(g.chat);
+    if (plan && plan.total) title.append(el('small', '', `${plural(plan.total, 'match', 'es')} in ${plural(plan.items.length, 'message')}`));
+    else if (g.count) title.append(el('small', '', 'In pasted text or file names'));
     const first = g.snippets[0] || { chat: g.chat, msg: null };
     title.addEventListener('click', () => openHit(first, g.terms, q));
     box.append(title);

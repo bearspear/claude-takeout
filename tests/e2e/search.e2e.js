@@ -55,9 +55,11 @@ const CHATS = [
   await search('survey');
   check('one group per chat', (await groups()).length === 3, (await groups()).join(' | '));
   check('the chat whose title matches comes first, then the busiest', (await groups()).join(' | ') === 'Survey analysis | Board minutes | Lunch', (await groups()).join(' | '));
-  check('the summary counts chats and messages', /3 chats · 6 messages/.test(await page.textContent('#results .lab')), await page.textContent('#results .lab'));
+  check('the summary counts chats and matches', /3 chats · 6 matches/.test(await page.textContent('#results .lab')), await page.textContent('#results .lab'));
   const busy = page.locator('#results .group').nth(1);
-  check('a group shows its message count', /5 messages/.test(await busy.textContent()));
+  check('a group counts matches and messages, as the match bar does', (await busy.locator('.group-title small').textContent()) === '5 matches in 5 messages', await busy.locator('.group-title small').textContent());
+  check('one match reads in the singular', (await page.locator('#results .group').nth(2).locator('.group-title small').textContent()) === '1 match in 1 message');
+  check('a chat matched only by its title shows no count', (await page.locator('#results .group').first().locator('.group-title small').count()) === 0);
   check('at most three snippets per chat', (await busy.locator('.snip').count()) === 3);
   check('matched words are bold', (await busy.locator('.snip mark').first().textContent()).toLowerCase() === 'survey');
   check('a matching title is bold too', (await page.locator('#results .group').first().locator('.group-title mark').count()) === 1);
