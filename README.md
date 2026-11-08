@@ -367,6 +367,16 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.9
+
+Viewer size and export memory, from the code review.
+
+- **Large files Claude made load when opened** - Their text over 64 KB now goes into `viewer-files/` like large uploads, instead of into `viewer.html`. Stylesheets and scripts stay, because previews use them. On an 18-chat archive `viewer.html` went from 15 to 8.8 MB, and the page used 17 MB of memory instead of 29 MB; all 218 files open as before. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+- **The viewer keeps one copy of its data** - The page no longer holds the raw data text beside the parsed copy for as long as it is open.
+- **Less memory while exporting** - An upload is turned into an inline image only when one of Claude's files refers to it, instead of every upload being encoded and held until the chat finished.
+- **One fetch per project in a mega-ZIP** - Chats in the same project reuse its metadata and documents, instead of fetching them again for each chat.
+- **Faster viewer building** - Finding duplicate projects and escaping the data each take one cheap pass over large archives.
+
 ### v1.6.8
 
 More fixes from the code review, to the Markdown files and to file names. They need a fresh export from claude.ai.

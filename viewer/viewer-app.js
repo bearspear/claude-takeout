@@ -598,7 +598,8 @@ function setupParts(data) {
   allAdded = Array.isArray(data.added) ? data.added : [];
   addedIds = new Map(allAdded.map((entry, i) => [entry, `x${i}`]));
   const uploads = (data.chats || []).flatMap(chat => (chat.messages || []).flatMap(m => m.uploads || []));
-  for (const entry of [...allAdded, ...uploads]) if (entry && Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
+  const versions = (data.chats || []).flatMap(chat => Object.values(chat.files || {}).flatMap(f => (f && f.versions) || []));
+  for (const entry of [...allAdded, ...uploads, ...versions]) if (entry && Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
   if (!partsListed.size) return;
   Object.defineProperty(window, '__archivePart', {
     value(n, data) {
@@ -1201,7 +1202,11 @@ function checkUnzipped() {
 
 function start() {
   checkUnzipped();
-  const data = JSON.parse(document.getElementById('data').textContent);
+  // The data is parsed once, and its text dropped: on a large archive it would otherwise
+  // stay in memory beside the parsed copy for as long as the page is open.
+  const holder = document.getElementById('data');
+  const data = JSON.parse(holder.textContent);
+  holder.remove();
   setupParts(data);
   allChats = linkProjects(data);
   allChats.forEach(chat => chatsById.set(chat.id, chat));

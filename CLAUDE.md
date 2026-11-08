@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.8.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.9.
 
 ---
 
@@ -40,7 +40,7 @@ For deeper dives, two companion docs live alongside this one:
 | `tests/archive.test.js` | Unit tests for the three `tools/` files. | Run by `sh tests/run.sh`. |
 | `tests/e2e/archive.e2e.js` | Browser test of a built archive viewer. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/colors.e2e.js` | Browser test of syntax colors. | Optional; needs `playwright-core` and Chromium. |
-| `tests/e2e/parts.e2e.js` | Browser test of upload text loaded from `viewer-files/`. | Optional; needs `playwright-core` and Chromium. |
+| `tests/e2e/parts.e2e.js` | Browser test of upload and generated-file text loaded from `viewer-files/`. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/hostile.js` | Hostile-input fixtures for the viewer e2e tests. | Not a test by itself. |
 | `takeout-viewer.js` | Builds the offline viewer's data. | Classic script loaded by `popup.html` and `sidepanel.html`, exposing `CTViewer` (`buildViewerChat`, `buildViewerData`, `assembleViewer`, ...). Header comment documents the contract. |
 | `viewer/` | Viewer page sources. | `viewer-template.html`, `viewer-logic.js`, `viewer-app.js`, `marked.min.js`, `katex.min.js`, `katex-inline.css`, `highlight.min.js`, `THIRD-PARTY-NOTICES.txt`. `writeViewer` inlines them into one `viewer.html`. |
@@ -209,7 +209,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 ├── original.json              # Raw API payload as fetched
 ├── viewer.html                # Offline viewer (see below)
 ├── viewer-check.gif           # 1x1 GIF; the viewer loads it to detect a ZIP that was not unzipped
-├── viewer-files/part-NNNN.js  # text of uploads over UPLOAD_INLINE_LIMIT (64 KB), only when there are some
+├── viewer-files/part-NNNN.js  # text of uploads and generated files over UPLOAD_INLINE_LIMIT (64 KB), only when there are some
 ├── responses/<NNN>_<title>_response.md       (pure text)
 ├── responses/<NNN>_<title>_response.full.md  (thinking/tools/embedded)
 ├── artefacts/<base>(_vN)?<ext>               (versioning — see §6)
@@ -222,7 +222,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 
 `viewer.html` and `viewer-check.gif` are written by `writeViewer` once per export, at the root. In a single ZIP that is beside the chat files; in a mega-ZIP, one viewer at the root covers all chats (`populateConversationFolder` returns `viewerChat`, built by `CTViewer.buildViewerChat`). Failure to build never blocks the download: a chat that fails to build gets a `viewer` warning, and a whole-viewer failure shows only in the status line.
 
-Upload text over `UPLOAD_INLINE_LIMIT` (64 KB of UTF-8) is not in `viewer.html` either. `CTViewer.moveUploadText` swaps it for `{ text: null, lines, part, key }`, with keys `u0`, `u1`, … in parts of the same format, and both `writeViewer`s write those parts to `viewer-files/` (the tool numbers them after its added-file parts). The viewer loads a part when the upload's popup opens. Search never reads upload text, so it is unaffected; pasted attachments stay inline because search does read them.
+Upload text over `UPLOAD_INLINE_LIMIT` (64 KB of UTF-8) is not in `viewer.html` either, nor is the text of a generated file's version over that size, except `.css`/`.js`/`.mjs`, which previews inline from the page. `CTViewer.moveUploadText` swaps an upload for `{ text: null, lines, part, key }` (keys `u0`, `u1`, …) and a file version for `{ text: null, part, key }` (keys `f0`, `f1`, …), in parts of the same format, and both `writeViewer`s write those parts to `viewer-files/` (the tool numbers them after its added-file parts). The viewer loads a part when the upload's popup opens. Search never reads upload text, so it is unaffected; pasted attachments stay inline because search does read them.
 
 `ViewerData.projects` holds each distinct project once, and a chat's `project` is an index into it. `buildViewerData` merges identical projects, so a mega-ZIP doesn't repeat a project's docs per chat, and the viewer's `linkProjects` puts them back on load. `ViewerData.added` lists files the owner put in an archive after export; only the old-archive tool writes it. Each entry is `{ path, chat, kind, size, href, part, key }`, and the viewer shows them under "Archive files". Their text and media are not inlined in `viewer.html`: `build_viewer.js` writes them as `viewer-files/part-NNNN.js` (about 4 MB each, calling `window.__archivePart(n, {...})`), loaded as local scripts. That is why `CTViewer.assembleViewer` takes `fileScripts` (adds `file:` to the page's `script-src` and `media-src`) and `fileMedia` (`media-src` only). Added HTML and SVG are untrusted and run only in the preview sandbox, and the sandboxed preview doesn't load sibling files. The viewer's Open file link goes through the `openableHref` allowlist (`OPENABLE_EXTENSIONS` in `viewer/viewer-logic.js`): only documents, images, audio, video, archives and plain data open. Everything else, HTML and SVG included, has no link. Keep it an allowlist.
 
@@ -344,7 +344,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.8. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.9. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 

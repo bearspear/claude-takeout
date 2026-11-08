@@ -931,3 +931,39 @@ test('names from chat data cannot form paths', () => {
   assert.strictEqual(fn('zipSafeName')('..'), '_');
   assert.strictEqual(fn('zipSafeName')('Q3/Q4\u0007.md'), 'Q3_Q4_.md');
 });
+
+test('uploads become data URIs only when a file refers to them', async () => {
+  let reads = 0;
+  const counted = { ...textBlob('png', 'image/png'), arrayBuffer: async () => { reads++; return new ArrayBuffer(3); } };
+  const data = chatOf([
+    { sender: 'human', content: [{ type: 'text', text: 'pic' }], files_v2: [{ success: true, file_name: 'x.png', file_uuid: 'up-x', file_kind: 'image', path: '/mnt/user-data/uploads/x.png' }] },
+    { sender: 'assistant', content: [use('1', 'create_file', { path: '/h/plain.html', file_text: '<p>no image</p>' })] },
+  ]);
+  await runFolder(exportPopup({ texts: { 'up-x': counted } }), data);
+  assert.strictEqual(reads, 0, 'no file refers to the upload');
+  data.chat_messages[1].content.push(use('2', 'create_file', { path: '/h/pic.html', file_text: '<img src="/mnt/user-data/uploads/x.png">' }));
+  const { written } = await runFolder(exportPopup({ texts: { 'up-x': counted } }), data);
+  assert.strictEqual(reads, 1);
+  assert.ok(String(written['artefacts/pic.html']).includes('data:image/png;base64,AAAA'));
+});
+
+test('a mega-ZIP fetches a project\'s documents once', async () => {
+  const seen = [];
+  const routes = [
+    [/\/projects\/P$/, () => ({ ok: true, status: 200, json: async () => ({ name: 'Proj', prompt_template: 'be brief' }) })],
+    [/\/projects\/P\/docs$/, () => ({ ok: true, status: 200, json: async () => [{ uuid: 'd1', file_name: 'Brief.md', content: 'be kind' }] })],
+    [/\/projects\/P\/files$/, () => ({ ok: true, status: 200, json: async () => [] })],
+  ].map(([re, answer]) => [re, (url) => { seen.push(url); return answer(url); }]);
+  const shared = { root: zipStub(), byUuid: new Map(), usedDirs: new Set() };
+  const chats = [];
+  for (const id of ['c1', 'c2', 'c3']) {
+    const data = Object.assign(chatOf([{ sender: 'human', content: [{ type: 'text', text: id }] }]), { uuid: id, project_uuid: 'P' });
+    chats.push(await runFolder(exportPopup({ routes }), data, { shared, folderName: id }));
+  }
+  assert.strictEqual(seen.filter((u) => /\/projects\/P\/docs$/.test(u)).length, 1);
+  assert.strictEqual(seen.filter((u) => /\/projects\/P$/.test(u)).length, 1);
+  for (const { written, chat } of chats) {
+    assert.ok(String(written['project/Brief.md']).includes('be kind'));
+    assert.strictEqual(chat.project.instructions, 'be brief');
+  }
+});
