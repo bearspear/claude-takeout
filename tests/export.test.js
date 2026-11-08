@@ -678,3 +678,122 @@ test('fixMojibake sorts its map keys once, not on every call', () => {
   } finally { Array.prototype.sort = sort; }
   assert.strictEqual(calls, 0);
 });
+
+const plain = o => JSON.parse(JSON.stringify(o));
+
+// Turns: each inner array is one assistant message's content, each after a human message.
+const turns = (...contents) => {
+  const chat_messages = [];
+  let parent = null;
+  contents.forEach((content, i) => {
+    chat_messages.push({ uuid: `h${i}`, parent_message_uuid: parent, sender: 'human', content: [] });
+    chat_messages.push({ uuid: `a${i}`, parent_message_uuid: `h${i}`, sender: 'assistant', content });
+    parent = `a${i}`;
+  });
+  return { current_leaf_message_uuid: parent, chat_messages };
+};
+
+test('a file named like another artifact\'s _vN is renamed, not overwritten', () => {
+  const later = turns(
+    [use('1', 'create_file', { path: '/h/report.html', file_text: 'A' })],
+    [use('2', 'str_replace', { path: '/h/report.html', old_str: 'A', new_str: 'B' })],
+    [use('3', 'create_file', { path: '/h/report_v1.html', file_text: 'OTHER' })],
+  );
+  const warned = collector();
+  const want = { 'report_v1.html': 'A', 'report_v2.html': 'B', 'report.html': 'B', 'report_v1_2.html': 'OTHER' };
+  assert.deepStrictEqual(plain(artifacts(later, warned)), want);
+  assert.deepStrictEqual(plain(warned.warnings.map(w => [w.type, w.filename])), [['artifact_basename_collision', 'report_v1_2.html']]);
+  assert.deepStrictEqual(pythonArtifacts(later), want);
+
+  const earlier = turns(
+    [use('1', 'create_file', { path: '/h/report_v1.html', file_text: 'OTHER' }), use('2', 'create_file', { path: '/h/report.html', file_text: 'A' })],
+    [use('3', 'str_replace', { path: '/h/report.html', old_str: 'A', new_str: 'B' })],
+  );
+  const want2 = { 'report_v1.html': 'OTHER', 'report_2_v1.html': 'A', 'report_2_v2.html': 'B', 'report_2.html': 'B' };
+  const index = {};
+  assert.deepStrictEqual(plain(artifacts(earlier, null, index)), want2);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(index['/h/report.html'])).versions, ['report_2_v1.html', 'report_2_v2.html']);
+  assert.deepStrictEqual(pythonArtifacts(earlier), want2);
+});
+
+test('the artifacts tool\'s update edits and rewrite are applied', () => {
+  const art = (id, input) => use(id, 'artifacts', { id: 'a1', title: 'Doc', type: 'text/markdown', ...input });
+  const data = turns(
+    [art('1', { command: 'create', content: 'hello world' })],
+    [art('2', { command: 'update', old_str: 'world', new_str: 'there' })],
+    [art('3', { command: 'rewrite', content: 'new text, there' })],
+    [art('4', { command: 'update', old_str: 'there', new_str: 'here' })],
+  );
+  const want = { 'Doc_v1.md': 'hello world', 'Doc_v2.md': 'hello there', 'Doc_v3.md': 'new text, there', 'Doc_v4.md': 'new text, here', 'Doc.md': 'new text, here' };
+  assert.deepStrictEqual(plain(artifacts(data)), want);
+  assert.deepStrictEqual(pythonArtifacts(data), want);
+});
+
+test('an artifacts-tool update that does not match warns', () => {
+  const data = turns(
+    [use('1', 'artifacts', { command: 'create', id: 'a1', title: 'Doc', type: 'text/markdown', content: 'hello' })],
+    [use('2', 'artifacts', { command: 'update', id: 'a1', old_str: 'nope', new_str: 'x' })],
+  );
+  const warned = collector();
+  assert.deepStrictEqual(plain(artifacts(data, warned)), { 'Doc.md': 'hello' });
+  assert.deepStrictEqual(plain(warned.warnings.map(w => [w.type, w.filename])), [['str_replace_failed', 'Doc.md']]);
+});
+
+test('the blob fallback takes only a full view of that exact file', () => {
+  const view = (id, path, text, input = {}) => [use(id, 'view', { path, ...input }), { type: 'tool_result', tool_use_id: id, name: 'view', content: [{ type: 'text', text }] }];
+  const chat = (...blocks) => ({ chat_messages: [{ uuid: 'a', sender: 'assistant', content: blocks.flat() }] });
+  const listing = 'Here are the files and directories up to 2 levels deep in /mnt/user-data/uploads, excluding hidden items:\n4.0K\t/mnt/user-data/uploads\n4.0K\t/mnt/user-data/uploads/notes.md\n';
+  const full = "Here's the content of /mnt/user-data/uploads/notes.md with line numbers:\n     1\thello\n     2\tworld";
+  const extract = fn('extractBlobContent');
+  assert.strictEqual(extract(chat(view('1', '/mnt/user-data/uploads', listing), view('2', '/mnt/user-data/uploads/notes.md', full)), '/mnt/user-data/uploads/notes.md').content, 'hello\nworld');
+  assert.strictEqual(extract(chat(view('1', '/mnt/user-data/uploads', listing)), '/mnt/user-data/uploads/notes.md'), null);
+  const other = "Here's the content of /mnt/user-data/uploads/old_data.csv with line numbers:\n     1\ta,b";
+  assert.strictEqual(extract(chat(view('1', '/mnt/user-data/uploads/old_data.csv', other)), '/mnt/user-data/uploads/data.csv'), null);
+  assert.strictEqual(extract(chat(view('1', '/mnt/user-data/uploads/notes.md', full, { view_range: [1, 2] })), '/mnt/user-data/uploads/notes.md'), null);
+  // The sandbox renames odd characters to _, so a view of the sanitized name still counts.
+  const sanitized = "Here's the content of /mnt/user-data/uploads/My_File__1_.md with line numbers:\n     1\tok";
+  const got = extract(chat(view('1', '/mnt/user-data/uploads/My_File__1_.md', sanitized)), '/mnt/user-data/uploads/My File (1).md');
+  assert.strictEqual(got.content, 'ok');
+});
+
+test('detectOpaqueMutations catches common write forms and ignores reads', () => {
+  const tracked = [use('0', 'create_file', { path: '/home/claude/page.html', file_text: 'x' })];
+  const warns = command => {
+    const c = collector();
+    fn('detectOpaqueMutations')(oneMessage([...tracked, use('1', 'bash_tool', { command })]), c);
+    return c.warnings.length;
+  };
+  for (const cmd of [
+    "python3 -c \"open('/home/claude/page.html','w', encoding='utf-8').write('y')\"",
+    "python3 -c \"open('/home/claude/page.html', mode='w').write('y')\"",
+    "python3 -c \"from pathlib import Path; Path('/home/claude/page.html').write_text('y')\"",
+    "python3 - <<'PY'\np = '/home/claude/page.html'\nwith open(p, 'w', encoding='utf-8') as f:\n    f.write('y')\nPY",
+    "sed -E -i 's/x/y/' /home/claude/page.html",
+    "cd /home/claude && sed -i 's/a;b/c/' page.html && grep -c c page.html",
+    "sed -i 's/x|y/z/' /home/claude/page.html",
+    "sed --in-place 's/x/y/' /home/claude/page.html",
+    "perl -pi -e 's/x/y/' /home/claude/page.html",
+    "echo hi | tee /home/claude/page.html",
+    "echo hi | tee -a /home/claude/page.html",
+    "cp /tmp/other.html /home/claude/page.html",
+    "mv /tmp/other.html /home/claude/page.html",
+  ]) assert.strictEqual(warns(cmd), 1, cmd);
+  for (const cmd of [
+    "cat /home/claude/page.html",
+    "python3 -c \"print(open('/home/claude/page.html').read())\"",
+    "python3 -c \"open('/home/claude/page.html', 'r', encoding='utf-8').read()\"",
+    "cp /home/claude/page.html /mnt/user-data/outputs/page.html",
+    "grep -c div /home/claude/page.html | tee /tmp/count.txt",
+    "sed -n '1,5p' /home/claude/page.html",
+  ]) assert.strictEqual(warns(cmd), 0, cmd);
+});
+
+test('integrated_chat.txt keeps code blocks as written', () => {
+  const plain = fn('markdownToPlainText');
+  const code = 'class A:\n    def __init__(self, **kwargs):\n        x = a*b*c  # `tick`\n        y = "_x_"';
+  const out = plain('Some **bold** and `code` text.\n\n```python\n' + code + '\n```\n\nAfter _that_.');
+  assert.ok(out.includes(code), out);
+  assert.ok(out.includes('Some bold and code text.'), out);
+  assert.ok(out.includes('After that.'), out);
+  assert.ok(!out.includes('```'), out);
+});

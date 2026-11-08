@@ -400,6 +400,24 @@ test('a versioned artifact is one file with one entry per version and cards poin
   assert.strictEqual(Object.values(chat.files).filter(g => g.name === 'report.html').length, 1);
 });
 
+test('artifacts-tool update edits and rewrites get a card for their version', () => {
+  const art = (id, input) => ({ type: 'tool_use', id, name: 'artifacts', input: { id: 'doc', title: 'Doc', type: 'text/markdown', ...input } });
+  const msgs = [];
+  let parent = null;
+  [[art('1', { command: 'create', content: 'hello world' })], [art('2', { command: 'update', old_str: 'world', new_str: 'there' })], [art('3', { command: 'rewrite', content: 'fresh' })]]
+    .forEach((content, i) => {
+      msgs.push({ uuid: `h${i}`, parent_message_uuid: parent, sender: 'human', created_at: '2026-01-01T00:00:00Z', content: [{ type: 'text', text: 'go' }] });
+      msgs.push({ uuid: `a${i}`, parent_message_uuid: `h${i}`, sender: 'assistant', created_at: '2026-01-01T00:00:01Z', content });
+      parent = `a${i}`;
+    });
+  const data = { uuid: 'c', name: 'Doc chat', current_leaf_message_uuid: parent, chat_messages: msgs };
+  const chat = buildViewerChat(data, ctxFor(data));
+  const cards = ['a0', 'a1', 'a2'].map(id => cardsOf(chat, id));
+  assert.deepStrictEqual(cards.map(c => c.length), [1, 1, 1]);
+  assert.deepStrictEqual(cards.map(c => c[0].version), [0, 1, 2]);
+  assert.deepStrictEqual(fileOf(chat, cards[0][0]).versions.map(v => v.text), ['hello world', 'hello there', 'fresh']);
+});
+
 test('file ids are a1, a2... in order of first appearance and stable', () => {
   const a = buildViewerChat(fixture, ctxFor(fixture));
   const b = buildViewerChat(fixture, ctxFor(fixture));

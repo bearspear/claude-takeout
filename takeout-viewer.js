@@ -223,11 +223,11 @@
         else if (b.name === 'Write') { key = input.file_path; text = input.content; }
         else if (b.name === 'rewrite' || b.name === 'create_or_overwrite') { key = input.path; text = input.file_text || input.content; }
         else if (b.name === 'str_replace' || b.name === 'Edit') { key = b.name === 'Edit' ? input.file_path : input.path; edit = true; }
-        else if (b.name === 'artifacts' && (input.command === 'create' || input.command === 'update')) {
-          if (input.content && (input.id || input.title)) {
-            key = 'artifact:' + (input.id || input.title); mime = input.type || null; text = input.content;
-            name = String(input.title || input.id);
-          }
+        else if (b.name === 'artifacts' && ['create', 'update', 'rewrite'].includes(input.command) && (input.id || input.title)) {
+          key = 'artifact:' + (input.id || input.title); mime = input.type || null; name = String(input.title || input.id);
+          if (input.content) text = input.content;
+          else if (input.command === 'update' && typeof input.old_str === 'string') edit = true; // replayed by extractArtifacts
+          else key = null;
         }
 
         if (key && (edit || text)) {

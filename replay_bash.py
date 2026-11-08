@@ -488,6 +488,25 @@ def find_highest_versioned_key(folder: Path, basename: str) -> Optional[Path]:
     return best[1] if best else None
 
 
+def exporter_names(data: dict) -> dict[str, dict]:
+    """{path: {"filename", "versions"}} exactly as the exporter named each artifact,
+    from extract_artifacts.py beside this script. Empty if it can't be loaded, and
+    the older rule below is used instead."""
+    import importlib.util
+    sys.dont_write_bytecode = True
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "takeout_extract_artifacts", Path(__file__).resolve().with_name("extract_artifacts.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module  # its dataclasses look themselves up here
+        spec.loader.exec_module(module)
+        names: dict[str, dict] = {}
+        module.extract_artifacts(data, [], names)
+        return names
+    except Exception:
+        return {}
+
+
 def artifact_filenames(state: dict[str, str]) -> dict[str, str]:
     """Filename under artefacts/ for each path, using the exporter's rule for
     two paths with one basename: the later one becomes <base>_2<ext>."""
@@ -526,9 +545,11 @@ def sync_back(
     state: dict[str, str],
     export_dir: Path,
     write_changes: bool,
+    names: Optional[dict[str, dict]] = None,
 ) -> list[tuple[str, int, int, Optional[Path]]]:
     """Compare each tracked artifact in the sandbox against its pre-bash state;
-    write changes into artefacts/<name> and the highest _vN snapshot."""
+    write changes into artefacts/<name> and the highest _vN snapshot. names, from
+    exporter_names, gives the exporter's own file names for each path."""
     artefacts_dir = export_dir / "artefacts"
     if not artefacts_dir.is_dir():
         return []
@@ -548,11 +569,16 @@ def sync_back(
             continue
         if post_content == pre_content:
             continue
-        basename = filenames[path]
+        named = (names or {}).get(path)
+        basename = named["filename"] if named else filenames[path]
         target = artefacts_dir / basename
         if not target.exists():
             continue
-        versioned = find_highest_versioned_key(artefacts_dir, basename)
+        if named:
+            last = named["versions"][-1] if len(named["versions"]) > 1 else None
+            versioned = artefacts_dir / last if last and (artefacts_dir / last).is_file() else None
+        else:
+            versioned = find_highest_versioned_key(artefacts_dir, basename)
         summary.append((basename, len(pre_content), len(post_content), versioned))
         if write_changes:
             write_artifact(target, post_content, backup_dir)
@@ -694,7 +720,7 @@ def main(argv: list[str]) -> int:
                     last = err[-1] if err else f"exit {returncode}"
                     print(f"  ✗ exit {returncode}: {truncate(last, 200)}")
 
-        sync = sync_back(td, state, export_dir, write_changes=not args.no_write)
+        sync = sync_back(td, state, export_dir, write_changes=not args.no_write, names=exporter_names(data))
 
     print()
     print("=" * 60)
