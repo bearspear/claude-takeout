@@ -367,6 +367,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.18
+
+- **Files list no longer hidden behind the project bar** - In a chat that belongs to a project, the top of the Files list (the Outputs heading and the first file) was drawn under the project bar. It now opens above it, and above the match bar. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+
 ### v1.6.17
 
 - **Claude Docs documents are exported** - When Claude writes a Claude Docs document (the editable docs on claude.ai), the export rebuilds it from the chat: `artefacts/<title>.md`, with Claude's comments and a link to the live document at the end, and a matching `artefacts/<title>.html` to read, print or share, styled for light and dark and with no scripts. A document written over several turns gets `_v1`, `_v2` versions like other files. In the viewer it has a card and appears under Outputs in the Files list; `full_chat.md` shows the document instead of raw tool calls, and the tool steps read "Created a document" and "Edited the document". Edits the chat can't rebuild are flagged in `errors.txt` with the link to the live document; edits made by hand on claude.ai aren't in the chat. `extract_artifacts.py` rebuilds the `.md` the same way. Needs a fresh export.

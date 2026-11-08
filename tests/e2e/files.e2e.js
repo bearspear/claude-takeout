@@ -42,6 +42,7 @@ const empty = {
       '/mnt/user-data/outputs/agenda.md': { path: '/mnt/user-data/outputs/agenda.md', filename: 'agenda.md', versions: ['agenda.md'], messages: ['a1'] },
     },
     uploads: { 'u-rec': { path: 'uploads/p01_recording.m4a.md', text: 'the recording text' }, 'u-png': { path: 'uploads/p02_photo.png', text: null } },
+    project: { name: 'Board', fileDir: 'project/files', fileNames: ['charter.pdf'], docs: [], instructions: '' },
   })));
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
@@ -66,6 +67,12 @@ const empty = {
   check('outputs newest first, then uploads and pastes newest first', rows.join('|') === 'minutes.md|agenda.md|photo.png|recording.m4a.md|Pasted text|build.py', rows.join('|'));
   check('an edited file says how many versions it has', /2 versions/.test(await menu.locator('.files-row').first().textContent()));
   check('focus moves into the list', await page.evaluate(() => document.activeElement && document.activeElement.closest('#files-menu') !== null));
+  check('the project bar is showing, as in a project chat', await page.$eval('#project', p => !p.hidden));
+  // Nothing may cover the list: what's on top at its heading and first row must be the list itself.
+  const covered = await page.evaluate(() => [...document.querySelectorAll('#files-menu .files-lab, #files-menu .files-row')].slice(0, 3)
+    .filter(e => { const r = e.getBoundingClientRect(); const top = document.elementFromPoint(r.left + 20, r.top + r.height / 2); return !top || !e.contains(top); })
+    .map(e => e.textContent.trim().slice(0, 30)));
+  check('the list is drawn above the project bar', covered.length === 0, covered.join(' | '));
 
   // An output opens in the file panel, at its newest version.
   await menu.locator('.files-row').first().click();
