@@ -79,7 +79,8 @@ For exporting your whole history:
 |---|---|
 | **Export All (Markdown)** | One `.md` file per conversation in your downloads folder. |
 | **Export All (Embedded)** | One `_embedded.md` per conversation, artifacts inlined. |
-| **Export All (Mega-Zip)** | A single `claude-takeout-<YYYY-MM-DD>.zip` containing one folder per conversation (full ZIP structure each), plus an `index.md` master table at the root. |
+| **Export All (Mega-Zip)** | A single `claude-takeout-<YYYY-MM-DD>.zip` containing one folder per conversation (full ZIP structure each), plus an `index.md` master table and an `export-manifest.json` listing every chat it holds, with each chat's `updated_at`, at the root. |
+| **Export Changes (Mega-Zip)** | A `claude-takeout-changes-<YYYY-MM-DD>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold. |
 | **Export All (JSON)** | One `.json` per conversation. |
 
 Progress shows below the buttons as `X / Y`. There's a 200–300 ms pause between conversations to be polite to Claude's API. 100 conversations takes about 30 seconds; 1000 will take under 10 minutes.
@@ -97,6 +98,7 @@ If a single conversation fails (deleted, server hiccup, rate limit), the bulk ex
 | To preserve everything — uploads, attachments, every artifact version, full chat history, the raw JSON for recovery | **ZIP** |
 | To run analysis or import into another tool | **JSON** |
 | To archive your whole account | **Mega-Zip** |
+| To keep that archive current | **Export Changes** after the first Mega-Zip |
 
 When in doubt: **ZIP**. It's the only format with the structured `errors.txt` report, the per-turn artifact snapshots, and `original.json` for full recovery.
 

@@ -3642,8 +3642,47 @@ async function bulkExport(format) {
   })();
 }
 
-// Bulk export all conversations as a single mega-zip
-async function bulkExportZip() {
+// ---- Incremental export ----
+// chrome.storage.local.exportRecord: { <org id>: { at, chats: { <chat uuid>: updated_at as the chat list gave it } } },
+// written after each mega-ZIP for the chats it holds. "Export changes" takes the listed chats whose
+// updated_at differs from the record, or that it doesn't have. Every mega-ZIP also carries
+// export-manifest.json, so the archive says what it holds without the browser.
+const EXPORT_RECORD_KEY = 'exportRecord';
+
+function changedSince(conversations, recorded) {
+  const known = recorded && typeof recorded === 'object' ? recorded : {};
+  return (conversations || []).filter((c) => c && (!Object.prototype.hasOwnProperty.call(known, c.uuid) || known[c.uuid] !== c.updated_at));
+}
+
+async function loadExportRecord(org) {
+  try {
+    const stored = await chrome.storage.local.get([EXPORT_RECORD_KEY]);
+    const all = stored && stored[EXPORT_RECORD_KEY];
+    const mine = all && typeof all === 'object' ? all[org] : null;
+    return mine && typeof mine === 'object' && mine.chats && typeof mine.chats === 'object' ? mine : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Adds the exported chats to the record; chats not in this export keep what they had.
+async function saveExportRecord(org, at, exportedChats) {
+  try {
+    const stored = await chrome.storage.local.get([EXPORT_RECORD_KEY]);
+    const all = stored && stored[EXPORT_RECORD_KEY] && typeof stored[EXPORT_RECORD_KEY] === 'object' ? stored[EXPORT_RECORD_KEY] : {};
+    const before = all[org] && all[org].chats && typeof all[org].chats === 'object' ? all[org].chats : {};
+    const chats = { ...before };
+    for (const c of exportedChats) chats[c.uuid] = c.updated_at;
+    await chrome.storage.local.set({ [EXPORT_RECORD_KEY]: { ...all, [org]: { at, chats } } });
+  } catch (e) {
+    console.warn('Could not save the export record:', e);
+  }
+}
+
+// Bulk export all conversations as a single mega-zip.
+// options.changesOnly: only chats new or updated since the last mega-ZIP from this browser ("Export changes").
+async function bulkExportZip(options = {}) {
+  const changesOnly = !!(options && options.changesOnly);
   const status = document.getElementById('status');
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
@@ -3667,10 +3706,24 @@ async function bulkExportZip() {
       return;
     }
 
-    const conversations = response.data;
+    const listedChats = Array.isArray(response.data) ? response.data : [];
+    const listedCount = listedChats.length;
+    const org = response.orgId || orgId || '';
+    const startedAt = new Date().toISOString();
+    // Export changes: only what is new or updated since the record. With no record, everything.
+    const record = changesOnly ? await loadExportRecord(org) : null;
+    const since = record && record.at ? record.at : null;
+    const conversations = since ? changedSince(listedChats, record.chats) : listedChats;
+    const kind = since ? 'changes' : 'full';
+    const firstNote = changesOnly && !since ? ' There is no earlier export from this browser, so every chat is exported.' : '';
+    if (since && !conversations.length) {
+      status.className = 'status ready';
+      status.textContent = `Nothing changed since the last export on ${formatTimestamp(since)}.`;
+      return;
+    }
     const total = conversations.length;
 
-    status.textContent = `Found ${total} conversations. Creating mega-zip...`;
+    status.textContent = `Found ${total} conversations${since ? ' changed since the last export' : ''}. Creating mega-zip...`;
     showProgress(0, total, `0 / ${total}`);
 
     const megaZip = new JSZip();
@@ -3684,6 +3737,7 @@ async function bulkExportZip() {
     const usedFolderNames = new Set(['projects']);
     const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set() };
     const viewerChats = [];
+    const exportedChats = [];  // { uuid, name, updated_at (as listed), folder }, for the manifest and the record
 
     for (const conv of conversations) {
       try {
@@ -3733,6 +3787,7 @@ async function bulkExportZip() {
           fileErrors: folderResult.errorCollector?.errors?.length || 0,
           fileWarnings: folderResult.errorCollector?.warnings?.length || 0
         });
+        exportedChats.push({ uuid: conv.uuid, name: data.name || conv.name || '', updated_at: conv.updated_at || data.updated_at || null, folder: folderName });
 
         exported++;
 
@@ -3748,11 +3803,12 @@ async function bulkExportZip() {
 
     // Create index.md at root
     const indexLines = [
-      '# Claude Takeout - All Conversations',
+      since ? `# Claude Takeout - Changes since ${formatTimestamp(since)}` : '# Claude Takeout - All Conversations',
       '',
       `**Exported:** ${formatTimestamp(new Date().toISOString())}`,
       `**Total Conversations:** ${exported}`,
     ];
+    if (since) indexLines.push('This archive holds only the chats that are new or changed since that export. Keep it with the earlier archives.');
 
     // Add summary of file-level issues
     if (totalFileErrors > 0 || totalFileWarnings > 0) {
@@ -3787,6 +3843,11 @@ async function bulkExportZip() {
     }
 
     addFileWithBOM(megaZip, 'index.md', indexLines.join('\n'));
+    // What this archive holds, readable without the browser that made it.
+    megaZip.file('export-manifest.json', JSON.stringify({
+      format: 1, exported_at: startedAt, kind, since, listed: listedCount,
+      chats: exportedChats.map(({ uuid, name, updated_at, folder }) => ({ uuid, name, updated_at, folder })),
+    }, null, 2));
 
     status.textContent = 'Building viewer...';
     const viewerBuilt = exported === 0 || await writeViewer(megaZip, viewerChats);
@@ -3805,7 +3866,9 @@ async function bulkExportZip() {
       });
 
       const dateStr = new Date().toISOString().slice(0, 10);
-      download(zipBlob, `claude-takeout-${dateStr}.zip`, 'application/zip');
+      download(zipBlob, `claude-takeout-${kind === 'changes' ? 'changes-' : ''}${dateStr}.zip`, 'application/zip');
+      // Only chats really in the archive are recorded, so one that failed is tried again next time.
+      if (org && exportedChats.length) await saveExportRecord(org, startedAt, exportedChats);
 
       hideProgress();
 
@@ -3829,13 +3892,13 @@ async function bulkExportZip() {
         if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
         status.className = 'status warning';
         const looks = incomplete ? ` ${incomplete} chat${incomplete === 1 ? ' looks' : 's look'} incomplete.` : '';
-        status.textContent = `Exported ${exported} conversations - ${issueParts.join(', ')}.${looks} See errors.txt${viewerBuilt ? '' : `.${viewerNote}`}`;
+        status.textContent = `Exported ${exported} conversations - ${issueParts.join(', ')}.${looks} See errors.txt${viewerBuilt ? '' : `.${viewerNote}`}${firstNote}`;
       } else if (!viewerBuilt) {
         status.className = 'status warning';
-        status.textContent = `Exported ${exported} conversations to mega-zip.${viewerNote}`;
+        status.textContent = `Exported ${exported} conversations to mega-zip.${viewerNote}${firstNote}`;
       } else {
         status.className = 'status ready';
-        status.textContent = `Exported ${exported} conversations to mega-zip!`;
+        status.textContent = `Exported ${exported} ${since ? 'changed ' : ''}conversations to mega-zip!${firstNote}`;
       }
     } catch (e) {
       hideProgress();
@@ -3855,7 +3918,7 @@ function exportedStatus(status, data, done) {
   status.textContent = problems.length ? `${done.replace(/!$/, '.')} But this chat looks incomplete: ${problems[0].message}` : done;
 }
 
-const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportAllJson'];
+const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportChangesZip', 'exportAllJson'];
 let exportRunning = false;
 function exclusiveExport(run) {
   return async (...args) => {
@@ -3976,6 +4039,7 @@ onExport('exportJson', async () => {
 onExport('exportAllMd', () => bulkExport('markdown'));
 onExport('exportAllEmbed', () => bulkExport('embedded'));
 onExport('exportAllZip', () => bulkExportZip());
+onExport('exportChangesZip', () => bulkExportZip({ changesOnly: true }));
 onExport('exportAllJson', () => bulkExport('json'));
 
 document.getElementById('refresh').addEventListener('click', () => scheduleRefresh());
