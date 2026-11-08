@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.18.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.19.
 
 ---
 
@@ -148,8 +148,8 @@ The user can regenerate a response, producing a tree. `current_leaf_message_uuid
 | `create_file` | `path`, `file_text`, `description` | Initializes artifact state at `input.path`; emits new version. |
 | `str_replace` | `path`, `old_str`, `new_str` | Replays edit against current state (single-match semantics); emits a `str_replace_failed` warning on 0 or >1 matches. |
 | `rewrite` / `create_or_overwrite` | `path`, `file_text` or `content` | Defensive — overwrites artifact state; emits new version. |
-| `artifacts` (cmd: `create`/`update`/`rewrite`) | `id`, `title`, `type`, `content`, `command`, `old_str`, `new_str` | Keyed by `artifact:<id-or-title>`. Filename = sanitized(title or id) + `typeToExt[type]` (fallback `.txt`). `create`, `rewrite` and an `update` with `content` set the text; an `update` with `old_str`/`new_str` is replayed like `str_replace`. |
-| `bash_tool` (heredoc) | `command` matching `cat > <path> << DELIM ... DELIM`, any delimiter (`HEREDOC_RE`) | Treated as create_file. |
+| `artifacts` (cmd: `create`/`update`/`rewrite`) | `id`, `title`, `type`, `content`, `command`, `old_str`, `new_str` | Keyed by `artifact:<id-or-title>`. Filename = `safeFileTitle(title or id)` (letters, digits and marks from any script) + `typeToExt[type]` (fallback `.txt`). `create`, `rewrite` and an `update` with `content` set the text; an `update` with `old_str`/`new_str` is replayed like `str_replace`. |
+| `bash_tool` (heredoc) | `command` matching `cat > <path> << DELIM ... DELIM` or `cat << DELIM > <path> ...`, any delimiter (`heredocMatches`) | Treated as create_file. |
 | `present_files` | `filepaths[]` | `populateConversationFolder` downloads a presented file the replay didn't make, or one whose replay is known to be off (`str_replace_failed` or `artifact_opaque_mutation` for that name: the download then replaces the final file and its last `_vN`). Same-named files from different folders become `<base>_2<ext>`. In `convertToMarkdown`, looked up through `presentedNames` in the `artifacts` map for inline embedding; a binary one is linked. *Caveat:* with edited artifacts, lookup resolves to the FINAL versioned state, not the state at the moment of presentation. Acceptable trade-off; the per-turn versioned files exist on disk for cases where the precise moment matters. |
 | `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Same replay as `create_file` / `str_replace`. Newer conversations use these names. |
 | `Bash` | `command` | Same as `bash_tool`, in the extension and `replay_bash.py`. Uploads live at `/root/.claude/uploads/<session>/<uuid8>-<name>`. |
@@ -351,7 +351,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.18. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.19. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 

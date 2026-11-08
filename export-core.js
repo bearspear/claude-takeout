@@ -147,10 +147,23 @@ function isBashTool(name) {
   return name === 'bash_tool' || name === 'Bash';
 }
 
-// `cat > path << DELIM ... DELIM`, with any delimiter, quoted or not. Groups:
-// 1 path, 2 the quote (empty when bash expands the body), 4 body, undefined
-// when the body is empty. Use heredocBody, which also does what <<- does.
-const HEREDOC_RE = /cat\s+>\s+(\S+)\s+<<-?\s*(['"]?)(\w+)\2[^\n]*\n(?:([\s\S]*?)\n)??[ \t]*\3[ \t]*(?=\n|$)/g;
+// `cat > path << DELIM ... DELIM` or `cat << DELIM > path ...`, with any delimiter, quoted or not.
+// heredocMatches returns them in command order, each shaped like a match of the first form:
+// [0] the whole heredoc, [1] path, [2] the quote (empty when bash expands the body), [4] body
+// (undefined when empty), and index. Use heredocPath and heredocBody on them.
+const HEREDOC_RE = /cat\s*>\s*(\S+?)\s*<<-?\s*(['"]?)(\w+)\2[^\n]*\n(?:([\s\S]*?)\n)??[ \t]*\3[ \t]*(?=\n|$)/g;
+const HEREDOC_TARGET_LAST_RE = /cat\s+<<-?\s*(['"]?)(\w+)\1[ \t]*>\s*(\S+)[^\n]*\n(?:([\s\S]*?)\n)??[ \t]*\2[ \t]*(?=\n|$)/g;
+
+function heredocMatches(command) {
+  const text = String(command || '');
+  const found = Array.from(text.matchAll(HEREDOC_RE));
+  for (const m of text.matchAll(HEREDOC_TARGET_LAST_RE)) {
+    const shaped = [m[0], m[3], m[1], m[2], m[4]];
+    shaped.index = m.index;
+    found.push(shaped);
+  }
+  return found.sort((a, b) => a.index - b.index);
+}
 
 function heredocPath(match) {
   return match[1].replace(/^['"]|['"]$/g, '');
@@ -164,7 +177,13 @@ function heredocBody(match) {
 
 // The files a Bash command writes with a heredoc, for the viewer's cards.
 function heredocFiles(command) {
-  return Array.from(String(command || '').matchAll(HEREDOC_RE), (match) => ({ path: heredocPath(match), text: heredocBody(match) }));
+  return heredocMatches(command).map((match) => ({ path: heredocPath(match), text: heredocBody(match) }));
+}
+
+// A title made safe as a file name: letters, digits and marks from any script, _ and -, with spaces
+// as _, at most 60 characters. '' when nothing is left. extract_artifacts.py's safe_file_title matches.
+function safeFileTitle(label) {
+  return Array.from(String(label || '').replace(/[^\p{L}\p{N}\p{M}_\-\s]/gu, '').replace(/\s+/g, '_')).slice(0, 60).join('');
 }
 
 // ---- Claude Docs documents ----
@@ -212,51 +231,69 @@ function docPayload(payload) {
   try { return JSON.parse(payload); } catch (e) { return null; }
 }
 
-// From a batch call that creates a document and its result: { key, title, markdown, blocks, url, idmap },
-// idmap taking each pending section's node id to its placeholder name. null when it isn't one.
-function claudeDocCreated(input, result) {
+const DOC_PLACEHOLDER_RE = /<\?claude block ([A-Za-z0-9_]+)\?>/g;
+
+// From a batch call that creates a document, and its result: { key, title, markdown, blocks, url, idmap,
+// unconfirmed }, idmap taking each pending section's node id to its placeholder name. Without a usable
+// result (the chat stopped, or the reply changed shape) the document is still returned, keyed by the
+// tool call, with no section ids and unconfirmed set. null when the call doesn't create a document.
+function claudeDocCreated(input, result, toolUseId = '') {
   const create = input && input.container && input.container.create;
   const doc = create && create.doc;
-  if (!doc || typeof doc.markdown !== 'string') return null;
+  if (!doc || typeof doc !== 'object' || typeof doc.markdown !== 'string') return null;
+  const blocks = doc.blocks && typeof doc.blocks === 'object' ? doc.blocks : {};
+  const title = String(create.name || ((/^#\s+(.+)$/m.exec(doc.markdown) || [])[1]) || 'Document');
   const text = resultText(result);
   const parsed = leadingJson(text) || {};
-  const ack = (Array.isArray(parsed.acks) ? parsed.acks : []).find((a) => a && a.id && typeof a.xml === 'string');
-  if (!ack) return null;
+  const ack = (Array.isArray(parsed.acks) ? parsed.acks : []).find((a) => a && typeof a === 'object' && a.id && typeof a.xml === 'string');
+  if (!ack) return { key: `doc:pending:${toolUseId}`, title, markdown: doc.markdown, blocks, url: '', idmap: {}, unconfirmed: true };
   const session = ack.session || ((/id='([^'.]+)\./.exec(ack.xml) || [])[1]) || '';
   const pendingIds = Array.from(ack.xml.matchAll(/<pending id='([^']+)'/g), (m) => (m[1].startsWith('.') ? session + m[1] : m[1]));
-  const blocks = doc.blocks && typeof doc.blocks === 'object' ? doc.blocks : {};
-  const pendingKeys = Array.from(doc.markdown.matchAll(/<\?claude block (\w+)\?>/g), (m) => m[1])
-    .filter((k) => blocks[k] && blocks[k].type === 'pending');
+  const pendingKeys = Array.from(doc.markdown.matchAll(DOC_PLACEHOLDER_RE), (m) => m[1])
+    .filter((k) => blocks[k] && typeof blocks[k] === 'object' && blocks[k].type === 'pending');
   const idmap = {};
   pendingIds.forEach((id, i) => { if (pendingKeys[i]) idmap[id] = pendingKeys[i]; });
-  const url = (parsed.frame && parsed.frame.url) || ((/https:\/\/claude\.ai\/artifact\/[\w-]+/.exec(text) || [])[0]) || '';
-  const title = String(create.name || ((/^#\s+(.+)$/m.exec(doc.markdown) || [])[1]) || 'Document');
-  return { key: `doc:${ack.id}`, title, markdown: doc.markdown, blocks, url, idmap };
+  const url = (parsed.frame && typeof parsed.frame === 'object' && parsed.frame.url) || ((/https:\/\/claude\.ai\/artifact\/[A-Za-z0-9_-]+/.exec(text) || [])[0]) || '';
+  return { key: `doc:${ack.id}`, title, markdown: doc.markdown, blocks, url: String(url), idmap, unconfirmed: false };
 }
 
-// The key a Docs call writes to, for the viewer's cards: 'doc:<node id>', or null.
+// The key a Docs call writes to, for the viewer's cards: 'doc:<node id>' (or 'doc:pending:<call id>'
+// for a document whose batch result is missing), or null.
 function claudeDocKey(block, result) {
   const action = claudeDocsAction(block && block.name);
   const input = (block && block.input) || {};
-  if (action === 'batch') { const made = claudeDocCreated(input, result); return made ? made.key : null; }
+  if (action === 'batch') { const made = claudeDocCreated(input, result, block.id); return made ? made.key : null; }
   if (action === 'update' && input.ref && input.ref.id) return `doc:${input.ref.id}`;
   return null;
 }
 
-// The Markdown for a document as rebuilt so far: placeholders filled, the author mention left out, then
-// Claude's comments and the link to the live document.
+// One placeholder's text: a date as written, a mention left out, other kinds noted.
+function renderDocBlock(b) {
+  if (!b || typeof b !== 'object' || typeof b.type !== 'string') return "*(An unsupported block isn't included in this export.)*";
+  if (b.type === 'date') return String(b.value || '');
+  if (b.type === 'mention') return '';
+  return `*(A ${b.type} block isn't included in this export.)*`;
+}
+
+// The Markdown for a document as rebuilt so far: placeholders filled (a section's own chips first),
+// then Claude's comments and the link to the live document.
 function renderClaudeDoc(d) {
-  let out = d.markdown.replace(/<\?claude block (\w+)\?>/g, (m, k) => {
-    const b = Object.prototype.hasOwnProperty.call(d.blocks, k) ? d.blocks[k] : null;
-    if (!b) return '';
-    if (b.type === 'date') return String(b.value || '');
-    if (b.type === 'mention') return '';
-    if (b.type === 'pending') return Object.prototype.hasOwnProperty.call(d.contents, k) ? d.contents[k] : "*(This section wasn't written.)*";
-    return `*(A ${b.type} block isn't included in this export.)*`;
+  const own = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+  let out = d.markdown.replace(DOC_PLACEHOLDER_RE, (m, k) => {
+    if (!own(d.blocks, k)) return '';
+    const b = d.blocks[k];
+    if (b && typeof b === 'object' && b.type === 'pending') {
+      if (!own(d.contents, k)) return "*(This section wasn't written.)*";
+      const local = own(d.sectionBlocks, k) ? d.sectionBlocks[k] : null;
+      return d.contents[k].replace(DOC_PLACEHOLDER_RE, (m2, k2) => (own(local, k2) ? renderDocBlock(local[k2]) : own(d.blocks, k2) ? renderDocBlock(d.blocks[k2]) : ''));
+    }
+    return renderDocBlock(b);
   });
   out = out.replace(/ · (?=\n|$)/g, '').replace(/(^|\n) · /g, '$1').replace(/\s+$/, '');
+  // A comment's later lines are indented, so a comment of several paragraphs stays one list item.
+  const item = (body) => body.split('\n').map((line, i) => (i === 0 || !line ? line : `  ${line}`)).join('\n');
   const tail = [];
-  if (d.comments.length) tail.push('## Comments\n\n' + d.comments.map((c) => (c.anchor ? `- On “${c.anchor}”: ${c.body}` : `- ${c.body}`)).join('\n'));
+  if (d.comments.length) tail.push('## Comments\n\n' + d.comments.map((c) => `- ${c.anchor ? `On “${c.anchor}”: ` : ''}${item(c.body)}`).join('\n'));
   if (d.url) tail.push(`*Live document on claude.ai: ${d.url}*`);
   return out + (tail.length ? '\n\n---\n\n' + tail.join('\n\n') : '') + '\n';
 }
@@ -420,7 +457,7 @@ function extractArtifacts(data, errorCollector = null, index = null) {
 
         if (content && (id || title)) {
           const ext = typeToExt[type] || '.txt';
-          let baseName = (title || id).replace(/[^a-zA-Z0-9_\-\s]/g, '').replace(/\s+/g, '_').substring(0, 60);
+          const baseName = safeFileTitle(title || id) || safeFileTitle(id) || 'artifact';
           const filename = baseName.endsWith(ext) ? baseName : baseName + ext;
           setContent(key, content, filename);
         } else if (input.command === 'update' && (id || title) && typeof input.old_str === 'string') {
@@ -437,44 +474,54 @@ function extractArtifacts(data, errorCollector = null, index = null) {
         }
       } else if (claudeDocsAction(block.name)) {
         const action = claudeDocsAction(block.name);
-        if (action === 'batch') {
-          const made = claudeDocCreated(input, resultsById.get(block.id));
-          if (made) {
-            const base = made.title.replace(/[^a-zA-Z0-9_\-\s]/g, '').replace(/\s+/g, '_').substring(0, 60) || 'Document';
-            docs[made.key] = { ...made, contents: {}, comments: [], filename: `${base}.md`, warned: false };
-            setContent(made.key, renderClaudeDoc(docs[made.key]), docs[made.key].filename);
-          }
+        // Once per document: an edit the chat can't rebuild.
+        const warnDoc = (d, key, message) => {
+          if (d.warned || !errorCollector) return;
+          d.warned = true;
+          errorCollector.addWarning('claude_doc_unreplayed', d.filename, message,
+            { path: key, note: d.url ? `Open the live document: ${d.url}` : 'Open the document on claude.ai.' });
+        };
+        const made = action === 'batch' ? claudeDocCreated(input, resultsById.get(block.id), block.id) : null;
+        if (made) {
+          docs[made.key] = { ...made, contents: {}, sectionBlocks: {}, comments: [], filename: `${safeFileTitle(made.title) || 'Document'}.md`, warned: false, project: '' };
+          setContent(made.key, renderClaudeDoc(docs[made.key]), docs[made.key].filename);
+          if (made.unconfirmed) warnDoc(docs[made.key], made.key, "This Claude Docs document's sections couldn't be matched to its edits, because the tool's reply is missing from the chat; they are shown as not written.");
+        } else if (action === 'batch') {
+          // A batch that edits an existing document applies operations the export can't replay.
+          const target = input.container && input.container.id;
+          const key = target && Object.keys(docs).find((k) => k === `doc:${target}` || docs[k].project === target);
+          if (key) warnDoc(docs[key], key, 'A batch of edits to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.');
         } else if (action === 'update' || action === 'create') {
           const payload = docPayload(input.payload) || {};
           const ref = action === 'update' ? input.ref : (payload.value && payload.value.parent);
           const key = ref && ref.id ? `doc:${ref.id}` : null;
           const d = key ? docs[key] : null;
+          if (d && input.container && input.container.id) d.project = String(input.container.id);
           if (d && action === 'create' && payload.value && typeof payload.value.body === 'string') {
             const anchor = payload.value.parent && payload.value.parent.anchor;
             d.comments.push({ anchor: anchor && anchor.text ? String(anchor.text) : '', body: payload.value.body });
             setContent(key, renderClaudeDoc(d), d.filename);
           } else if (d && action === 'update') {
-            let changed = false, unreplayed = false;
-            for (const op of (Array.isArray(payload.ops) ? payload.ops : [])) {
-              const ids = (op && op.target && op.target.ids) || [];
-              const content = op && op.with && op.with.from && op.with.from.content;
-              if (op && op.op === 'replace' && ids.length === 1 && Object.prototype.hasOwnProperty.call(d.idmap, ids[0]) && typeof content === 'string') {
-                d.contents[d.idmap[ids[0]]] = content;
+            const ops = Array.isArray(payload.ops) ? payload.ops : [];
+            let changed = false, unreplayed = ops.length === 0;  // an update with no operations changed something else
+            for (const op of ops) {
+              const ok = op && typeof op === 'object';
+              const ids = (ok && op.target && Array.isArray(op.target.ids)) ? op.target.ids : [];
+              const content = ok && op.with && op.with.from && op.with.from.content;
+              if (ok && op.op === 'replace' && ids.length === 1 && Object.prototype.hasOwnProperty.call(d.idmap, ids[0]) && typeof content === 'string') {
+                const section = d.idmap[ids[0]];
+                d.contents[section] = content;
+                d.sectionBlocks[section] = op.with.blocks && typeof op.with.blocks === 'object' ? op.with.blocks : null;
                 changed = true;
               } else unreplayed = true;
             }
             if (changed) setContent(key, renderClaudeDoc(d), d.filename);
-            if (unreplayed && !d.warned && errorCollector) {
-              d.warned = true;
-              errorCollector.addWarning('claude_doc_unreplayed', d.filename,
-                'An edit to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.',
-                { path: key, note: d.url ? `Open the live document: ${d.url}` : 'Open the document on claude.ai.' });
-            }
+            if (unreplayed) warnDoc(d, key, 'An edit to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.');
           }
         }
       } else if (isBashTool(block.name)) {
         const command = input.command || '';
-        for (const match of command.matchAll(HEREDOC_RE)) {
+        for (const match of heredocMatches(command)) {
           const filepath = heredocPath(match);
           const content = heredocBody(match);
           const filename = basenameOf(filepath);
@@ -831,7 +878,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, HEREDOC_RE, heredocFiles,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject,
   };
 }

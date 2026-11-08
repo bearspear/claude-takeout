@@ -300,20 +300,32 @@ async function addArtefactBlob(folder, artifacts, filename, blob) {
 // shown as text, and only web and mail links and https images are kept; the page's CSP allows no
 // script at all, so nothing in it can run.
 const escapeHtmlText = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+// marked hands some attribute values over already escaped (titles, alt text, autolinks) and others not,
+// so each is unescaped first and then escaped exactly once.
+const docAttr = (s) => escapeHtmlText(String(s).replace(/&(amp|lt|gt|quot|#39);/g, (m, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" })[e]));
 let docMarked = null;
 function claudeDocHtml(title, markdown) {
   if (!docMarked) {
     docMarked = new marked.Marked({
       gfm: true,
+      tokenizer: {
+        // An inline <code> or <pre> would make marked copy the text after it unescaped; this page shows
+        // raw HTML as text, so that state is never entered.
+        tag(src) {
+          const token = marked.Tokenizer.prototype.tag.call(this, src);
+          if (token) { this.lexer.state.inRawBlock = false; this.lexer.state.inLink = false; token.inRawBlock = false; token.inLink = false; }
+          return token;
+        },
+      },
       renderer: {
         html(raw, block) { return block ? `<p>${escapeHtmlText(raw.trimEnd())}</p>` : escapeHtmlText(raw); },
         link(href, linkTitle, text) {
           if (!/^(https?:|mailto:|#)/i.test(String(href || '').trim())) return text;
-          return `<a href="${escapeHtmlText(href)}"${linkTitle ? ` title="${escapeHtmlText(linkTitle)}"` : ''} rel="noopener noreferrer">${text}</a>`;
+          return `<a href="${docAttr(href)}"${linkTitle ? ` title="${docAttr(linkTitle)}"` : ''} rel="noopener noreferrer">${text}</a>`;
         },
         image(href, imageTitle, text) {
-          if (!/^https:/i.test(String(href || '').trim())) return escapeHtmlText(text || '');
-          return `<img src="${escapeHtmlText(href)}" alt="${escapeHtmlText(text || '')}"${imageTitle ? ` title="${escapeHtmlText(imageTitle)}"` : ''}>`;
+          if (!/^https:/i.test(String(href || '').trim())) return docAttr(text || '');
+          return `<img src="${docAttr(href)}" alt="${docAttr(text || '')}"${imageTitle ? ` title="${docAttr(imageTitle)}"` : ''}>`;
         },
       },
     });
@@ -521,6 +533,47 @@ function shellSegments(command) {
   return segments;
 }
 
+// One simple command's words, quotes removed, and the targets of its output redirects (> and >>,
+// with or without a file descriptor). Quoted text is never a redirect: echo '<a>x.html</a>' > f has
+// one target, f.
+function shellWords(segment) {
+  const words = [];
+  const redirects = [];
+  let current = '', started = false, quote = null, into = null;
+  const end = () => {
+    if (started) {
+      if (into === 'out') redirects.push(current);
+      else if (into !== 'in') words.push(current);
+      into = null;
+    }
+    current = ''; started = false;
+  };
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (ch === '\\' && quote === '"' && i + 1 < segment.length) current += segment[++i];
+      else current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; started = true; continue; }
+    if (ch === '\\' && i + 1 < segment.length) { current += segment[++i]; started = true; continue; }
+    if (/\s/.test(ch)) { end(); continue; }
+    if (ch === '>' || ch === '<') {
+      if (started && /^(\d+|&)$/.test(current)) { current = ''; started = false; } else end();
+      if (ch === '>' && /[>|&]/.test(segment[i + 1] || '')) i++;
+      into = ch === '>' ? 'out' : 'in';
+      continue;
+    }
+    current += ch; started = true;
+  }
+  end();
+  return { words, redirects };
+}
+
+// Any heredoc's body taken out, the rest of its first line kept: the body is input, not shell.
+const ANY_HEREDOC_RE = /<<-?\s*(['"]?)(\w+)\1([^\n]*)\n(?:[\s\S]*?\n)??[ \t]*\2[ \t]*(?=\n|$)/g;
+
 function detectOpaqueMutations(data, errorCollector) {
   const messages = getMessageChain(data);
   const basenameOf = (p) => (p || '').split('/').pop();
@@ -541,7 +594,7 @@ function detectOpaqueMutations(data, errorCollector) {
       }
       if (isBashTool(block.name)) {
         const cmd = input.command || '';
-        for (const match of cmd.matchAll(HEREDOC_RE)) {
+        for (const match of heredocMatches(cmd)) {
           knownArtifactPaths.add(heredocPath(match));
         }
       }
@@ -573,22 +626,28 @@ function detectOpaqueMutations(data, errorCollector) {
       // extractArtifacts already handled each `cat > path << DELIM` heredoc, so drop
       // the whole heredoc, body included: a body is text, and `<a href>about.html`
       // in it is no redirect. The rest of the command can still mutate artifacts.
-      const command = rawCommand.replace(HEREDOC_RE, '');
+      const catHeredocs = heredocMatches(rawCommand);
+      let command = rawCommand;
+      for (const match of catHeredocs.slice().reverse()) command = command.slice(0, match.index) + command.slice(match.index + match[0].length);
+      // For the shell checks, other heredocs' bodies go too (a Python script is checked as Python),
+      // so an apostrophe in a script's comment can't hide the sed after it.
+      const shellCommand = command.replace(ANY_HEREDOC_RE, '$3');
       // An unquoted delimiter means bash expanded $, ` and \ in the body, so the
       // file Claude got differs from the text in the command.
-      for (const match of rawCommand.matchAll(HEREDOC_RE)) {
+      for (const match of catHeredocs) {
         if (match[2] === '' && /[$`\\]/.test(match[4] || '')) {
           opaqueMutations.push({ artifactPath: heredocPath(match), msgIndex: mi, blockIndex: bi, command: rawCommand });
         }
       }
 
-      // Map variable name -> the artifact path it aliases (path or basename).
+      // Map variable name -> the artifact path it aliases (path or basename), as a string
+      // (f = 'foo.html') or a Path (p = Path('/home/claude/foo.html')).
       const varToArtifact = {};
-      const varBindingRe = /(?:^|[\s;])\s*(\w+)\s*=\s*(['"])((?:\\.|(?!\2).)*)\2/g;
+      const varBindingRe = /(?:^|[\s;])\s*(\w+)\s*=\s*(?:(?:pathlib\.)?Path\(\s*)?(['"])((?:\\.|(?!\2).)*)\2/g;
       let vbm;
       while ((vbm = varBindingRe.exec(command)) !== null) {
         const varName = vbm[1];
-        const value = vbm[3];
+        const value = vbm[3].replace(/^\.\//, '');
         for (const ap of knownArtifactPaths) {
           if (value === ap || value === basenameOf(ap)) {
             varToArtifact[varName] = ap;
@@ -596,6 +655,7 @@ function detectOpaqueMutations(data, errorCollector) {
           }
         }
       }
+      const globbed = /[*?]/.test(shellCommand);
 
       for (const ap of knownArtifactPaths) {
         const basename = basenameOf(ap);
@@ -606,35 +666,46 @@ function detectOpaqueMutations(data, errorCollector) {
         const referenced =
           command.includes(ap) ||
           command.includes(basename) ||
-          aliasVars.length > 0;
+          aliasVars.length > 0 ||
+          globbed;
         if (!referenced) continue;
 
         // Write-back patterns, against the full path or the basename (not as part of a
         // longer name) or an aliasing variable.
-        const lit = "['\"](?:" + escapedPath + "|" + escapedBase + ")['\"]";
-        const target = aliasVars.length > 0
-          ? "(?:" + lit + "|" + aliasVars.map(v => '\\b' + v + '\\b').join('|') + ")"
-          : lit;
-        // Python: open(p, 'w' / 'a' / 'x' / 'r+' ..., encoding=...) and Path(p).write_text(...).
+        const lit = "['\"](?:\\./)?(?:" + escapedPath + "|" + escapedBase + ")['\"]";
+        const varAlt = aliasVars.map(v => '\\b' + v + '\\b').join('|');
+        const target = aliasVars.length > 0 ? "(?:" + lit + "|" + varAlt + ")" : lit;
+        // Python: open(p, 'w' / 'a' / 'x' / 'r+' ..., encoding=...), open(file=p, mode='w'),
+        // Path(p).write_text(...) and p.write_text(...) for a Path variable.
         const pyWriteRe = new RegExp(
-          "open\\(\\s*" + target + "\\s*,\\s*(?:mode\\s*=\\s*)?['\"](?:[wax][bt]?\\+?|r[bt]?\\+)['\"]" +
-          "|Path\\(\\s*" + target + "\\s*\\)\\s*\\.write_(?:text|bytes)\\s*\\("
+          "open\\(\\s*(?:file\\s*=\\s*)?" + target + "\\s*,\\s*(?:mode\\s*=\\s*)?['\"](?:[wax][bt]?\\+?|r[bt]?\\+)['\"]" +
+          "|Path\\(\\s*" + target + "\\s*\\)\\s*\\.write_(?:text|bytes)\\s*\\(" +
+          (varAlt ? "|(?:" + varAlt + ")\\s*\\.\\s*write_(?:text|bytes)\\s*\\(" : '')
         );
+        // A shell word names the file as its path, its name, ./name, or a glob matching either.
         const names = new Set([ap, basename]);
-        const isTarget = (word) => names.has(word.replace(/^['"]|['"]$/g, ''));
-        // Shell, one simple command at a time: a redirect into the file, sed/perl
+        const globRe = (word) => new RegExp('^' + word.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
+        const isTarget = (word) => {
+          const w = word.replace(/^\.\//, '');
+          if (names.has(w)) return true;
+          if (!/[*?]/.test(w)) return false;
+          const re = globRe(w);
+          return w.includes('/') ? re.test(ap) : re.test(basename);
+        };
+        // Shell, one simple command at a time: a redirect into the file, sed/perl/awk
         // in place, tee, or cp/mv/install onto it.
-        const redirectRe = new RegExp(
-          ">>?\\s*['\"]?(?:" + escapedPath + "|(?<![\\w./-])" + escapedBase + ")['\"]?(?![\\w.-])"
-        );
-        const shellWrites = shellSegments(command).some((segment) => {
-          if (redirectRe.test(segment)) return true;
-          const words = segment.trim().split(/\s+/).filter(Boolean);
+        const shellWrites = shellSegments(shellCommand).some((segment) => {
+          const { words, redirects } = shellWords(segment);
+          if (redirects.some(isTarget)) return true;
           if (words[0] === 'sudo') words.shift();
           const tool = words[0];
           const args = words.slice(1);
           if (tool === 'sed' || tool === 'perl') {
             const inPlace = args.some((w) => /^-[a-zA-Z]*i/.test(w) || w.startsWith('--in-place'));
+            return inPlace && args.some(isTarget);
+          }
+          if (tool === 'awk' || tool === 'gawk') {
+            const inPlace = args.some((w, i) => (w === '-i' && args[i + 1] === 'inplace') || w === '-iinplace' || w === '--include=inplace');
             return inPlace && args.some(isTarget);
           }
           if (tool === 'tee') return args.some(isTarget);
@@ -644,8 +715,8 @@ function detectOpaqueMutations(data, errorCollector) {
         });
 
         if (pyWriteRe.test(command) || shellWrites) {
+          // Every file the command changes is recorded, not just the first.
           opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command: rawCommand });
-          break;
         }
       }
     }
@@ -679,6 +750,7 @@ function extractTextAttachments(data) {
   const attachments = {};
   const idToFilename = {};  // Maps attachment id to final filename
   const byMessage = {};  // message uuid -> [{ att, name }], saved attachments in order
+  const takenLower = new Set();  // Notes.txt and notes.txt are one file on macOS and Windows
   const messages = getMessageChain(data);  // Use ordered message chain
   let unnamedCounter = 1;
   let promptNum = 0;
@@ -721,7 +793,7 @@ function extractTextAttachments(data) {
       // Handle duplicate filenames by adding a suffix
       let finalName = filename;
       let counter = 1;
-      while (attachments[finalName]) {
+      while (takenLower.has(finalName.toLowerCase())) {
         const currentExt = filename.includes('.') ? filename.substring(filename.lastIndexOf('.')) : '';
         const base = filename.includes('.') ? filename.substring(0, filename.lastIndexOf('.')) : filename;
         finalName = `${base}_${counter}${currentExt}`;
@@ -729,6 +801,7 @@ function extractTextAttachments(data) {
       }
       // Apply mojibake fix to repair encoding issues
       attachments[finalName] = fixMojibake(content);
+      takenLower.add(finalName.toLowerCase());
 
       // Track the id -> filename mapping for linking in prompts
       if (attId) {
@@ -1414,20 +1487,21 @@ function markdownToPlainText(markdown) {
     return '\n' + heading.toUpperCase() + '\n' + '='.repeat(Math.min(heading.length, 80)) + '\n';
   });
 
-  // Remove bold/italic markers
-  text = text.replace(/\*\*\*(.+?)\*\*\*/g, '$1'); // bold+italic
-  text = text.replace(/\*\*(.+?)\*\*/g, '$1');     // bold
-  text = text.replace(/\*(.+?)\*/g, '$1');         // italic
-  text = text.replace(/___(.+?)___/g, '$1');       // bold+italic
-  text = text.replace(/__(.+?)__/g, '$1');         // bold
-  text = text.replace(/_(.+?)_/g, '$1');           // italic
+  // Markdown links to plain text, [text](url) -> text (url), the url set aside so its _ and * stay.
+  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, label, url) => `${label} (${keep(url)})`);
+
+  // Remove bold/italic markers. A marker opens and closes next to text, and _ only at a word's
+  // edge, so MAX_RETRIES and 2 * 3 * 4 stay as written.
+  text = text.replace(/\*\*\*(?=\S)(.+?)(?<=\S)\*\*\*/g, '$1');            // bold+italic
+  text = text.replace(/\*\*(?=\S)(.+?)(?<=\S)\*\*/g, '$1');                  // bold
+  text = text.replace(/\*(?=[^\s*])(.+?)(?<=[^\s*])\*/g, '$1');              // italic
+  text = text.replace(/(?<![\w_])___(?=\S)(.+?)(?<=\S)___(?![\w_])/g, '$1'); // bold+italic
+  text = text.replace(/(?<![\w_])__(?=\S)(.+?)(?<=\S)__(?![\w_])/g, '$1');   // bold
+  text = text.replace(/(?<![\w_])_(?=[^\s_])(.+?)(?<=[^\s_])_(?![\w_])/g, '$1'); // italic
 
   // Convert lists to simple format
   text = text.replace(/^\s*[-*+]\s+/gm, '  • ');
   text = text.replace(/^\s*\d+\.\s+/gm, '  ');
-
-  // Convert markdown links to plain text: [text](url) -> text (url)
-  text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)');
 
   // Remove blockquote markers
   text = text.replace(/^>\s?/gm, '');
@@ -2219,12 +2293,16 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   const replayIsOff = (name) => errorCollector.warnings.some((w) =>
     (w.type === 'str_replace_failed' || w.type === 'artifact_opaque_mutation') && w.filename === name);
   const docHtmlNames = new Set();  // lowercase names of the Claude Docs .html pages written
+  const docHtmlFiles = [];  // their names, for README.md
   const presentedNames = {};  // presented path -> its name in artefacts/
   const presentedFrom = {};   // name in artefacts/ -> the presented path that took it
   for (let i = 0; i < presentedFiles.length; i++) {
     const file = presentedFiles[i];
-    let name = file.filename;
-    if (presentedFrom[name] && presentedFrom[name] !== file.path) {
+    // The artifact Claude wrote at this exact path, when there is one: another file with the same name
+    // elsewhere (a draft in /home/claude) must not stand in for it.
+    const own = Object.prototype.hasOwnProperty.call(artifactIndex, file.path) ? artifactIndex[file.path] : null;
+    let name = own ? own.filename : file.filename;
+    if (!own && presentedFrom[name] && presentedFrom[name] !== file.path) {
       const dot = name.lastIndexOf('.');
       const base = dot > 0 ? name.substring(0, dot) : name;
       const ext = dot > 0 ? name.substring(dot) : '';
@@ -2233,7 +2311,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         `Another presented file is already named "${file.filename}". This one was saved as "${name}" to avoid overwriting.`,
         { path: file.path, note: 'Check that both files are intended.' });
     }
-    const replayed = Object.prototype.hasOwnProperty.call(artifacts, name) && !presentedFrom[name];
+    const replayed = own ? !presentedFrom[name] : Object.prototype.hasOwnProperty.call(artifacts, name) && !presentedFrom[name];
     presentedNames[file.path] = name;
     presentedFrom[name] = file.path;
     if (replayed && !replayIsOff(name)) continue;
@@ -2247,7 +2325,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       const blob = await fetchUploadedFile(null, file.uuid, organizationId, conversationId, file.path);
       await addArtefactBlob(folder, artifacts, name, blob);
       if (replayed) {
-        const entry = Object.values(artifactIndex).find((e) => e.filename === name);
+        const entry = own || Object.values(artifactIndex).find((e) => e.filename === name);
         if (entry && entry.versions.length > 1) await addArtefactBlob(folder, artifacts, entry.versions[entry.versions.length - 1], blob);
         errorCollector.clearWarnings('artifact_opaque_mutation', name);
       }
@@ -2296,12 +2374,15 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
     const markdown = artifacts[entry.filename];
     const base = entry.filename.replace(/\.md$/, '');
+    // Unique whatever the case: notes.html and Notes.html are one file on macOS and Windows.
+    const taken = new Set(Object.keys(artifacts).map((n) => n.toLowerCase()));
     let htmlName = `${base}.html`;
-    for (let n = 1; Object.prototype.hasOwnProperty.call(artifacts, htmlName) || docHtmlNames.has(htmlName.toLowerCase()); n++) htmlName = `${base}_doc${n > 1 ? `_${n}` : ''}.html`;
+    for (let n = 1; taken.has(htmlName.toLowerCase()) || docHtmlNames.has(htmlName.toLowerCase()); n++) htmlName = `${base}_doc${n > 1 ? `_${n}` : ''}.html`;
     docHtmlNames.add(htmlName.toLowerCase());
     const title = ((/^#\s+(.+)$/m.exec(markdown) || [])[1] || base).trim();
     try {
       folder.file(`artefacts/${htmlName}`, claudeDocHtml(title, markdown));
+      docHtmlFiles.push(htmlName);
     } catch (err) {
       console.warn(`Could not write ${htmlName}:`, err.message);
     }
@@ -2519,7 +2600,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   // The Markdown links to what this export really saved.
-  const saved = { artifacts, attachmentFiles, uploadNames: savedUploadNames, presentedNames };
+  const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames };
   addFileWithBOM(folder, 'full_chat.md', convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking, ...saved }));
   const integratedChatMd = convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking, ...saved });
   addFileWithBOM(folder, 'integrated_chat.md', integratedChatMd);
@@ -2584,9 +2665,10 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   readmeLines.push('');
   readmeLines.push('---');
   readmeLines.push('');
-  readmeLines.push(`## Artefacts (${Object.keys(artifacts).length})`);
+  const artefactNames = Object.keys(artifacts).concat(docHtmlFiles);
+  readmeLines.push(`## Artefacts (${artefactNames.length})`);
   readmeLines.push('');
-  for (const filename of Object.keys(artifacts).sort()) {
+  for (const filename of artefactNames.sort()) {
     readmeLines.push(`- [${filename}](artefacts/${encodeURIComponent(filename)})`);
   }
 
@@ -2788,7 +2870,14 @@ function convertToMarkdown(data, options = {}) {
 
   // Extract artifacts for embedding or reference. In a ZIP these include the
   // presented and delivered files that were downloaded.
-  const artifacts = options.artifacts || extractArtifacts(data);
+  const inZip = !!options.artifacts;
+  const artifactIndex = options.artifactIndex || {};
+  const artifacts = options.artifacts || extractArtifacts(data, null, artifactIndex);
+  // Tool results by call id, so a Claude Docs call can be matched to the document it made.
+  const resultsById = new Map();
+  for (const m of (data.chat_messages || [])) {
+    for (const b of (m.content || [])) if (b && b.type === 'tool_result' && b.tool_use_id) resultsById.set(b.tool_use_id, b);
+  }
   let promptNum = 0;
   const takenUploads = {};
 
@@ -3092,11 +3181,14 @@ function convertToMarkdown(data, options = {}) {
           } else if (claudeDocsAction(toolName)) {
             // Claude Docs: the document itself, not its tool calls.
             const action = claudeDocsAction(toolName);
-            const create = action === 'batch' && input.container && input.container.create;
-            if (create && create.doc) {
-              const title = String(create.name || 'Document');
-              const filename = `${title.replace(/[^a-zA-Z0-9_\-\s]/g, '').replace(/\s+/g, '_').substring(0, 60) || 'Document'}.md`;
-              lines.push(`\n**Document: ${title}** (Claude Docs; [artefacts/${filename}](artefacts/${encodeURIComponent(filename)}))\n`);
+            const made = action === 'batch' ? claudeDocCreated(input, resultsById.get(block.id), block.id) : null;
+            if (made) {
+              const title = made.title;
+              const entry = artifactIndex[made.key];
+              const filename = entry ? entry.filename : `${safeFileTitle(title) || 'Document'}.md`;
+              // A ZIP has the file; a single Markdown file links the live document instead.
+              const where = inZip ? `[artefacts/${filename}](artefacts/${encodeURIComponent(filename)})` : (made.url ? `<${made.url}>` : 'on claude.ai');
+              lines.push(`\n**Document: ${title}** (Claude Docs; ${where})\n`);
               const content = artifacts[filename];
               if (embedArtifacts && typeof content === 'string') {
                 if (seamlessMd) {
@@ -3109,7 +3201,8 @@ function convertToMarkdown(data, options = {}) {
             } else if (action === 'create') {
               const payload = (() => { try { return typeof input.payload === 'string' ? JSON.parse(input.payload) : input.payload; } catch (e) { return null; } })();
               const body = payload && payload.value && payload.value.body;
-              if (body) lines.push(`> **Comment on the document:** ${body}`, '');
+              // Every line quoted, so a comment of several paragraphs stays one quote.
+              if (body) lines.push(String(body).split('\n').map((line, i) => (i === 0 ? `> **Comment on the document:** ${line}` : line ? `> ${line}` : '>')).join('\n'), '');
             }
           } else {
             // Other tool use - show concisely
@@ -3454,10 +3547,13 @@ async function bulkExport(format) {
   status.textContent = 'Fetching conversation list...';
 
   // Get all conversations
-  chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations' }, async (response) => {
-    if (chrome.runtime.lastError || response?.error) {
+  // Awaited to the end, so the export lock holds until every file is written.
+  const response = await new Promise((resolve) => chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations' },
+    (r) => resolve(chrome.runtime && chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : r)));
+  await (async () => {
+    if (!response || response.error) {
       status.className = 'status error';
-      status.textContent = response?.error || chrome.runtime.lastError.message;
+      status.textContent = (response && response.error) || 'Could not fetch the conversation list.';
       return;
     }
 
@@ -3523,7 +3619,7 @@ async function bulkExport(format) {
       status.className = 'status ready';
       status.textContent = `Exported ${exported} conversations!`;
     }
-  });
+  })();
 }
 
 // Bulk export all conversations as a single mega-zip
@@ -3541,10 +3637,13 @@ async function bulkExportZip() {
   status.textContent = 'Fetching conversation list...';
 
   // Get all conversations
-  chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations' }, async (response) => {
-    if (chrome.runtime.lastError || response?.error) {
+  // Awaited to the end, so the export lock holds until every file is written.
+  const response = await new Promise((resolve) => chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations' },
+    (r) => resolve(chrome.runtime && chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : r)));
+  await (async () => {
+    if (!response || response.error) {
       status.className = 'status error';
-      status.textContent = response?.error || chrome.runtime.lastError.message;
+      status.textContent = (response && response.error) || 'Could not fetch the conversation list.';
       return;
     }
 
@@ -3715,7 +3814,7 @@ async function bulkExportZip() {
       status.className = 'status error';
       status.textContent = `Zip generation failed: ${e.message}`;
     }
-  });
+  })();
 }
 
 // Event listeners with settings-aware filenames
@@ -3728,12 +3827,13 @@ function exclusiveExport(run) {
     if (exportRunning) return;
     exportRunning = true;
     const buttons = typeof document === 'undefined' ? [] : EXPORT_BUTTONS.map((id) => document.getElementById(id)).filter(Boolean);
+    const before = buttons.map((b) => b.disabled);
     buttons.forEach((b) => { b.disabled = true; });
     try {
       return await run(...args);
     } finally {
       exportRunning = false;
-      buttons.forEach((b) => { b.disabled = false; });
+      buttons.forEach((b, i) => { b.disabled = before[i]; });
     }
   };
 }

@@ -1,6 +1,6 @@
 # Claude Takeout - Technical Documentation
 
-How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.18.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.19.
 
 This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
@@ -128,7 +128,7 @@ Tools the exporter understands:
 | `rewrite`, `create_or_overwrite` | `path`, `file_text` or `content` | Replaces an artifact. |
 | `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Newer names for the same two operations. |
 | `artifacts` | `command` (`create`, `update`, `rewrite`), `id`, `title`, `type`, `content`, `old_str`, `new_str` | Older artifact tool, keyed `artifact:<id or title>`. An `update` usually carries an `old_str`/`new_str` edit. |
-| `bash_tool` / `Bash` | `command` | A `cat > path << DELIM` heredoc counts as a file write. Other changes are flagged; see [bash mutations](#bash-mutations-and-replay_bashpy). |
+| `bash_tool` / `Bash` | `command` | A `cat > path << DELIM` or `cat << DELIM > path` heredoc counts as a file write (`heredocMatches`). Other changes are flagged; see [bash mutations](#bash-mutations-and-replay_bashpy). |
 | `present_files` | `filepaths[]`; result has `local_resource` items | Files Claude showed the user; downloaded when replay didn't make them. |
 | `SendUserFile` | `files[]`; result has `file_deliveries[]` | Files Claude sent; downloaded by UUID. |
 | `…Claude_Docs__batch`, `__update`, `__create` | the document's Markdown with placeholders; section replacements; comments | A Claude Docs document, rebuilt into `artefacts/<title>.md` and `<title>.html`. |
@@ -198,7 +198,7 @@ An artifact that refers to an upload by its sandbox path (`<img src="/mnt/user-d
 
 ### Claude Docs documents
 
-Claude Docs, the editable documents on claude.ai, live there rather than in a sandbox, so the export rebuilds each one from its tool calls (`claudeDocCreated`, `renderClaudeDoc` in export-core.js; `extract_artifacts.py` mirrors them). A `batch` call creates the document from Markdown in which `<?claude block k?>` placeholders stand for a date, an author mention or a pending section; its result begins with JSON whose `acks` give the document's node id and an XML outline with the pending sections' ids, followed by plain instructions for Claude. Each `update` replaces one pending section, by that id, with Markdown, and each `create` on the document adds a comment. The rebuilt text fills the placeholders (dates as written, mentions left out, unwritten sections noted), then appends the comments and the link to the live document. It is versioned per turn like any artifact, under the key `doc:<node id>`. An edit of another kind is not replayed and warns `claude_doc_unreplayed`. `populateConversationFolder` also writes `<title>.html`, a self-contained page rendered with `marked`: raw HTML shown as text, only web and mail links and https images kept, and a CSP with no script.
+Claude Docs, the editable documents on claude.ai, live there rather than in a sandbox, so the export rebuilds each one from its tool calls (`claudeDocCreated`, `renderClaudeDoc` in export-core.js; `extract_artifacts.py` mirrors them). A `batch` call creates the document from Markdown in which `<?claude block k?>` placeholders stand for a date, an author mention or a pending section; its result begins with JSON whose `acks` give the document's node id and an XML outline with the pending sections' ids, followed by plain instructions for Claude. Each `update` replaces one pending section, by that id, with Markdown, and each `create` on the document adds a comment. The rebuilt text fills the placeholders (dates as written, mentions left out, unwritten sections noted), then appends the comments and the link to the live document. Chips a section brings with it (`with.blocks`) are filled in the same way, and a comment's later lines are indented so it stays one list item. It is versioned per turn like any artifact, under the key `doc:<node id>`, and saved as its title made safe by `safeFileTitle` (letters, digits and marks from any script). When the batch's result is missing, the document is still written, under `doc:pending:<call id>`, with its sections shown as not written and a `claude_doc_unreplayed` warning. An edit of another kind (a batch on an existing document, an update with no section text, any other operation) is not replayed and warns `claude_doc_unreplayed`, once per document. In `full_chat.md` a document is linked by the name it was saved under; a single Markdown file links the live document. `populateConversationFolder` also writes `<title>.html`, a self-contained page rendered with `marked`: raw HTML shown as text (an inline tag never switches marked into copying raw text), only web and mail links and https images kept, attributes escaped once, and a CSP with no script. Its name is unique among the artefacts whatever the case, and README.md lists it.
 
 ### Project files
 
@@ -289,7 +289,7 @@ Each error records the URLs tried, HTTP status and fallback result. A new kind o
 
 The extension replays only file tools and heredocs. When a bash command changes a tracked file any other way (a Python script, `sed -i`, a pipeline), `detectOpaqueMutations` records `artifact_opaque_mutation` and points to `replay_bash.py`.
 
-Heredocs are removed from a command before it is checked, and a heredoc with an unquoted delimiter whose body bash would expand is flagged too.
+`cat` heredocs are removed from a command before it is checked, and a heredoc with an unquoted delimiter whose body bash would expand is flagged too. The shell checks also drop every other heredoc's body (a Python script is checked as Python) and split each simple command into words with `shellWords`, so quoted text is never a redirect. Every tracked file a command changes gets a warning. Python `Path` variables, `open(file=...)`, `./name`, globs and `awk -i inplace` are recognized.
 
 `replay_bash.py` reruns Claude's actual commands from `original.json` in a temporary folder, with `/home/claude`, `/mnt/user-data`, `/tmp` and `/root/.claude` mapped into it, asking before each command. Commands are untrusted. On macOS a deny-by-default `sandbox-exec` profile isolates them, paths leaving the folder are refused, results are read back without following any link (`read_sandbox_text`), and tokens are kept out of the environment. On Linux it refuses to run without `--no-isolation`. It updates the final file and its last `_vN`. `docs/WASM_REPLAY_APPROACH.md` explains why this is a CLI and not in-browser Python.
 

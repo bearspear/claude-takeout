@@ -69,17 +69,30 @@ SEED_SUBDIRS = ("home/claude", "mnt/user-data/uploads", "mnt/user-data/outputs",
 SANDBOX_ROOT_RE = re.compile(
     r"(?<![\w./-])(" + "|".join(re.escape(r) for r in SANDBOX_ROOTS) + r")(?![\w.-])"
 )
-# cat > path << DELIM ... DELIM, with any delimiter. Groups: 1 path, 4 body.
+# cat > path << DELIM ... DELIM or cat << DELIM > path ..., with any delimiter, quoted or
+# not. heredoc_files returns (path, body) for each, in command order, like heredocMatches
+# and heredocBody in export-core.js.
 HEREDOC_RE = re.compile(
-    r"cat\s+>\s+(\S+)\s+<<-?\s*(['\"]?)(\w+)\2[^\n]*\n(?:(.*?)\n)??[ \t]*\3[ \t]*(?=\n|\Z)",
+    r"cat\s*>\s*(\S+?)\s*<<-?\s*(['\"]?)([A-Za-z0-9_]+)\2[^\n]*\n(?:(.*?)\n)??[ \t]*\3[ \t]*(?=\n|\Z)",
+    re.DOTALL,
+)
+HEREDOC_TARGET_LAST_RE = re.compile(
+    r"cat\s+<<-?\s*(['\"]?)([A-Za-z0-9_]+)\1[ \t]*>\s*(\S+)[^\n]*\n(?:(.*?)\n)??[ \t]*\2[ \t]*(?=\n|\Z)",
     re.DOTALL,
 )
 
 
-def heredoc_body(m: re.Match) -> str:
-    """heredocBody in export-core.js: the body bash writes; <<- removes leading tabs."""
-    body = m.group(4) or ""
-    return re.sub(r"^\t+", "", body, flags=re.M) if "<<-" in m.group(0).split("\n", 1)[0] else body
+def heredoc_files(command: str) -> list[tuple[str, str]]:
+    """Each heredoc's (path, body), in command order. With <<-, leading tabs are removed."""
+    found = [(m.start(), m.group(0), m.group(1), m.group(4)) for m in HEREDOC_RE.finditer(command or "")]
+    found += [(m.start(), m.group(0), m.group(3), m.group(4)) for m in HEREDOC_TARGET_LAST_RE.finditer(command or "")]
+    out = []
+    for _, whole, path, body in sorted(found, key=lambda f: f[0]):
+        body = body or ""
+        if "<<-" in whole.split("\n", 1)[0]:
+            body = re.sub(r"^\t+", "", body, flags=re.M)
+        out.append((re.sub(r"^['\"]|['\"]$", "", path), body))
+    return out
 # Display only: stops text in a conversation from driving your terminal.
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 # Where the Bash tool's sessions keep uploads, as <dir>/<uuid8>-<safe name>.
@@ -162,9 +175,9 @@ def declarative_state(data: dict) -> dict[str, str]:
                 if p and t:
                     state[p] = t
             elif name in BASH_TOOLS:
-                for hm in HEREDOC_RE.finditer(inp.get("command", "")):
-                    if heredoc_body(hm):
-                        state[hm.group(1).strip("'\"")] = heredoc_body(hm)
+                for path, body in heredoc_files(inp.get("command", "")):
+                    if body:
+                        state[path] = body
     return state
 
 
@@ -226,9 +239,9 @@ def replay_steps(data: dict) -> list[Step]:
                     steps.append(Step(path=inp["path"], write=text))
             elif name in BASH_TOOLS and inp.get("command"):
                 # Keep a heredoc's file even if the user skips the command.
-                for hm in HEREDOC_RE.finditer(inp["command"]):
-                    if heredoc_body(hm):
-                        steps.append(Step(path=hm.group(1).strip("'\""), write=heredoc_body(hm)))
+                for path, body in heredoc_files(inp["command"]):
+                    if body:
+                        steps.append(Step(path=path, write=body))
                 steps.append(Step(bash=BashCmd(
                     msg_idx=mi,
                     block_idx=bi,
