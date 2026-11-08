@@ -705,6 +705,31 @@ function richSingle(root) {
   return root;
 }
 
+test('writeViewer numbers upload parts after added-file parts', async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  const big = 'upload line\n'.repeat(7000);
+  const human = { uuid: 'u1-1', sender: 'human', content: [{ type: 'text', text: 'see file' }], parent_message_uuid: null, files_v2: [{ file_uuid: 'f-big', file_name: 'big.md', success: true }] };
+  put(root, 'original.json', chatJson('u1', 'Uploads', { chat_messages: [human, { uuid: 'u1-2', sender: 'assistant', content: [{ type: 'text', text: 'ok' }], parent_message_uuid: 'u1-1' }] }));
+  put(root, 'uploads/p01_big.md', big);
+  put(root, 'synthesis/note.md', 'added note');
+  const before = hashTree(root);
+  const res = await writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  const after = hashTree(root);
+  assertKept(before, after);
+  assert.deepStrictEqual(newEntries(before, after).sort(), ['viewer-check.gif', 'viewer-files', 'viewer-files/part-0001.js', 'viewer-files/part-0002.js', 'viewer.html']);
+  const one = loadPart(fs.readFileSync(path.join(root, 'viewer-files/part-0001.js'), 'utf8'));
+  const two = loadPart(fs.readFileSync(path.join(root, 'viewer-files/part-0002.js'), 'utf8'));
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(one)), { n: 1, data: { 0: 'added note' } });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(two)), { n: 2, data: { u0: big } });
+  const data = viewerData(root);
+  const upload = data.chats[0].messages[0].uploads[0];
+  assert.deepStrictEqual([upload.name, upload.text, upload.part, upload.key, upload.lines], ['big.md', null, 2, 'u0', 7001]);
+  assert.strictEqual(data.added[0].part, 1);
+  assert.ok(!fs.readFileSync(path.join(root, 'viewer.html'), 'utf8').includes('upload line\nupload line'));
+});
+
 test('assembleViewer: fileScripts adds file: to the page policy only, and exports are unchanged', () => {
   const [template, logic, app, marked, katex, css] = CTViewer.VIEWER_ASSETS.map(a => fs.readFileSync(path.resolve(__dirname, '..', a), 'utf8'));
   const parts = { template, css, marked, katex, logic, app, data: { exported: 'x', chats: [] } };

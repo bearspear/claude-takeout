@@ -9,6 +9,10 @@
 //                                      writes with a heredoc; without it Bash blocks yield no cards.
 //   buildViewerData(chats, {exported}) { exported, chats, projects }, newest update first. A chat's project is an
 //                                      index into projects, where identical projects are kept once
+//   moveUploadText(data, {firstPart, inlineLimit, partLimit})  { data, parts: [{ name, body }] }: upload text over
+//                                      UPLOAD_INLINE_LIMIT bytes moves into viewer-files parts; the upload keeps
+//                                      { text: null, lines, part, key }. Keys are u0, u1, ... Attachments stay
+//   PART_LIMIT, UPLOAD_INLINE_LIMIT    4 MB per part; 64 KB of upload text stays in the page
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
 //   joinPath(folder, rel)              folder + rel with '..' resolved
 //   escapeJson(data)                   JSON that is safe inside a <script> tag
@@ -29,6 +33,8 @@
 
   const TOOL_TEXT_LIMIT = 20000;
   const TEXT_EMBED_LIMIT = 2 * 1024 * 1024; // longest upload or project text a caller should embed
+  const PART_LIMIT = 4 * 1024 * 1024; // largest viewer-files part, unless one text alone is larger
+  const UPLOAD_INLINE_LIMIT = 64 * 1024; // upload text over this many UTF-8 bytes goes to a part
   const VIEWER_CHECK_FILE = 'viewer-check.gif';
   const VIEWER_CHECK_BASE64 = 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
   const SAFE_IMAGE = /^image\/(png|jpeg|gif|webp)$/;
@@ -409,6 +415,46 @@
     return { exported, chats: out, projects };
   }
 
+  // Large upload text leaves the page for viewer-files/part-NNNN.js, loaded when the upload is opened.
+  // Search never reads upload text, so it is unchanged. data is not mutated.
+  function moveUploadText(data, { firstPart = 1, inlineLimit = UPLOAD_INLINE_LIMIT, partLimit = PART_LIMIT } = {}) {
+    const encoder = new TextEncoder();
+    const parts = [];
+    let pending = [], pendingBytes = 0, number = firstPart, keys = 0;
+    const head = n => `window.__archivePart(${n}, {`;
+    const flush = () => {
+      if (!pending.length) return;
+      parts.push({ name: `part-${String(number).padStart(4, '0')}.js`, body: `${head(number)}${pending.join(',')}});` });
+      number++;
+      pending = [];
+      pendingBytes = 0;
+    };
+    const chats = data.chats.map(chat => {
+      let changed = false;
+      const messages = chat.messages.map(m => {
+        if (!Array.isArray(m.uploads) || !m.uploads.some(u => u && typeof u.text === 'string')) return m;
+        let moved = false;
+        const uploads = m.uploads.map(u => {
+          if (!u || typeof u.text !== 'string' || encoder.encode(u.text).length <= inlineLimit) return u;
+          const key = 'u' + keys++;
+          const item = `${escapeJson(key)}:${escapeJson(u.text)}`;
+          const bytes = encoder.encode(item).length + 1;
+          if (pending.length && pendingBytes + bytes + head(number).length + 3 > partLimit) flush();
+          pending.push(item);
+          pendingBytes += bytes;
+          moved = true;
+          return { ...u, text: null, lines: u.text.split('\n').length, part: number, key };
+        });
+        if (!moved) return m;
+        changed = true;
+        return { ...m, uploads };
+      });
+      return changed ? { ...chat, messages } : chat;
+    });
+    flush();
+    return { data: parts.length ? { ...data, chats } : data, parts };
+  }
+
   // Each '/'-separated part is encoded per segment. '..' or '.' anywhere: null (never leave the export).
   function relHref(...parts) {
     const segs = [];
@@ -464,7 +510,7 @@
     return page.replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
-  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT };
+  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT };
   root.CTViewer = Object.assign(root.CTViewer || {}, api);
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);
