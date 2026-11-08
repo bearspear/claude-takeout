@@ -1,6 +1,6 @@
 # Claude Takeout - Technical Documentation
 
-How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.9.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.17.
 
 This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
@@ -131,6 +131,7 @@ Tools the exporter understands:
 | `bash_tool` / `Bash` | `command` | A `cat > path << DELIM` heredoc counts as a file write. Other changes are flagged; see [bash mutations](#bash-mutations-and-replay_bashpy). |
 | `present_files` | `filepaths[]`; result has `local_resource` items | Files Claude showed the user; downloaded when replay didn't make them. |
 | `SendUserFile` | `files[]`; result has `file_deliveries[]` | Files Claude sent; downloaded by UUID. |
+| `…Claude_Docs__batch`, `__update`, `__create` | the document's Markdown with placeholders; section replacements; comments | A Claude Docs document, rebuilt into `artefacts/<title>.md` and `<title>.html`. |
 | `view` / `read_file` | `path` | Its result may hold the text of an upload or project file. |
 | `web_search`, `web_fetch` | `query`, `url` | Sources and citations. |
 
@@ -194,6 +195,10 @@ An artifact that refers to an upload by its sandbox path (`<img src="/mnt/user-d
 ### Files Claude made (`present_files`, `SendUserFile`)
 
 `extractPresentedFiles` lists the files in `present_files` results (`local_resource` items). One the replay already rebuilt is kept as is, unless that file has a `str_replace_failed` or `artifact_opaque_mutation` warning: then the presented copy is downloaded and replaces the final file and its last `_vN`. Any other, such as a file a Python script wrote, is downloaded through `fetchUploadedFile` by its sandbox path into `artefacts/`. Two presented files with one name from different folders become `<base>_2<ext>` with an `artifact_basename_collision` warning. A download is the file's final state, so it clears that file's `str_replace_failed` warnings. `extractDeliveredFiles` lists `SendUserFile` deliveries, which are downloaded by UUID into `artefacts/`, with a `delivered_file` error on failure.
+
+### Claude Docs documents
+
+Claude Docs, the editable documents on claude.ai, live there rather than in a sandbox, so the export rebuilds each one from its tool calls (`claudeDocCreated`, `renderClaudeDoc` in export-core.js; `extract_artifacts.py` mirrors them). A `batch` call creates the document from Markdown in which `<?claude block k?>` placeholders stand for a date, an author mention or a pending section; its result begins with JSON whose `acks` give the document's node id and an XML outline with the pending sections' ids, followed by plain instructions for Claude. Each `update` replaces one pending section, by that id, with Markdown, and each `create` on the document adds a comment. The rebuilt text fills the placeholders (dates as written, mentions left out, unwritten sections noted), then appends the comments and the link to the live document. It is versioned per turn like any artifact, under the key `doc:<node id>`. An edit of another kind is not replayed and warns `claude_doc_unreplayed`. `populateConversationFolder` also writes `<title>.html`, a self-contained page rendered with `marked`: raw HTML shown as text, only web and mail links and https images kept, and a CSP with no script.
 
 ### Project files
 
@@ -273,6 +278,7 @@ Encoding rules:
 | `str_replace_failed` | A successful edit could not be replayed. |
 | `artifact_basename_collision` | Two paths had the same filename; one was renamed. |
 | `artifact_opaque_mutation` | A bash command changed a file in a way replay can't follow. |
+| `claude_doc_unreplayed` | A Claude Docs edit could not be rebuilt from the chat; the note links the live document. |
 | `viewer` | One chat could not be added to `viewer.html`. |
 
 Each error records the URLs tried, HTTP status and fallback result. A new kind of failure gets a new type and a `_getRecoveryHint` case.

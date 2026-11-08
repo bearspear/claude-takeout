@@ -212,6 +212,7 @@ Each entry includes:
 | `project_metadata` | Project metadata fetch failed. `project.json` may be incomplete. | Re-export when the Project endpoint works. |
 | `str_replace_failed` | A `str_replace` edit couldn't be applied to an artifact during reconstruction (the `old_str` didn't appear or appeared multiple times). | Usually mirrors what happened in Claude's actual sandbox — no action needed unless `original.json` shows the tool succeeded but the warning fired anyway. |
 | `artifact_basename_collision` | Two distinct artifact paths produced files with the same basename. The second was renamed to avoid overwriting. | Inspect both source paths to confirm they were intentionally distinct files. |
+| `claude_doc_unreplayed` | Claude edited a Claude Docs document in a way the export can't rebuild from the chat. | The exported `.md` and `.html` hold what could be rebuilt. Open the live document from the link in the note for the current version. |
 | `viewer` | A chat couldn't be added to `viewer.html`. (If the whole viewer fails, only the status line says so.) | Nothing is lost: the chat data is all in the export and only the viewer is missing or incomplete. Use the Markdown files, or re-export. |
 | `artifact_opaque_mutation` | A `bash_tool` command mutated an artifact in a way the extension can't reconstruct (Python heredoc, sed, awk, multi-step pipeline, etc.). | **Run `replay_bash.py`** — see next section. |
 

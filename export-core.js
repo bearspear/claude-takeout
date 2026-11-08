@@ -167,6 +167,100 @@ function heredocFiles(command) {
   return Array.from(String(command || '').matchAll(HEREDOC_RE), (match) => ({ path: heredocPath(match), text: heredocBody(match) }));
 }
 
+// ---- Claude Docs documents ----
+// claude.ai's Docs tools (named <connector>Claude_Docs__<action>) write a document in steps: batch
+// creates it from Markdown with <?claude block k?> placeholders, some of them pending sections; update
+// replaces a pending section, by the id its batch result gave it, with Markdown; create adds a
+// comment. The document lives on claude.ai, so it is rebuilt from these calls. extract_artifacts.py
+// does the same; keep them in step.
+const CLAUDE_DOCS_RE = /Claude_Docs__(\w+)$/;
+function claudeDocsAction(name) {
+  const m = CLAUDE_DOCS_RE.exec(String(name || ''));
+  return m ? m[1] : null;
+}
+
+// The JSON value at the start of text, which may go on with plain words after it. null if none.
+function leadingJson(text) {
+  const t = String(text || '').trimStart();
+  if (!/^[{[]/.test(t)) return null;
+  let depth = 0, inString = false, escaped = false;
+  for (let i = 0; i < t.length; i++) {
+    const c = t[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === '"') inString = false;
+    } else if (c === '"') inString = true;
+    else if (c === '{' || c === '[') depth++;
+    else if (c === '}' || c === ']') {
+      depth--;
+      if (depth === 0) { try { return JSON.parse(t.slice(0, i + 1)); } catch (e) { return null; } }
+    }
+  }
+  return null;
+}
+
+function resultText(result) {
+  const content = result && result.content;
+  if (typeof content === 'string') return content;
+  const first = Array.isArray(content) ? content.find((c) => c && c.type === 'text') : null;
+  return first ? String(first.text || '') : '';
+}
+
+function docPayload(payload) {
+  if (payload && typeof payload === 'object') return payload;
+  try { return JSON.parse(payload); } catch (e) { return null; }
+}
+
+// From a batch call that creates a document and its result: { key, title, markdown, blocks, url, idmap },
+// idmap taking each pending section's node id to its placeholder name. null when it isn't one.
+function claudeDocCreated(input, result) {
+  const create = input && input.container && input.container.create;
+  const doc = create && create.doc;
+  if (!doc || typeof doc.markdown !== 'string') return null;
+  const text = resultText(result);
+  const parsed = leadingJson(text) || {};
+  const ack = (Array.isArray(parsed.acks) ? parsed.acks : []).find((a) => a && a.id && typeof a.xml === 'string');
+  if (!ack) return null;
+  const session = ack.session || ((/id='([^'.]+)\./.exec(ack.xml) || [])[1]) || '';
+  const pendingIds = Array.from(ack.xml.matchAll(/<pending id='([^']+)'/g), (m) => (m[1].startsWith('.') ? session + m[1] : m[1]));
+  const blocks = doc.blocks && typeof doc.blocks === 'object' ? doc.blocks : {};
+  const pendingKeys = Array.from(doc.markdown.matchAll(/<\?claude block (\w+)\?>/g), (m) => m[1])
+    .filter((k) => blocks[k] && blocks[k].type === 'pending');
+  const idmap = {};
+  pendingIds.forEach((id, i) => { if (pendingKeys[i]) idmap[id] = pendingKeys[i]; });
+  const url = (parsed.frame && parsed.frame.url) || ((/https:\/\/claude\.ai\/artifact\/[\w-]+/.exec(text) || [])[0]) || '';
+  const title = String(create.name || ((/^#\s+(.+)$/m.exec(doc.markdown) || [])[1]) || 'Document');
+  return { key: `doc:${ack.id}`, title, markdown: doc.markdown, blocks, url, idmap };
+}
+
+// The key a Docs call writes to, for the viewer's cards: 'doc:<node id>', or null.
+function claudeDocKey(block, result) {
+  const action = claudeDocsAction(block && block.name);
+  const input = (block && block.input) || {};
+  if (action === 'batch') { const made = claudeDocCreated(input, result); return made ? made.key : null; }
+  if (action === 'update' && input.ref && input.ref.id) return `doc:${input.ref.id}`;
+  return null;
+}
+
+// The Markdown for a document as rebuilt so far: placeholders filled, the author mention left out, then
+// Claude's comments and the link to the live document.
+function renderClaudeDoc(d) {
+  let out = d.markdown.replace(/<\?claude block (\w+)\?>/g, (m, k) => {
+    const b = Object.prototype.hasOwnProperty.call(d.blocks, k) ? d.blocks[k] : null;
+    if (!b) return '';
+    if (b.type === 'date') return String(b.value || '');
+    if (b.type === 'mention') return '';
+    if (b.type === 'pending') return Object.prototype.hasOwnProperty.call(d.contents, k) ? d.contents[k] : "*(This section wasn't written.)*";
+    return `*(A ${b.type} block isn't included in this export.)*`;
+  });
+  out = out.replace(/ · (?=\n|$)/g, '').replace(/(^|\n) · /g, '$1').replace(/\s+$/, '');
+  const tail = [];
+  if (d.comments.length) tail.push('## Comments\n\n' + d.comments.map((c) => (c.anchor ? `- On “${c.anchor}”: ${c.body}` : `- ${c.body}`)).join('\n'));
+  if (d.url) tail.push(`*Live document on claude.ai: ${d.url}*`);
+  return out + (tail.length ? '\n\n---\n\n' + tail.join('\n\n') : '') + '\n';
+}
+
 // tool_use ids whose tool_result reported an error. A failed file tool changed
 // nothing, so replaying it would invent an edit that never happened.
 function failedToolUseIds(messages) {
@@ -220,6 +314,9 @@ function extractArtifacts(data, errorCollector = null, index = null) {
   // tool). Each entry tracks current content, the basename to write under,
   // a list of post-turn snapshots, and whether the current turn edited it.
   const state = Object.create(null);  // any key, __proto__ included
+  const docs = Object.create(null);  // Claude Docs: 'doc:<node id>' -> { title, markdown, blocks, contents, comments, url, idmap, filename }
+  const resultsById = new Map();
+  for (const m of messages) for (const b of (m.content || [])) if (b && b.type === 'tool_result' && b.tool_use_id) resultsById.set(b.tool_use_id, b);
 
   const basenameOf = (p) => zipSafeName((p || '').split('/').pop());
   const splitExt = (name) => {
@@ -336,6 +433,43 @@ function extractArtifacts(data, errorCollector = null, index = null) {
               `artifact update skipped: ${result.reason}`,
               { path: key, note: 'The update could not be applied; the exported artifact may be missing this edit.' }
             );
+          }
+        }
+      } else if (claudeDocsAction(block.name)) {
+        const action = claudeDocsAction(block.name);
+        if (action === 'batch') {
+          const made = claudeDocCreated(input, resultsById.get(block.id));
+          if (made) {
+            const base = made.title.replace(/[^a-zA-Z0-9_\-\s]/g, '').replace(/\s+/g, '_').substring(0, 60) || 'Document';
+            docs[made.key] = { ...made, contents: {}, comments: [], filename: `${base}.md`, warned: false };
+            setContent(made.key, renderClaudeDoc(docs[made.key]), docs[made.key].filename);
+          }
+        } else if (action === 'update' || action === 'create') {
+          const payload = docPayload(input.payload) || {};
+          const ref = action === 'update' ? input.ref : (payload.value && payload.value.parent);
+          const key = ref && ref.id ? `doc:${ref.id}` : null;
+          const d = key ? docs[key] : null;
+          if (d && action === 'create' && payload.value && typeof payload.value.body === 'string') {
+            const anchor = payload.value.parent && payload.value.parent.anchor;
+            d.comments.push({ anchor: anchor && anchor.text ? String(anchor.text) : '', body: payload.value.body });
+            setContent(key, renderClaudeDoc(d), d.filename);
+          } else if (d && action === 'update') {
+            let changed = false, unreplayed = false;
+            for (const op of (Array.isArray(payload.ops) ? payload.ops : [])) {
+              const ids = (op && op.target && op.target.ids) || [];
+              const content = op && op.with && op.with.from && op.with.from.content;
+              if (op && op.op === 'replace' && ids.length === 1 && Object.prototype.hasOwnProperty.call(d.idmap, ids[0]) && typeof content === 'string') {
+                d.contents[d.idmap[ids[0]]] = content;
+                changed = true;
+              } else unreplayed = true;
+            }
+            if (changed) setContent(key, renderClaudeDoc(d), d.filename);
+            if (unreplayed && !d.warned && errorCollector) {
+              d.warned = true;
+              errorCollector.addWarning('claude_doc_unreplayed', d.filename,
+                'An edit to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.',
+                { path: key, note: d.url ? `Open the live document: ${d.url}` : 'Open the document on claude.ai.' });
+            }
           }
         }
       } else if (isBashTool(block.name)) {
@@ -697,7 +831,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, HEREDOC_RE, heredocFiles,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, HEREDOC_RE, heredocFiles,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject,
   };
 }

@@ -380,7 +380,7 @@ const ctxFor = (data, extra = {}) => {
   }
   const plain = {};
   for (const k of Object.keys(artifacts)) plain[k] = artifacts[k];
-  return Object.assign({ folder: '', artifacts: plain, artifactIndex, deliveries, heredocs: popup.fn('heredocFiles') }, extra);
+  return Object.assign({ folder: '', artifacts: plain, artifactIndex, deliveries, heredocs: popup.fn('heredocFiles'), docKey: popup.fn('claudeDocKey') }, extra);
 };
 const cardsOf = (chat, id) => chat.messages.find(m => m.id === id).blocks.filter(b => b.t === 'card');
 const fileOf = (chat, card) => chat.files[card.file];
@@ -912,6 +912,21 @@ test('buildViewerChat marks a file shared when Claude sent, presented, saved to 
   const chat = buildViewerChat(data, ctxFor(data));
   const shared = Object.fromEntries(Object.values(chat.files).map(f => [f.name, f.shared]));
   assert.deepStrictEqual(shared, { 'build.py': false, 'page.html': true, 'report.md': true, 'Doc.md': true });
+});
+
+test('a Claude Docs document gets a card, as an output', () => {
+  const { docTools } = require('./helpers');
+  const t = docTools();
+  const data = { uuid: 'c', name: 'c', current_leaf_message_uuid: 'a', chat_messages: [
+    { uuid: 'h', parent_message_uuid: null, sender: 'human', created_at: '2026-01-01T00:00:00Z', content: [{ type: 'text', text: 'go' }] },
+    { uuid: 'a', parent_message_uuid: 'h', sender: 'assistant', created_at: '2026-01-01T00:00:01Z', content: [t.batch, t.batchResult, t.update('u1', 'sess.10', '## Alpha'), t.result('u1', '{}')] },
+  ] };
+  const chat = buildViewerChat(data, ctxFor(data));
+  const files = Object.values(chat.files);
+  assert.deepStrictEqual(files.map(f => [f.name, f.kind, f.shared]), [['Lorber_Notes.md', 'md', true]]);
+  assert.ok(files[0].versions[0].text.includes('## Alpha'));
+  assert.strictEqual(chat.messages.find(m => m.id === 'a').blocks.filter(b => b.t === 'card').length, 1, 'one card for the document');
+  assert.deepStrictEqual(chat.messages.find(m => m.id === 'a').blocks.filter(b => b.t === 'tool').map(b => b.label), ['Created a document', 'Edited the document']);
 });
 
 test('countTerms counts every occurrence of any term, longest first, without overlaps', () => {

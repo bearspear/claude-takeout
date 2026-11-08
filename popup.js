@@ -90,6 +90,9 @@ class ExportErrorCollector {
       case 'viewer':
         return 'The chat data is all in this export. Only viewer.html is missing or incomplete; the Markdown files are unaffected.';
 
+      case 'claude_doc_unreplayed':
+        return 'Claude edited this Claude Docs document in a way the export can\'t rebuild from the chat. The exported .md and .html hold what could be rebuilt; open the live document on claude.ai (link in the note) for the current version.';
+
       default:
         return 'Check original.json for the raw conversation data that may contain this content.';
     }
@@ -293,6 +296,68 @@ async function addArtefactBlob(folder, artifacts, filename, blob) {
 
 // An upload's text for the viewer. A failure here must never touch the export,
 // so it only ever costs the preview. content: a Blob, or a string from JSON.
+// A Claude Docs document as one self-contained page to read, print or share. Raw HTML in the Markdown is
+// shown as text, and only web and mail links and https images are kept; the page's CSP allows no
+// script at all, so nothing in it can run.
+const escapeHtmlText = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+let docMarked = null;
+function claudeDocHtml(title, markdown) {
+  if (!docMarked) {
+    docMarked = new marked.Marked({
+      gfm: true,
+      renderer: {
+        html(raw, block) { return block ? `<p>${escapeHtmlText(raw.trimEnd())}</p>` : escapeHtmlText(raw); },
+        link(href, linkTitle, text) {
+          if (!/^(https?:|mailto:|#)/i.test(String(href || '').trim())) return text;
+          return `<a href="${escapeHtmlText(href)}"${linkTitle ? ` title="${escapeHtmlText(linkTitle)}"` : ''} rel="noopener noreferrer">${text}</a>`;
+        },
+        image(href, imageTitle, text) {
+          if (!/^https:/i.test(String(href || '').trim())) return escapeHtmlText(text || '');
+          return `<img src="${escapeHtmlText(href)}" alt="${escapeHtmlText(text || '')}"${imageTitle ? ` title="${escapeHtmlText(imageTitle)}"` : ''}>`;
+        },
+      },
+    });
+  }
+  const body = docMarked.parse(String(markdown || ''));
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data:">
+<title>${escapeHtmlText(title)}</title>
+<style>
+:root { --bg: #faf9f6; --ink: #1f1e1c; --soft: #4a4844; --mute: #77736b; --line: #e3dfd6; --card: #fff; --accent: #b4552d; }
+@media (prefers-color-scheme: dark) { :root { --bg: #1d1c1a; --ink: #ecebe6; --soft: #cfcdc6; --mute: #9b978e; --line: #3a3833; --card: #262522; --accent: #e08a5f; } }
+html { background: var(--bg); }
+body { margin: 0; color: var(--ink); font: 17px/1.65 Georgia, "Iowan Old Style", "Times New Roman", serif; }
+main { max-width: 720px; margin: 0 auto; padding: 48px 20px 80px; }
+h1, h2, h3, h4 { font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; line-height: 1.3; }
+h1 { font-size: 30px; margin: 0 0 .4em; }
+h2 { font-size: 21px; margin: 1.8em 0 .5em; }
+h3 { font-size: 17px; margin: 1.5em 0 .4em; }
+p, ul, ol, table, blockquote, pre { margin: 0 0 1em; }
+a { color: var(--accent); }
+blockquote { margin-left: 0; padding-left: 16px; border-left: 3px solid var(--line); color: var(--soft); }
+code { font: 14px/1.5 ui-monospace, Menlo, Consolas, monospace; background: var(--card); border: 1px solid var(--line); border-radius: 4px; padding: 1px 4px; }
+pre { background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; overflow-x: auto; }
+pre code { border: 0; padding: 0; background: none; }
+table { border-collapse: collapse; width: 100%; font-size: 15px; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+th { background: var(--card); font-family: -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+hr { border: 0; border-top: 1px solid var(--line); margin: 2em 0; }
+img { max-width: 100%; }
+@media print { html, body { background: #fff; color: #000; } main { max-width: none; padding: 0; } a { color: inherit; } h2, h3 { break-after: avoid; } tr, pre, blockquote { break-inside: avoid; } }
+</style>
+</head>
+<body>
+<main>
+${body}</main>
+</body>
+</html>
+`;
+}
+
 async function viewerUploadText(name, content) {
   try {
     if (!isTextFile(name)) return null;
@@ -2153,6 +2218,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // folders are kept apart as <base>_2<ext>.
   const replayIsOff = (name) => errorCollector.warnings.some((w) =>
     (w.type === 'str_replace_failed' || w.type === 'artifact_opaque_mutation') && w.filename === name);
+  const docHtmlNames = new Set();  // lowercase names of the Claude Docs .html pages written
   const presentedNames = {};  // presented path -> its name in artefacts/
   const presentedFrom = {};   // name in artefacts/ -> the presented path that took it
   for (let i = 0; i < presentedFiles.length; i++) {
@@ -2222,6 +2288,22 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         urlsTried: err.urlsTried || [],
         httpStatus: err.httpStatus || null
       });
+    }
+  }
+
+  // Each Claude Docs document also gets a standalone .html beside its .md, from its final state.
+  for (const [key, entry] of Object.entries(artifactIndex)) {
+    if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
+    const markdown = artifacts[entry.filename];
+    const base = entry.filename.replace(/\.md$/, '');
+    let htmlName = `${base}.html`;
+    for (let n = 1; Object.prototype.hasOwnProperty.call(artifacts, htmlName) || docHtmlNames.has(htmlName.toLowerCase()); n++) htmlName = `${base}_doc${n > 1 ? `_${n}` : ''}.html`;
+    docHtmlNames.add(htmlName.toLowerCase());
+    const title = ((/^#\s+(.+)$/m.exec(markdown) || [])[1] || base).trim();
+    try {
+      folder.file(`artefacts/${htmlName}`, claudeDocHtml(title, markdown));
+    } catch (err) {
+      console.warn(`Could not write ${htmlName}:`, err.message);
     }
   }
 
@@ -2604,6 +2686,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       uploads: viewerUploads,
       deliveries: buildViewerDeliveries(savedDeliveries),
       heredocs: heredocFiles,
+      docKey: claudeDocKey,
       project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions, CTViewer.TEXT_EMBED_LIMIT)
     });
   } catch (err) {
@@ -3006,6 +3089,28 @@ function convertToMarkdown(data, options = {}) {
               }
             }
 
+          } else if (claudeDocsAction(toolName)) {
+            // Claude Docs: the document itself, not its tool calls.
+            const action = claudeDocsAction(toolName);
+            const create = action === 'batch' && input.container && input.container.create;
+            if (create && create.doc) {
+              const title = String(create.name || 'Document');
+              const filename = `${title.replace(/[^a-zA-Z0-9_\-\s]/g, '').replace(/\s+/g, '_').substring(0, 60) || 'Document'}.md`;
+              lines.push(`\n**Document: ${title}** (Claude Docs; [artefacts/${filename}](artefacts/${encodeURIComponent(filename)}))\n`);
+              const content = artifacts[filename];
+              if (embedArtifacts && typeof content === 'string') {
+                if (seamlessMd) {
+                  lines.push('\n---\n', content, '\n---\n');
+                } else {
+                  const fence = getCodeFence(content);
+                  lines.push(`${fence}markdown`, content, fence, '');
+                }
+              }
+            } else if (action === 'create') {
+              const payload = (() => { try { return typeof input.payload === 'string' ? JSON.parse(input.payload) : input.payload; } catch (e) { return null; } })();
+              const body = payload && payload.value && payload.value.body;
+              if (body) lines.push(`> **Comment on the document:** ${body}`, '');
+            }
           } else {
             // Other tool use - show concisely
             const inputStr = JSON.stringify(input, null, 2);
@@ -3020,7 +3125,9 @@ function convertToMarkdown(data, options = {}) {
         } else if (block.type === 'tool_result') {
           const toolName = block.name || '';
 
-          if (toolName === 'web_search' && Array.isArray(block.content)) {
+          if (claudeDocsAction(toolName)) {
+            // Claude Docs results are acknowledgements for Claude, not part of the conversation.
+          } else if (toolName === 'web_search' && Array.isArray(block.content)) {
             // Format web search results nicely
             for (const result of block.content) {
               if (result.type === 'knowledge') {
