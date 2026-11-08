@@ -462,6 +462,8 @@ function chatFromDisk(archive, chat) {
     heredocs: core.heredocFiles,
     docKey: core.claudeDocKey,
     project,
+    // An older export's viewer had no badges; its errors.txt still names the files that may not match.
+    flags: core.viewerFlags(core.warningsFromReport(readText(path.join(chat.dir, 'errors.txt')))),
   });
   return { viewerChat, missing, warnings };
 }

@@ -1,6 +1,6 @@
 # Claude Takeout - Technical Documentation
 
-How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.22.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.23.
 
 This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
@@ -302,7 +302,7 @@ Every export includes `viewer.html`, a single page that shows the chats as they 
 
 **Building it.** `takeout-viewer.js` (`CTViewer`) holds the data contract:
 
-- `buildViewerChat` turns one payload into the viewer's shape: every branch, rendered tool calls, file versions, uploads, the project.
+- `buildViewerChat` turns one payload into the viewer's shape: every branch, rendered tool calls, file versions, uploads, the project. A file named in `ctx.flags` (`viewerFlags` over the export's warnings; the old-archive tool gets them from `errors.txt` with `warningsFromReport`) gets `flag`, and the viewer shows a "May not match" badge on its cards, a note in the Files list and an explanation in the file panel.
 - `buildViewerData` gathers the chats and stores each distinct project once in `data.projects`; a chat's `project` is an index into it. Projects are grouped by a cheap key, then compared in full only within a group.
 - `moveUploadText` moves upload text, and generated-file version text other than stylesheets and scripts, over `UPLOAD_INLINE_LIMIT` (64 KB of UTF-8) into parts of at most `PART_LIMIT` (4 MB). Each part is `viewer-files/part-NNNN.js`, which calls `window.__archivePart(n, { u0: text, f0: text, ... })`. When a part can't load, an upload or a file version falls back to its own copy in `uploads/` or `artefacts/`, when there is one.
 - `assembleViewer` inlines the template, the data (`<script id="data">`), the app, `marked`, KaTeX and highlight.js into one HTML string. `writeViewer` in `popup.js` adds it to the ZIP.

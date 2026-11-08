@@ -4,7 +4,7 @@ Candidate features for Claude Takeout after v1.6.12, with the problem each solve
 
 **Size:** S is one PR of about a day, M is one or two PRs, L is several PRs with a written design first.
 
-**Shipped since this list was written** (not on it, but the same kind of work): grouped and ranked search with operators (v1.6.13), the Files list in each chat's top bar (v1.6.14), and the in-chat "match N of M" bar (v1.6.15). From this list: the export health check (v1.6.22).
+**Shipped since this list was written** (not on it, but the same kind of work): grouped and ranked search with operators (v1.6.13), the Files list in each chat's top bar (v1.6.14), and the in-chat "match N of M" bar (v1.6.15). From this list: the export health check (v1.6.22) and warning badges in the viewer (v1.6.23).
 
 ## Recommended order
 

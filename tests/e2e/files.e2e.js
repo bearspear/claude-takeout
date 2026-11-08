@@ -36,6 +36,7 @@ const empty = {
   fs.writeFileSync(path.join(dir, VIEWER_CHECK_FILE), Buffer.from(VIEWER_CHECK_BASE64, 'base64'));
   fs.writeFileSync(file, buildHtml([withFiles(), empty], '2026-11-08T12:00:00Z', c => (c.uuid !== 'f' ? {} : {
     artifacts: { 'build.py': 'print(1)', 'minutes_v1.md': '# Minutes v1', 'minutes_v2.md': '# Minutes v2', 'minutes.md': '# Minutes v2', 'agenda.md': '# Agenda' },
+    flags: { 'agenda.md': 'script' },
     artifactIndex: {
       '/home/claude/build.py': { path: '/home/claude/build.py', filename: 'build.py', versions: ['build.py'], messages: ['a1'] },
       '/mnt/user-data/outputs/minutes.md': { path: '/mnt/user-data/outputs/minutes.md', filename: 'minutes.md', versions: ['minutes_v1.md', 'minutes_v2.md'], messages: ['a1', 'a2'] },
@@ -91,6 +92,17 @@ const empty = {
   await page.waitForSelector('.pop');
   check('a paste opens in the popup', (await page.textContent('.pop .pop-body')) === 'pasted agenda\nline two');
   await page.keyboard.press('Escape');
+
+  // A file whose export warned that it may not match what Claude made carries a badge everywhere it shows.
+  const agendaCard = page.locator('.msg[data-id="a1"] .art', { hasText: 'agenda.md' });
+  check('a flagged file\'s card has a badge', (await agendaCard.locator('.flag').textContent()) === 'May not match' && (await page.locator('.art .flag').count()) === 1);
+  await button.click();
+  check('the Files list notes it', /may not match/.test(await menu.locator('.files-row', { hasText: 'agenda.md' }).textContent()));
+  await page.keyboard.press('Escape');
+  await agendaCard.click();
+  await page.waitForSelector('#panel:not([hidden])');
+  check('the panel explains it and names replay_bash.py', /may not match what Claude made/.test(await page.textContent('#panel-body .flag-note')) && /replay_bash\.py/.test(await page.textContent('#panel-body .flag-note')));
+  await page.click('#panel .close');
 
   // Keyboard: Tab out closes the list; a file opened from it takes focus to the panel and back.
   await button.click();

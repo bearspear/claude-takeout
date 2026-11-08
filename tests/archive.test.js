@@ -1933,3 +1933,12 @@ test('upload names that differ only in case are matched as the export names them
   const got = chatFromDisk(archive, chat);
   assert.deepStrictEqual(got.missing, []);
 });
+
+test('an old archive\'s errors.txt flags its files in the viewer', () => {
+  const data = { uuid: 'u', current_leaf_message_uuid: 'a', chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant',
+    content: [{ type: 'tool_use', id: '1', name: 'create_file', input: { path: '/h/page.html', file_text: 'x' } }] }] };
+  const { dir, archive, chat } = chatDir(data);
+  put(dir, 'errors.txt', '﻿## Warnings\n\n### page.html\n\n- **Type:** artifact opaque mutation\n\n---\n\n## Troubleshooting Guide\n');
+  const files = Object.values(chatFromDisk(archive, chat).viewerChat.files);
+  assert.deepStrictEqual(files.map(f => [f.name, f.flag]), [['page.html', 'script']]);
+});
