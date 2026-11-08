@@ -42,6 +42,19 @@ class Paths(unittest.TestCase):
     def test_clean(self):self.assertEqual(rb.clean('a\x1b[2Jb\tc'),'a?[2Jb\tc')
 @unittest.skipUnless(HAS_SANDBOX, 'needs sandbox-exec')
 class Replay(unittest.TestCase):
+    def test_literal_v1_name_kept_apart(self):
+        # report.html edited over two turns, then Claude saves report_v1.html itself. The exporter
+        # writes that one as report_v1_2.html, so a bash change to it must land there.
+        turns=[[cf('/home/claude/report.html','A')],[sr('/home/claude/report.html','A','B')],[cf('/home/claude/report_v1.html','OTHER')],[sh('echo X > /home/claude/report_v1.html')]]
+        msgs=[];parent=None
+        for i,blocks in enumerate(turns):
+            msgs+=[{'uuid':f'h{i}','parent_message_uuid':parent,'sender':'human','content':[]},{'uuid':f'a{i}','parent_message_uuid':f'h{i}','sender':'assistant','content':blocks}];parent=f'a{i}'
+        d=export([],{'report.html':b'B','report_v1.html':b'A','report_v2.html':b'B','report_v1_2.html':b'OTHER'})
+        (d/'original.json').write_text(json.dumps({'current_leaf_message_uuid':parent,'chat_messages':msgs}))
+        r=run(d)
+        self.assertEqual((d/'artefacts/report_v1_2.html').read_text(),'X\n',r.stdout+r.stderr)
+        self.assertEqual((d/'artefacts/report_v1.html').read_text(),'A')
+        self.assertEqual((d/'artefacts/report.html').read_text(),'B')
     def test_order_edit_after_script(self):
         d=export([cf(P,'one'),sh("sed -i '' s/one/two/ /home/claude/a.html"),sr(P,'two','three')],{'a.html':b'one'})
         r=run(d);self.assertEqual((d/'artefacts/a.html').read_text(),'three',r.stdout+r.stderr)
@@ -89,8 +102,12 @@ class Replay(unittest.TestCase):
         (d/'original.json').write_text(json.dumps(data))
         r=run(d);self.assertEqual((d/'artefacts/a.html').read_text(),'from upload',r.stdout+r.stderr)
     def test_versioned_too(self):
-        d=export([cf(P,'o'),sh('echo n > /home/claude/a.html')],{'a.html':b'o','a_v2.html':b'o'})
-        run(d);self.assertEqual((d/'artefacts/a_v2.html').read_text(),'n\n')
+        # Two turns give a_v1 and a_v2; a later bash change lands in a.html and the last version.
+        msgs=[{'uuid':'h0','parent_message_uuid':None,'sender':'human','content':[]},{'uuid':'a0','parent_message_uuid':'h0','sender':'assistant','content':[cf(P,'o')]},
+              {'uuid':'h1','parent_message_uuid':'a0','sender':'human','content':[]},{'uuid':'a1','parent_message_uuid':'h1','sender':'assistant','content':[sr(P,'o','p'),sh('echo n > /home/claude/a.html')]}]
+        d=export([],{'a.html':b'p','a_v1.html':b'o','a_v2.html':b'p'})
+        (d/'original.json').write_text(json.dumps({'current_leaf_message_uuid':'a1','chat_messages':msgs}))
+        run(d);self.assertEqual((d/'artefacts/a_v2.html').read_text(),'n\n');self.assertEqual((d/'artefacts/a.html').read_text(),'n\n');self.assertEqual((d/'artefacts/a_v1.html').read_text(),'o')
     def test_utf8_sig_json(self):
         d=export([sh('true')],{});(d/'original.json').write_bytes(b'\xef\xbb\xbf'+(d/'original.json').read_bytes())
         self.assertEqual(run(d).returncode,0)

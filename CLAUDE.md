@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.6.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.7.
 
 ---
 
@@ -143,7 +143,7 @@ The user can regenerate a response, producing a tree. `current_leaf_message_uuid
 | `create_file` | `path`, `file_text`, `description` | Initializes artifact state at `input.path`; emits new version. |
 | `str_replace` | `path`, `old_str`, `new_str` | Replays edit against current state (single-match semantics); emits a `str_replace_failed` warning on 0 or >1 matches. |
 | `rewrite` / `create_or_overwrite` | `path`, `file_text` or `content` | Defensive — overwrites artifact state; emits new version. |
-| `artifacts` (cmd: `create`/`update`) | `id`, `title`, `type`, `content`, `command` | Keyed by `artifact:<id-or-title>`. Filename = sanitized(title or id) + `typeToExt[type]` (fallback `.txt`). |
+| `artifacts` (cmd: `create`/`update`/`rewrite`) | `id`, `title`, `type`, `content`, `command`, `old_str`, `new_str` | Keyed by `artifact:<id-or-title>`. Filename = sanitized(title or id) + `typeToExt[type]` (fallback `.txt`). `create`, `rewrite` and an `update` with `content` set the text; an `update` with `old_str`/`new_str` is replayed like `str_replace`. |
 | `bash_tool` (heredoc) | `command` matching `cat > <path> << DELIM ... DELIM`, any delimiter (`HEREDOC_RE`) | Treated as create_file. |
 | `present_files` | `filepaths[]` | In `convertToMarkdown`, looked up in the `artifacts` map for inline embedding. *Caveat:* with edited artifacts, lookup resolves to the FINAL versioned state, not the state at the moment of presentation. Acceptable trade-off; the per-turn versioned files exist on disk for cases where the precise moment matters. |
 | `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Same replay as `create_file` / `str_replace`. Newer conversations use these names. |
@@ -175,7 +175,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 6. Emit:
    - `versions.length <= 1` → only `<base><ext>` (the single content).
    - Else → `<base>_v1<ext>` … `<base>_vN<ext>` + `<base><ext>` = final state.
-7. Disambiguate basename collisions across distinct keys: append `_2`, `_3`, … and emit `artifact_basename_collision` warning.
+7. Disambiguate collisions across distinct keys: each artifact claims every name it writes (`<base><ext>` and, when versioned, each `<base>_vN<ext>`). If any is taken, by another path with the same basename or by a file Claude itself named `report_v1.html`, append `_2`, `_3`, … to the base and emit `artifact_basename_collision`. `extract_artifacts.py` fills an optional `names` dict with the result, and `replay_bash.py` uses it to write to the same files.
 
 **Why per-turn (not per-edit):** matches the natural "Claude finished editing for now" boundary. The bug-fixture conversation has 11 `str_replace` calls split across two assistant turns; per-turn gives 2 useful intermediate versions, per-edit would give 12 noisy ones. If a user requests per-edit later, the snapshot loop is the only place to change.
 
@@ -288,7 +288,7 @@ The exporter handles three classes of artifact mutation:
 
 The CLI does what the extension can't safely do: runs Claude's actual scripts in a tmpdir with `/home/claude`, `/mnt/user-data`, `/tmp` and `/root/.claude` path-rewritten into it, with per-command confirmation. Commands are untrusted: `sandbox_profile` applies a deny-by-default `sandbox-exec` profile, `sandbox_path` rejects paths and symlinks leaving the tmpdir, and `command_env` keeps tokens out. Never weaken these without saying so in `USAGE.md`. See `docs/WASM_REPLAY_APPROACH.md` for the architectural reasoning (we briefly shipped JS regex-based recipe matchers, then removed them once the CLI proved more reliable and covered more cases).
 
-If you change the opaque-mutation detector's heuristics: keep them tight. The signal it produces is the only thing pointing users at the CLI, and a missed signal means a silently-incomplete export.
+The detector checks Python writes (`open(p, 'w'|'a'|'x'|'r+', ...)`, `Path(p).write_text/bytes`) on the whole command, and shell writes per simple command (`shellSegments`, which respects quotes): redirects, `sed`/`perl` in place, `tee`, `cp`/`mv`/`install` onto the file, `dd of=`. If you change the opaque-mutation detector's heuristics: keep them tight. The signal it produces is the only thing pointing users at the CLI, and a missed signal means a silently-incomplete export.
 
 ## 11. Error reporting (`ExportErrorCollector`)
 
@@ -344,7 +344,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.6. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.7. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 

@@ -456,6 +456,31 @@ const HEREDOC_HEADER_RE = /cat\s+>\s+\S+\s+<<-?\s*['"]?\w+['"]?/g;
 // shell + Python coverage; the extension's job is to flag what it can't
 // handle, not to second-guess it. See docs/WASM_REPLAY_APPROACH.md for the
 // architectural reasoning.
+// A shell command split into simple commands at newlines, ;, &&, || and |, but not
+// inside quotes, so a sed script like 's/a;b/c/' stays whole.
+function shellSegments(command) {
+  const segments = [];
+  let current = '';
+  let quote = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      else if (ch === '\\' && quote === '"' && i + 1 < command.length) { current += ch + command[++i]; continue; }
+      current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
+    if (ch === '\\' && i + 1 < command.length) { current += ch + command[++i]; continue; }
+    const two = command.slice(i, i + 2);
+    if (two === '&&' || two === '||') { segments.push(current); current = ''; i++; continue; }
+    if (ch === '\n' || ch === ';' || ch === '|') { segments.push(current); current = ''; continue; }
+    current += ch;
+  }
+  segments.push(current);
+  return segments;
+}
+
 function detectOpaqueMutations(data, errorCollector) {
   const messages = getMessageChain(data);
   const basenameOf = (p) => (p || '').split('/').pop();
@@ -536,26 +561,41 @@ function detectOpaqueMutations(data, errorCollector) {
           aliasVars.length > 0;
         if (!referenced) continue;
 
-        // Write-back patterns. Python literal-string open() accepts the
-        // full path or the basename; the variable form accepts any
-        // aliasing variable name.
-        const pyOpenStrRe = new RegExp(
-          "open\\(\\s*['\"](?:" + escapedPath + "|" + escapedBase + ")['\"]\\s*,\\s*['\"][wa][b]?\\+?['\"]\\s*\\)"
+        // Write-back patterns, against the full path or the basename (not as part of a
+        // longer name) or an aliasing variable.
+        const lit = "['\"](?:" + escapedPath + "|" + escapedBase + ")['\"]";
+        const target = aliasVars.length > 0
+          ? "(?:" + lit + "|" + aliasVars.map(v => '\\b' + v + '\\b').join('|') + ")"
+          : lit;
+        // Python: open(p, 'w' / 'a' / 'x' / 'r+' ..., encoding=...) and Path(p).write_text(...).
+        const pyWriteRe = new RegExp(
+          "open\\(\\s*" + target + "\\s*,\\s*(?:mode\\s*=\\s*)?['\"](?:[wax][bt]?\\+?|r[bt]?\\+)['\"]" +
+          "|Path\\(\\s*" + target + "\\s*\\)\\s*\\.write_(?:text|bytes)\\s*\\("
         );
-        const pyOpenVarRe = aliasVars.length > 0
-          ? new RegExp(
-              "open\\(\\s*(?:" + aliasVars.map(v => '\\b' + v + '\\b').join('|') + ")\\s*,\\s*['\"][wa][b]?\\+?['\"]\\s*\\)"
-            )
-          : null;
-        // Shell redirects and sed -i, against full path or basename.
-        const shellRe = new RegExp(
-          "(?:>>?\\s*['\"]?(?:" + escapedPath + "|" + escapedBase + ")['\"]?)" +
-          "|(?:sed\\s+-i[^\\n]*\\s(?:" + escapedPath + "|" + escapedBase + "))"
+        const names = new Set([ap, basename]);
+        const isTarget = (word) => names.has(word.replace(/^['"]|['"]$/g, ''));
+        // Shell, one simple command at a time: a redirect into the file, sed/perl
+        // in place, tee, or cp/mv/install onto it.
+        const redirectRe = new RegExp(
+          ">>?\\s*['\"]?(?:" + escapedPath + "|(?<![\\w./-])" + escapedBase + ")['\"]?(?![\\w.-])"
         );
+        const shellWrites = shellSegments(command).some((segment) => {
+          if (redirectRe.test(segment)) return true;
+          const words = segment.trim().split(/\s+/).filter(Boolean);
+          if (words[0] === 'sudo') words.shift();
+          const tool = words[0];
+          const args = words.slice(1);
+          if (tool === 'sed' || tool === 'perl') {
+            const inPlace = args.some((w) => /^-[a-zA-Z]*i/.test(w) || w.startsWith('--in-place'));
+            return inPlace && args.some(isTarget);
+          }
+          if (tool === 'tee') return args.some(isTarget);
+          if (tool === 'cp' || tool === 'mv' || tool === 'install') return args.length > 1 && isTarget(args[args.length - 1]);
+          if (tool === 'dd') return args.some((w) => w.startsWith('of=') && isTarget(w.slice(3)));
+          return false;
+        });
 
-        if (pyOpenStrRe.test(command) ||
-            (pyOpenVarRe && pyOpenVarRe.test(command)) ||
-            shellRe.test(command)) {
+        if (pyWriteRe.test(command) || shellWrites) {
           opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command: rawCommand });
           break;
         }
@@ -978,53 +1018,34 @@ function extractBlobContent(data, blobPath) {
     }
   }
 
-  const normalizedBlobPath = normalizePathForComparison(blobPath);
-  // Also extract just the filename part for looser matching
-  const blobFilename = blobPath.split('/').pop();
-  const normalizedFilename = normalizePathForComparison(blobFilename);
-
+  // view results: only a whole-file read of this very file counts. The header names the
+  // file; the sandbox may have renamed odd characters to _, so compare basenames with
+  // punctuation removed. A directory listing has no such header, and a view_range read
+  // is only part of the file.
+  const wanted = normalizePathForComparison(blobName);
+  const viewInputs = {};
+  for (const msg of messages) {
+    for (const block of (msg.content || [])) {
+      if (block.type === 'tool_use' && block.name === 'view' && block.id) viewInputs[block.id] = block.input || {};
+    }
+  }
   for (const msg of messages) {
     for (const item of (msg.content || [])) {
-      // Look for tool_result from "view" that read this file
-      if (item.type === 'tool_result' && item.name === 'view') {
-        for (const content of (item.content || [])) {
-          if (content.type === 'text' && content.text) {
-            // Check if this tool result is for our file
-            // The text starts with "Here's the content of {path} with line numbers:"
-            // Try multiple matching strategies
-            const normalizedText = normalizePathForComparison(content.text.substring(0, 500));
-
-            if (content.text.includes(blobPath) ||
-                normalizedText.includes(normalizedBlobPath) ||
-                normalizedText.includes(normalizedFilename)) {
-              // Extract the sanitized filename from the view tool header
-              const headerMatch = content.text.match(/^Here's the content of ([^\s]+) with line numbers:/);
-              const viewFilename = headerMatch ? headerMatch[1].split('/').pop() : blobFilename;
-
-              // Extract the actual content (skip the header line and line numbers)
-              const lines = content.text.split('\n');
-              // Find where the actual content starts (after "Here's the content of...")
-              let startIdx = 0;
-              for (let i = 0; i < lines.length; i++) {
-                if (lines[i].match(/^\s*\d+\t/)) {
-                  startIdx = i;
-                  break;
-                }
-              }
-              // Remove line number prefixes and reconstruct content
-              const contentLines = lines.slice(startIdx).map(line => {
-                // Format is "    123\tActual content here"
-                const match = line.match(/^\s*\d+\t(.*)$/);
-                return match ? match[1] : line;
-              });
-              // Apply mojibake fix to repair encoding issues
-              return {
-                content: fixMojibake(contentLines.join('\n')),
-                filename: viewFilename
-              };
-            }
-          }
-        }
+      if (item.type !== 'tool_result' || item.name !== 'view' || item.is_error) continue;
+      const input = item.tool_use_id ? viewInputs[item.tool_use_id] : null;
+      if (input && input.view_range != null) continue;
+      for (const content of (item.content || [])) {
+        if (content.type !== 'text' || !content.text) continue;
+        const header = content.text.match(/^Here's the content of (.+?) with line numbers:\n/);
+        if (!header) continue;
+        const viewPath = header[1];
+        const viewFilename = viewPath.split('/').pop();
+        if (viewPath !== blobPath && normalizePathForComparison(viewFilename) !== wanted) continue;
+        const lines = content.text.split('\n').slice(1).map((line) => {
+          const match = line.match(/^\s*\d+\t(.*)$/);
+          return match ? match[1] : line;
+        });
+        return { content: fixMojibake(lines.join('\n')), filename: viewFilename };
       }
     }
   }
@@ -1361,6 +1382,14 @@ function markdownToPlainText(markdown) {
   // Remove BOM if present
   text = text.replace(/^\uFEFF/, '');
 
+  // Code is kept exactly as written: fenced blocks and inline code are set aside
+  // before any Markdown markers are stripped, and put back at the end.
+  const kept = [];
+  const keep = (value) => `\uE000${kept.push(value) - 1}\uE001`;
+  text = text.replace(/^(`{3,})[^\n`]*\n([\s\S]*?)\n?^\1[ \t]*$/gm, (match, fence, code) =>
+    keep('\n' + '-'.repeat(80) + '\n' + code.replace(/^\n+|\s+$/g, '') + '\n' + '-'.repeat(80) + '\n'));
+  text = text.replace(/`([^`\n]+)`/g, (match, code) => keep(code));
+
   // Remove HTML comments
   text = text.replace(/<!--[\s\S]*?-->/g, '');
 
@@ -1382,14 +1411,6 @@ function markdownToPlainText(markdown) {
   text = text.replace(/__(.+?)__/g, '$1');         // bold
   text = text.replace(/_(.+?)_/g, '$1');           // italic
 
-  // Remove inline code backticks
-  text = text.replace(/`([^`]+)`/g, '$1');
-
-  // Convert code blocks to plain text with separators
-  text = text.replace(/```[\w]*\n([\s\S]*?)```/g, (match, code) => {
-    return '\n' + '-'.repeat(80) + '\n' + code.trim() + '\n' + '-'.repeat(80) + '\n';
-  });
-
   // Convert lists to simple format
   text = text.replace(/^\s*[-*+]\s+/gm, '  • ');
   text = text.replace(/^\s*\d+\.\s+/gm, '  ');
@@ -1405,6 +1426,8 @@ function markdownToPlainText(markdown) {
 
   // Clean up multiple blank lines (more than 2)
   text = text.replace(/\n{4,}/g, '\n\n\n');
+
+  text = text.replace(/\uE000(\d+)\uE001/g, (match, i) => kept[Number(i)]);
 
   // Remove leading/trailing whitespace
   text = text.trim();
@@ -2056,9 +2079,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
             fullContent.push(fence);
             fullContent.push('');
           }
-        } else if (toolName === 'artifacts' && (input.command === 'create' || input.command === 'update')) {
+        } else if (toolName === 'artifacts' && ['create', 'update', 'rewrite'].includes(input.command)) {
           const title = input.title || input.id || 'Untitled';
-          const action = input.command === 'update' ? 'Updating' : 'Creating';
+          const action = input.command === 'update' ? 'Updating' : input.command === 'rewrite' ? 'Rewriting' : 'Creating';
           const content = input.content || '';
           const type = input.type || 'text/plain';
           fullContent.push('```plaintext');
@@ -2866,9 +2889,9 @@ function convertToMarkdown(data, options = {}) {
             // Artifact creation/update via artifacts tool
             const title = input.title || input.id || 'Untitled';
             const command = input.command || 'create';
-            const action = command === 'update' ? 'Updating' : 'Creating';
+            const action = command === 'update' ? 'Updating' : command === 'rewrite' ? 'Rewriting' : 'Creating';
 
-            if (command === 'create' || command === 'update') {
+            if (command === 'create' || command === 'update' || command === 'rewrite') {
               if (embedArtifacts && input.content) {
                 // Embed the artifact content
                 const content = input.content;

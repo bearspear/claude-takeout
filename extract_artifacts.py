@@ -184,12 +184,15 @@ def sanitize_artifact_basename(label: str) -> str:
     return cleaned[:60]
 
 
-def extract_artifacts(data: dict, warnings: list[Warning]) -> dict[str, str]:
+def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict] = None) -> dict[str, str]:
     """Return {filename: content} including all per-turn versions.
 
-    Mirrors popup.js's extractArtifacts(). The returned dict contains
+    Mirrors extractArtifacts() in export-core.js. The returned dict contains
     versioned files (_v1, _v2, ...) for edited artifacts plus the unversioned
     final state. Single-version artifacts get only the unversioned file.
+
+    names, when given, is filled with {state key: {"filename": ..., "versions":
+    [...]}}, the file names each path was written under, as the JS index is.
     """
     messages = get_message_chain(data)
     failed_ids = failed_tool_use_ids(messages)
@@ -258,17 +261,32 @@ def extract_artifacts(data: dict, warnings: list[Warning]) -> dict[str, str]:
                 if path and file_text:
                     set_content(path, file_text, basename_of(path))
 
-            elif name == "artifacts" and inp.get("command") in ("create", "update"):
+            elif name == "artifacts" and inp.get("command") in ("create", "update", "rewrite"):
+                # create and rewrite carry the whole text; update carries the
+                # whole text or an old_str/new_str edit.
                 content = inp.get("content") or ""
                 aid = inp.get("id") or ""
                 title = inp.get("title") or ""
                 atype = inp.get("type") or "text/plain"
+                key = f"artifact:{aid or title}"
                 if content and (aid or title):
                     ext = TYPE_TO_EXT.get(atype, ".txt")
                     base = sanitize_artifact_basename(title or aid)
                     filename = base if base.endswith(ext) else base + ext
-                    key = f"artifact:{aid or title}"
                     set_content(key, content, filename)
+                elif inp.get("command") == "update" and (aid or title) and isinstance(inp.get("old_str"), str):
+                    s = state.get(key)
+                    if s is None:
+                        ok, reason = False, "no prior create_file for this path"
+                    else:
+                        ok, reason = apply_str_replace(s, inp.get("old_str"), inp.get("new_str") or "")
+                    if not ok:
+                        warnings.append(Warning(
+                            type="str_replace_failed",
+                            filename=s.basename if s else str(title or aid),
+                            message=f"artifact update skipped: {reason}",
+                            path=key,
+                        ))
 
             elif name in ("bash_tool", "Bash"):
                 command = inp.get("command") or ""
@@ -293,29 +311,42 @@ def extract_artifacts(data: dict, warnings: list[Warning]) -> dict[str, str]:
             s.versions.append(s.current)
             s.edited_this_turn = False
 
-    # Emit. Track basename collisions across distinct keys and disambiguate.
+    # Emit. Each artifact claims every name it writes (<base><ext>, plus
+    # <base>_vN<ext> when it has versions). If another artifact already holds
+    # any of them, this one becomes <base>_2<ext> and so on.
     artifacts: dict[str, str] = {}
     used: set[str] = set()
 
     for key, s in state.items():
         base, ext = split_ext(s.basename)
+
+        def names_for(b: str) -> list[str]:
+            if len(s.versions) <= 1:
+                return [b + ext]
+            return [b + ext] + [f"{b}_v{i}{ext}" for i in range(1, len(s.versions) + 1)]
+
         out_base = base
         collision = 0
-        while (out_base + ext) in used:
+        while any(n in used for n in names_for(out_base)):
             collision += 1
             out_base = f"{base}_{collision + 1}"
-        used.add(out_base + ext)
+        used.update(names_for(out_base))
         if collision > 0:
             warnings.append(Warning(
                 type="artifact_basename_collision",
                 filename=out_base + ext,
                 message=(
-                    f'Two distinct paths produced files with the same basename '
-                    f'"{base}{ext}". This artifact was renamed to '
+                    f'Another artifact already uses a file name that '
+                    f'"{base}{ext}" needs. This artifact was renamed to '
                     f'"{out_base}{ext}" to avoid overwriting.'
                 ),
                 path=key,
             ))
+        if names is not None:
+            names[key] = {
+                "filename": out_base + ext,
+                "versions": names_for(out_base)[1:] if len(s.versions) > 1 else [out_base + ext],
+            }
 
         if len(s.versions) <= 1:
             artifacts[out_base + ext] = s.versions[0] if s.versions else s.current

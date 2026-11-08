@@ -1,6 +1,6 @@
 # Claude Takeout - Technical Documentation
 
-How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.6.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.7.
 
 This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
@@ -127,7 +127,7 @@ Tools the exporter understands:
 | `str_replace` | `path`, `old_str`, `new_str` | Edits an artifact. |
 | `rewrite`, `create_or_overwrite` | `path`, `file_text` or `content` | Replaces an artifact. |
 | `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Newer names for the same two operations. |
-| `artifacts` | `command` (`create`, `update`), `id`, `title`, `type`, `content` | Older artifact tool, keyed `artifact:<id or title>`. |
+| `artifacts` | `command` (`create`, `update`, `rewrite`), `id`, `title`, `type`, `content`, `old_str`, `new_str` | Older artifact tool, keyed `artifact:<id or title>`. An `update` usually carries an `old_str`/`new_str` edit. |
 | `bash_tool` / `Bash` | `command` | A `cat > path << DELIM` heredoc counts as a file write. Other changes are flagged; see [bash mutations](#bash-mutations-and-replay_bashpy). |
 | `present_files` | `filepaths[]`; result has `local_resource` items | Files Claude showed the user; downloaded when replay didn't make them. |
 | `SendUserFile` | `files[]`; result has `file_deliveries[]` | Files Claude sent; downloaded by UUID. |
@@ -149,12 +149,12 @@ Tools the exporter understands:
 3. Skip file tools whose `tool_result` has `is_error`, since they changed nothing. Bash commands are never skipped, because a failed command can still have written its heredoc.
 4. Apply each call:
    - A write (`create_file`, `rewrite`, `Write`, `artifacts create|update`, heredoc) sets `current`.
-   - An edit (`str_replace`, `Edit`) needs `old_str` exactly once in `current`, as the real tool does. With 0 or more than 1 matches, the edit is skipped and a `str_replace_failed` warning is recorded. The warning is cleared if the file was later downloaded in its final state.
+   - An edit (`str_replace`, `Edit`, or an `artifacts` `update` with `old_str`) needs `old_str` exactly once in `current`, as the real tool does. With 0 or more than 1 matches, the edit is skipped and a `str_replace_failed` warning is recorded. The warning is cleared if the file was later downloaded in its final state.
 5. At the end of each message, every key edited in it gets a snapshot pushed onto `versions`.
 6. Write out:
    - one version → `<base><ext>`
    - several → `<base>_v1<ext>` … `<base>_vN<ext>`, plus `<base><ext>` holding the final state
-7. Two keys with the same basename get `_2`, `_3`, … and an `artifact_basename_collision` warning.
+7. Each key claims every name it writes, `<base><ext>` and its `_vN` names. If any is taken, by another key with the same basename or by a file literally named `report_v1.html`, the base gets `_2`, `_3`, … and an `artifact_basename_collision` warning.
 
 Snapshots are per turn, not per edit, because a turn is where Claude has "finished editing for now". A chat with 11 edits over 2 turns gives 2 useful versions instead of 12.
 
@@ -183,7 +183,7 @@ Text pasted into a prompt arrives with its text in `extracted_content`. `extract
 3. The same with the filename sanitized the way the sandbox does it (non-alphanumerics become `_`).
 4. By file UUID: `/api/organizations/<org>/files/<uuid>/contents`, then older shapes (`/api/<org>/files/<uuid>/preview`, `/content`, `/api/organizations/<org>/files/<uuid>/content`, and the bare file URL).
 
-If all fail, `extractBlobContent` looks for a `view` result where Claude read the file and rebuilds its text by stripping the line numbers. A file Claude never read and that the API no longer serves is lost; it is recorded as an `upload` error.
+If all fail, `extractBlobContent` looks for a full read of that file in the chat: a `Read` without offset or limit, or a `view` without `view_range` whose header names the file (the sandbox may have replaced odd characters with `_`). It rebuilds the text by stripping the line numbers. Directory listings and partial reads are never used. A file Claude never read and that the API no longer serves is lost; it is recorded as an `upload` error.
 
 Binary files keep their bytes. `isTextFile` decides by extension, and only text files are decoded. Decoding a PDF as text destroys it.
 

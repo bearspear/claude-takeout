@@ -303,18 +303,31 @@ function extractArtifacts(data, errorCollector = null, index = null) {
         if (path && fileText) {
           setContent(path, fileText, basenameOf(path));
         }
-      } else if (block.name === 'artifacts' && (input.command === 'create' || input.command === 'update')) {
+      } else if (block.name === 'artifacts' && ['create', 'update', 'rewrite'].includes(input.command)) {
+        // create and rewrite carry the whole text. update carries either the whole text or,
+        // as claude.ai's artifacts tool usually sent it, an old_str/new_str edit.
         const content = input.content || '';
         const id = input.id || '';
         const title = input.title || '';
         const type = input.type || 'text/plain';
+        const key = `artifact:${id || title}`;
 
         if (content && (id || title)) {
           const ext = typeToExt[type] || '.txt';
           let baseName = (title || id).replace(/[^a-zA-Z0-9_\-\s]/g, '').replace(/\s+/g, '_').substring(0, 60);
           const filename = baseName.endsWith(ext) ? baseName : baseName + ext;
-          const key = `artifact:${id || title}`;
           setContent(key, content, filename);
+        } else if (input.command === 'update' && (id || title) && typeof input.old_str === 'string') {
+          const result = applyStrReplace(key, input.old_str, input.new_str || '');
+          if (!result.ok && errorCollector) {
+            const name = state[key] ? state[key].basename : String(title || id);
+            errorCollector.addWarning(
+              'str_replace_failed',
+              name,
+              `artifact update skipped: ${result.reason}`,
+              { path: key, note: 'The update could not be applied; the exported artifact may be missing this edit.' }
+            );
+          }
         }
       } else if (isBashTool(block.name)) {
         const command = input.command || '';
@@ -356,28 +369,32 @@ function extractArtifacts(data, errorCollector = null, index = null) {
     }
   }
 
-  // Final emission. Track basename collisions across distinct artifact keys
-  // (e.g. /home/claude/foo.html and /mnt/user-data/outputs/foo.html) so the
-  // later writer doesn't silently clobber the earlier one.
-  const usedBasenames = {};
+  // Final emission. Each artifact claims every name it writes: <base><ext>, plus
+  // <base>_v1<ext> ... when it has versions. If another artifact already holds any
+  // of them (two paths with one basename, or a file Claude itself named
+  // report_v1.html), this one becomes <base>_2<ext> and so on, so nothing is
+  // silently overwritten.
+  const usedNames = new Set();
 
   for (const key of Object.keys(state)) {
     const s = state[key];
     let { base, ext } = splitExt(s.basename);
+    const namesFor = (b) => s.versions.length <= 1
+      ? [`${b}${ext}`]
+      : [`${b}${ext}`, ...s.versions.map((_, i) => `${b}_v${i + 1}${ext}`)];
 
-    // Disambiguate if another artifact already claimed this basename.
     let outBase = base;
     let collision = 0;
-    while (usedBasenames[outBase + ext]) {
+    while (namesFor(outBase).some((n) => usedNames.has(n))) {
       collision++;
       outBase = `${base}_${collision + 1}`;
     }
-    usedBasenames[outBase + ext] = true;
+    for (const n of namesFor(outBase)) usedNames.add(n);
     if (collision > 0 && errorCollector) {
       errorCollector.addWarning(
         'artifact_basename_collision',
         `${outBase}${ext}`,
-        `Two distinct paths produced files with the same basename "${base}${ext}". This artifact was renamed to "${outBase}${ext}" to avoid overwriting.`,
+        `Another artifact already uses a file name that "${base}${ext}" needs. This artifact was renamed to "${outBase}${ext}" to avoid overwriting.`,
         { path: key, note: 'Check that both artifacts are intended; the renamed copy still preserves all versions.' }
       );
     }

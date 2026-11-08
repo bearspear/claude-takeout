@@ -367,6 +367,16 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.7
+
+Fixes from a full code review. These change what goes into a new export, so they need a fresh export from claude.ai; rebuilding a viewer doesn't apply them.
+
+- **Edits made with the older artifacts tool are kept** - Chats that used claude.ai's earlier `artifacts` tool exported the first draft only: its `update` edits (old text to new text) and `rewrite` commands were ignored. They are now applied, with a version per turn, and an edit that can't be applied is listed in `errors.txt`.
+- **A file Claude named `report_v1.html` no longer overwrites a version** - When Claude edited `report.html` and also saved its own `report_v1.html`, one silently replaced the other, because the export writes versions under those names. The later file is now renamed (`report_v1_2.html`) with a warning. `extract_artifacts.py` and `replay_bash.py` follow the same names.
+- **An upload rebuilt from the chat is the right text** - When an upload can't be downloaded, its text is recovered from the chat. A folder listing that mentioned the file, a partial read, or a file with a similar name could be saved in its place. Only a full read of that file is used now.
+- **More script edits are flagged** - Commands that changed a file with `open(p, 'w', encoding=...)`, `Path(p).write_text`, `sed -E -i` or `--in-place`, `perl -i`, `tee`, `cp` or `mv` went unnoticed, so the exported file could be out of date with no pointer to `replay_bash.py`. They now get the `artifact_opaque_mutation` warning. On 87 real chats the warnings are unchanged, so nothing new is flagged by mistake.
+- **`integrated_chat.txt` keeps code intact** - Code blocks lost underscores, asterisks and backticks (`__init__` became `init`, `a*b*c` became `abc`). Code is now kept as written, between separator lines.
+
 ### v1.6.6
 
 - **Copy a whole file** - Upload and pasted-text popups, the file panel and the "Archive files" panel have a Copy button in their header. It copies the file's text, and in Preview it copies the source, not the rendered page. Images, PDFs and other non-text files have none. A large upload's Copy appears once its text has loaded. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
