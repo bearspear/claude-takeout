@@ -410,7 +410,8 @@ function inlineSiblings(html, lookup) {
       const code = text(src, /\.m?js$/i);
       if (code == null) return null;
       const rest = kept(attrs.filter(a => a !== src));
-      const script = `<script${rest}>${String(code).replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\!--')}</script>`;
+      // \x21 rather than \!, which a regular expression with the u flag rejects.
+      const script = `<script${rest}>${String(code).replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\x21--')}</script>`;
       const type = attrOf(attrs, 'type');
       if ((attrOf(attrs, 'defer') || attrOf(attrs, 'async')) && !(type && /^\s*module\s*$/i.test(type.value))) {
         late.push(script);

@@ -20,6 +20,9 @@ const HTML = `<!doctype html><html><body><script>${RUNS}</script></body></html>`
 const BAD_NAME = `x"><img src=x onerror=${HIT}>.md`;
 const NOTES = `## Notes from ${MARKER}\n\nThe **variance** is $x^2$, for Gödel.\n\n<script>${HIT}</script>\n\n<img src=x onerror="${HIT}">\n\n![remote](https://remote.test/md.png)\n\n\`\`\`python\nprint("hi")\n\`\`\`\n`;
 const BULK = 1000;
+// An upload large enough for its text to move into a part of its own, after the added-file parts.
+const UPLOAD_MARKER = 'UPLOAD-TEXT-IN-A-PART';
+const BIG_UPLOAD = `# ${UPLOAD_MARKER}\n` + 'upload line\n'.repeat(8000);
 
 function wav() {
   const rate = 8000, samples = 4000;
@@ -35,10 +38,10 @@ const put = (root, rel, data) => {
   fs.writeFileSync(p, data);
 };
 
-const chatJson = (uuid, name, updated) => JSON.stringify({
+const chatJson = (uuid, name, updated, uploads = []) => JSON.stringify({
   uuid, name, created_at: '2026-01-01T00:00:00Z', updated_at: updated, model: 'claude-x', settings: {},
   chat_messages: [
-    { uuid: `${uuid}-1`, sender: 'human', created_at: '2026-01-01T00:00:00Z', content: [{ type: 'text', text: `hello from ${name}` }], parent_message_uuid: null },
+    { uuid: `${uuid}-1`, sender: 'human', created_at: '2026-01-01T00:00:00Z', content: [{ type: 'text', text: `hello from ${name}` }], parent_message_uuid: null, files_v2: uploads },
     { uuid: `${uuid}-2`, sender: 'assistant', created_at: '2026-01-01T00:00:01Z', content: [{ type: 'text', text: 'hi' }], parent_message_uuid: `${uuid}-1` },
   ],
   current_leaf_message_uuid: `${uuid}-2`,
@@ -49,7 +52,8 @@ function makeArchive(root, attacks) {
   put(root, 'index.md', '# Index');
   put(root, 'chat-one/original.json', chatJson('c1', 'First chat', '2026-03-01T00:00:00Z'));
   put(root, 'chat-one/README.md', 'readme');
-  put(root, 'chat-two/original.json', chatJson('c2', 'Second chat', '2026-02-01T00:00:00Z'));
+  put(root, 'chat-two/original.json', chatJson('c2', 'Second chat', '2026-02-01T00:00:00Z', [{ file_uuid: 'up-big', file_name: 'big.md', success: true }]));
+  put(root, 'chat-two/uploads/big.md', BIG_UPLOAD);
 
   put(root, '_index.md', '# Archive index\n\nEverything added by hand.');
   for (let i = 0; i < BULK; i++) put(root, `bulk/f${String(i).padStart(4, '0')}.md`, `note ${i}`);
@@ -183,6 +187,9 @@ function viewerDataOf(file) {
     const extra = fs.statSync(viewer).size - fs.statSync(exportFile).size;
     check('viewer.html is about the size of an export viewer', extra < 400 * 1024, `${extra} bytes over`);
     check('added text is not in viewer.html', !htmlText.includes(MARKER));
+    check('upload text is not in viewer.html', !htmlText.includes(UPLOAD_MARKER));
+    const lastPart = fs.readFileSync(path.join(root, 'viewer-files', partsMade[partsMade.length - 1]), 'utf8');
+    check('the upload part comes after the added-file parts', lastPart.includes(UPLOAD_MARKER) && lastPart.includes('"u0"') && !lastPart.includes(MARKER), partsMade.join());
     check('added text is in a part', fs.readdirSync(path.join(root, 'viewer-files')).some(f => fs.readFileSync(path.join(root, 'viewer-files', f), 'utf8').includes(MARKER)));
 
     const main = await open(url);
@@ -649,6 +656,19 @@ function viewerDataOf(file) {
     check('that viewer allows no script from disk', !/script-src[^;]*file:/.test(await aud.page.$eval('meta[http-equiv="Content-Security-Policy"]', m => m.content)));
     clean('audio only flow', aud.seen);
     await aud.context.close();
+
+    // One chat, both kinds of part: its large upload and an added file.
+    const mixed = await open(`${url}#chat=c2&leaf=c2-2`);
+    await mixed.page.click('button.chip:has-text("big.md")');
+    await mixed.page.waitForFunction(t => document.querySelector('.pop .pop-body')?.textContent === t, BIG_UPLOAD, { timeout: 3000 }).catch(() => {});
+    check('a large upload opens from its part in an archive', (await mixed.page.textContent('.pop .pop-body')) === BIG_UPLOAD);
+    await mixed.page.click('.pop .close');
+    await openAdded(mixed, 'chat-two/only-two.md');
+    await mixed.page.waitForFunction(() => document.querySelector('#panel-body')?.textContent.includes('Second chat only'), null, { timeout: 3000 }).catch(() => {});
+    check('an added file opens beside it', (await panelText(mixed)).includes('Second chat only'));
+    check('both kinds loaded from viewer-files', new Set(mixed.seen.files.filter(u => u.includes('/viewer-files/'))).size >= 2, mixed.seen.files.filter(u => u.includes('/viewer-files/')).join());
+    clean('both kinds flow', mixed.seen);
+    await mixed.context.close();
 
     // An export viewer still has no section
     const exp = await open('file://' + exportFile);

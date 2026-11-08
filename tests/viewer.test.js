@@ -546,7 +546,17 @@ test('inlineSiblings feeds in ./name and name, and escapes closing tags', () => 
   assert.ok(inlineSiblings('<link rel="stylesheet" href="a.css">', look).includes('<style>b{}</style>'));
   assert.strictEqual(inlineSiblings('<script src="app.js"></script>', n => n === 'app.js' ? 'a</SCRIPT>b</style>' : null), '<script>a<\\/SCRIPT>b</style></script>');
   assert.strictEqual(inlineSiblings('<link rel=stylesheet href=a.css>', n => n === 'a.css' ? 'a</STYLE>b</script>' : null), '<style>a<\\/STYLE>b</script></style>');
-  assert.strictEqual(inlineSiblings('<script src="app.js"></script>', () => 'x="<!--<script>"'), '<script>x="<\\!--<script>"</script>');
+  assert.strictEqual(inlineSiblings('<script src="app.js"></script>', () => 'x="<!--<script>"'), '<script>x="<\\x21--<script>"</script>');
+});
+
+test('inlineSiblings keeps a u-flag regular expression with <!-- valid', () => {
+  const code = 'globalThis.hit = /<!--/u.test("a<!--b") && "<!--".length === 4;';
+  const body = /^<script>([\s\S]*)<\/script>$/.exec(inlineSiblings('<script src="re.js"></script>', () => code))[1];
+  assert.notStrictEqual(body, code);
+  delete globalThis.hit;
+  new Function(body)();
+  assert.strictEqual(globalThis.hit, true);
+  delete globalThis.hit;
 });
 
 test('inlineSiblings handles attribute order and quote styles', () => {

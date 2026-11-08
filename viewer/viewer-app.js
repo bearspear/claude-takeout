@@ -454,12 +454,20 @@ function openPopup(item, trigger) {
   const mine = popup = { veil, trigger };
   pop.focus({ preventScroll: true });
   // Large upload text is in a part. It lands only in the popup that asked for it.
+  // The text is kept even when the popup has closed, so the next open is instant.
   if (part) loadPart(part).then(loaded => {
-    if (popup !== mine) return;
     const text = loaded && Object.prototype.hasOwnProperty.call(loaded, item.key) ? loaded[item.key] : null;
     if (typeof text === 'string') item.text = text;
-    body.replaceChildren(...(typeof text === 'string' ? popupContent(item).nodes : [el('div', 'file-missing', 'This file is not in this export.')]));
+    if (popup !== mine) return;
+    body.replaceChildren(...(typeof text === 'string' ? popupContent(item).nodes : partMissing(item)));
   });
+}
+
+// A part that can't load: the upload's own copy, when the export has one, is still beside the viewer.
+function partMissing(item) {
+  if (!item.href) return [el('div', 'file-missing', 'This file is not in this export.')];
+  const { nodes } = popupContent({ name: item.name, href: item.href });
+  return [el('div', 'file-missing', "The text couldn't load."), ...nodes];
 }
 
 // The project's files and documents, under the top bar. Rebuilt only for another chat, so it stays open.
