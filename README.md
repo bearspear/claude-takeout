@@ -367,6 +367,21 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.10
+
+Fixes to `tools/build_viewer.js`, the tool that gives older exports a viewer, from the code review.
+
+- **Files with less common types keep their text** - A rebuilt viewer showed Claude's `.mmd` diagrams, `Makefile`s and other files whose type isn't on the text list as binary, with no preview. They keep their text now, as in an export's own viewer.
+- **Linked folders are not followed** - A `project/`, `uploads/` or `artefacts/` folder that is a link to somewhere else is no longer read, so files from outside the archive can't end up in `viewer.html`. The report says the link was skipped.
+- **Each ZIP is read once** - A ZIP was read from disk and parsed three times; now once.
+- **Safer ZIP handling** - A ZIP named `foo.partial.zip` no longer blocks `foo.zip`; the tool's own work folder is now hidden (`.foo.partial`). A ZIP in which two entries end up with the same name is refused instead of silently losing one.
+- **Uploads go to the right prompt** - When several uploads could match one file on disk, none of them gets it and the report says so, instead of the first one taking it.
+- **Rebuilding after deleting `viewer.html`** - The tool's own `viewer-check.gif` and `viewer-files/` are replaced as expected; only a file the tool didn't write stops it, and the message names that file.
+- **Project links** - A chat folder taken out of a mega-ZIP lists its project files without links, since the files are outside the folder; before, the links pointed nowhere.
+- **Your `index.md` is listed** - An `index.md` you added to a single-chat archive shows under "Archive files". Only a mega-ZIP's own `index.md` is left out.
+
+Rebuilt viewers of two real exports are identical to before.
+
 ### v1.6.9
 
 Viewer size and export memory, from the code review.

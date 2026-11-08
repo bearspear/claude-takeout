@@ -43,20 +43,14 @@ async function stopPoint() {
 // Added files
 // ===================================================================
 
-// isTextFile leaves .mmd out, and exports keep to it.
-const isAddedText = name => core.isTextFile(name) || /\.mmd$/i.test(name);
+const isAddedText = lib.isAddedText;
 
 // The text to embed for an added file, or null when it only gets a link.
 function addedText(root, rel, size, warnings) {
   const parts = rel.split('/');
-  if (!isAddedText(parts[parts.length - 1]) || size > CTViewer.TEXT_EMBED_LIMIT) return null;
-  try {
-    const text = lib.stripBom(fs.readFileSync(path.join(root, ...parts), 'utf8'));
-    return text.length <= CTViewer.TEXT_EMBED_LIMIT ? core.fixMojibake(text) : null;
-  } catch (e) {
-    warnings.push(`added file ${rel}: ${e.message}`);
-    return null;
-  }
+  if (size > CTViewer.TEXT_EMBED_LIMIT) return null;
+  return lib.embeddableText(path.join(root, ...parts), parts[parts.length - 1], {
+    isText: isAddedText, onError: e => warnings.push(`added file ${rel}: ${e.message}`) });
 }
 
 // added: [{ path, chat, size }], paths relative to root. Parts are filled in order and each is handed to
@@ -134,11 +128,13 @@ function inspectRoot(root, force) {
   const viewer = lstat(viewerPath), gif = lstat(gifPath), parts = lstat(partsPath);
 
   if (!viewer) {
-    const stray = gif ? CTViewer.VIEWER_CHECK_FILE : parts ? PARTS_DIR + '/' : null;
-    // Our own gif left behind by a deleted viewer.html is no one's file: it is rewritten with the viewer.
-    if (gif && !parts && isOurGif(gifPath, gif)) return { viewer: false, gif: true, parts: false };
-    if (stray) return { stop: 'failed', reason: `${stray} is here with no viewer.html, so it counts as your file and was left alone` };
-    return { viewer: false, gif: false, parts: false };
+    // Our own gif and parts left behind by a deleted viewer.html are no one's files: they are
+    // rewritten with the viewer. Anything else there is the owner's, and is named as the blocker.
+    const gifOurs = !gif || isOurGif(gifPath, gif);
+    const partsOurs = !parts || isOurParts(partsPath, parts);
+    if (gifOurs && partsOurs) return { viewer: false, gif: !!gif, parts: !!parts };
+    const stray = !gifOurs ? CTViewer.VIEWER_CHECK_FILE : PARTS_DIR + '/';
+    return { stop: 'failed', reason: `${stray} is here with no viewer.html, and this tool did not write it, so it was left alone` };
   }
   if (!force) return { stop: 'skipped', reason: 'it already has a viewer.html (--force replaces a generated one)' };
   if (!viewer.isFile() || !lib.isGeneratedViewer(fs.readFileSync(viewerPath, 'utf8'))) {
@@ -309,7 +305,8 @@ async function processZip(zip, { outDir, force, dryRun, claims }) {
     if (!outDir) return finish('failed', 'ZIPs need --out <folder> to extract into');
     entry.dest = path.join(outDir, path.basename(zip).replace(/\.zip$/i, ''));
 
-    const names = await zipLib.zipEntryNames(zip);
+    const loaded = await zipLib.loadZip(zip);  // read once, for every step below
+    const names = await zipLib.zipEntryNames(zip, loaded);
     entry.chats = names.filter(n => /(^|\/)original\.json$/.test(n)).length;
     if (!entry.chats) return finish('skipped', 'no Claude chat in it');
 
@@ -320,12 +317,12 @@ async function processZip(zip, { outDir, force, dryRun, claims }) {
     claims.set(claim, zip);
     if (lstat(entry.dest)) return finish('skipped', `${entry.dest} already exists, so it was left alone. To give it a viewer, run the tool on that folder.`);
 
-    entry.space = await zipLib.zipFreeSpaceOk(zip, outDir);
+    entry.space = await zipLib.zipFreeSpaceOk(zip, outDir, loaded);
     if (!entry.space.ok) return finish('failed', `not enough free space: needs ${entry.space.needed} bytes, ${entry.space.free} free`);
     if (dryRun) return finish('written', `would extract to ${entry.dest}`);
 
     await stopPoint();
-    const extracted = await zipLib.extractZip(zip, entry.dest);
+    const extracted = await zipLib.extractZip(zip, entry.dest, { loaded });
     entry.files = extracted.files;
     entry.rejected = extracted.rejected;
     const found = lib.findArchives(entry.dest);
