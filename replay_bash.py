@@ -53,6 +53,7 @@ import os
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -70,9 +71,15 @@ SANDBOX_ROOT_RE = re.compile(
 )
 # cat > path << DELIM ... DELIM, with any delimiter. Groups: 1 path, 4 body.
 HEREDOC_RE = re.compile(
-    r"cat\s+>\s+(\S+)\s+<<-?\s*(['\"]?)(\w+)\2[^\n]*\n(.*?)\n[ \t]*\3[ \t]*(?=\n|\Z)",
+    r"cat\s+>\s+(\S+)\s+<<-?\s*(['\"]?)(\w+)\2[^\n]*\n(?:(.*?)\n)??[ \t]*\3[ \t]*(?=\n|\Z)",
     re.DOTALL,
 )
+
+
+def heredoc_body(m: re.Match) -> str:
+    """heredocBody in export-core.js: the body bash writes; <<- removes leading tabs."""
+    body = m.group(4) or ""
+    return re.sub(r"^\t+", "", body, flags=re.M) if "<<-" in m.group(0).split("\n", 1)[0] else body
 # Display only: stops text in a conversation from driving your terminal.
 CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 # Where the Bash tool's sessions keep uploads, as <dir>/<uuid8>-<safe name>.
@@ -156,8 +163,8 @@ def declarative_state(data: dict) -> dict[str, str]:
                     state[p] = t
             elif name in BASH_TOOLS:
                 for hm in HEREDOC_RE.finditer(inp.get("command", "")):
-                    if hm.group(4):
-                        state[hm.group(1).strip("'\"")] = hm.group(4)
+                    if heredoc_body(hm):
+                        state[hm.group(1).strip("'\"")] = heredoc_body(hm)
     return state
 
 
@@ -220,8 +227,8 @@ def replay_steps(data: dict) -> list[Step]:
             elif name in BASH_TOOLS and inp.get("command"):
                 # Keep a heredoc's file even if the user skips the command.
                 for hm in HEREDOC_RE.finditer(inp["command"]):
-                    if hm.group(4):
-                        steps.append(Step(path=hm.group(1).strip("'\""), write=hm.group(4)))
+                    if heredoc_body(hm):
+                        steps.append(Step(path=hm.group(1).strip("'\""), write=heredoc_body(hm)))
                 steps.append(Step(bash=BashCmd(
                     msg_idx=mi,
                     block_idx=bi,
@@ -490,6 +497,41 @@ def find_highest_versioned_key(folder: Path, basename: str) -> Optional[Path]:
     return best[1] if best else None
 
 
+def read_sandbox_text(td: Path, path: str) -> Optional[str]:
+    """A replayed file's text, read so that no link can redirect the read: each
+    folder and the file are opened with O_NOFOLLOW relative to the one before,
+    starting at the tmpdir, and the file must be a regular file with one link.
+    A process left behind by a command can still swap names around, but it can
+    no longer make this read leave the tmpdir. None for anything else."""
+    if not SANDBOX_ROOT_RE.match(path):
+        return None
+    parts = [p for p in path.split("/") if p]
+    if not parts or any(p in (".", "..") for p in parts):
+        return None
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    fds = []
+    try:
+        fds.append(os.open(td, os.O_RDONLY | directory))
+        for part in parts[:-1]:
+            fds.append(os.open(part, os.O_RDONLY | directory | nofollow, dir_fd=fds[-1]))
+        fd = os.open(parts[-1], os.O_RDONLY | nofollow, dir_fd=fds[-1])
+        fds.append(fd)
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+            return None
+        with os.fdopen(os.dup(fd), "rb") as f:
+            return f.read().decode("utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    finally:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
 def exporter_names(data: dict) -> dict[str, dict]:
     """{path: {"filename", "versions"}} exactly as the exporter named each artifact,
     from extract_artifacts.py beside this script. Empty if it can't be loaded, and
@@ -559,15 +601,10 @@ def sync_back(
     filenames = artifact_filenames(state)
     summary: list[tuple[str, int, int, Optional[Path]]] = []
     for path, pre_content in state.items():
-        sandbox_file = sandbox_path(td, path)
-        # A symlink could point this read at a file the command itself can't
-        # see, and it would land in the export. sandbox_path resolves links, so
-        # check the unresolved path too.
-        if sandbox_file is None or (td / path.lstrip("/")).is_symlink() or not sandbox_file.is_file():
-            continue
-        try:
-            post_content = sandbox_file.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
+        # A link could point this read at a file the command itself can't see,
+        # and it would land in the export, so the read follows none.
+        post_content = read_sandbox_text(td, path)
+        if post_content is None:
             continue
         if post_content == pre_content:
             continue

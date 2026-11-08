@@ -53,8 +53,12 @@ function pythonArtifacts(data) {
   try {
     fs.writeFileSync(path.join(dir, 'original.json'), JSON.stringify(data));
     execFileSync('python3', ['-B', path.join(REPO, 'extract_artifacts.py'), path.join(dir, 'original.json'), '-o', path.join(dir, 'out')], { stdio: 'ignore' });
+    // Any name is a plain key, __proto__ included. The BOM on .md files is the exporter's, not content.
     const out = {};
-    for (const f of fs.readdirSync(path.join(dir, 'out'))) out[f] = fs.readFileSync(path.join(dir, 'out', f), 'utf8');
+    for (const f of fs.readdirSync(path.join(dir, 'out'))) {
+      const value = fs.readFileSync(path.join(dir, 'out', f), 'utf8').replace(/^\uFEFF/, '');
+      Object.defineProperty(out, f, { value, enumerable: true, writable: true, configurable: true });
+    }
     return out;
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });

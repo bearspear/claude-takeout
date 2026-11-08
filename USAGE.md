@@ -431,8 +431,8 @@ Click the gear icon in the popup to open the settings drawer.
 
 | Setting | What it does |
 |---|---|
-| **Filename style** | `title`, `title_date`, or `date_title`. Affects all download filenames. |
-| **Include thinking blocks** | Whether to include Claude's `<thinking>` content in markdown exports. |
+| **Filename style** | `title`, `title_date`, or `date_title`. Applies to single-chat Markdown, Embedded Markdown and JSON downloads. ZIPs and bulk exports keep their own names. |
+| **Include thinking blocks** | Whether to include Claude's `<thinking>` content in the Markdown exports and in a ZIP's `full_chat.md` and `integrated_chat.md`. The `responses/*.full.md` files always include it. |
 | **Show shortcuts** | Show keyboard shortcut hints next to buttons. |
 | **Open as sidebar by default** | Use Chrome's side panel instead of the popup, so the export UI stays open while you browse conversations. |
 

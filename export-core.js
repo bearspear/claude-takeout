@@ -148,16 +148,23 @@ function isBashTool(name) {
 }
 
 // `cat > path << DELIM ... DELIM`, with any delimiter, quoted or not. Groups:
-// 1 path, 4 body.
-const HEREDOC_RE = /cat\s+>\s+(\S+)\s+<<-?\s*(['"]?)(\w+)\2[^\n]*\n([\s\S]*?)\n[ \t]*\3[ \t]*(?=\n|$)/g;
+// 1 path, 2 the quote (empty when bash expands the body), 4 body, undefined
+// when the body is empty. Use heredocBody, which also does what <<- does.
+const HEREDOC_RE = /cat\s+>\s+(\S+)\s+<<-?\s*(['"]?)(\w+)\2[^\n]*\n(?:([\s\S]*?)\n)??[ \t]*\3[ \t]*(?=\n|$)/g;
 
 function heredocPath(match) {
   return match[1].replace(/^['"]|['"]$/g, '');
 }
 
+// The text bash writes for a heredoc match: with <<-, leading tabs are removed from every line.
+function heredocBody(match) {
+  const body = match[4] || '';
+  return /^[^\n]*<<-/.test(match[0]) ? body.replace(/^\t+/gm, '') : body;
+}
+
 // The files a Bash command writes with a heredoc, for the viewer's cards.
 function heredocFiles(command) {
-  return Array.from(String(command || '').matchAll(HEREDOC_RE), (match) => ({ path: heredocPath(match), text: match[4] }));
+  return Array.from(String(command || '').matchAll(HEREDOC_RE), (match) => ({ path: heredocPath(match), text: heredocBody(match) }));
 }
 
 // tool_use ids whose tool_result reported an error. A failed file tool changed
@@ -212,7 +219,7 @@ function extractArtifacts(data, errorCollector = null, index = null) {
   // rewrite / bash heredoc) or `artifact:<id-or-title>` (for the artifacts
   // tool). Each entry tracks current content, the basename to write under,
   // a list of post-turn snapshots, and whether the current turn edited it.
-  const state = {};
+  const state = Object.create(null);  // any key, __proto__ included
 
   const basenameOf = (p) => zipSafeName((p || '').split('/').pop());
   const splitExt = (name) => {
@@ -335,7 +342,7 @@ function extractArtifacts(data, errorCollector = null, index = null) {
         const command = input.command || '';
         for (const match of command.matchAll(HEREDOC_RE)) {
           const filepath = heredocPath(match);
-          const content = match[4];
+          const content = heredocBody(match);
           const filename = basenameOf(filepath);
           if (filename && content) {
             setContent(filepath, content, filename);
@@ -408,15 +415,17 @@ function extractArtifacts(data, errorCollector = null, index = null) {
       index[key] = { path: key, filename: `${outBase}${ext}`, versions: names, messages: s.versionMsgs.slice() };
     }
 
+    // defineProperty, so a file named __proto__ is a file, not the object's prototype.
+    const put = (name, content) => Object.defineProperty(artifacts, name, { value: content, enumerable: true, writable: true, configurable: true });
     if (s.versions.length <= 1) {
       // No edits — just emit the single content under the unversioned name.
-      artifacts[`${outBase}${ext}`] = s.versions[0] != null ? s.versions[0] : s.current;
+      put(`${outBase}${ext}`, s.versions[0] != null ? s.versions[0] : s.current);
     } else {
       // Emit each per-turn version and the unversioned final.
       for (let i = 0; i < s.versions.length; i++) {
-        artifacts[`${outBase}_v${i + 1}${ext}`] = s.versions[i];
+        put(`${outBase}_v${i + 1}${ext}`, s.versions[i]);
       }
-      artifacts[`${outBase}${ext}`] = s.versions[s.versions.length - 1];
+      put(`${outBase}${ext}`, s.versions[s.versions.length - 1]);
     }
   }
 
@@ -688,7 +697,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, getMessageChain, failedToolUseIds, isBashTool, heredocPath, HEREDOC_RE, heredocFiles,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, HEREDOC_RE, heredocFiles,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject,
   };
 }

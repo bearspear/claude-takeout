@@ -403,10 +403,9 @@ function inlineSandboxPaths(content, uploadDataUris) {
 }
 
 // ============================================================================
-// Priority 1 Fixes: Core improvements matching claude_json_to_md.py
+// Shared helpers: upload keys and code fences
 // ============================================================================
 
-// Get appropriate code fence based on content (uses 4 backticks if content has 3)
 // One upload's key, the same from extractUploadedFiles and from the message: its file
 // UUID, or its prompt and name when it has none.
 function uploadNameKey(uuid, promptNum, originalName) {
@@ -422,36 +421,6 @@ function getCodeFence(content) {
 
 // getMessageChain, isBashTool, the heredoc helpers and extractArtifacts are in export-core.js
 
-// A heredoc header line, which detectOpaqueMutations strips before looking for other writes.
-const HEREDOC_HEADER_RE = /cat\s+>\s+\S+\s+<<-?\s*['"]?\w+['"]?/g;
-
-// Detect and apply Claude's standard "encode upload to base64 and substitute
-// a placeholder in an artifact" recipe.
-//
-// Claude's go-to pattern when asked to embed an image into self-contained HTML
-// is to run two bash_tool Python scripts:
-//
-//   # Step 1 — encode the upload, stash the data URI to a temp file
-//   data = open('/mnt/user-data/uploads/X.png','rb').read()
-//   b64  = base64.b64encode(data).decode()
-//   uri  = "data:image/png;base64," + b64
-//   open('img_uri.txt','w').write(uri)
-//
-//   # Step 2 — substitute the placeholder in the artifact
-//   uri  = open('img_uri.txt').read().strip()
-//   html = open('booklet.html').read()
-//   html = html.replace('__IMG_URI__', uri)
-//   open('booklet.html','w').write(html)
-//
-// extractArtifacts cannot replay this because the substitution is hidden inside
-// arbitrary bash. This function pattern-matches both steps against bash_tool
-// commands in the message chain, then performs the substitution in JS using the
-// already-downloaded upload bytes (uploadDataUris[sandboxPath]).
-//
-// The match is intentionally narrow. Any unrecognized bash mutation against a
-// tracked artifact path emits an `artifact_opaque_mutation` warning so the
-// user is told reconstruction may be incomplete rather than silently shipping
-// stale content.
 // Detect bash_tool commands that mutate a tracked artifact in a way the
 // declarative replay (create_file / str_replace / rewrite / heredoc) can't
 // reconstruct. Emits one `artifact_opaque_mutation` warning per distinct
@@ -536,9 +505,17 @@ function detectOpaqueMutations(data, errorCollector) {
       const rawCommand = (block.input && block.input.command) || '';
       if (!rawCommand) continue;
 
-      // extractArtifacts already handled the heredoc itself, so drop only its
-      // `cat > path <<` line. The rest of the command can still mutate artifacts.
-      const command = rawCommand.replace(HEREDOC_HEADER_RE, '');
+      // extractArtifacts already handled each `cat > path << DELIM` heredoc, so drop
+      // the whole heredoc, body included: a body is text, and `<a href>about.html`
+      // in it is no redirect. The rest of the command can still mutate artifacts.
+      const command = rawCommand.replace(HEREDOC_RE, '');
+      // An unquoted delimiter means bash expanded $, ` and \ in the body, so the
+      // file Claude got differs from the text in the command.
+      for (const match of rawCommand.matchAll(HEREDOC_RE)) {
+        if (match[2] === '' && /[$`\\]/.test(match[4] || '')) {
+          opaqueMutations.push({ artifactPath: heredocPath(match), msgIndex: mi, blockIndex: bi, command: rawCommand });
+        }
+      }
 
       // Map variable name -> the artifact path it aliases (path or basename).
       const varToArtifact = {};
@@ -727,45 +704,6 @@ function extractWebSources(data) {
   }
 
   return sources;
-}
-
-// Generate sources.md from web search sources
-function generateSources(sources) {
-  if (!sources || sources.length === 0) return null;
-
-  // Group by domain
-  const byDomain = {};
-  for (const src of sources) {
-    const domain = src.domain || 'other';
-    if (!byDomain[domain]) byDomain[domain] = [];
-    byDomain[domain].push(src);
-  }
-
-  const lines = [
-    '# Web Sources',
-    '',
-    `*${sources.length} sources from web search*`,
-    '',
-  ];
-
-  // Sort domains by count
-  const sortedDomains = Object.keys(byDomain).sort((a, b) => byDomain[b].length - byDomain[a].length);
-
-  for (const domain of sortedDomains) {
-    const domainSources = byDomain[domain];
-    lines.push(`## ${domain} (${domainSources.length})`);
-    lines.push('');
-    for (const src of domainSources) {
-      const flags = [];
-      if (src.isMissing) flags.push('missing');
-      if (!src.isCitable) flags.push('not citable');
-      const flagStr = flags.length > 0 ? ` *(${flags.join(', ')})*` : '';
-      lines.push(`- [${src.title}](${src.url})${flagStr}`);
-    }
-    lines.push('');
-  }
-
-  return lines.join('\n');
 }
 
 // extractUploadedFiles, extractPresentedFiles and extractDeliveredFiles are in export-core.js
@@ -1895,7 +1833,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   let projectUploads = [];  // Names of the project's saved knowledge files
   let projectFilesPath = 'project/files';  // Where they are, relative to this folder
   if (data.project_uuid || data.project?.uuid) {
-    if (onProgress) onProgress('Fetching project files...');
+    if (onProgress) onProgress(8, 100, 'Fetching project files...');
     // In a mega-ZIP, every chat in a project needs the same metadata and docs, so a
     // complete fetch is kept for the next chat. One with failures is fetched again.
     const docsKey = data.project_uuid || data.project?.uuid;
@@ -3399,7 +3337,7 @@ async function bulkExport(format) {
   const status = document.getElementById('status');
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-  if (!tab.url.includes('claude.ai')) {
+  if (!(tab?.url || '').includes('claude.ai')) {
     status.className = 'status error';
     status.textContent = 'Please navigate to claude.ai first';
     return;
@@ -3486,7 +3424,7 @@ async function bulkExportZip() {
   const status = document.getElementById('status');
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
-  if (!tab.url.includes('claude.ai')) {
+  if (!(tab?.url || '').includes('claude.ai')) {
     status.className = 'status error';
     status.textContent = 'Please navigate to claude.ai first';
     return;
@@ -3674,7 +3612,27 @@ async function bulkExportZip() {
 }
 
 // Event listeners with settings-aware filenames
-document.getElementById('exportMd').addEventListener('click', async () => {
+// One export at a time: a second click, or a shortcut, while one runs does nothing,
+// and the export buttons are disabled meanwhile.
+const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportAllJson'];
+let exportRunning = false;
+function exclusiveExport(run) {
+  return async (...args) => {
+    if (exportRunning) return;
+    exportRunning = true;
+    const buttons = typeof document === 'undefined' ? [] : EXPORT_BUTTONS.map((id) => document.getElementById(id)).filter(Boolean);
+    buttons.forEach((b) => { b.disabled = true; });
+    try {
+      return await run(...args);
+    } finally {
+      exportRunning = false;
+      buttons.forEach((b) => { b.disabled = false; });
+    }
+  };
+}
+const onExport = (id, run) => document.getElementById(id).addEventListener('click', exclusiveExport(run));
+
+onExport('exportMd', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
   try {
@@ -3692,7 +3650,7 @@ document.getElementById('exportMd').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('exportMdEmbed').addEventListener('click', async () => {
+onExport('exportMdEmbed', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
   try {
@@ -3702,8 +3660,7 @@ document.getElementById('exportMdEmbed').addEventListener('click', async () => {
       embedArtifacts: true,
       includeThinking: settings.includeThinking
     });
-    const baseName = safeFilename(data.name);
-    const filename = generateFilename(baseName + '_embedded', 'md', data.project?.name);
+    const filename = generateFilename(data.name, 'md', data.project?.name, '_embedded');
     download(md, filename, 'text/markdown');
     status.className = 'status ready';
     status.textContent = 'Embedded markdown exported successfully!';
@@ -3714,7 +3671,7 @@ document.getElementById('exportMdEmbed').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('exportZip').addEventListener('click', async () => {
+onExport('exportZip', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
 
@@ -3756,7 +3713,7 @@ document.getElementById('exportZip').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('exportJson').addEventListener('click', async () => {
+onExport('exportJson', async () => {
   if (!conversationData) return;
   const status = document.getElementById('status');
   try {
@@ -3774,21 +3731,10 @@ document.getElementById('exportJson').addEventListener('click', async () => {
   }
 });
 
-document.getElementById('exportAllMd').addEventListener('click', () => {
-  bulkExport('markdown');
-});
-
-document.getElementById('exportAllEmbed').addEventListener('click', () => {
-  bulkExport('embedded');
-});
-
-document.getElementById('exportAllZip').addEventListener('click', () => {
-  bulkExportZip();
-});
-
-document.getElementById('exportAllJson').addEventListener('click', () => {
-  bulkExport('json');
-});
+onExport('exportAllMd', () => bulkExport('markdown'));
+onExport('exportAllEmbed', () => bulkExport('embedded'));
+onExport('exportAllZip', () => bulkExportZip());
+onExport('exportAllJson', () => bulkExport('json'));
 
 document.getElementById('refresh').addEventListener('click', () => scheduleRefresh());
 
@@ -3941,49 +3887,12 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ============================================================================
-// Enhanced Error Handling
-// ============================================================================
-
-// Wrap export functions with error handling
-function withErrorHandling(fn, actionName) {
-  return async function(...args) {
-    const status = document.getElementById('status');
-    try {
-      return await fn.apply(this, args);
-    } catch (error) {
-      console.error(`${actionName} failed:`, error);
-      status.className = 'status error';
-
-      // Provide helpful error messages
-      let message = error.message || 'Unknown error';
-      if (message.includes('network') || message.includes('fetch')) {
-        message = 'Network error. Check your connection and try again.';
-      } else if (message.includes('permission')) {
-        message = 'Permission denied. Try refreshing the page.';
-      } else if (message.includes('quota')) {
-        message = 'Storage quota exceeded. Clear some browser data.';
-      }
-
-      status.textContent = `${actionName} failed: ${message}`;
-
-      // Auto-clear error after 5 seconds
-      setTimeout(() => {
-        if (status.classList.contains('error')) {
-          updateUI(conversationData, orgId);
-        }
-      }, 5000);
-
-      throw error;
-    }
-  };
-}
-
-// ============================================================================
 // Filename Generation with Settings
 // ============================================================================
 
-function generateFilename(name, ext, projectName = null) {
-  const title = safeFilename(name);
+// suffix (such as '_embedded') goes after the title is cut to length, so it is never cut off.
+function generateFilename(name, ext, projectName = null, suffix = '') {
+  const title = safeFilename(name) + suffix;
   const date = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
   const projectPrefix = projectName ? `[${safeFilename(projectName)}-project]_` : '';
 

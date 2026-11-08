@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Claude Takeout",
-  "version": "1.6.11",
+  "version": "1.6.12",
   "description": "Export Claude conversations to Markdown",
   "permissions": [
     "activeTab",

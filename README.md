@@ -367,6 +367,18 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.12
+
+Cleanup and the last fixes from the code review.
+
+- **Heredocs** - A file written with an empty heredoc no longer swallows the commands after it, and `<<-` heredocs lose their leading tabs as bash removes them. A heredoc without quotes around its delimiter, whose text bash would expand (`$`, a backtick or `\`), now gets the `artifact_opaque_mutation` warning pointing to `replay_bash.py`, since the file Claude got differs from the text. Text inside a heredoc is no longer mistaken for a command that changes another file. Same in `extract_artifacts.py` and `replay_bash.py`.
+- **A file named `__proto__`** is kept, as it already was in `extract_artifacts.py`.
+- **One export at a time** - The export buttons are disabled while an export runs, so a second click or shortcut can't start another.
+- **Small fixes** - The progress line no longer shows "undefined" while a project chat's ZIP fetches project files; Export All no longer fails silently in the side panel on a tab that isn't claude.ai; Embedded Markdown keeps its `_embedded` suffix on long titles.
+- **`replay_bash.py` reads results without following links** - Each folder and file is opened so no link can redirect the read out of the temporary folder, and a file with more than one hard link is skipped. A process a command left running can no longer slip a file from elsewhere into the export.
+- **`extract_artifacts.py`** writes `.md` files with the BOM an export gives them, so `diff -r` against an export compares cleanly.
+- **Cleanup** - Two unused functions and a comment describing removed code are gone, and USAGE.md now says which downloads the Filename style and thinking settings affect.
+
 ### v1.6.11
 
 Smaller viewer fixes from the code review. Older exports get them when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).

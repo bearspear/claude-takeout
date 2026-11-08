@@ -30,7 +30,7 @@ For deeper dives, two companion docs live alongside this one:
 | `popup.html` | Popup UI (action click). | Buttons, status pill, settings drawer. Includes `.status.ready` / `.waiting` / `.error` / `.warning` styles. |
 | `sidepanel.html` | Side Panel UI. | Same buttons/handlers as the popup, just a different host. |
 | `export-core.js` | Shared pure extractors. | Classic script loaded before `popup.js` (plain top-level declarations, `module.exports` under Node only). Holds `fixMojibake`, `isTextFile`, `zipSafeName` (every name from chat data that becomes a ZIP path goes through it), `getMessageChain`, `extractArtifacts`, the heredoc helpers, `extractUploadedFiles`, `extractPresentedFiles`, `extractDeliveredFiles`, `getModelName`, `buildViewerDeliveries`, `viewerProject`, `heredocFiles`. Used by `popup.js` and Node tools. |
-| `popup.js` | **The brain.** Over 4,000 lines. All export logic, all conversion, all UI wiring. Same script is loaded by both `popup.html` and `sidepanel.html`. | See §3 below for the internal layout. |
+| `popup.js` | **The brain.** About 3,900 lines. All export logic, all conversion, all UI wiring. Same script is loaded by both `popup.html` and `sidepanel.html`. | See §3 below for the internal layout. |
 | `jszip.min.js` | ZIP library (vendored). | Used by both single-ZIP and mega-ZIP exports. |
 | `extract_artifacts.py` | Stdlib-only Python port of `extractArtifacts`. | Reconstructs all per-turn artifact versions from `original.json` offline. Byte-identical output to the JS implementation. |
 | `replay_bash.py` | Stdlib-only Python CLI for post-export bash replay. | Reconstruction, isolated by `sandbox-exec` on macOS, of artifacts the declarative replay can't reach (anything Claude mutated via `bash_tool`). See §10 below and `docs/WASM_REPLAY_APPROACH.md`. |
@@ -76,7 +76,8 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 | Click handlers + `refresh` | Button → action mapping. Each per-conversation handler calls `ensureProjectName` before generating the filename or starting the ZIP. |
 | Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
 | Keyboard shortcuts | `Alt+M / E / Z / J / A / R`. |
-| `withErrorHandling`, `generateFilename` | Error wrapping + `[<Project>-project]_` prefix + filenameStyle suffix. |
+| `exclusiveExport`, `onExport` | One export at a time: the export buttons are disabled while one runs, and a second click or shortcut does nothing. |
+| `generateFilename` | `[<Project>-project]_` prefix + filenameStyle, with an optional suffix such as `_embedded` added after the title is cut to length. |
 | Bootstrap | `loadSettings()` then `requestData()`. |
 
 When adding code: keep the banner-comment section structure and put helpers near the section that uses them. Do **not** create new files unless adding a non-trivial standalone tool (e.g. a second companion script).
@@ -289,7 +290,7 @@ The exporter handles three classes of artifact mutation:
 
 The CLI does what the extension can't safely do: runs Claude's actual scripts in a tmpdir with `/home/claude`, `/mnt/user-data`, `/tmp` and `/root/.claude` path-rewritten into it, with per-command confirmation. Commands are untrusted: `sandbox_profile` applies a deny-by-default `sandbox-exec` profile, `sandbox_path` rejects paths and symlinks leaving the tmpdir, and `command_env` keeps tokens out. Never weaken these without saying so in `USAGE.md`. See `docs/WASM_REPLAY_APPROACH.md` for the architectural reasoning (we briefly shipped JS regex-based recipe matchers, then removed them once the CLI proved more reliable and covered more cases).
 
-The detector checks Python writes (`open(p, 'w'|'a'|'x'|'r+', ...)`, `Path(p).write_text/bytes`) on the whole command, and shell writes per simple command (`shellSegments`, which respects quotes): redirects, `sed`/`perl` in place, `tee`, `cp`/`mv`/`install` onto the file, `dd of=`. If you change the opaque-mutation detector's heuristics: keep them tight. The signal it produces is the only thing pointing users at the CLI, and a missed signal means a silently-incomplete export.
+The detector checks Python writes (`open(p, 'w'|'a'|'x'|'r+', ...)`, `Path(p).write_text/bytes`) on the whole command, and shell writes per simple command (`shellSegments`, which respects quotes): redirects, `sed`/`perl` in place, `tee`, `cp`/`mv`/`install` onto the file, `dd of=`. Heredocs themselves (header and body) are removed before these checks, and a heredoc with an unquoted delimiter whose body has `$`, a backtick or `\\` is flagged, since bash expanded it. If you change the opaque-mutation detector's heuristics: keep them tight. The signal it produces is the only thing pointing users at the CLI, and a missed signal means a silently-incomplete export.
 
 ## 11. Error reporting (`ExportErrorCollector`)
 
