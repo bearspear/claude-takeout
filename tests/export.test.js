@@ -1370,3 +1370,83 @@ test('the viewer chat of an export carries its files\' warnings', async () => {
   const { chat } = await runFolder(exportPopup(), data);
   assert.deepStrictEqual(Object.values(chat.files).map(f => [f.name, f.flag]), [['page.html', 'script']]);
 });
+
+// ---- incremental export ----
+test('changedSince picks chats that are new or updated since the record', () => {
+  const list = [{ uuid: 'a', updated_at: '1' }, { uuid: 'b', updated_at: '2' }, { uuid: 'c', updated_at: '3' }];
+  const pick = (record) => plain(fn('changedSince')(list, record)).map((c) => c.uuid);
+  assert.deepStrictEqual(pick({ a: '1', b: 'old' }), ['b', 'c']);
+  assert.deepStrictEqual(pick({ a: '1', b: '2', c: '3' }), []);
+  assert.deepStrictEqual(pick({}), ['a', 'b', 'c']);
+});
+
+// Runs bulkExportZip in the sandbox with a chat list and chats, a real JSZip, and storage kept in memory.
+async function runBulkZip({ list, chats, stored = {}, options = {} }) {
+  const JSZip = require('../jszip.min.js');
+  const popup = exportPopup();
+  const sb = popup.sandbox;
+  const store = { ...stored };
+  sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
+  sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+  sb.chrome.tabs.query = async () => [{ id: 1, url: 'https://claude.ai/chat/x' }];
+  sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+    if (msg.action === 'fetchAllConversations') cb({ data: list, orgId: 'org-1' });
+    else if (msg.action === 'fetchConversation') cb({ data: chats[msg.conversationId] });
+    else cb({});
+  };
+  sb.JSZip = JSZip;
+  let saved = null;
+  sb.download = (blob, name) => { saved = { blob, name }; };
+  sb.setTimeout = (f) => setTimeout(f, 0);
+  vm.runInContext('orgId = "org-1"', sb);
+  sb.__opts = options;
+  await vm.runInContext('bulkExportZip(__opts)', sb);
+  const zip = saved ? await JSZip.loadAsync(await saved.blob.arrayBuffer()) : null;
+  return { store, saved, zip, status: sb.document.getElementById('status') };
+}
+const listed = (uuid, updated) => ({ uuid, name: `Chat ${uuid}`, updated_at: updated });
+const chatFor = (uuid, updated) => Object.assign(chatOf([{ sender: 'human', content: [{ type: 'text', text: `hello ${uuid}` }] }]), { uuid, name: `Chat ${uuid}`, created_at: updated, updated_at: updated });
+
+test('a full mega-ZIP writes export-manifest.json and records what it exported', async () => {
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-02T00:00:00Z') };
+  const { store, saved, zip } = await runBulkZip({ list, chats });
+  assert.match(saved.name, /^claude-takeout-\d{4}-\d{2}-\d{2}\.zip$/);
+  const manifest = JSON.parse(await zip.file('export-manifest.json').async('string'));
+  assert.strictEqual(manifest.kind, 'full');
+  assert.strictEqual(manifest.listed, 2);
+  assert.deepStrictEqual(manifest.chats.map((c) => [c.uuid, c.updated_at, c.folder]), [['a', '2026-01-01T00:00:00Z', 'Chat_a'], ['b', '2026-01-02T00:00:00Z', 'Chat_b']]);
+  assert.deepStrictEqual(store.exportRecord['org-1'].chats, { a: '2026-01-01T00:00:00Z', b: '2026-01-02T00:00:00Z' });
+  assert.ok(store.exportRecord['org-1'].at);
+});
+
+test('Export changes takes only new and updated chats, and says when nothing changed', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z', b: '2026-01-02T00:00:00Z' } } } };
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-09T00:00:00Z'), listed('c', '2026-01-08T00:00:00Z')];
+  const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-09T00:00:00Z'), c: chatFor('c', '2026-01-08T00:00:00Z') };
+  const { store, saved, zip } = await runBulkZip({ list, chats, stored, options: { changesOnly: true } });
+  assert.match(saved.name, /^claude-takeout-changes-\d{4}-\d{2}-\d{2}\.zip$/);
+  const manifest = JSON.parse(await zip.file('export-manifest.json').async('string'));
+  assert.deepStrictEqual([manifest.kind, manifest.since, manifest.chats.map((c) => c.uuid)], ['changes', '2026-01-05T00:00:00Z', ['b', 'c']]);
+  assert.ok(!zip.file('Chat_a/README.md') && zip.file('Chat_b/README.md') && zip.file('Chat_c/README.md'));
+  assert.match((await zip.file('index.md').async('string')).replace(/^﻿/, ''), /^# Claude Takeout - Changes since /);
+  assert.deepStrictEqual(store.exportRecord['org-1'].chats, { a: '2026-01-01T00:00:00Z', b: '2026-01-09T00:00:00Z', c: '2026-01-08T00:00:00Z' });
+
+  const again = await runBulkZip({ list, chats, stored: store, options: { changesOnly: true } });
+  assert.strictEqual(again.saved, null, 'nothing to download');
+  assert.match(again.status.textContent, /Nothing changed since/);
+});
+
+test('Export changes with no record exports everything and says why', async () => {
+  const list = [listed('a', '2026-01-01T00:00:00Z')];
+  const { saved, zip, status } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, options: { changesOnly: true } });
+  assert.ok(saved);
+  assert.strictEqual(JSON.parse(await zip.file('export-manifest.json').async('string')).kind, 'full');
+  assert.match(status.textContent, /no earlier export/i);
+});
+
+test('a chat that failed is not recorded, so the next Export changes tries it again', async () => {
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const { store } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') } });
+  assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats), ['a']);
+});

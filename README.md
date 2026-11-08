@@ -119,6 +119,7 @@ Creates a single archive containing all your conversations:
 ```
 claude-takeout-2026-01-01.zip
 ├── index.md                         # Master list with links to all conversations
+├── export-manifest.json             # Every chat in the archive, with its updated_at
 ├── conversation_one/
 │   ├── README.md
 │   ├── meta.md
@@ -366,6 +367,11 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.7.0
+
+- **Export Changes** - A new **Export Changes (Mega-Zip)** button makes a mega-ZIP of only the chats that are new or changed since the last mega-ZIP from this browser, so a regular backup no longer downloads every chat again. The first time it exports everything and says so; when nothing changed, it says so and downloads nothing. A chat that failed is tried again next time.
+- **export-manifest.json** - Every mega-ZIP now lists the chats it holds, with each chat's `updated_at`, in `export-manifest.json` at its root, so an archive records what it contains without the browser that made it.
 
 ### v1.6.23
 

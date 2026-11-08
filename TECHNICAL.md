@@ -1,6 +1,6 @@
 # Claude Takeout - Technical Documentation
 
-How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.6.23.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Current as of v1.7.0.
 
 This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
@@ -230,7 +230,9 @@ A `text` block's `citations[]` items carry `start_index`, `end_index`, `url`, `t
 
 ## ZIP export
 
-`populateConversationFolder` writes one chat's folder. The single-chat ZIP is that folder; the all-chats mega-ZIP holds one per chat, plus `index.md`, the shared `projects/` folder, and one viewer for all of them.
+`populateConversationFolder` writes one chat's folder. The single-chat ZIP is that folder; the all-chats mega-ZIP holds one per chat, plus `index.md`, `export-manifest.json`, the shared `projects/` folder, and one viewer for all of them.
+
+**Export Changes.** After each mega-ZIP, `saveExportRecord` adds the chats it holds to `chrome.storage.local.exportRecord[<org>]`, each with the `updated_at` the chat list gave. `bulkExportZip({ changesOnly: true })` loads that record and exports only the listed chats that are new or whose `updated_at` differs (`changedSince`), into `claude-takeout-changes-<date>.zip`, whose `index.md` is headed "Changes since <date>". With no record it exports everything; with nothing changed it downloads nothing. Chats that failed aren't recorded, so the next run tries them again. `export-manifest.json` (`format: 1`, `kind: full | changes`, `since`, `listed`, and every chat's `uuid`, `name`, `updated_at` and `folder`) lets the archive say what it holds without the browser; the old-archive tool treats it as part of the export.
 
 ```
 [<Project>-project]_<chat>_claude-chat.zip

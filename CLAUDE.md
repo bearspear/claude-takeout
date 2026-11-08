@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.23.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.7.0.
 
 ---
 
@@ -236,6 +236,7 @@ Mega-ZIP only:
 ```
 claude-takeout-<YYYY-MM-DD>.zip
 ├── index.md                   # Master table w/ per-conversation issue counts
+├── export-manifest.json       # { format, exported_at, kind: full|changes, since, listed, chats: [{ uuid, name, updated_at, folder }] }
 ├── projects/<project>/        # files/ and files.json, stored once and linked from each chat's README
 ├── <conversation-folder-1>/   # Same layout as above
 ├── <conversation-folder-2>/
@@ -275,7 +276,10 @@ If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a
     "showShortcuts": true,
     "useSidePanel": false
   },
-  "useSidePanel": false  // mirrored at top level so background.js can read it
+  "useSidePanel": false,  // mirrored at top level so background.js can read it
+  "exportRecord": {       // written after each mega-ZIP; "Export Changes" exports chats whose listed updated_at differs
+    "<org id>": { "at": "ISO time of that export", "chats": { "<chat uuid>": "updated_at as the chat list gave it" } }
+  }
 }
 ```
 
@@ -352,7 +356,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.23. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built, current as of v1.7.0. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 

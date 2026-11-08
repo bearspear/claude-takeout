@@ -1942,3 +1942,13 @@ test('an old archive\'s errors.txt flags its files in the viewer', () => {
   const files = Object.values(chatFromDisk(archive, chat).viewerChat.files);
   assert.deepStrictEqual(files.map(f => [f.name, f.flag]), [['page.html', 'script']]);
 });
+
+test('a mega-ZIP\'s export-manifest.json is part of the export, not an added file', () => {
+  const tmp = tmpRoot();
+  const m = path.join(tmp, 'mega');
+  put(m, 'index.md');
+  put(m, 'export-manifest.json', '{"format":1,"chats":[]}');
+  put(m, 'mine.md');
+  put(m, 'chat one/original.json', CHAT);
+  assert.deepStrictEqual(scanAdded(find(tmp).archives[0]).files.map(f => f.path), ['mine.md']);
+});

@@ -12,7 +12,7 @@ const CTViewer = require('../takeout-viewer.js');
 const KNOWN_ROOT_FILES = [
   'README.md', 'meta.md', 'prompts.md', 'responses_text_only.md', 'full_chat.md', 'integrated_chat.md',
   'integrated_chat.txt', 'code_snippets.md', 'links_and_sources.md', 'errors.txt', 'original.json',
-  'index.md', 'viewer.html', 'viewer-check.gif',
+  'index.md', 'viewer.html', 'viewer-check.gif', 'export-manifest.json',
 ];
 const KNOWN_DIRS = ['responses', 'artefacts', 'attachments', 'uploads', 'project', 'projects', 'viewer-files'];
 const IGNORED_NAMES = ['.DS_Store', 'Thumbs.db', '__MACOSX', '.git', 'node_modules'];
