@@ -1128,3 +1128,184 @@ test('an export writes a Claude Docs document as .md and a safe standalone .html
   assert.ok(!full.includes('"ops"') && !full.includes('Claude_Docs__batch'), 'no raw tool JSON');
   assert.match(full, /Document: Lorber Notes/);
 });
+
+// ---- second review: export and Claude Docs ----
+const docText = (written, k) => { const v = written[k]; return v === undefined ? undefined : String(v && v.content !== undefined ? v.content : v).replace(/^﻿/, ''); };
+const docWarnings = (data) => { const w = collector(); artifacts(data, w); return plain(w.warnings.map((x) => [x.type, x.filename])); };
+
+test('full_chat.md links and embeds each document by the name it was saved under', async () => {
+  const a = docTools(undefined, { node: 'n-a', title: 'Notes', idPrefix: 'a' });
+  const b = docTools(undefined, { node: 'n-b', title: 'Notes', idPrefix: 'b' });
+  const data = Object.assign(turns(
+    [a.batch, a.batchResult, a.update('ua', 'sess.10', 'FIRST DOC'), a.result('ua', '{}')],
+    [b.batch, b.batchResult, b.update('ub', 'sess.10', 'SECOND DOC'), b.result('ub', '{}')],
+  ), { uuid: 'two', name: 'two docs' });
+  const { written } = await runFolder(exportPopup(), data);
+  assert.ok(docText(written, 'artefacts/Notes.md').includes('FIRST DOC') && docText(written, 'artefacts/Notes_2.md').includes('SECOND DOC'));
+  const full = docText(written, 'full_chat.md');
+  assert.ok(full.includes('artefacts/Notes_2.md') && full.includes('SECOND DOC'), 'the second document is linked and shown');
+});
+
+test('Claude Docs edits that are not section fills, empty updates and a missing batch result all warn', () => {
+  const t = docTools();
+  const batchEdit = { type: 'tool_use', id: 'be', name: 'mcp__Claude_Docs__batch', input: { container: { kind: 'project', id: 'node-1' }, batch: [{ op: 'replace', target: { ids: ['x'] } }] } };
+  assert.deepStrictEqual(docWarnings(turns([t.batch, t.batchResult], [batchEdit, t.result('be', '{}')])), [['claude_doc_unreplayed', 'Lorber_Notes.md']]);
+  const empty = { type: 'tool_use', id: 'ue', name: 'mcp__Claude_Docs__update', input: { ref: { object: 'node', id: 'node-1' }, payload: 'rename please' } };
+  assert.deepStrictEqual(docWarnings(turns([t.batch, t.batchResult], [empty, t.result('ue', '{}')])), [['claude_doc_unreplayed', 'Lorber_Notes.md']]);
+  // No result (the chat stopped): the document is still exported, its sections unwritten, with a warning.
+  const lost = turns([t.batch]);
+  const out = plain(artifacts(lost));
+  assert.deepStrictEqual(Object.keys(out), ['Lorber_Notes.md']);
+  assert.match(out['Lorber_Notes.md'], /wasn't written/);
+  assert.deepStrictEqual(docWarnings(lost), [['claude_doc_unreplayed', 'Lorber_Notes.md']]);
+  assert.deepStrictEqual(pythonArtifacts(lost), out);
+});
+
+test('a section filled with chips expands them, in both implementations', () => {
+  const t = docTools();
+  const data = turns([t.batch, t.batchResult, t.update('u1', 'sess.10', 'Owner <?claude block me?>, due <?claude block due?>.', { blocks: { me: { type: 'mention', user: 'me' }, due: { type: 'date', value: '2026-10-06' } } }), t.result('u1', '{}')]);
+  const out = plain(artifacts(data))['Lorber_Notes.md'];
+  assert.ok(out.includes('Owner , due 2026-10-06.') || out.includes('Owner, due 2026-10-06.'), out);
+  assert.ok(!out.includes('<?claude'), out);
+  assert.deepStrictEqual(pythonArtifacts(data)['Lorber_Notes.md'], out);
+});
+
+test('odd Claude Docs shapes do not crash the Python script and render the same in both', () => {
+  const t = docTools();
+  const odd = JSON.parse(JSON.stringify(t.batch));
+  odd.input.container.create.doc.blocks.x = { value: 1 };
+  odd.input.container.create.doc.blocks.y = 'text';
+  odd.input.container.create.doc.markdown += '\n\n<?claude block x?>\n\n<?claude block y?>';
+  const badOps = { type: 'tool_use', id: 'u9', name: 'mcp__Claude_Docs__update', input: { ref: { object: 'node', id: 'node-1' }, payload: JSON.stringify({ ops: ['nope', null] }) } };
+  const data = turns([odd, t.batchResult], [badOps, t.result('u9', '{}')]);
+  assert.deepStrictEqual(pythonArtifacts(data), plain(artifacts(data)));
+  const strDoc = JSON.parse(JSON.stringify(t.batch));
+  strDoc.input.container.create.doc = 'not an object';
+  assert.deepStrictEqual(pythonArtifacts(turns([strDoc, t.batchResult])), plain(artifacts(turns([strDoc, t.batchResult]))));
+});
+
+test('multi-line comments stay one list item and one quote', async () => {
+  const t = docTools();
+  const c = JSON.parse(JSON.stringify(t.comment));
+  c.input.payload = JSON.stringify({ value: { body: 'first line\n\nsecond line', parent: { object: 'node', id: 'node-1' } } });
+  const data = Object.assign(turns([t.batch, t.batchResult], [c, t.result('c1', '{}')]), { uuid: 'mc', name: 'mc' });
+  const md = plain(artifacts(data))['Lorber_Notes.md'];
+  assert.match(md, /- first line\n\n {2}second line/);
+  assert.deepStrictEqual(pythonArtifacts(data)['Lorber_Notes.md'], md);
+  const { written } = await runFolder(exportPopup(), data);
+  assert.match(docText(written, 'full_chat.md'), /> \*\*Comment on the document:\*\* first line\n>\n> second line/);
+});
+
+test('non-Latin titles keep their letters in file names', () => {
+  const art = (id, title) => use(id, 'artifacts', { command: 'create', id, title, type: 'text/markdown', content: title });
+  const data = turns([art('1', 'Резюме'), art('2', '日本語'), art('3', '!!!')]);
+  const want = ['Резюме.md', '日本語.md', '3.md'];
+  assert.deepStrictEqual(Object.keys(plain(artifacts(data))).sort(), want.slice().sort());
+  assert.deepStrictEqual(Object.keys(pythonArtifacts(data)).sort(), want.slice().sort());
+});
+
+test('claudeDocHtml escapes text after raw tags and escapes attributes once', () => {
+  const html = fn('claudeDocHtml')('T', 'Wrap it in <code> tags; it works when n<limit, and AT&T too.\n\nSee <https://e.com/?a=1&b=2> and ![Q&A](https://e.com/x.png "Tom & Jerry").');
+  const body = html.split('<main>')[1];
+  assert.ok(body.includes('n&lt;limit') && body.includes('AT&amp;T'), body);
+  assert.ok(body.includes('href="https://e.com/?a=1&amp;b=2"'), body);
+  assert.ok(body.includes('alt="Q&amp;A"') && body.includes('title="Tom &amp; Jerry"'), body);
+  assert.ok(!body.includes('&amp;amp;'), body);
+});
+
+test('a document .html never clashes with another file, whatever the case, and README lists it', async () => {
+  const t = docTools(undefined, { title: 'Notes' });
+  const data = Object.assign(turns([use('0', 'create_file', { path: '/mnt/user-data/outputs/notes.html', file_text: '<p>mine</p>' }), t.batch, t.batchResult]), { uuid: 'nc', name: 'nc' });
+  const { written } = await runFolder(exportPopup(), data);
+  const arte = Object.keys(written).filter((k) => k.startsWith('artefacts/')).map((k) => k.slice(10).toLowerCase());
+  assert.strictEqual(new Set(arte).size, arte.length, arte.join());
+  const docHtml = Object.keys(written).find((k) => /artefacts\/Notes.*\.html$/.test(k));
+  assert.ok(docHtml && docText(written, docHtml).includes('<title>Notes</title>'));
+  assert.ok(docText(written, 'README.md').includes(docHtml.slice(10)), 'README lists the page');
+});
+
+test('a single Markdown file shows the document, not a link into a ZIP', () => {
+  const t = docTools();
+  const data = turns([t.batch, t.batchResult, t.update('u1', 'sess.10', 'SECTION ONE'), t.result('u1', '{}')]);
+  const md = fn('convertToMarkdown')(data, { embedArtifacts: false });
+  assert.ok(!md.includes('artefacts/'), md);
+  assert.ok(md.includes(DOC_URL), 'the live document is linked');
+  const embedded = fn('convertToMarkdown')(data, { embedArtifacts: true });
+  assert.ok(embedded.includes('SECTION ONE'), 'the embedded export shows the document');
+});
+
+test('a presented file is matched to the artifact with its exact path', async () => {
+  const data = Object.assign(chatOf([
+    { sender: 'human', content: [{ type: 'text', text: 'go' }] },
+    { sender: 'assistant', content: [
+      use('1', 'create_file', { path: '/home/claude/index.html', file_text: 'DRAFT' }),
+      use('2', 'create_file', { path: '/mnt/user-data/outputs/index.html', file_text: 'FINAL' }),
+      ...presented('p', ['/mnt/user-data/outputs/index.html']),
+    ] },
+  ]), { uuid: 'pm', name: 'pm' });
+  const asked = [];
+  const popup = exportPopup({ routes: [[/download-file/, (u) => { asked.push(u); return { ok: true, status: 200, blob: async () => textBlob('DISK') }; }]] });
+  const { written } = await runFolder(popup, data);
+  const full = docText(written, 'full_chat.md');
+  const at = full.indexOf('**Artifact: index_2.html**');
+  assert.ok(at >= 0 && full.slice(at, at + 200).includes('FINAL'), 'the presented file is the outputs copy');
+  assert.strictEqual(asked.length, 0, 'it was replayed cleanly, so nothing is downloaded');
+});
+
+test('detectOpaqueMutations: every changed file, Path variables, ./name, globs, other interpreters, and heredoc text', () => {
+  const tracked = ['/home/claude/foo.html', '/home/claude/bar.html', '/home/claude/index.html'].map((p, i) => use('t' + i, 'create_file', { path: p, file_text: 'x' }));
+  const warned = (command) => { const c = collector(); fn('detectOpaqueMutations')(oneMessage([...tracked, use('1', 'bash_tool', { command })]), c); return c.warnings.map((w) => w.filename).sort().join(','); };
+  assert.strictEqual(warned("sed -i 's/v1/v2/' /home/claude/foo.html /home/claude/bar.html"), 'bar.html,foo.html');
+  assert.strictEqual(warned("python3 - <<'PY'\nfrom pathlib import Path\np = Path('/home/claude/foo.html')\np.write_text(p.read_text().replace('a', 'b'))\nPY"), 'foo.html');
+  assert.strictEqual(warned("cd /home/claude && sed -i 's/a/b/' ./foo.html"), 'foo.html');
+  assert.strictEqual(warned("sed -i 's/a/b/' /home/claude/*.html"), 'bar.html,foo.html,index.html');
+  assert.strictEqual(warned("python3 -c \"open(file='/home/claude/foo.html', mode='w').write('y')\""), 'foo.html');
+  assert.strictEqual(warned("awk -i inplace '{print}' /home/claude/foo.html"), 'foo.html');
+  assert.strictEqual(warned("python3 << 'EOF'\n# check the page's size\nprint(len(open('/home/claude/foo.html').read()))\nEOF\nsed -i 's/a/b/' /home/claude/foo.html"), 'foo.html');
+  assert.strictEqual(warned("python3 << 'EOF'\nhtml = '<a href=\"foo.html\">foo.html</a>'\nopen('/home/claude/index.html', 'w').write(html)\nEOF"), 'index.html');
+  assert.strictEqual(warned("echo '<li><a href=\"foo.html\">foo.html</a></li>' >> /home/claude/index.html"), 'index.html');
+});
+
+test('heredocs written as cat << EOF > path or cat >path << EOF are tracked, in every implementation', () => {
+  const data = turns([
+    use('1', 'bash_tool', { command: "cat << 'EOF' > /home/claude/app.py\nprint(1)\nEOF" }),
+    use('2', 'bash_tool', { command: "cat >/home/claude/b.py <<'EOF'\nprint(2)\nEOF" }),
+  ]);
+  const want = { 'app.py': 'print(1)', 'b.py': 'print(2)' };
+  assert.deepStrictEqual(plain(artifacts(data)), want);
+  assert.deepStrictEqual(pythonArtifacts(data), want);
+});
+
+test('integrated_chat.txt keeps link paths and snake_case words', () => {
+  const plainText = fn('markdownToPlainText');
+  const out = plainText('- [my_notes.txt](uploads/p01_my_notes.txt)\n\nSet MAX_RETRIES and API_KEY; 2 * 3 * 4 = 24. Some _italic_ and *emphasis* and **bold**.');
+  assert.ok(out.includes('my_notes.txt (uploads/p01_my_notes.txt)'), out);
+  assert.ok(out.includes('MAX_RETRIES and API_KEY') && out.includes('2 * 3 * 4 = 24'), out);
+  assert.ok(out.includes('Some italic and emphasis and bold.'), out);
+});
+
+test('pasted names are de-duplicated case-insensitively', () => {
+  const data = chatOf([{ sender: 'human', content: [{ type: 'text', text: 'p' }], attachments: [{ file_name: 'Notes.txt', extracted_content: 'a' }, { file_name: 'notes.txt', extracted_content: 'b' }] }]);
+  const names = Object.keys(fn('extractTextAttachments')(data).attachments).map((n) => n.toLowerCase());
+  assert.strictEqual(new Set(names).size, 2, names.join());
+});
+
+test('an export leaves disabled buttons disabled, and bulk exports hold the lock until they finish', async () => {
+  const popup = exportPopup();
+  const doc = popup.sandbox.document;
+  doc.getElementById('exportMd').disabled = true;
+  await vm.runInContext('exclusiveExport(async () => {})()', popup.sandbox);
+  assert.strictEqual(doc.getElementById('exportMd').disabled, true, 'a button that was off stays off');
+  let answer;
+  popup.sandbox.chrome.tabs.query = async () => [{ id: 1, url: 'https://claude.ai/chat/x' }];
+  popup.sandbox.chrome.tabs.sendMessage = (id, msg, cb) => { answer = cb; };
+  let done = false;
+  const run = vm.runInContext('exclusiveExport(() => bulkExportZip())()', popup.sandbox).then(() => { done = true; });
+  for (let i = 0; i < 5 && !answer; i++) await new Promise((r) => setTimeout(r, 5));
+  assert.ok(answer, 'the list was requested');
+  assert.strictEqual(done, false, 'still running while the list is fetched');
+  assert.strictEqual(vm.runInContext('exportRunning', popup.sandbox), true);
+  answer({ error: 'stopped' });
+  await run;
+  assert.strictEqual(vm.runInContext('exportRunning', popup.sandbox), false);
+});

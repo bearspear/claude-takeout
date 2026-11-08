@@ -367,6 +367,21 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.19
+
+Fixes from a second full review of the export code. None were critical.
+
+- **Heredocs written either way round** - `cat << 'EOF' > file` and `cat >file << EOF` now count as file writes, like `cat > file << EOF`, in the extension, `extract_artifacts.py` and `replay_bash.py`.
+- **Titles in any script** - Artifact and Claude Docs titles in Cyrillic, Greek, Japanese and other scripts keep their letters in file names, instead of becoming `.md`, `.md_2`, ...
+- **Claude Docs** - A document whose tool reply is missing from the chat is still exported, with a warning. Edits made with a batch, and updates with no section text, now warn instead of passing silently. Date and mention chips inside a section are filled in, a comment of several paragraphs stays one list item, and odd block shapes no longer stop `extract_artifacts.py`.
+- **Documents in the Markdown files** - `full_chat.md` links each document by the name it was saved under (two documents with one title are `Notes.md` and `Notes_2.md`). A single Markdown file links the live document instead of a ZIP path, and a multi-paragraph comment stays one quote.
+- **Document pages** - In a document's `.html`, text after an inline `<code>` tag is escaped, and link and image attributes are escaped once. The page's name never clashes with another file in a different case, and README.md lists it.
+- **Presented files** - A presented file is matched to the file Claude wrote at that exact path, so a draft with the same name elsewhere no longer stands in for it.
+- **Changed-file warnings** - A command that changes several tracked files warns for each one. Python `Path` variables, `open(file=...)`, `./name`, globs such as `*.html` and `awk -i inplace` are recognized. Text inside a heredoc or in quotes is no longer read as a redirect.
+- **integrated_chat.txt** - Link paths and words such as `MAX_RETRIES` keep their underscores, and `2 * 3 * 4` keeps its stars.
+- **Pasted files** - `Notes.txt` and `notes.txt` pasted in one prompt are saved as two files on every system.
+- **Export buttons** - A bulk export keeps the other export buttons off until it has finished, and a button that was off before an export stays off after it.
+
 ### v1.6.18
 
 - **Files list no longer hidden behind the project bar** - In a chat that belongs to a project, the top of the Files list (the Outputs heading and the first file) was drawn under the project bar. It now opens above it, and above the match bar. Older exports get this when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).

@@ -74,6 +74,8 @@
       default: {
         // Claude Docs tools come under a connector prefix, such as mcp__Claude_Docs__update.
         const doc = /Claude_Docs__(\w+)$/.exec(String(name || ''));
+        // A batch creates a document only when it carries container.create; otherwise it edits one.
+        if (doc && doc[1] === 'batch' && !(i.container && i.container.create)) return 'Edited the document';
         if (doc) return ({ batch: 'Created a document', update: 'Edited the document', create: 'Commented on the document', guide: 'Read the Claude Docs guide' })[doc[1]] || 'Used Claude Docs';
         return `Used ${name || 'a tool'}`;
       }

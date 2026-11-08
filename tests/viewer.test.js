@@ -927,6 +927,9 @@ test('a Claude Docs document gets a card, as an output', () => {
   assert.ok(files[0].versions[0].text.includes('## Alpha'));
   assert.strictEqual(chat.messages.find(m => m.id === 'a').blocks.filter(b => b.t === 'card').length, 1, 'one card for the document');
   assert.deepStrictEqual(chat.messages.find(m => m.id === 'a').blocks.filter(b => b.t === 'tool').map(b => b.label), ['Created a document', 'Edited the document']);
+  const editBatch = { type: 'tool_use', id: 'be', name: 'mcp__Claude_Docs__batch', input: { container: { kind: 'project', id: 'node-1' }, batch: [] } };
+  assert.strictEqual(buildViewerChat(Object.assign({}, data, { chat_messages: [data.chat_messages[0], Object.assign({}, data.chat_messages[1], { content: [editBatch] })] }), ctxFor(data))
+    .messages.find(m => m.id === 'a').blocks.find(b => b.t === 'tool').label, 'Edited the document', 'a batch without create edits');
 });
 
 test('countTerms counts every occurrence of any term, longest first, without overlaps', () => {
