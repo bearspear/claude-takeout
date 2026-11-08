@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, groupChats, linkProjects, copyText, attachmentNames, uploadName } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -877,6 +877,31 @@ test('search edge cases: blank, long, limit, odd lowercasing', () => {
   assert.ok(hit.snippet.length <= 90);
   assert.ok(searchChats(odd, 'needle x')[0].snippet.includes('needle x'));
   assert.ok(searchChats(buildSearchIndex([{ id: 'e', title: 'Hi', project: null, messages: [T('e1', null, 'human', 'a'.repeat(300) + 'Z')] }]), 'z')[0].snippet.startsWith('\u2026'));
+});
+
+test('countTerms counts every occurrence of any term, longest first, without overlaps', () => {
+  assert.strictEqual(countTerms('survey Survey SURVEYS', ['survey']), 3);
+  assert.strictEqual(countTerms('survey feedback, survey', ['survey', 'feedback']), 3);
+  assert.strictEqual(countTerms('aaaa', ['aa']), 2);
+  assert.strictEqual(countTerms('surveys', ['survey', 'surveys']), 1, 'the longer term wins at one spot');
+  assert.strictEqual(countTerms('nothing', ['survey']), 0);
+  assert.strictEqual(countTerms('x', []), 0);
+});
+
+test('findPlan: matching messages in chat order, counted from what the conversation shows', () => {
+  const msg = (id, text, extra = {}) => ({ id, parent: null, sender: 'assistant', blocks: [{ t: 'text', text, cites: [] }], uploads: [], attachments: [], ...extra });
+  const chat = { messages: [
+    msg('m1', 'the survey and the survey again'),
+    msg('m2', 'no match here', { attachments: [{ name: 'p.txt', text: 'survey survey survey' }] }),
+    msg('m3', 'Survey draft'),
+    msg('m4', 'survey feedback came in', { blocks: [{ t: 'thinking', text: 'survey survey' }, { t: 'text', text: 'survey feedback came in', cites: [] }] }),
+  ] };
+  const plan = q => JSON.parse(JSON.stringify(findPlan(chat, q)));
+  assert.deepStrictEqual(plan('survey'), { terms: ['survey'], items: [{ msg: 'm1', count: 2 }, { msg: 'm3', count: 1 }, { msg: 'm4', count: 1 }], total: 4 });
+  assert.deepStrictEqual(plan('survey -draft').items.map(i => i.msg), ['m1', 'm4']);
+  assert.deepStrictEqual(plan('survey feedback'), { terms: ['survey', 'feedback'], items: [{ msg: 'm4', count: 2 }], total: 2 });
+  assert.deepStrictEqual(plan('"no match"').items, [{ msg: 'm2', count: 1 }]);
+  assert.deepStrictEqual(plan(''), { terms: [], items: [], total: 0 });
 });
 
 test('chatFiles: outputs once each, newest first, and every upload and paste', () => {

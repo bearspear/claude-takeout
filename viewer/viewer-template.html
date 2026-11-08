@@ -82,6 +82,14 @@ mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; 
 #menu svg.ic { width: 20px; height: 20px; }
 #title { flex: 1; min-width: 0; margin: 0; font: 500 14px/1.3 var(--sans); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #meta { flex: none; font-size: 12.5px; color: var(--mute); }
+#findbar { flex: none; display: flex; align-items: center; gap: 6px; margin: 0 20px 6px; padding: 5px 6px 5px 12px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; font: 12.5px/1.3 var(--sans); color: var(--soft); position: relative; z-index: 2; }
+#findbar[hidden] { display: none; }
+#findbar .find-q { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--ink); font-weight: 500; }
+#findbar .find-pos { flex: none; color: var(--mute); font-variant-numeric: tabular-nums; }
+#findbar button { all: unset; display: flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: 7px; color: var(--soft); cursor: pointer; }
+#findbar button:hover:not(:disabled), #findbar button:focus-visible { background: var(--hover); color: var(--ink); }
+#findbar button:disabled { opacity: .35; cursor: default; }
+#findbar svg.ic { width: 15px; height: 15px; }
 #files-button { flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--soft); font: 500 12.5px/1 var(--sans); cursor: pointer; }
 #files-button[hidden] { display: none; }
 #files-button:hover, #files-button[aria-expanded="true"] { background: var(--hover); color: var(--ink); }
@@ -364,6 +372,13 @@ button.chip:hover { border-color: var(--line-strong); }
       <div id="files-menu" aria-label="Files in this chat" hidden></div>
     </header>
     <div id="project" hidden></div>
+    <div id="findbar" role="search" aria-label="Matches in this chat" hidden>
+      <span class="find-q"></span>
+      <span class="find-pos" aria-live="polite"></span>
+      <button class="find-prev" type="button" aria-label="Previous match" title="Previous match (Shift+Enter)"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+      <button class="find-next" type="button" aria-label="Next match" title="Next match (Enter)"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6"/></svg></button>
+      <button class="find-close" type="button" aria-label="Close" title="Close (Esc)"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
     <div id="scroll"><div id="chat"></div></div>
   </main>
   <aside id="panel" aria-label="File" hidden>
