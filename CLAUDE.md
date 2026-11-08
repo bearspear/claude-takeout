@@ -40,6 +40,7 @@ For deeper dives, two companion docs live alongside this one:
 | `tests/archive.test.js` | Unit tests for the three `tools/` files. | Run by `sh tests/run.sh`. |
 | `tests/e2e/archive.e2e.js` | Browser test of a built archive viewer. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/colors.e2e.js` | Browser test of syntax colors. | Optional; needs `playwright-core` and Chromium. |
+| `tests/e2e/files.e2e.js` | Browser test of the Files list in a chat's top bar. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/search.e2e.js` | Browser test of sidebar search: grouping and ranking, bold matches, operators, the clear button, `/` and arrow keys. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/navigation.e2e.js` | Browser test of keyboard version switching, search highlights, Sources on plain-text responses, the phone panel header and the color queue. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/parts.e2e.js` | Browser test of upload and generated-file text loaded from `viewer-files/`. | Optional; needs `playwright-core` and Chromium. |

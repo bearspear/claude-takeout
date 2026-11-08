@@ -790,6 +790,44 @@ function attachmentNames(attachments) {
   return list.map(a => (a && a.name ? a.name : unnamed > 1 ? `Pasted text ${++n}` : 'Pasted text'));
 }
 
+// A chat's files for the Files list, newest first: outputs (each file Claude made or sent, once:
+// { id, name, kind, versions }, ordered by the last message that touched it) and uploads (every
+// upload and pasted text in the chat, once: { name, note-free item for the popup, pasted }).
+function chatFiles(chat) {
+  const files = (chat && chat.files) || {};
+  const messages = (chat && Array.isArray(chat.messages)) ? chat.messages : [];
+  const lastSeen = new Map();  // file id -> position of its last card in the chat
+  let position = 0;
+  for (const m of messages) {
+    for (const b of m.blocks || []) if (b && b.t === 'card' && Object.prototype.hasOwnProperty.call(files, b.file)) lastSeen.set(b.file, position++);
+  }
+  const outputs = [...lastSeen.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .map(([id]) => ({ id, name: files[id].name || 'Untitled', kind: files[id].kind, versions: (files[id].versions || []).length || 1 }));
+  const uploads = [];
+  const seen = new Set();
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    for (const u of m.uploads || []) {
+      if (!u) continue;
+      const name = uploadName(u) || 'Untitled';
+      const key = `u\n${u.href || ''}\n${name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      uploads.push({ name, item: u.name ? u : { ...u, name }, pasted: false });
+    }
+    const pastedNames = attachmentNames(m.attachments);
+    (m.attachments || []).forEach((a, j) => {
+      if (!a || typeof a.text !== 'string') return;
+      const key = `p\n${pastedNames[j]}\n${a.text}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      uploads.push({ name: pastedNames[j], item: { name: pastedNames[j], href: null, text: a.text }, pasted: !a.name });
+    });
+  }
+  return { outputs, uploads };
+}
+
 // An upload with no name is called by the file it was saved as. '' when there is none.
 function uploadName(u) {
   if (u && u.name) return u.name;
@@ -834,5 +872,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, groupChats, linkProjects, copyText, attachmentNames, uploadName };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, groupChats, linkProjects, copyText, attachmentNames, uploadName };
 }

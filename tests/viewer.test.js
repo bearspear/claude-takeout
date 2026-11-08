@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, groupChats, linkProjects, copyText, attachmentNames, uploadName } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, groupChats, linkProjects, copyText, attachmentNames, uploadName } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -877,6 +877,28 @@ test('search edge cases: blank, long, limit, odd lowercasing', () => {
   assert.ok(hit.snippet.length <= 90);
   assert.ok(searchChats(odd, 'needle x')[0].snippet.includes('needle x'));
   assert.ok(searchChats(buildSearchIndex([{ id: 'e', title: 'Hi', project: null, messages: [T('e1', null, 'human', 'a'.repeat(300) + 'Z')] }]), 'z')[0].snippet.startsWith('\u2026'));
+});
+
+test('chatFiles: outputs once each, newest first, and every upload and paste', () => {
+  const card = (file, version) => ({ t: 'card', file, version });
+  const chat = {
+    files: {
+      a1: { name: 'Minutes 09 21.odt', kind: 'binary', versions: [{ label: '', text: null, href: 'x' }] },
+      a2: { name: 'notes.md', kind: 'md', versions: [{ label: 'v1', text: 'a', href: 'y1' }, { label: 'v2', text: 'b', href: 'y2' }] },
+      a3: { name: 'gone.html', kind: 'missing', versions: [{ label: '', text: null, href: null }] },
+    },
+    messages: [
+      { id: 'h1', sender: 'human', blocks: [], uploads: [{ name: 'rec.m4a.md', href: 'uploads/p01_rec.m4a.md', text: 'hi' }], attachments: [{ name: '', text: 'pasted one' }] },
+      { id: 'a1', sender: 'assistant', blocks: [card('a1', 0), card('a2', 0)] },
+      { id: 'h2', sender: 'human', blocks: [], uploads: [{ name: 'photo.png', href: 'uploads/p02_photo.png', text: null }, { name: 'rec.m4a.md', href: 'uploads/p01_rec.m4a.md', text: 'hi' }], attachments: [] },
+      { id: 'a2', sender: 'assistant', blocks: [card('a2', 1), card('a3', 0)] },
+    ],
+  };
+  const f = JSON.parse(JSON.stringify(chatFiles(chat)));
+  assert.deepStrictEqual(f.outputs.map(o => [o.id, o.name, o.versions]), [['a3', 'gone.html', 1], ['a2', 'notes.md', 2], ['a1', 'Minutes 09 21.odt', 1]]);
+  assert.deepStrictEqual(f.uploads.map(u => [u.name, u.pasted]), [['photo.png', false], ['rec.m4a.md', false], ['Pasted text', true]]);
+  assert.strictEqual(f.uploads[1].item.href, 'uploads/p01_rec.m4a.md', 'an upload is listed once');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(chatFiles({ files: {}, messages: [] }))), { outputs: [], uploads: [] });
 });
 
 test('parseQuery: words, "phrases", OR and -exclusions', () => {

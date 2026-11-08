@@ -367,6 +367,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.14
+
+- **Files list in the viewer** - A Files button in each chat's top bar, with a count, lists everything in that chat in one place: Outputs (each file Claude made or sent, once, newest first, with how many versions it has) and Uploads (your uploads and pasted text). An output opens in the file panel at its latest version, an upload in the popup. Like claude.ai's own files panel, but it also lists the working files Claude wrote along the way. Older exports get it when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+
 ### v1.6.13
 
 Better search in the viewer. Older exports get it when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
