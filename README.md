@@ -367,6 +367,13 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.16
+
+- **Working files kept apart** - In the Files list, Outputs now holds only what Claude shared with you (sent, presented, saved to its outputs folder, or made as an artifact), as on claude.ai. Helper scripts and other files it wrote along the way are listed under a new Working files group.
+- **Search counts match the match bar** - Each chat in the results now says how many matches it has and in how many messages ("144 matches in 47 messages"), counted the way the match bar counts them, and the summary gives the total matches. A chat that matches only in pasted text or file names says so.
+
+Both reach older exports when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).
+
 ### v1.6.15
 
 - **Step through every match in a chat** - Opening a search result shows a bar at the top of the conversation: “survey” · 1 of 144 · ‹ › ✕. The arrows, or Enter and Shift+Enter, go to the next or previous occurrence, highlighted, including matches on an earlier version of a response and far down a long chat. Escape or ✕ closes it, as does clearing the search or opening another chat. It counts the words the conversation shows: pasted text and file names still lead search to a chat, but aren't stepped through. Older exports get it when their viewer is rebuilt with `--force`; see [Updating a viewer](USAGE.md#updating-a-viewer).

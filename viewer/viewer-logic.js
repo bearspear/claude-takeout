@@ -824,9 +824,11 @@ function attachmentNames(attachments) {
   return list.map(a => (a && a.name ? a.name : unnamed > 1 ? `Pasted text ${++n}` : 'Pasted text'));
 }
 
-// A chat's files for the Files list, newest first: outputs (each file Claude made or sent, once:
-// { id, name, kind, versions }, ordered by the last message that touched it) and uploads (every
-// upload and pasted text in the chat, once: { name, note-free item for the popup, pasted }).
+// A chat's files for the Files list, newest first: outputs (each file Claude shared, once:
+// { id, name, kind, versions }, ordered by the last card that shows it), working (files Claude made but
+// didn't share, such as helper scripts; same shape) and uploads (every upload and pasted text in the
+// chat, once: { name, item for the popup, pasted }). A viewer built before files carried `shared` has
+// no working files: everything is an output, as it was.
 function chatFiles(chat) {
   const files = (chat && chat.files) || {};
   const messages = (chat && Array.isArray(chat.messages)) ? chat.messages : [];
@@ -835,9 +837,11 @@ function chatFiles(chat) {
   for (const m of messages) {
     for (const b of m.blocks || []) if (b && b.t === 'card' && Object.prototype.hasOwnProperty.call(files, b.file)) lastSeen.set(b.file, position++);
   }
-  const outputs = [...lastSeen.entries()]
+  const all = [...lastSeen.entries()]
     .sort((a, b) => b[1] - a[1])
     .map(([id]) => ({ id, name: files[id].name || 'Untitled', kind: files[id].kind, versions: (files[id].versions || []).length || 1 }));
+  const outputs = all.filter(o => files[o.id].shared !== false);
+  const working = all.filter(o => files[o.id].shared === false);
   const uploads = [];
   const seen = new Set();
   for (let i = messages.length - 1; i >= 0; i--) {
@@ -859,7 +863,7 @@ function chatFiles(chat) {
       uploads.push({ name: pastedNames[j], item: { name: pastedNames[j], href: null, text: a.text }, pasted: !a.name });
     });
   }
-  return { outputs, uploads };
+  return { outputs, working, uploads };
 }
 
 // An upload with no name is called by the file it was saved as. '' when there is none.

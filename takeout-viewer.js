@@ -199,6 +199,10 @@
     const files = {};
     const ids = new Map();
     let counter = 0;
+    // Files Claude shared, as claude.ai's own Outputs list has them: sent, presented, saved under
+    // /mnt/user-data/outputs, or made with the artifacts tool. The rest are working files.
+    const sharedKeys = new Set();
+    const isShared = key => /^(artifact:|deliver:|name:|missing:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
 
     source.forEach((m, mi) => {
       const message = messages[mi];
@@ -260,6 +264,7 @@
             if (!entry) entry = Object.values(index).find(e => e && e.filename === base) || null;
             if (entry) {
               const v = Math.max(versionAsOf(entry, where), 0);
+              sharedKeys.add(entry.path);
               touch(after, entry.path, () => entryFile(entry.filename, entry.versions, null), v);
             } else if (hasOwn(arts, base)) {
               touch(after, 'name:' + base, () => entryFile(base, [base], null), 0);
@@ -273,6 +278,7 @@
             if (!d || !d.path) continue;
             // Off the active branch, or not saved: the file isn't in this export.
             if (!active || !hasOwn(deliveries, d.file_uuid)) {
+              sharedKeys.add('x:' + m.uuid + ':' + d.path);
               missingKey(after, 'x:' + m.uuid + ':' + d.path, baseName(d.path));
               continue;
             }
@@ -305,6 +311,7 @@
       }
       message.blocks = out;
     });
+    for (const [fileKey, id] of ids) files[id].shared = sharedKeys.has(fileKey) || isShared(fileKey);
     return files;
   }
 
