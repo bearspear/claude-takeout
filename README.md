@@ -342,12 +342,14 @@ Check the browser console for error details. Common causes:
 ## Technical Documentation
 
 See [TECHNICAL.md](TECHNICAL.md) for a comprehensive technical writeup covering:
-- JSON structure and data extraction
-- Message chain/tree resolution for branched conversations
-- Content block types (text, thinking, tool_use, tool_result)
-- Artifact extraction from multiple tool types
-- File handling (attachments, uploads, ephemeral blobs, project files)
-- Web search sources and citation processing
+- How conversations are loaded, and the JSON structure
+- Message chain resolution for branched conversations
+- Content blocks and the tools the exporter understands
+- Artifact extraction with per-turn versions
+- Files: pasted text, uploads, files Claude made, project files
+- Web search sources and citations
+- The ZIP layout, `errors.txt`, and `replay_bash.py`
+- The offline viewer and viewers for older archives
 - API endpoints and authentication
 
 ## Companion CLIs
