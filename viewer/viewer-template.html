@@ -82,6 +82,20 @@ mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; 
 #menu svg.ic { width: 20px; height: 20px; }
 #title { flex: 1; min-width: 0; margin: 0; font: 500 14px/1.3 var(--sans); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #meta { flex: none; font-size: 12.5px; color: var(--mute); }
+#files-button { flex: none; display: inline-flex; align-items: center; gap: 5px; padding: 4px 9px; border: 1px solid var(--line); border-radius: 8px; background: var(--card); color: var(--soft); font: 500 12.5px/1 var(--sans); cursor: pointer; }
+#files-button[hidden] { display: none; }
+#files-button:hover, #files-button[aria-expanded="true"] { background: var(--hover); color: var(--ink); }
+#files-button svg.ic { width: 14px; height: 14px; }
+#files-menu { position: absolute; top: 46px; right: 16px; width: min(340px, calc(100vw - 32px)); max-height: 70vh; overflow-y: auto; background: var(--card); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 10px 32px rgba(0, 0, 0, .18); padding: 6px; z-index: 5; }
+#files-menu[hidden] { display: none; }
+.files-lab { font-size: 12px; font-weight: 500; color: var(--mute); padding: 8px 10px 4px; }
+.files-row { display: flex; align-items: center; gap: 10px; width: 100%; text-align: left; border: 0; background: none; border-radius: 8px; padding: 6px 8px; cursor: pointer; font: inherit; color: inherit; }
+.files-row:hover, .files-row:focus-visible { background: var(--hover); outline: none; }
+.files-row .tile { width: 28px; height: 28px; border-radius: 7px; background: var(--bub); color: var(--mute); display: flex; align-items: center; justify-content: center; flex: none; }
+.files-row .tile svg.ic { width: 14px; height: 14px; }
+.files-row .txt { min-width: 0; display: flex; flex-direction: column; }
+.files-row b { font: 500 13px/1.35 var(--sans); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.files-row small { font-size: 11.5px; color: var(--mute); }
 
 /* Chat column */
 #scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-gutter: stable; }
@@ -346,6 +360,8 @@ button.chip:hover { border-color: var(--line-strong); }
       </button>
       <h1 id="title"></h1>
       <span id="meta"></span>
+      <button id="files-button" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="files-menu" title="Files in this chat" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg><span class="n"></span></button>
+      <div id="files-menu" aria-label="Files in this chat" hidden></div>
     </header>
     <div id="project" hidden></div>
     <div id="scroll"><div id="chat"></div></div>

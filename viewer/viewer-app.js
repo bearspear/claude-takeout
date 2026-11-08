@@ -663,6 +663,96 @@ function renderCard(block, chat) {
   return card;
 }
 
+// The Files list in the top bar: what Claude made, and what was uploaded or pasted, each once.
+let filesOf = null; // chatFiles() for the chat on screen
+
+function renderFilesButton(chat) {
+  closeFilesMenu(false);
+  filesOf = { chat, ...chatFiles(chat) };
+  const count = filesOf.outputs.length + filesOf.uploads.length;
+  const button = document.getElementById('files-button');
+  button.hidden = count === 0;
+  button.querySelector('.n').textContent = String(count);
+  button.setAttribute('aria-label', `Files in this chat: ${count}`);
+}
+
+function filesRow(name, note, onOpen) {
+  const row = el('button', 'files-row');
+  row.type = 'button';
+  const tile = el('span', 'tile');
+  tile.append(icon('file'));
+  const txt = el('span', 'txt');
+  txt.append(el('b', '', name), ...(note ? [el('small', '', note)] : []));
+  row.append(tile, txt);
+  row.title = name;
+  row.addEventListener('click', onOpen);
+  return row;
+}
+
+function openFilesMenu() {
+  if (!filesOf) return;
+  const { chat, outputs, uploads } = filesOf;
+  const menu = document.getElementById('files-menu');
+  const button = document.getElementById('files-button');
+  const parts = [];
+  if (outputs.length) {
+    parts.push(el('div', 'files-lab', 'Outputs'));
+    for (const o of outputs) {
+      const file = chat.files[o.id];
+      const note = [fileKindLabel(file), o.versions > 1 ? `${o.versions} versions` : ''].filter(Boolean).join(' · ');
+      parts.push(filesRow(o.name, note, () => {
+        closeFilesMenu(false);
+        navigate({ ...parseHash(location.hash), file: o.id, version: o.versions - 1 });
+      }));
+    }
+  }
+  if (uploads.length) {
+    parts.push(el('div', 'files-lab', 'Uploads'));
+    for (const u of uploads) {
+      const note = u.pasted ? ['Pasted', fileNote('', u.item.text)].filter(Boolean).join(' · ') : fileNote(u.name, u.item.text, u.item.lines);
+      parts.push(filesRow(u.name, note, () => {
+        closeFilesMenu(false);
+        openPopup(u.item, button);
+      }));
+    }
+  }
+  menu.replaceChildren(...parts);
+  menu.setAttribute('role', 'dialog');  // only while open, so a closed list is no dialog
+  menu.hidden = false;
+  button.setAttribute('aria-expanded', 'true');
+  const first = menu.querySelector('.files-row');
+  if (first) first.focus({ preventScroll: true });
+}
+
+// refocus: put focus back on the button, as when the list is dismissed rather than used.
+function closeFilesMenu(refocus = true) {
+  const menu = document.getElementById('files-menu');
+  if (!menu || menu.hidden) return;
+  menu.hidden = true;
+  menu.removeAttribute('role');
+  menu.replaceChildren();
+  const button = document.getElementById('files-button');
+  button.setAttribute('aria-expanded', 'false');
+  if (refocus) button.focus({ preventScroll: true });
+}
+
+function setupFilesMenu() {
+  const button = document.getElementById('files-button');
+  const menu = document.getElementById('files-menu');
+  button.addEventListener('click', () => (menu.hidden ? openFilesMenu() : closeFilesMenu()));
+  menu.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); closeFilesMenu(); return; }
+    if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+    e.preventDefault();
+    const rows = [...menu.querySelectorAll('.files-row')];
+    const at = rows.indexOf(document.activeElement) + (e.key === 'ArrowDown' ? 1 : -1);
+    if (rows[at]) rows[at].focus();
+  });
+  document.addEventListener('mousedown', e => {
+    if (!menu.hidden && !menu.contains(e.target) && !button.contains(e.target)) closeFilesMenu(false);
+  });
+}
+
 function renderAssistant(m, chat) {
   const node = el('section', 'msg assistant');
   const sources = [];
@@ -753,6 +843,7 @@ function renderChat(chat, leaf = chat.leaf, anchor = null) {
   if (!anchor) scroll.scrollTop = 0;
   document.getElementById('title').textContent = title;
   document.getElementById('meta').textContent = [chat.model, shortDate(chat.created)].filter(Boolean).join(' · ');
+  renderFilesButton(chat);
   document.title = `${title} - Claude Takeout`;
   document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
 
@@ -1282,6 +1373,7 @@ function start() {
   const data = JSON.parse(holder.textContent);
   holder.remove();
   setupParts(data);
+  setupFilesMenu();
   allChats = linkProjects(data);
   allChats.forEach(chat => chatsById.set(chat.id, chat));
   renderSidebar(data.chats);
