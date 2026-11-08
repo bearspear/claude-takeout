@@ -174,7 +174,7 @@
       return v;
     };
 
-    // Same rule as failedToolUseIds in popup.js.
+    // Same rule as failedToolUseIds in export-core.js.
     const failed = new Set();
     const resultOf = new Map();
     for (const m of source) for (const b of Array.isArray(m.content) ? m.content : []) {

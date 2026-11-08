@@ -2,6 +2,8 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const fs = require('fs');
+const os = require('os');
+const { execFileSync } = require('child_process');
 const path = require('path');
 const vm = require('vm');
 const { REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads } = require('./helpers');
@@ -992,4 +994,81 @@ test('uploads without a file UUID are told apart by prompt in the viewer', async
   assert.ok('uploads/p01_notes.txt' in written && 'uploads/p02_notes.txt' in written, Object.keys(written).join());
   const hrefs = chat.messages.filter((m) => m.sender === 'human').map((m) => (m.uploads || []).map((u) => u.href));
   assert.deepStrictEqual(plain(hrefs), [['uploads/p01_notes.txt'], ['uploads/p02_notes.txt']]);
+});
+
+// ---- cleanup group ----
+test('an empty heredoc ends at its own terminator, and <<- strips leading tabs', () => {
+  const data = turns([
+    use('1', 'bash_tool', { command: "cat > /h/a.txt << 'EOF'\nEOF\ncat > /h/b.txt << 'EOF'\nhello\nEOF" }),
+    use('2', 'bash_tool', { command: "cat > /h/t.txt <<- 'EOF'\n\tindented\n\t\ttwice\n\tEOF" }),
+  ]);
+  const want = { 'b.txt': 'hello', 't.txt': 'indented\ntwice' };
+  assert.deepStrictEqual(plain(artifacts(data)), want);
+  assert.deepStrictEqual(pythonArtifacts(data), want);
+});
+
+test('a file named like an Object property is kept', () => {
+  const data = turns([
+    use('1', 'bash_tool', { command: "cat > /h/constructor << 'EOF'\nx\nEOF" }),
+    use('2', 'create_file', { path: '/h/toString', file_text: 'y' }),
+    use('3', 'create_file', { path: '/h/__proto__', file_text: 'z' }),
+  ]);
+  const want = JSON.parse('{"constructor":"x","toString":"y","__proto__":"z"}');
+  const sorted = (o) => JSON.parse(JSON.stringify(Object.entries(o))).sort();
+  assert.deepStrictEqual(sorted(artifacts(data)), sorted(want));
+  assert.deepStrictEqual(sorted(pythonArtifacts(data)), sorted(want));
+});
+
+test('detectOpaqueMutations ignores heredoc bodies and flags heredocs bash would expand', () => {
+  const tracked = [use('0', 'create_file', { path: '/home/claude/about.html', file_text: 'x' })];
+  const warned = (command) => {
+    const c = collector();
+    fn('detectOpaqueMutations')(oneMessage([...tracked, use('1', 'bash_tool', { command })]), c);
+    return c.warnings.map((w) => w.filename);
+  };
+  assert.deepStrictEqual(plain(warned("cat > /home/claude/index.html << 'EOF'\n<nav><a href=\"about.html\">about.html</a></nav>\nEOF")), []);
+  assert.deepStrictEqual(plain(warned('cat /home/claude/about.html > /home/claude/about.html.bak')), []);
+  assert.deepStrictEqual(plain(warned("cat > /home/claude/app.js << EOF\nconst url = `${base}/x`;\nEOF")), ['app.js']);
+  assert.deepStrictEqual(plain(warned("cat > /home/claude/app.js << 'EOF'\nconst url = `${base}/x`;\nEOF")), []);
+  assert.deepStrictEqual(plain(warned('cat > /home/claude/plain.txt << EOF\nno expansion here\nEOF')), []);
+});
+
+test('every progress update gives a step and a total', async () => {
+  const popup = exportPopup({ routes: projectResponses() });
+  const data = withUploads();
+  data.project_uuid = 'P';
+  const calls = [];
+  popup.sandbox.__folder = zipStub();
+  popup.sandbox.__data = data;
+  popup.sandbox.__progress = (...args) => calls.push(args);
+  await vm.runInContext("populateConversationFolder(__folder, __data, __progress, 'org', null, '')", popup.sandbox);
+  assert.ok(calls.length > 0);
+  for (const args of calls) assert.ok(typeof args[0] === 'number' && typeof args[1] === 'number', JSON.stringify(args));
+});
+
+test('a long title keeps its _embedded suffix', () => {
+  const name = fn('generateFilename')('How to configure a reverse proxy for my home server', 'md', null, '_embedded');
+  assert.ok(name.endsWith('_embedded.md'), name);
+});
+
+test('an export that is running blocks a second one', async () => {
+  let runs = 0, release;
+  const wrapped = fn('exclusiveExport')(async () => { runs++; await new Promise((r) => { release = r; }); });
+  const first = wrapped();
+  await wrapped();
+  release();
+  await first;
+  assert.strictEqual(runs, 1);
+  await fn('exclusiveExport')(async () => { runs++; })();
+  assert.strictEqual(runs, 2, 'a later export runs');
+});
+
+test('extract_artifacts.py writes .md files with the BOM an export gives them', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'takeout-bom-'));
+  try {
+    fs.writeFileSync(path.join(dir, 'original.json'), JSON.stringify(oneMessage([use('1', 'create_file', { path: '/h/a.md', file_text: '# hi' }), use('2', 'create_file', { path: '/h/b.py', file_text: 'x' })])));
+    execFileSync('python3', ['-B', path.join(REPO, 'extract_artifacts.py'), path.join(dir, 'original.json'), '-o', path.join(dir, 'out'), '--quiet']);
+    assert.deepStrictEqual([...fs.readFileSync(path.join(dir, 'out', 'a.md')).subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+    assert.strictEqual(fs.readFileSync(path.join(dir, 'out', 'b.py'), 'utf8'), 'x');
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });

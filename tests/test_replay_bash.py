@@ -42,6 +42,22 @@ class Paths(unittest.TestCase):
     def test_clean(self):self.assertEqual(rb.clean('a\x1b[2Jb\tc'),'a?[2Jb\tc')
 @unittest.skipUnless(HAS_SANDBOX, 'needs sandbox-exec')
 class Replay(unittest.TestCase):
+    def test_empty_heredoc_and_tab_strip(self):
+        d=conv([sh("cat > /home/claude/a.txt << 'EOF'\nEOF\ncat > /home/claude/b.txt << 'EOF'\nhello\nEOF"),sh("cat > /home/claude/t.txt <<- 'EOF'\n\tin\n\tEOF")])
+        st=rb.declarative_state(d)
+        self.assertEqual(st.get('/home/claude/b.txt'),'hello');self.assertEqual(st.get('/home/claude/t.txt'),'in');self.assertNotIn('EOF',st.get('/home/claude/a.txt',''))
+    def test_sync_read_refuses_links(self):
+        td=Path(tempfile.mkdtemp(dir=SP)).resolve()
+        (td/'home/claude').mkdir(parents=True)
+        secret=SP/'secret.txt';secret.write_text('TOPSECRET')
+        (td/'home/claude/plain.html').write_text('ok')
+        self.assertEqual(rb.read_sandbox_text(td,'/home/claude/plain.html'),'ok')
+        os.symlink(secret,td/'home/claude/link.html')
+        self.assertIsNone(rb.read_sandbox_text(td,'/home/claude/link.html'))
+        os.link(secret,td/'home/claude/hard.html')
+        self.assertIsNone(rb.read_sandbox_text(td,'/home/claude/hard.html'))
+        (td/'home/other').mkdir();(td/'home/other/x.html').write_text('x');os.symlink(td/'home/other',td/'home/linked')
+        self.assertIsNone(rb.read_sandbox_text(td,'/home/linked/x.html'))
     def test_parent_loop_ends(self):
         d={'current_leaf_message_uuid':'a','chat_messages':[{'uuid':'a','parent_message_uuid':'b'},{'uuid':'b','parent_message_uuid':'a'}]}
         self.assertEqual([m['uuid'] for m in rb.message_chain(d)],['b','a'])

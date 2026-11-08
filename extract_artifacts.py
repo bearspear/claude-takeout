@@ -3,8 +3,8 @@
 extract_artifacts.py — Reconstruct all artifact versions from a Claude Takeout
 original.json export.
 
-Mirrors the per-turn versioning logic implemented in popup.js's
-extractArtifacts(): walks the conversation in chronological order, replays
+Mirrors the per-turn versioning logic of extractArtifacts() in
+export-core.js: walks the conversation in chronological order, replays
 str_replace edits against the running file content, and snapshots each
 artifact at the end of every assistant turn in which it changed.
 
@@ -16,6 +16,8 @@ Output:
     named `<base>_v1<ext>`, `<base>_v2<ext>`, ..., plus the final state under
     the unversioned `<base><ext>` so external tooling (and `present_files`
     references) still resolve to the latest content.
+  - .md files start with a UTF-8 BOM, as an export writes them, so
+    `diff -r` against an export's artefacts/ compares like with like.
 
 Limitations:
   - Only artifact content present in the JSON is extracted. Uploaded files
@@ -72,9 +74,15 @@ TYPE_TO_EXT = {
 # Matches: cat > /path/file.ext << DELIM ... DELIM, with any delimiter, quoted
 # or not. Groups: 1 path, 4 body.
 HEREDOC_RE = re.compile(
-    r"cat\s+>\s+(\S+)\s+<<-?\s*(['\"]?)(\w+)\2[^\n]*\n(.*?)\n[ \t]*\3[ \t]*(?=\n|\Z)",
+    r"cat\s+>\s+(\S+)\s+<<-?\s*(['\"]?)(\w+)\2[^\n]*\n(?:(.*?)\n)??[ \t]*\3[ \t]*(?=\n|\Z)",
     re.DOTALL,
 )
+
+
+def heredoc_body(m: re.Match) -> str:
+    """heredocBody in export-core.js: the body bash writes; <<- removes leading tabs."""
+    body = m.group(4) or ""
+    return re.sub(r"^\t+", "", body, flags=re.M) if "<<-" in m.group(0).split("\n", 1)[0] else body
 
 
 @dataclass
@@ -300,7 +308,7 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
             elif name in ("bash_tool", "Bash"):
                 command = inp.get("command") or ""
                 for m in HEREDOC_RE.finditer(command):
-                    filepath, content = m.group(1).strip("'\""), m.group(4)
+                    filepath, content = m.group(1).strip("'\""), heredoc_body(m)
                     filename = basename_of(filepath)
                     if filename and content:
                         set_content(filepath, content, filename)
@@ -372,8 +380,9 @@ def write_artifacts(artifacts: dict[str, str], out_dir: Path) -> list[tuple[str,
     out_dir.mkdir(parents=True, exist_ok=True)
     written: list[tuple[str, int]] = []
     for name, content in artifacts.items():
-        # Normalize line endings on write — match what the browser writes.
-        data = content.encode("utf-8")
+        # Written as the export writes them: UTF-8, with a BOM on .md files
+        # (addFileWithBOM in popup.js). Line endings are left as they are.
+        data = (b"\xef\xbb\xbf" if name.endswith(".md") else b"") + content.encode("utf-8")
         (out_dir / name).write_bytes(data)
         written.append((name, len(data)))
     return written
