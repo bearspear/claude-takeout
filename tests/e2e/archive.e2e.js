@@ -646,8 +646,10 @@ function viewerDataOf(file) {
     fs.rmSync(path.join(gone, 'viewer-files', `part-${String(notes.part).padStart(4, '0')}.js`));
     const miss = await open('file://' + path.join(gone, 'viewer.html'));
     await openAdded(miss, 'chat-one/synthesis/notes.md');
-    await miss.page.waitForSelector('#panel .file-missing');
-    check('a missing part says so', (await miss.page.textContent('#panel .file-missing')) === 'This file is not in this export.');
+    await miss.page.waitForSelector('#panel .file-details');
+    const missText = await miss.page.textContent('#panel .file-details');
+    check('a missing part says so and points at the file in the archive', missText.includes("The text couldn't load") && !missText.includes('not in this export')
+      && (await miss.page.locator('#panel .file-details a.file-open').count()) === 1, missText);
     check('a missing part makes no page error', miss.seen.pageErrors.length === 0, miss.seen.pageErrors.join(' | '));
     const noise = miss.seen.errors.filter(e => !e.includes('ERR_FILE_NOT_FOUND'));
     check('a missing part logs only the failed load', noise.length === 0, noise.join(' | '));

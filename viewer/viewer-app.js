@@ -966,6 +966,7 @@ function fileDetails(file, version) {
   tile.append(icon('file'));
   box.append(tile, el('b', '', file.name || 'Untitled'), el('small', '', fileKindLabel(file)));
   if (file.tooLarge) box.append(el('p', '', 'This file is too large to preview here'), el('small', 'file-path', file.path));
+  if (version.partFailed) box.append(el('p', '', "The text couldn't load, because viewer-files/ is missing or blocked."));
   if (openableHref(version.href)) {
     const link = el('a', 'file-open', 'Open file');
     link.setAttribute('href', version.href);
@@ -1089,7 +1090,7 @@ function drawPanel(chat, open, file, version) {
 
 let panelLoad = 0; // goes up with every change of the panel, so a slow part can't draw over what came after it
 
-// Shows Loading… until the part arrives. A part that can't be read leaves the file missing, as a generated one would be.
+// Shows Loading… until the part arrives. A part that can't be read leaves the file's own copy, or none.
 function drawFromPart(chat, open, file, version) {
   const load = panelLoad;
   renderPanelHead(chat, open.file, file, open.version, { views: [] });
@@ -1100,6 +1101,9 @@ function drawFromPart(chat, open, file, version) {
     if (typeof text === 'string') {
       version.text = text;
       drawPanel(chat, open, file, version);
+    } else if (version.href) {
+      // Its own copy in artefacts/ is still beside the viewer.
+      drawPanel(chat, open, file, { ...version, text: null, partFailed: true });
     } else {
       drawPanel(chat, open, { ...file, kind: 'missing' }, { ...version, href: null });
     }

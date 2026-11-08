@@ -305,7 +305,7 @@ async function processZip(zip, { outDir, force, dryRun, claims }) {
     if (!outDir) return finish('failed', 'ZIPs need --out <folder> to extract into');
     entry.dest = path.join(outDir, path.basename(zip).replace(/\.zip$/i, ''));
 
-    const loaded = await zipLib.loadZip(zip);  // read once, for every step below
+    let loaded = await zipLib.loadZip(zip);  // read once, for every step below
     const names = await zipLib.zipEntryNames(zip, loaded);
     entry.chats = names.filter(n => /(^|\/)original\.json$/.test(n)).length;
     if (!entry.chats) return finish('skipped', 'no Claude chat in it');
@@ -323,6 +323,7 @@ async function processZip(zip, { outDir, force, dryRun, claims }) {
 
     await stopPoint();
     const extracted = await zipLib.extractZip(zip, entry.dest, { loaded });
+    loaded = null;  // the ZIP's bytes aren't needed to build viewers from the folder, so they can go
     entry.files = extracted.files;
     entry.rejected = extracted.rejected;
     const found = lib.findArchives(entry.dest);

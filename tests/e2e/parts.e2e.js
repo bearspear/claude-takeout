@@ -138,6 +138,12 @@ const ctx = () => ({ folder: '', artifacts: { 'big.html': BIG_HTML }, artifactIn
   await miss.waitForFunction(() => document.querySelector('.pop .pop-body')?.textContent !== 'Loading…', null, { timeout: 3000 }).catch(() => {});
   check('a missing part offers the uploads copy when it can open', (await miss.locator('.pop .pop-body').textContent()).includes("The text couldn't load.") && (await miss.locator('.pop .pop-body a[href="uploads/p01_big.md"]').count()) === 1, await miss.locator('.pop .pop-body').innerHTML());
   await miss.locator('.pop .close').click();
+  // A generated file's version whose part can't load still points at its artefacts/ copy.
+  await miss.click('.msg[data-id="a"] .art');
+  await miss.waitForFunction(() => !document.querySelector('#panel-body .file-loading'), null, { timeout: 3000 }).catch(() => {});
+  const panelText = await miss.textContent('#panel-body');
+  check('a file whose part is missing is not called missing from the export', !panelText.includes('not in this export') && panelText.includes("The text couldn't load") && panelText.includes('artefacts folder'), panelText);
+  await miss.click('#panel .close');
   fs.renameSync(gone, path.join(dir, 'viewer-files'));
   await miss.locator('button.chip', { hasText: 'big.py' }).click();
   await miss.waitForFunction(t => document.querySelector('.pop .pop-body')?.textContent === t, BIG_PY, { timeout: 3000 }).catch(() => {});
