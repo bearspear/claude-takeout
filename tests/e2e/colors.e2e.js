@@ -10,6 +10,8 @@ const STALL = 'a'.repeat(150000);
 const LONG = 'const a = 1;\n'.repeat(16000);
 const fence = (lang, text) => '```' + lang + '\n' + text + '\n```';
 const CRLF = 'x = 1\r\ny = 2\r\n';
+// A transcript whose title has an underscore: it must not turn the rest italic.
+const NOTES = '# sept21_part1.m4a\n\n## Content\n\nSo, we need *one* more.\n\nIs he?\n';
 
 function message(uuid, parent, sender, content, extra = {}) {
   return { uuid, parent_message_uuid: parent, sender, created_at: '2026-05-01T10:00:00Z', content, attachments: [], files: [], files_v2: [], ...extra };
@@ -31,7 +33,7 @@ function colorsChat() {
   });
   out.push(message('stall', 'h6', 'assistant', [{ type: 'text', text: fence('bash', STALL) + '\n\n' + fence('python', 'import after_stall') }]));
   out.push(message('h7', 'stall', 'human', [{ type: 'text', text: 'and a file' }]));
-  out.push(message('filed', 'h7', 'assistant', [{ type: 'text', text: 'Made it.' }, { type: 'tool_use', id: 't1', name: 'create_file', input: { path: '/mnt/user-data/outputs/calc.py', file_text: PY } }]));
+  out.push(message('filed', 'h7', 'assistant', [{ type: 'text', text: 'Made it.' }, { type: 'tool_use', id: 't1', name: 'create_file', input: { path: '/mnt/user-data/outputs/calc.py', file_text: PY } }, { type: 'tool_use', id: 't1b', name: 'create_file', input: { path: '/mnt/user-data/outputs/notes.md', file_text: NOTES } }]));
   out.push(message('h8', 'filed', 'human', [{ type: 'text', text: 'and a page' }]));
   out.push(message('paged', 'h8', 'assistant', [{ type: 'text', text: 'Page.' }, { type: 'tool_use', id: 't2', name: 'create_file', input: { path: '/mnt/user-data/outputs/worker.html', file_text: '<!doctype html><script>try{const w=new Worker(URL.createObjectURL(new Blob(["postMessage(1)"])));w.onmessage=()=>console.log("WORKER RAN");w.onerror=()=>console.log("WORKER BLOCKED")}catch(e){console.log("WORKER BLOCKED")}<\/script>' } }]));
   out.push(message('h9', 'paged', 'human', [{ type: 'text', text: 'line endings' }]));
@@ -48,8 +50,9 @@ function colorsChat() {
   const file = path.join(dir, 'viewer.html');
   fs.writeFileSync(path.join(dir, VIEWER_CHECK_FILE), Buffer.from(VIEWER_CHECK_BASE64, 'base64'));
   const conversation = colorsChat();
-  fs.writeFileSync(file, buildHtml([conversation], '2026-11-06T12:00:00Z', () => ({ artifacts: { 'calc.py': PY, 'worker.html': conversation.chat_messages.find(m => m.uuid === 'paged').content[1].input.file_text }, artifactIndex: {
+  fs.writeFileSync(file, buildHtml([conversation], '2026-11-06T12:00:00Z', () => ({ artifacts: { 'calc.py': PY, 'notes.md': NOTES, 'worker.html': conversation.chat_messages.find(m => m.uuid === 'paged').content[1].input.file_text }, artifactIndex: {
     '/mnt/user-data/outputs/calc.py': { path: '/mnt/user-data/outputs/calc.py', filename: 'calc.py', versions: ['calc.py'], messages: ['filed'] },
+    '/mnt/user-data/outputs/notes.md': { path: '/mnt/user-data/outputs/notes.md', filename: 'notes.md', versions: ['notes.md'], messages: ['filed'] },
     '/mnt/user-data/outputs/worker.html': { path: '/mnt/user-data/outputs/worker.html', filename: 'worker.html', versions: ['worker.html'], messages: ['paged'] },
   } })));
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
@@ -106,11 +109,27 @@ function colorsChat() {
   await page.click('#panel .tab:has-text("Code")').catch(() => {});
   await page.locator('#panel .file-code .hljs-keyword').first().waitFor({ timeout: 3000 });
   check('a file in Code view gets colors', (await page.textContent('#panel .file-code')) === PY);
+  await page.click('#panel-head .copy');
+  check('the panel copies the file', (await page.evaluate(() => navigator.clipboard.readText())) === PY);
+  check('the panel Copy says Copied', (await page.textContent('#panel-head .copy span')) === 'Copied');
+  await page.click('#panel .close');
+
+  await page.click('.msg[data-id="filed"] .art:has-text("notes.md")');
+  await page.waitForSelector('#panel .prose');
+  await page.click('#panel-head .copy');
+  check('Preview copies the Markdown source, not the page', (await page.evaluate(() => navigator.clipboard.readText())) === NOTES);
+  await page.click('#panel .tab:has-text("Code")');
+  await page.locator('#panel .file-code .hljs-section').first().waitFor({ timeout: 3000 });
+  const emphasis = await page.$$eval('#panel .file-code .hljs-emphasis', n => n.map(e => e.textContent));
+  check('an underscore in a word turns nothing italic', emphasis.join('|') === '*one*', emphasis.join('|'));
+  check('headings after it still color', (await page.$$eval('#panel .file-code .hljs-section', n => n.map(e => e.textContent))).join('|') === '# sept21_part1.m4a|## Content');
   await page.click('#panel .close');
 
   await page.click('.msg[data-id="paged"] .art');
   await page.waitForFunction(() => document.querySelector('#panel iframe'));
   await page.waitForTimeout(500);
+  await page.click('#panel-head .copy');
+  check('an HTML preview copies its source', (await page.evaluate(() => navigator.clipboard.readText())) === conversation.chat_messages.find(m => m.uuid === 'paged').content[1].input.file_text);
   check('a preview cannot start a worker', logs.includes('WORKER BLOCKED') && !logs.includes('WORKER RAN'), logs.filter(l => /WORKER/.test(l)).join());
   await page.click('#panel .close');
   const blocked = errors.filter(e => /Worker|worker-src|blob:/.test(e));
@@ -119,6 +138,9 @@ function colorsChat() {
   await page.locator('.msg[data-id="h0"] button.chip').first().click();
   await page.locator('.file-code .hljs-keyword').first().waitFor({ timeout: 3000 });
   check('an upload in a popup gets colors', (await page.locator('.file-code').first().textContent()) === PY);
+  check('the popup Copy sits in its header', (await page.locator('.pop-head .copy').getAttribute('aria-label')) === 'Copy pasted.py');
+  await page.click('.pop-head .copy');
+  check('the popup copies the file', (await page.evaluate(() => navigator.clipboard.readText())) === PY);
   await page.keyboard.press('Escape');
 
   await block('a0').scrollIntoViewIfNeeded();

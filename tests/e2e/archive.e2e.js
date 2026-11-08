@@ -284,6 +284,7 @@ function viewerDataOf(file) {
     await page.waitForSelector('#panel .file-image');
     await page.waitForFunction(() => document.querySelector('#panel .file-image').naturalWidth > 0);
     check('an image opens from a relative path', (await page.getAttribute('#panel .file-image', 'src')) === 'chat-one/media/photo.png');
+    check('an image has no Copy', (await page.locator('#panel-head .copy').count()) === 0);
     await openAdded(main, 'chat-one/media/paper.pdf');
     const pdf = await page.$eval('#panel iframe', f => ({ sandboxed: f.hasAttribute('sandbox'), src: f.getAttribute('src'), srcdoc: f.hasAttribute('srcdoc') }));
     check('a PDF uses a plain frame from a relative path', !pdf.sandboxed && !pdf.srcdoc && pdf.src === 'chat-one/media/paper.pdf', JSON.stringify(pdf));
@@ -658,7 +659,7 @@ function viewerDataOf(file) {
     await aud.context.close();
 
     // One chat, both kinds of part: its large upload and an added file.
-    const mixed = await open(`${url}#chat=c2&leaf=c2-2`);
+    const mixed = await open(`${url}#chat=c2&leaf=c2-2`, { permissions: ['clipboard-read', 'clipboard-write'] });
     await mixed.page.click('button.chip:has-text("big.md")');
     await mixed.page.waitForFunction(t => document.querySelector('.pop .pop-body')?.textContent === t, BIG_UPLOAD, { timeout: 3000 }).catch(() => {});
     check('a large upload opens from its part in an archive', (await mixed.page.textContent('.pop .pop-body')) === BIG_UPLOAD);
@@ -666,6 +667,8 @@ function viewerDataOf(file) {
     await openAdded(mixed, 'chat-two/only-two.md');
     await mixed.page.waitForFunction(() => document.querySelector('#panel-body')?.textContent.includes('Second chat only'), null, { timeout: 3000 }).catch(() => {});
     check('an added file opens beside it', (await panelText(mixed)).includes('Second chat only'));
+    await mixed.page.click('#panel-head .copy');
+    check('an added file copies its text', (await mixed.page.evaluate(() => navigator.clipboard.readText())) === '# Second chat only');
     check('both kinds loaded from viewer-files', new Set(mixed.seen.files.filter(u => u.includes('/viewer-files/'))).size >= 2, mixed.seen.files.filter(u => u.includes('/viewer-files/')).join());
     clean('both kinds flow', mixed.seen);
     await mixed.context.close();

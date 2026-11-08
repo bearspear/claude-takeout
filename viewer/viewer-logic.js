@@ -306,6 +306,32 @@ function sanitizeHtml(html, parser) {
 // Longest text that gets syntax colors. Past this the page gains too many elements to stay quick.
 const HIGHLIGHT_LIMIT = 200000;
 
+// highlight.js's Markdown opens italics or bold at any _ and runs to the next one, so "sept21_part1" turns
+// the rest of a transcript italic. As in Markdown itself, _ inside a word opens nothing, and neither _ nor *
+// carries past a blank line. Changes the language in place before its first use. The worker runs this
+// function's own source, so it uses nothing from this file.
+function tameMarkdown(hljs) {
+  const md = hljs && typeof hljs.getLanguage === 'function' ? hljs.getLanguage('markdown') : null;
+  if (!md) return;
+  const done = new Set();
+  const visit = mode => {
+    if (!mode || typeof mode !== 'object' || done.has(mode)) return;
+    done.add(mode);
+    if ((mode.className === 'emphasis' || mode.className === 'strong') && Array.isArray(mode.variants)) {
+      for (const v of mode.variants) {
+        if (!v.begin || !v.end || v.tamed) continue;
+        const underscore = String(v.begin.source || v.begin).startsWith('_');
+        const begin = String(v.begin.source || v.begin), end = String(v.end.source || v.end);
+        v.begin = new RegExp(underscore ? `(?<![A-Za-z0-9_])${begin}` : begin);
+        v.end = new RegExp(underscore ? `${end}(?![A-Za-z0-9_])|\\n\\s*\\n` : `${end}|\\n\\s*\\n`);
+        v.tamed = true;
+      }
+    }
+    for (const list of [mode.contains, mode.variants]) if (Array.isArray(list)) list.forEach(visit);
+  };
+  visit(md);
+}
+
 // The highlighter's language name for a file. Its names cover most extensions as they are.
 function languageOfFile(name) {
   const ext = /\.([a-z0-9+#-]+)$/i.exec(String(name || ''));
@@ -707,5 +733,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, linkProjects, copyText, attachmentNames, uploadName };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, groupChats, linkProjects, copyText, attachmentNames, uploadName };
 }

@@ -367,6 +367,11 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.6
+
+- **Copy a whole file** - Upload and pasted-text popups, the file panel and the "Archive files" panel have a Copy button in their header. It copies the file's text, and in Preview it copies the source, not the rendered page. Images, PDFs and other non-text files have none. A large upload's Copy appears once its text has loaded.
+- **Underscores no longer turn Markdown italic** - A file named like `sept21_part1` in a Markdown heading made the rest of the file italic in Code view. An underscore inside a word now starts nothing, and italics or bold stop at a blank line, as in Markdown itself.
+
 ### v1.6.5
 
 - **Preview scripts with `<!--` run** - A generated file whose script held `<!--` inside a regular expression with the `u` flag failed to run in the viewer's preview. It now runs.

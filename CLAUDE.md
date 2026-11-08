@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.5.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Current as of v1.6.6.
 
 ---
 
@@ -337,14 +337,14 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - **Tests:** run `sh tests/run.sh` before committing. See `tests/README.md`. Never put real conversations or exports in the repo, because they're private; add a synthetic case to `tests/fixtures/conversation.json` instead. Mocks have missed real claude.ai behavior here, so also export a real conversation for anything touching fetching or capture. `extract_artifacts.py` and the `validate-export` skill at `~/.claude/skills/validate-export/SKILL.md` must stay in sync with `export-core.js`. `tests/export.test.js` also pins every file an export writes against `tests/fixtures/export-baseline.json` (refresh steps in `tests/README.md`).
 - **No `_`-prefixed files or folders:** Chrome refuses to load an extension containing one, including `__pycache__`. Run Python with `-B`, and never import these scripts without `sys.dont_write_bytecode = True`.
 - **Viewer rendering:** the viewer renders chat text through escaped raw HTML, text-node placeholders and `sanitizeHtml`. Keep all three when changing it. `tests/e2e/viewer.e2e.js` is the only coverage for `sanitizeHtml`, so run it after viewer changes. The viewer page's CSP keeps `'unsafe-inline'` and `'unsafe-eval'` for scripts, and `'unsafe-inline'` for styles, because `srcdoc` previews inherit the page's policy and `PREVIEW_CSP` can only narrow it; removing either breaks previews (`new Function` in a generated file). Previews are sandboxed but not a security boundary for untrusted exports: a generated file's own text and that chat's `.js` and `.css` can leave, while the viewer, other chats and files on disk can't be reached (see `USAGE.md`).
-- **Syntax colors:** highlight.js can run for minutes on some text, such as one very long word, so never call it on the page. It runs in a blob worker (`worker-src blob:`) built from the `#highlighter` script tag, one block at a time, and is stopped after `HIGHLIGHT_TIMEOUT`. Colors only appear as a block scrolls into view, and any failure leaves the block plain. Unlabeled fences are not guessed. `tests/e2e/colors.e2e.js` covers this.
+- **Syntax colors:** highlight.js can run for minutes on some text, such as one very long word, so never call it on the page. It runs in a blob worker (`worker-src blob:`) built from the `#highlighter` script tag, one block at a time, and is stopped after `HIGHLIGHT_TIMEOUT`. Colors only appear as a block scrolls into view, and any failure leaves the block plain. Unlabeled fences are not guessed. Before first use the worker runs `tameMarkdown` (in `viewer-logic.js`, passed in as source), which stops `_` inside a word from opening italics and ends italics and bold at a blank line. `tests/e2e/colors.e2e.js` covers this.
 - **Syntax check after every edit:** `node --check popup.js`. Catches most copy/paste mistakes without launching Chrome.
 
 ---
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.5. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built, current as of v1.6.6. It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 
