@@ -1364,3 +1364,9 @@ test('a single export without errors.txt turns amber when the chat looks incompl
   assert.strictEqual(status.className, 'status warning');
   assert.match(status.textContent, /^JSON exported successfully\. But this chat looks incomplete: claude\.ai returned no messages/);
 });
+
+test('the viewer chat of an export carries its files\' warnings', async () => {
+  const data = Object.assign(turns([use('1', 'create_file', { path: '/home/claude/page.html', file_text: '<p>a</p>' }), use('2', 'bash_tool', { command: "sed -i 's/a/b/' /home/claude/page.html" })]), { uuid: 'fl', name: 'fl', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' });
+  const { chat } = await runFolder(exportPopup(), data);
+  assert.deepStrictEqual(Object.values(chat.files).map(f => [f.name, f.flag]), [['page.html', 'script']]);
+});

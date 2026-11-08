@@ -645,6 +645,14 @@ function loadPart(n) {
   return loading;
 }
 
+// What a file's flag means, for its badge and the panel note.
+const FLAG_NOTES = {
+  script: "Claude changed this file with a command the export can't replay, so it may not match what Claude made. replay_bash.py beside the extension can rebuild it from the chat folder.",
+  edit: "An edit Claude made to this file couldn't be replayed, so it may not match what Claude made.",
+  doc: 'Some edits to this document couldn\'t be rebuilt from the chat. The live document on claude.ai is the current one.',
+};
+const flagNote = file => (file && file.flag ? FLAG_NOTES[file.flag] || FLAG_NOTES.edit : '');
+
 function renderCard(block, chat) {
   const file = resolveFile(chat.files, block.file, block.version) && chat.files[block.file];
   if (!file) return null;
@@ -660,6 +668,10 @@ function renderCard(block, chat) {
   label.append(el('b', '', file.name || 'Untitled'), el('small', '', [fileKindLabel(file), version && version.label].filter(Boolean).join(' · ')));
   card.append(tile, label);
   card.title = file.name || '';
+  if (file.flag) {
+    card.append(el('span', 'flag', 'May not match'));
+    card.title = `${file.name || ''}\n${flagNote(file)}`;
+  }
   return card;
 }
 
@@ -697,7 +709,7 @@ function openFilesMenu() {
   const parts = [];
   const outputRows = list => list.map(o => {
     const file = chat.files[o.id];
-    const note = [fileKindLabel(file), o.versions > 1 ? `${o.versions} versions` : ''].filter(Boolean).join(' · ');
+    const note = [fileKindLabel(file), o.versions > 1 ? `${o.versions} versions` : '', file && file.flag ? 'may not match' : ''].filter(Boolean).join(' · ');
     return filesRow(o.name, note, () => {
       closeFilesMenu(false);
       panelReturn = button;
@@ -1028,6 +1040,7 @@ function panelButton(className, text, pressed, onClick) {
 
 function renderPanelBody(chat, file, version, shape) {
   const body = document.getElementById('panel-body');
+  const flagged = () => { if (file.flag) body.prepend(el('div', 'file-note flag-note', flagNote(file))); };
   if (shape.missing) body.replaceChildren(el('div', 'file-missing', 'This file is not in this export.'));
   else if (!shape.views.length) body.replaceChildren(fileDetails(file, version));
   else if (panelView === 'preview') body.replaceChildren(...previewNodes(chat, file, version));
@@ -1037,6 +1050,7 @@ function renderPanelBody(chat, file, version, shape) {
     colorWhenSeen(code, languageOfFile(file.name));
     body.replaceChildren(...(shape.note ? [el('div', 'file-note', shape.note)] : []), code);
   }
+  if (!shape.missing) flagged();
   body.scrollTop = 0;
 }
 

@@ -94,6 +94,35 @@ function isTextFile(filename) {
 
 // Trace message chain from current_leaf_message_uuid through parent_message_uuid
 // This handles branched conversations where user may have regenerated responses
+// ---- Warning badges ----
+// The warnings that mean a generated file may not match what Claude made, as the viewer's flags:
+// 'script' (a bash command changed it), 'edit' (an edit couldn't be replayed), 'doc' (a Claude Docs
+// edit couldn't be rebuilt). The first warning for a file wins.
+const FLAG_FOR_WARNING = { artifact_opaque_mutation: 'script', str_replace_failed: 'edit', claude_doc_unreplayed: 'doc' };
+
+function viewerFlags(warnings) {
+  const flags = {};
+  for (const w of warnings || []) {
+    const flag = w && Object.prototype.hasOwnProperty.call(FLAG_FOR_WARNING, w.type) ? FLAG_FOR_WARNING[w.type] : null;
+    if (flag && w.filename && !Object.prototype.hasOwnProperty.call(flags, w.filename)) flags[w.filename] = flag;
+  }
+  return flags;
+}
+
+// The warnings in an errors.txt (generateErrorReport's format), for archives exported before the viewer
+// carried them: [{ type, filename }].
+function warningsFromReport(text) {
+  const t = String(text || '').replace(/^\uFEFF/, '');
+  const at = t.search(/^## Warnings\s*$/m);
+  if (at < 0) return [];
+  const section = t.slice(at).split(/^## (?!Warnings)/m)[0];
+  const out = [];
+  for (const m of section.matchAll(/^### (.+)\n(?:[^\n]*\n)*?- \*\*Type:\*\* ([a-z ]+)$/gm)) {
+    out.push({ type: m[2].trim().replace(/ /g, '_'), filename: m[1].trim() });
+  }
+  return out;
+}
+
 // ---- Export health ----
 // claude.ai's REST API is undocumented. When its shape changes, an export can come out thin with nothing
 // saying so. These checks look for what such a change leaves behind. Each problem: { check, message }.
@@ -917,6 +946,6 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated,
-    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES,
+    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
   };
 }

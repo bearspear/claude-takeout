@@ -367,6 +367,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.6.23
+
+- **Warning badges in the viewer** - A file the export warned about (changed by a command it can't replay, an edit it couldn't replay, or a Claude Docs edit it couldn't rebuild) now shows a **May not match** badge on its card and in the Files list, and the file panel says why and how to rebuild it. Before, such files looked normal in the viewer and the warning was only in `errors.txt`. Older exports get the badges when their viewer is rebuilt with `--force`; the tool reads them from `errors.txt`.
+
 ### v1.6.22
 
 - **Export health check** - Each export now checks that claude.ai's data looks complete, since an unannounced change to its API could otherwise leave an export thin without anything saying so. A chat with no messages although it was used, messages that came back empty, a branched chat with no current branch, content the exporter doesn't show yet, or several uploads that all failed is listed in `errors.txt` under `export_health`, and the status line turns amber. Markdown and JSON exports show it in the status line. A mega-ZIP's `index.md` counts these chats and shows how many chats claude.ai listed.

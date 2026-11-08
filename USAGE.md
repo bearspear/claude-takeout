@@ -215,6 +215,9 @@ Each entry includes:
 | `claude_doc_unreplayed` | Claude edited a Claude Docs document in a way the export can't rebuild from the chat. | The exported `.md` and `.html` hold what could be rebuilt. Open the live document from the link in the note for the current version. |
 | `viewer` | A chat couldn't be added to `viewer.html`. (If the whole viewer fails, only the status line says so.) | Nothing is lost: the chat data is all in the export and only the viewer is missing or incomplete. Use the Markdown files, or re-export. |
 | `artifact_opaque_mutation` | A `bash_tool` command mutated an artifact in a way the extension can't reconstruct (Python heredoc, sed, awk, multi-step pipeline, etc.). | **Run `replay_bash.py`** — see next section. |
+| `export_health` | claude.ai's data for the chat looks incomplete: no messages although the chat was used, messages with no content, no current branch, content the exporter doesn't show yet, or several uploads that all failed. Usually a sign that claude.ai's API changed. | Check the chat on claude.ai. `original.json` has everything that came back. If it repeats, report it so the exporter can be updated. |
+
+In `viewer.html`, a file with an `artifact_opaque_mutation`, `str_replace_failed` or `claude_doc_unreplayed` warning carries a **May not match** badge on its card and in the Files list, and the file panel explains why. Older exports get the badges when their viewer is rebuilt with `node tools/build_viewer.js <folder> --force`, which reads them from `errors.txt`.
 
 The Troubleshooting Guide at the bottom of `errors.txt` includes a copy-paste-ready `python3 replay_bash.py` command pointing at the export folder.
 

@@ -1463,3 +1463,35 @@ test('Files list: off-branch artifacts stay outputs, a written file that was sen
   ] };
   assert.deepStrictEqual(lists(sent), { outputs: ['report.md'], working: [] });
 });
+
+// ---- warning badges ----
+test('viewerFlags keeps the warnings that mean a file may not match, by file name', () => {
+  const { viewerFlags } = require('../export-core.js');
+  assert.deepStrictEqual(viewerFlags([
+    { type: 'artifact_opaque_mutation', filename: 'page.html' },
+    { type: 'str_replace_failed', filename: 'notes.md' },
+    { type: 'str_replace_failed', filename: 'page.html' },
+    { type: 'claude_doc_unreplayed', filename: 'Plan.md' },
+    { type: 'upload', filename: 'a.pdf' },
+  ]), { 'page.html': 'script', 'notes.md': 'edit', 'Plan.md': 'doc' });
+});
+
+test('warningsFromReport reads the warnings back out of errors.txt', () => {
+  const { warningsFromReport } = require('../export-core.js');
+  const report = '# Export Errors\n\n## Errors\n\n### a.pdf\n\n- **Type:** upload\n\n---\n\n## Warnings\n\n### page.html\n\n- **Type:** artifact opaque mutation\n- **Message:** x\n\n**Recovery:** y\n\n### notes.md\n\n- **Type:** str replace failed\n\n---\n\n## Troubleshooting Guide\n\n### Common HTTP Status Codes\n';
+  assert.deepStrictEqual(warningsFromReport(report), [{ type: 'artifact_opaque_mutation', filename: 'page.html' }, { type: 'str_replace_failed', filename: 'notes.md' }]);
+  assert.deepStrictEqual(warningsFromReport(''), []);
+});
+
+test('buildViewerChat marks flagged files', () => {
+  const use = (id, name, input) => ({ type: 'tool_use', id, name, input });
+  const data = { uuid: 'c', name: 'c', current_leaf_message_uuid: 'a', chat_messages: [
+    { uuid: 'h', parent_message_uuid: null, sender: 'human', created_at: '2026-01-01T00:00:00Z', content: [{ type: 'text', text: 'go' }] },
+    { uuid: 'a', parent_message_uuid: 'h', sender: 'assistant', created_at: '2026-01-01T00:00:01Z', content: [
+      use('1', 'create_file', { path: '/home/claude/page.html', file_text: '<p>x</p>' }),
+      use('2', 'create_file', { path: '/home/claude/ok.md', file_text: '# ok' }),
+    ] },
+  ] };
+  const chat = buildViewerChat(data, ctxFor(data, { flags: { 'page.html': 'script' } }));
+  assert.deepStrictEqual(Object.values(chat.files).map(f => [f.name, f.flag || null]), [['page.html', 'script'], ['ok.md', null]]);
+});

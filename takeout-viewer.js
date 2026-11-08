@@ -2,7 +2,9 @@
 // Classic script. Exposes globalThis.CTViewer (and module.exports for tests):
 //   buildViewerChat(data, ctx)         one conversation as the viewer's compact Chat (see the data contract).
 //                                      ctx: { folder, model, fixText, artifacts, artifactIndex, uploads,
-//                                      deliveries, heredocs, docKey, project }, all optional. data is never mutated.
+//                                      deliveries, heredocs, docKey, project, flags }, all optional. data is never mutated.
+//                                      flags: file name to 'script' | 'edit' | 'doc' (viewerFlags in export-core.js);
+//                                      a file with that name gets flag, for the viewer's "may not match" badge.
 //                                      artifacts: filename to text ('' for binaries). artifactIndex: extractArtifacts' index
 //                                      (state key to { path, filename, versions, messages }). deliveries: file uuid to
 //                                      { filename, path }. heredocs(command): [{ path, text }], the files a Bash command
@@ -429,6 +431,8 @@
     }
 
     const files = addCards(source, messages, blockOf, data.current_leaf_message_uuid, c);
+    const flags = c.flags && typeof c.flags === 'object' ? c.flags : {};
+    for (const f of Object.values(files)) if (f && Object.prototype.hasOwnProperty.call(flags, f.name)) f.flag = String(flags[f.name]);
 
     return {
       id: data.uuid, title: data.name || '', model: c.model || data.model || '',

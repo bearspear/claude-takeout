@@ -2782,6 +2782,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       deliveries: buildViewerDeliveries(savedDeliveries),
       heredocs: heredocFiles,
       docKey: claudeDocKey,
+      flags: viewerFlags(errorCollector.warnings),
       project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions, CTViewer.TEXT_EMBED_LIMIT)
     });
   } catch (err) {
