@@ -14,7 +14,7 @@
 //                                      { text: null, lines, part, key }. Keys are u0, u1, ... Attachments stay
 //   PART_LIMIT, UPLOAD_INLINE_LIMIT    4 MB per part; 64 KB of upload text stays in the page
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
-//   joinPath(folder, rel)              folder + rel with '..' resolved
+//   joinPath(folder, rel)              folder + rel with '..' resolved; null if it climbs above the folder
 //   escapeJson(data)                   JSON that is safe inside a <script> tag
 //   assembleViewer({template, css, marked, katex, highlight, logic, app, data, fileScripts, fileMedia})  one HTML string.
 //                                      fileScripts adds file: to the page's script-src and media-src, for viewer-files/
@@ -515,12 +515,15 @@
     return segs.length ? segs.join('/') : null;
   }
 
+  // null when '..' would climb above the viewer's folder: such a link could only point outside the export.
   function joinPath(folder, rel) {
     const out = [];
     for (const s of `${folder || ''}/${rel || ''}`.split('/')) {
       if (s === '' || s === '.') continue;
-      if (s === '..') out.pop();
-      else out.push(s);
+      if (s === '..') {
+        if (!out.length) return null;
+        out.pop();
+      } else out.push(s);
     }
     return out.join('/');
   }

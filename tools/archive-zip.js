@@ -1,6 +1,6 @@
 // Safe ZIP extraction for archive-viewer tooling. ZIPs are untrusted input: the ZIP itself is only
 // ever read, entries that could escape the target are refused, and a failed run removes only the
-// '.partial' folder it created. CommonJS, Node stdlib plus the vendored JSZip.
+// '.<name>.partial' folder it created. CommonJS, Node stdlib plus the vendored JSZip.
 const fs = require('fs');
 const path = require('path');
 const { Transform } = require('stream');
@@ -29,18 +29,38 @@ function unsafeName(name, target) {
 
 const isSkipped = name => name.split('/').some(s => s === '__MACOSX' || s === '.DS_Store');
 
+// The number of entries the ZIP's central directory declares, or null when it can't be told
+// (ZIP64, or no end record found).
+function declaredEntryCount(buf) {
+  const stop = Math.max(0, buf.length - 22 - 0xffff);
+  for (let i = buf.length - 22; i >= stop; i--) {
+    if (buf.readUInt32LE(i) === 0x06054b50) {
+      const count = buf.readUInt16LE(i + 10);
+      return count === 0xffff ? null : count;
+    }
+  }
+  return null;
+}
+
+// Loads the ZIP once. Pass the result to zipEntryNames, zipFreeSpaceOk and extractZip as `loaded`,
+// so a big ZIP is read and parsed once, not once per step.
 async function loadZip(zipPath) {
   const size = fs.statSync(zipPath).size;
   if (size > MAX_ZIP_BYTES) {
     throw new Error(`ZIP is ${mb(size)}, over the 2 GB limit this tool can read safely: ${zipPath}`);
   }
   let zip;
+  const buf = fs.readFileSync(zipPath);
   try {
-    zip = await JSZip.loadAsync(fs.readFileSync(zipPath));
+    zip = await JSZip.loadAsync(buf);
   } catch (e) {
     throw new Error(`Not a valid ZIP file (${e.message}): ${zipPath}`);
   }
-  return { zip, size };
+  // JSZip keys entries by their cleaned names, so 'x/../original.json' silently replaces
+  // 'original.json'. Fewer entries than the ZIP declares means two collided.
+  const declared = declaredEntryCount(buf);
+  const collided = declared !== null && declared > Object.keys(zip.files).length;
+  return { zip, size, collided };
 }
 
 function declaredSize(entry) {
@@ -48,15 +68,20 @@ function declaredSize(entry) {
   return d && typeof d.uncompressedSize === 'number' ? d.uncompressedSize : 0;
 }
 
-// opts.maxBytes overrides the zip-bomb limit (tests).
+// The staging folder beside dest. Dot-prefixed, so no ZIP's destination can have this name, and
+// findArchives never treats it as an archive.
+const partialOf = dest => path.join(path.dirname(dest), `.${path.basename(dest)}.partial`);
+
+// opts.maxBytes overrides the zip-bomb limit (tests). opts.loaded: a loadZip result to reuse.
 async function extractZip(zipPath, destDir, opts = {}) {
   const dest = path.resolve(destDir);
-  const partial = dest + '.partial';
+  const partial = partialOf(dest);
   if (fs.existsSync(dest)) throw new Error(`Destination already exists, not touching it: ${dest}`);
   if (fs.existsSync(partial)) {
-    throw new Error(`A leftover from an earlier failed run exists. Remove it and run again: ${partial}`);
+    throw new Error(`A leftover from an earlier failed run of this tool exists. Remove it and run again: ${partial}`);
   }
-  const { zip, size } = await loadZip(zipPath);
+  const { zip, size, collided } = opts.loaded || await loadZip(zipPath);
+  if (collided) throw new Error(`Two entries in this ZIP have the same name once cleaned up, so one would hide the other. Not extracted: ${zipPath}`);
   const maxBytes = opts.maxBytes != null ? opts.maxBytes : size * 50 + GB;
 
   fs.mkdirSync(path.dirname(dest), { recursive: true });
@@ -110,8 +135,8 @@ async function extractZip(zipPath, destDir, opts = {}) {
 }
 
 // Needed = sum of uncompressed sizes + 10%. Async because reading entry metadata loads the ZIP.
-async function zipFreeSpaceOk(zipPath, destParent) {
-  const { zip } = await loadZip(zipPath);
+async function zipFreeSpaceOk(zipPath, destParent, loaded = null) {
+  const { zip } = loaded || await loadZip(zipPath);
   let total = 0;
   for (const entry of Object.values(zip.files)) total += declaredSize(entry);
   const needed = Math.ceil(total * 1.1);
@@ -123,9 +148,9 @@ async function zipFreeSpaceOk(zipPath, destParent) {
 }
 
 // Names as the ZIP holds them, for a look before extracting. Nothing is written.
-async function zipEntryNames(zipPath) {
-  const { zip } = await loadZip(zipPath);
+async function zipEntryNames(zipPath, loaded = null) {
+  const { zip } = loaded || await loadZip(zipPath);
   return Object.values(zip.files).map(entry => entry.unsafeOriginalName || entry.name);
 }
 
-module.exports = { extractZip, zipFreeSpaceOk, zipEntryNames, MAX_ZIP_BYTES };
+module.exports = { loadZip, extractZip, zipFreeSpaceOk, zipEntryNames, partialOf, MAX_ZIP_BYTES };

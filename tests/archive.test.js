@@ -228,7 +228,8 @@ test('a folder with its own original.json is a single even beside index.md', () 
   assert.strictEqual(res.archives.length, 1);
   assert.strictEqual(res.archives[0].kind, 'single');
   assert.strictEqual(res.archives[0].root, tmp);
-  assert.deepStrictEqual(scanAdded(res.archives[0]).files.map(f => f.path), ['synthesis/other-export/original.json']);
+  // A single-chat export writes no index.md, so this one is the owner's.
+  assert.deepStrictEqual(scanAdded(res.archives[0]).files.map(f => f.path), ['index.md', 'synthesis/other-export/original.json']);
 });
 
 test('scanAdded reports an unreadable folder and keeps going', { skip: process.getuid && process.getuid() === 0 }, () => {
@@ -470,7 +471,7 @@ test('extractZip keeps a non-ASCII name and binary bytes', async () => {
   assert.strictEqual(res.bytes, 5 + bin.length);
   assert.strictEqual(fs.readFileSync(path.join(dest, 'chat/Übergröße.md'), 'utf8'), 'hallo');
   assert.ok(fs.readFileSync(path.join(dest, 'chat/uploads/p01_x.pdf')).equals(bin));
-  assert.ok(!fs.existsSync(dest + '.partial'));
+  assert.ok(!fs.existsSync(zipLib.partialOf(dest)));
 });
 
 test('extractZip leaves the ZIP untouched and writes nothing beside it', async () => {
@@ -563,12 +564,12 @@ test('extractZip rejects an existing destDir or a .partial leftover and keeps th
   fs.mkdirSync(dest);
   await assert.rejects(extractZip(zp, dest), /already exists/);
   assert.deepStrictEqual(fs.readdirSync(dest), []);
-  assert.ok(!fs.existsSync(dest + '.partial'));
+  assert.ok(!fs.existsSync(zipLib.partialOf(dest)));
   const dest2 = path.join(tmp, 'out2');
-  fs.mkdirSync(dest2 + '.partial');
-  fs.writeFileSync(path.join(dest2 + '.partial', 'keep'), 'k');
+  fs.mkdirSync(zipLib.partialOf(dest2));
+  fs.writeFileSync(path.join(zipLib.partialOf(dest2), 'keep'), 'k');
   await assert.rejects(extractZip(zp, dest2), /remove.*\.partial/is);
-  assert.ok(fs.existsSync(path.join(dest2 + '.partial', 'keep')));
+  assert.ok(fs.existsSync(path.join(zipLib.partialOf(dest2), 'keep')));
   assert.ok(!fs.existsSync(dest2));
 });
 
@@ -578,7 +579,7 @@ test('extractZip rejects a corrupt ZIP clearly and leaves nothing', async () => 
   fs.writeFileSync(zp, 'this is not a zip file at all');
   const dest = path.join(tmp, 'out');
   await assert.rejects(extractZip(zp, dest), /not a valid ZIP/i);
-  assert.ok(!fs.existsSync(dest) && !fs.existsSync(dest + '.partial'));
+  assert.ok(!fs.existsSync(dest) && !fs.existsSync(zipLib.partialOf(dest)));
 });
 
 test('extractZip stops on a zip bomb and removes its partial folder', async () => {
@@ -586,7 +587,7 @@ test('extractZip stops on a zip bomb and removes its partial folder', async () =
   const zp = await makeZip(tmp, z => z.file('big.txt', Buffer.alloc(4 * 1024 * 1024)));
   const dest = path.join(tmp, 'out');
   await assert.rejects(extractZip(zp, dest, { maxBytes: 1024 }), /too large|zip bomb/i);
-  assert.ok(!fs.existsSync(dest) && !fs.existsSync(dest + '.partial'));
+  assert.ok(!fs.existsSync(dest) && !fs.existsSync(zipLib.partialOf(dest)));
 });
 
 test('zipFreeSpaceOk reports needed (+10%) and free', async () => {
@@ -606,7 +607,7 @@ test('extractZip lists a file-then-folder clash and keeps the rest', async () =>
   assert.deepStrictEqual(res.rejected, ['a/b']);
   assert.strictEqual(res.files, 2);
   assert.deepStrictEqual(fs.readdirSync(dest).sort(), ['a', 'good.txt']);
-  assert.ok(!fs.existsSync(dest + '.partial'));
+  assert.ok(!fs.existsSync(zipLib.partialOf(dest)));
 });
 
 test('extractZip lists names too long for the filesystem and keeps the rest', async () => {
@@ -627,7 +628,7 @@ test('extractZip streaming guard catches a header that lies about size', async (
   fs.writeFileSync(zp, rawZip([['big.txt', '\0'.repeat(4 * 1024 * 1024), { deflate: true, lieSize: 10 }]]));
   const dest = path.join(tmp, 'out');
   await assert.rejects(extractZip(zp, dest, { maxBytes: 1024 * 1024 }), /zip bomb/i);
-  assert.ok(!fs.existsSync(dest) && !fs.existsSync(dest + '.partial'));
+  assert.ok(!fs.existsSync(dest) && !fs.existsSync(zipLib.partialOf(dest)));
 });
 
 test('extractZip keeps a decomposed name as stored', async () => {
@@ -1640,7 +1641,7 @@ test('a stop during extraction says what was really done', async () => {
   let closed = false;
   child.stdout.on('data', d => { stdout += d; });
   const done = new Promise(resolve => child.on('close', code => { closed = true; resolve(code); }));
-  while (!closed && !fs.existsSync(dest + '.partial')) await new Promise(resolve => setTimeout(resolve, 1));
+  while (!closed && !fs.existsSync(zipLib.partialOf(dest))) await new Promise(resolve => setTimeout(resolve, 1));
   assert.ok(!closed, 'the run ended before the signal could be sent');
   child.kill('SIGINT');
   assert.notStrictEqual(await done, 0);
@@ -1709,7 +1710,7 @@ test('a second signal ends the run at once with exit 130', async () => {
   const child = spawn(process.execPath, [TOOL_PATH, input, '--out', out, '--json'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let closed = false;
   const done = new Promise(resolve => child.on('close', (code, sig) => { closed = true; resolve({ code, sig }); }));
-  while (!closed && !fs.existsSync(path.join(out, 'big.partial'))) await new Promise(resolve => setTimeout(resolve, 1));
+  while (!closed && !fs.existsSync(zipLib.partialOf(path.join(out, 'big')))) await new Promise(resolve => setTimeout(resolve, 1));
   assert.ok(!closed, 'the run ended before the signal could be sent');
   child.kill('SIGINT');
   await new Promise(resolve => setTimeout(resolve, 5));
@@ -1749,7 +1750,8 @@ test('a mega whose index.md was removed still finds the shared project files', (
   assert.ok(archive, 'the chat folder is a single archive');
   const got = chatFromDisk(archive, archive.chats[0]);
   assert.deepStrictEqual(got.viewerChat.project.files.map(f => f.name), ['Paper.pdf']);
-  assert.ok(!got.warnings.some(w => /projects/.test(w)), got.warnings.join('|'));
+  // They are outside the folder the viewer goes in, so they are listed without links, and the report says so.
+  assert.deepStrictEqual(got.warnings.filter(w => /projects/.test(w)).map(w => /outside this folder/.test(w)), [true]);
 });
 
 test('a README project link that points nowhere is a warning', () => {
@@ -1759,4 +1761,137 @@ test('a README project link that points nowhere is a warning', () => {
   const archive = singleOf(dir);
   const got = chatFromDisk(archive, archive.chats[0]);
   assert.ok(got.warnings.some(w => /projects\/Gone/.test(w)), got.warnings.join('|'));
+});
+
+// ---- review fixes ----
+const turnsJson = (uuid, contents, extra = {}) => {
+  const chat_messages = [];
+  let parent = null;
+  contents.forEach((content, i) => {
+    chat_messages.push({ uuid: `${uuid}-h${i}`, parent_message_uuid: parent, sender: 'human', content: [{ type: 'text', text: 'go' }], ...(extra.human && extra.human[i] ? extra.human[i] : {}) });
+    chat_messages.push({ uuid: `${uuid}-a${i}`, parent_message_uuid: `${uuid}-h${i}`, sender: 'assistant', content });
+    parent = `${uuid}-a${i}`;
+  });
+  return JSON.stringify({ uuid, name: 'Chat', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', current_leaf_message_uuid: parent, chat_messages, ...(extra.top || {}) });
+};
+
+test('a rebuilt viewer keeps the text of files with extensions isTextFile does not know', () => {
+  const dir = tmpRoot();
+  put(dir, 'original.json', turnsJson('u', [[
+    { type: 'tool_use', id: 't1', name: 'create_file', input: { path: '/o/flow.mmd', file_text: 'graph TD; A-->B' } },
+    { type: 'tool_use', id: 't2', name: 'create_file', input: { path: '/o/Makefile', file_text: 'all:\n\techo hi' } },
+  ]]));
+  put(dir, 'artefacts/flow.mmd', 'graph TD; A-->B');
+  put(dir, 'artefacts/Makefile', 'all:\n\techo hi');
+  const archive = singleOf(dir);
+  const files = Object.values(chatFromDisk(archive, archive.chats[0]).viewerChat.files);
+  const byName = Object.fromEntries(files.map(f => [f.name, f]));
+  assert.strictEqual(byName['flow.mmd'].versions[0].text, 'graph TD; A-->B');
+  assert.strictEqual(byName['flow.mmd'].kind, 'mermaid');
+  assert.strictEqual(byName.Makefile.versions[0].text, 'all:\n\techo hi');
+  assert.notStrictEqual(byName.Makefile.kind, 'binary');
+});
+
+test('a chat folder taken out of a mega gets no project link that points nowhere', () => {
+  const parent = tmpRoot();
+  put(parent, 'c/original.json', JSON.stringify({ uuid: 'u', project_uuid: 'P', project: { uuid: 'P', name: 'Shared' }, chat_messages: [] }));
+  put(parent, 'c/README.md', '- [Paper.pdf](../projects/My%20Proj/files/Paper.pdf)\n');
+  put(parent, 'projects/My Proj/files/Paper.pdf', 'pdf');
+  const archive = findArchives(parent).archives.find(a => a.root === path.join(parent, 'c'));
+  const files = chatFromDisk(archive, archive.chats[0]).viewerChat.project.files;
+  assert.deepStrictEqual(files.map(f => [f.name, f.href]), [['Paper.pdf', null]]);
+});
+
+test('symlinked project/, uploads/ and artefacts/ folders are not read', () => {
+  const tmp = tmpRoot();
+  put(tmp, 'secret/notes.txt', 'TOPSECRET-TOKEN');
+  put(tmp, 'secret/p01_a.txt', 'TOPSECRET-UPLOAD');
+  put(tmp, 'secret/x.html', 'TOPSECRET-ART');
+  const dir = path.join(tmp, 'chat');
+  put(dir, 'original.json', turnsJson('u', [[{ type: 'tool_use', id: 't1', name: 'create_file', input: { path: '/o/x.html', file_text: 'replayed' } }]],
+    { top: { project_uuid: 'P' }, human: [{ files_v2: [{ success: true, file_name: 'a.txt', file_uuid: 'fa', file_kind: 'blob' }] }] }));
+  for (const name of ['project', 'uploads', 'artefacts']) fs.symlinkSync(path.join(tmp, 'secret'), path.join(dir, name));
+  const archive = singleOf(dir);
+  const got = chatFromDisk(archive, archive.chats[0]);
+  assert.ok(!JSON.stringify(got.viewerChat).includes('TOPSECRET'), 'nothing from the linked folder');
+  assert.ok(got.warnings.some(w => /link/i.test(w)), got.warnings.join('|'));
+});
+
+test('a ZIP is read from disk once', async (t) => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => z.file('original.json', chatJson('z1')), 'a.zip');
+  let loads = 0;
+  const realRead = fs.readFileSync;
+  t.mock.method(fs, 'readFileSync', function (p, ...rest) { if (String(p).endsWith('a.zip')) loads++; return realRead.call(fs, p, ...rest); });
+  const report = await tool().run(input, { out: path.join(tmp, 'out') });
+  assert.deepStrictEqual(report.zips.map(z => z.status), ['written']);
+  assert.strictEqual(loads, 1);
+});
+
+test('foo.partial.zip and foo.zip both extract', async () => {
+  const tmp = tmpRoot();
+  const input = path.join(tmp, 'in');
+  fs.mkdirSync(input);
+  await makeZip(input, z => z.file('original.json', chatJson('p1')), 'foo.partial.zip');
+  await makeZip(input, z => z.file('original.json', chatJson('p2')), 'foo.zip');
+  const report = await tool().run(input, { out: path.join(tmp, 'out') });
+  assert.deepStrictEqual(report.zips.map(z => z.status), ['written', 'written'], JSON.stringify(report.zips.map(z => z.reason)));
+});
+
+test('a ZIP whose entries collide once their names are cleaned is refused', async () => {
+  const tmp = tmpRoot();
+  const zp = path.join(tmp, 'twin.zip');
+  fs.writeFileSync(zp, rawZip([['original.json', 'LEGIT'], ['x/../original.json', 'EVIL']]));
+  const dest = path.join(tmp, 'out');
+  await assert.rejects(extractZip(zp, dest), /collide|same name/i);
+  assert.ok(!fs.existsSync(dest));
+});
+
+test('loose matching does not give one file on disk to the wrong upload', () => {
+  const dir = tmpRoot();
+  const upload = { files_v2: [{ success: true, file_name: 'data.csv', file_uuid: '', file_kind: 'blob' }] };
+  put(dir, 'original.json', turnsJson('u', [[], [], []], { human: [upload, {}, upload] }));
+  put(dir, 'uploads/p02_data.csv', 'a,b');
+  const archive = singleOf(dir);
+  const got = chatFromDisk(archive, archive.chats[0]);
+  const linked = got.viewerChat.messages.flatMap(m => m.uploads || []).filter(u => u.href);
+  assert.deepStrictEqual(linked.map(u => u.href), [], 'neither upload is given the one file');
+  assert.ok(got.warnings.some(w => /several|which/i.test(w)), got.warnings.join('|'));
+});
+
+test('with viewer.html deleted, our own gif and parts are replaced', async () => {
+  const dir = tmpRoot();
+  put(dir, 'original.json', chatJson('g1'));
+  fs.writeFileSync(path.join(dir, 'viewer-check.gif'), Buffer.from(require('../takeout-viewer.js').VIEWER_CHECK_BASE64, 'base64'));
+  put(dir, 'viewer-files/part-0001.js', 'window.__archivePart(1, {"u0":"x"});');
+  const report = await tool().run(dir, {});
+  assert.deepStrictEqual(report.archives.map(a => a.status), ['written'], JSON.stringify(report.archives.map(a => a.reason)));
+  assert.ok(fs.existsSync(path.join(dir, 'viewer.html')));
+});
+
+test('a stray non-viewer folder is named as the blocker', async () => {
+  const dir = tmpRoot();
+  put(dir, 'original.json', chatJson('g2'));
+  fs.writeFileSync(path.join(dir, 'viewer-check.gif'), Buffer.from(require('../takeout-viewer.js').VIEWER_CHECK_BASE64, 'base64'));
+  put(dir, 'viewer-files/mine.txt', 'my notes');
+  const report = await tool().run(dir, {});
+  assert.strictEqual(report.archives[0].status, 'failed');
+  assert.match(report.archives[0].reason, /viewer-files/);
+  assert.doesNotMatch(report.archives[0].reason, /viewer-check\.gif/);
+});
+
+test('an index.md added to a single-chat archive is listed; a mega root index.md is not', () => {
+  const single = tmpRoot();
+  put(single, 'original.json', CHAT);
+  put(single, 'index.md', '# my notes');
+  assert.deepStrictEqual(scanAdded(singleOf(single)).files.map(f => f.path), ['index.md']);
+  const mega = tmpRoot();
+  put(mega, 'index.md', '# index');
+  put(mega, 'c1/original.json', CHAT);
+  put(mega, 'c2/original.json', CHAT);
+  const archive = findArchives(mega).archives.find(a => a.root === mega);
+  assert.strictEqual(archive.kind, 'mega');
+  assert.deepStrictEqual(scanAdded(archive).files.map(f => f.path), []);
 });

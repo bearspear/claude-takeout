@@ -191,7 +191,9 @@ function scanAdded(archive) {
         if (KNOWN_DIRS.includes(e.name) || skipDirs.has(e.name)) continue;
         addTree(p, r, chatDir);
       } else if (e.isFile()) {
-        if (!KNOWN_ROOT_FILES.includes(e.name)) addFile(p, r, chatDir);
+        // index.md is the export's only at a mega root; anywhere else it is the owner's.
+        const known = KNOWN_ROOT_FILES.includes(e.name) && (e.name !== 'index.md' || (archive.kind === 'mega' && dir === archive.root));
+        if (!known) addFile(p, r, chatDir);
       }
     }
   }
@@ -240,6 +242,7 @@ const stripBom = text => (text.charCodeAt(0) === 0xFEFF ? text.slice(1) : text);
 
 // Real files directly in dir, sorted. A missing or unreadable folder lists nothing.
 function fileNames(dir) {
+  if (!isRealDir(dir)) return [];  // a missing folder, or a link to one elsewhere: never followed
   try {
     return fs.readdirSync(dir, { withFileTypes: true })
       .filter(e => e.isFile() && !isIgnored(e.name)).map(e => e.name).sort(byCodeUnit);
@@ -263,16 +266,26 @@ function readChatJson(dir) {
   }
 }
 
-// An upload's text for the viewer: the sync twin of popup.js's viewerUploadText.
-function uploadText(file, name) {
+// A file's text to embed in the viewer, or null when it only gets a link: not text by isText, over
+// TEXT_EMBED_LIMIT, or unreadable (onError hears why). Uploads and added files both use it.
+function embeddableText(file, name, { isText = core.isTextFile, onError = null } = {}) {
   try {
-    if (!core.isTextFile(name)) return null;
+    if (!isText(name)) return null;
     const limit = CTViewer.TEXT_EMBED_LIMIT;
     if (fs.statSync(file).size > limit) return null;
     const text = stripBom(fs.readFileSync(file, 'utf8'));
     return text.length <= limit ? core.fixMojibake(text) : null;
-  } catch (e) { return null; }
+  } catch (e) {
+    if (onError) onError(e);
+    return null;
+  }
 }
+
+// An upload's text for the viewer: the sync twin of popup.js's viewerUploadText.
+const uploadText = (file, name) => embeddableText(file, name);
+
+// isTextFile leaves .mmd out, and exports keep to it; the viewer shows it as a diagram.
+const isAddedText = name => core.isTextFile(name) || /\.mmd$/i.test(name);
 
 const PROJECT_META_FILES = ['project.json', 'docs.json', 'files.json', 'prompt_template.md'];
 
@@ -285,6 +298,10 @@ function chatFromDisk(archive, chat) {
   }
   const warnings = [];
   const missing = [];
+  for (const name of ['artefacts', 'uploads', 'project']) {
+    const s = lstat(path.join(chat.dir, name));
+    if (s && s.isSymbolicLink()) warnings.push(`${name}/ is a link to another folder, so it was not read`);
+  }
   // An odd shape in one extractor costs that detail, never the chat.
   const safe = (label, fallback, fn) => {
     try { return fn(); } catch (e) { warnings.push(`${label}: ${e.message}`); return fallback; }
@@ -303,9 +320,12 @@ function chatFromDisk(archive, chat) {
   for (const name of artefactNames) if (!diskByNfc.has(nfc(name))) diskByNfc.set(nfc(name), name);
   const diskName = name => diskByNfc.get(nfc(name)) || name;
   for (const key of Object.keys(artifacts)) if (diskName(key) !== key) delete artifacts[key];
+  // A name isTextFile doesn't know (flow.mmd, Makefile) keeps the replayed text rather than becoming
+  // binary; the export's own viewer has that text too.
   for (const name of artefactNames) {
     const text = core.isTextFile(name) ? readText(path.join(chat.dir, 'artefacts', name)) : null;
-    artifacts[name] = text === null ? '' : text;
+    if (text !== null) artifacts[name] = text;
+    else if (!(typeof artifacts[name] === 'string' && artifacts[name] !== '')) artifacts[name] = '';
   }
   for (const entry of Object.values(artifactIndex)) {
     if (!entry) continue;
@@ -346,20 +366,37 @@ function chatFromDisk(archive, chat) {
     wanted.push({ file, expected, found: null });
   }
   let free = uploadNames.slice();
+  const tierKey = { 2: looseKey, 3: n => looseKey(unnumbered(n)) };
+  const unsure = new Set();  // loose keys several uploads want: no file is given to any of them
   for (let tier = 0; tier <= 3; tier++) {
+    if (tierKey[tier]) {
+      const wantedBy = new Map();
+      for (const w of wanted) if (w.found === null) {
+        const k = tierKey[tier](w.expected);
+        wantedBy.set(k, (wantedBy.get(k) || 0) + 1);
+      }
+      for (const [k, count] of wantedBy) if (count > 1 && k) unsure.add(`${tier}:${k}`);
+    }
     for (const w of wanted) {
       if (w.found !== null) continue;
+      if (tierKey[tier] && unsure.has(`${tier}:${tierKey[tier](w.expected)}`)) continue;
       const hit = matchFile(w.expected, free, tier);
       if (hit === null) continue;
       w.found = hit;
       free = free.filter(n => n !== hit);
     }
   }
+  const warnedUnsure = new Set();
   for (const { file, expected, found } of wanted) {
     if (found === null) {
       missing.push(expected);
-      const candidates = free.filter(n => looseKey(n) === looseKey(expected));
+      const key3 = looseKey(unnumbered(expected));
+      const candidates = free.filter(n => looseKey(unnumbered(n)) === key3);
       if (candidates.length > 1) warnings.push(`upload ${expected} matches several files: ${candidates.join(', ')}`);
+      else if (candidates.length === 1 && unsure.has(`3:${key3}`) && !warnedUnsure.has(key3)) {
+        warnedUnsure.add(key3);
+        warnings.push(`several uploads could be ${candidates[0]}, so it was given to none of them`);
+      }
       continue;
     }
     uploads[file.uuid || file.originalFilename] = { path: `uploads/${found}`, text: uploadText(path.join(chat.dir, 'uploads', found), found) };
@@ -385,9 +422,11 @@ function chatFromDisk(archive, chat) {
       try { dir = decodeURIComponent(dir); } catch (e) { /* keep it as written */ }
       if (dir !== '.' && dir !== '..' && !/[\\/]/.test(dir)) {
         // A mega whose index.md was removed is read as single chats, so projects/ sits beside the chat folder.
-        const shared = isRealDir(path.join(archive.root, 'projects', dir)) ||
-          (archive.kind === 'single' && isRealDir(path.resolve(chat.dir, '..', 'projects', dir)));
+        const inside = isRealDir(path.join(archive.root, 'projects', dir));
+        const beside = !inside && archive.kind === 'single' && isRealDir(path.resolve(chat.dir, '..', 'projects', dir));
+        const shared = inside || beside;
         if (shared) fileDir = `../projects/${dir}/files`;
+        if (beside) warnings.push(`project files are in ../projects/${dir}, outside this folder, so the viewer lists them without links`);
         else warnings.push(`README.md links to projects/${dir}/files, which is not there, so project files are taken from project/files`);
       }
     }
@@ -420,4 +459,4 @@ function chatFromDisk(archive, chat) {
   return { viewerChat, missing, warnings };
 }
 
-module.exports = { findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, NotAChat, matchFile, stripBom, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
+module.exports = { findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, NotAChat, matchFile, stripBom, embeddableText, isAddedText, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
