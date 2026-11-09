@@ -1501,6 +1501,7 @@ function showResults(query) {
   holder.hidden = !q;
   document.getElementById('recents').hidden = !!q;
   document.querySelector('.find .clear').hidden = !query;
+  fileSearchGen++;  // a file search still running for an earlier query stops
   if (!q) { holder.replaceChildren(); closeStepper(); return; }
   if (!searchIndex) searchIndex = buildSearchIndex(allChats);
   const groups = groupHits(searchChats(searchIndex, q, Infinity));
@@ -1539,6 +1540,87 @@ function showResults(query) {
   const shown = groups.length > GROUP_LIMIT ? [el('div', 'lab', `Showing the first ${GROUP_LIMIT} chats`)] : [];
   holder.replaceChildren(el('div', 'lab', note), list, ...shown);
   holder.scrollTop = 0;
+  if (searchFilesOn()) searchInFiles(q);
+}
+
+// ---- "Also search inside files": uploads and generated files, text loaded part by part ----
+const FILE_HIT_LIMIT = 100;
+const SEARCH_FILES_KEY = 'claude-takeout-search-files';
+let fileSearchGen = 0;
+let fileSources = null;
+
+function searchFilesOn() {
+  const box = document.getElementById('search-files');
+  return !!(box && box.checked);
+}
+
+// Appends an "In files" section to the results. Inline text is searched at once; text in viewer-files/
+// is loaded one part at a time, and a newer search stops this one between parts.
+async function searchInFiles(query) {
+  const gen = fileSearchGen;
+  const holder = document.getElementById('results');
+  const lab = el('div', 'lab', 'Searching inside files\u2026');
+  const list = el('div', 'list');
+  const box = el('div', 'file-hits');
+  box.append(lab, list);
+  holder.append(box);
+  if (!fileSources) fileSources = fileSearchSources(allChats);
+  const q = parseQuery(query);
+  let found = 0, failed = 0;
+  const check = (src, text) => {
+    if (found >= FILE_HIT_LIMIT) return;
+    const hit = fileHit(q, src.name, text);
+    if (!hit) return;
+    found++;
+    list.append(fileHitRow(src, hit));
+  };
+  for (const src of fileSources) if (src.text !== null) check(src, src.text);
+  const byPart = new Map();
+  for (const src of fileSources) {
+    if (src.text !== null || src.part === null) continue;
+    if (!byPart.has(src.part)) byPart.set(src.part, []);
+    byPart.get(src.part).push(src);
+  }
+  const parts = [...byPart.keys()].sort((a, b) => a - b);
+  for (const [i, n] of parts.entries()) {
+    if (found >= FILE_HIT_LIMIT) break;
+    lab.textContent = `Searching inside files\u2026 ${i + 1} of ${parts.length}`;
+    const data = await loadPart(n);
+    if (gen !== fileSearchGen) return;
+    if (!data) { failed += byPart.get(n).length; continue; }
+    for (const src of byPart.get(n)) {
+      const text = Object.prototype.hasOwnProperty.call(data, src.key) ? data[src.key] : null;
+      if (typeof text === 'string') check(src, text);
+      else failed++;
+    }
+  }
+  if (gen !== fileSearchGen) return;
+  const count = found >= FILE_HIT_LIMIT ? `the first ${FILE_HIT_LIMIT} files` : `${found} file${found === 1 ? '' : 's'}`;
+  lab.textContent = found ? `Inside files \u00b7 ${count}` : 'No matches inside files';
+  if (failed) box.append(el('div', 'lab', `${failed} file${failed === 1 ? '' : 's'} couldn't be read, because viewer-files/ is missing or blocked.`));
+}
+
+function fileHitRow(src, hit) {
+  const chat = chatsById.get(src.chat);
+  const row = el('button', 'group-title file-hit');
+  row.type = 'button';
+  const name = el('b');
+  name.append(...withMarks(src.name || 'Untitled', hit.terms));
+  row.append(name, el('small', '', `${src.kind === 'upload' ? 'Upload' : 'File'} in ${(chat && chat.title) || 'Untitled'}`));
+  const snip = el('span', 'snip');
+  snip.append(...withMarks(hit.snippet, hit.terms));
+  row.append(snip);
+  row.addEventListener('click', () => {
+    setDrawer(false);
+    closeStepper();
+    if (src.kind === 'file') {
+      navigate({ chat: src.chat, file: src.id, version: src.version });
+      return;
+    }
+    navigate({ chat: src.chat });
+    openPopup(src.item, document.querySelector('.find input'));
+  });
+  return row;
 }
 
 function setupSearch() {
@@ -1548,6 +1630,12 @@ function setupSearch() {
   input.disabled = false;
   const reset = () => { clearTimeout(timer); input.value = ''; showResults(''); };
   input.addEventListener('focus', () => { if (!searchIndex) searchIndex = buildSearchIndex(allChats); });
+  const files = document.getElementById('search-files');
+  try { files.checked = localStorage.getItem(SEARCH_FILES_KEY) === '1'; } catch (e) { /* no storage: off */ }
+  files.addEventListener('change', () => {
+    try { localStorage.setItem(SEARCH_FILES_KEY, files.checked ? '1' : '0'); } catch (e) { /* kept for this page only */ }
+    if (input.value.trim()) showResults(input.value);
+  });
   input.addEventListener('input', () => {
     clearTimeout(timer);
     if (!input.value.trim()) showResults(input.value);

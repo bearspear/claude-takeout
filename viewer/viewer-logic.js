@@ -926,6 +926,58 @@ function chatFiles(chat) {
   return { outputs, working, uploads };
 }
 
+// What "Also search inside files" reads: each chat's generated files (their newest version) and its
+// uploads, each once. Pasted text is left out, since the main search already reads it.
+// [{ chat, kind: 'file' | 'upload', id (file id, for 'file'), version, item (the upload, for 'upload'),
+//    name, text (inline text or null), part, key (where text that was moved out lives) }]
+function fileSearchSources(chats) {
+  const out = [];
+  const where = v => {
+    const text = v && typeof v.text === 'string' ? v.text : null;
+    const part = v && Number.isSafeInteger(v.part) && v.part > 0 ? v.part : null;
+    return { text, part, key: part ? v.key : null };
+  };
+  for (const chat of chats || []) {
+    if (!chat) continue;
+    const { outputs, working } = chatFiles(chat);
+    for (const o of [...outputs, ...working]) {
+      const versions = (chat.files[o.id] && chat.files[o.id].versions) || [];
+      const version = versions.length - 1;
+      const w = where(versions[version]);
+      if (w.text !== null || w.part !== null) out.push({ chat: chat.id, kind: 'file', id: o.id, version, item: null, name: o.name, ...w });
+    }
+    const seen = new Set();
+    for (const m of chat.messages || []) {
+      for (const u of m.uploads || []) {
+        const w = where(u);
+        if (w.text === null && w.part === null) continue;
+        const name = uploadName(u) || 'Untitled';
+        const key = `${u.href || ''}\n${name}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        out.push({ chat: chat.id, kind: 'upload', id: null, version: null, item: u.name ? u : { ...u, name }, name, ...w });
+      }
+    }
+  }
+  return out;
+}
+
+// A file's hit for a parsed query (parseQuery), or null: { snippet, terms }. The name and the text are
+// searched together; the snippet comes from the text when a term is in it, otherwise it is the name.
+function fileHit(q, name, text) {
+  const t = String(text || '');
+  const lowerText = t.toLowerCase();
+  const n = String(name || '');
+  if (!queryMatches(q, `${n.toLowerCase()}\n${lowerText}`)) return null;
+  const terms = q.all.flat().filter(w => lowerText.includes(w) || n.toLowerCase().includes(w));
+  let at = -1, len = 0;
+  for (const w of terms) {
+    const i = lowerText.indexOf(w);
+    if (i >= 0 && (at < 0 || i < at)) { at = i; len = w.length; }
+  }
+  return { snippet: at < 0 ? n : snippetAt(t, lowerText, at, len), terms };
+}
+
 // An upload with no name is called by the file it was saved as. '' when there is none.
 function uploadName(u) {
   if (u && u.name) return u.name;
@@ -970,5 +1022,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
 }

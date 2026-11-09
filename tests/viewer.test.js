@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -1494,4 +1494,39 @@ test('buildViewerChat marks flagged files', () => {
   ] };
   const chat = buildViewerChat(data, ctxFor(data, { flags: { 'page.html': 'script' } }));
   assert.deepStrictEqual(Object.values(chat.files).map(f => [f.name, f.flag || null]), [['page.html', 'script'], ['ok.md', null]]);
+});
+
+test('fileSearchSources lists newest file versions and uploads once, with inline text or a part, and skips pasted text', () => {
+  const chat = {
+    id: 'c',
+    files: {
+      f1: { name: 'report.md', versions: [{ text: 'old' }, { text: 'new text' }] },
+      f2: { name: 'big.html', shared: false, versions: [{ text: null, part: 3, key: 'f0' }] },
+      f3: { name: 'pic.png', versions: [{ text: null, href: 'artefacts/pic.png' }] },
+    },
+    messages: [
+      { id: 'h', uploads: [{ name: 'a.txt', href: 'uploads/a.txt', text: 'upload words' }, { name: 'b.py', href: 'uploads/b.py', text: null, part: 2, key: 'u0' }, { name: 'doc.pdf', href: 'uploads/doc.pdf', text: null }],
+        attachments: [{ name: 'paste.txt', text: 'pasted' }], blocks: [] },
+      { id: 'a', blocks: [{ t: 'card', file: 'f1', version: 1 }, { t: 'card', file: 'f2', version: 0 }, { t: 'card', file: 'f3', version: 0 }] },
+      { id: 'h2', uploads: [{ name: 'a.txt', href: 'uploads/a.txt', text: 'upload words' }], blocks: [] },
+    ],
+  };
+  const got = fileSearchSources([chat]).map(s => [s.kind, s.name, s.text, s.part, s.key, s.kind === 'file' ? s.version : null]);
+  assert.deepStrictEqual(got, [
+    ['file', 'report.md', 'new text', null, null, 1],
+    ['file', 'big.html', null, 3, 'f0', 0],
+    ['upload', 'a.txt', 'upload words', null, null, null],
+    ['upload', 'b.py', null, 2, 'u0', null],
+  ]);
+});
+
+test('fileHit searches name and text together and cuts the snippet from the text', () => {
+  const q = parseQuery('wombat');
+  assert.strictEqual(fileHit(q, 'notes.md', 'nothing here'), null);
+  const hit = fileHit(q, 'notes.md', 'a'.repeat(200) + ' wombat ' + 'b'.repeat(200));
+  assert.match(hit.snippet, /^\u2026a+ wombat b+\u2026$/);
+  assert.deepStrictEqual(hit.terms, ['wombat']);
+  assert.strictEqual(fileHit(parseQuery('wombat'), 'wombat.md', 'plain').snippet, 'wombat.md');
+  assert.ok(fileHit(parseQuery('wombat plain'), 'wombat.md', 'plain text'), 'one word in the name, one in the text');
+  assert.strictEqual(fileHit(parseQuery('wombat -plain'), 'wombat.md', 'plain text'), null);
 });
