@@ -79,10 +79,10 @@ For exporting your whole history:
 |---|---|
 | **Export All (Markdown)** | One `.md` file per conversation in your downloads folder. |
 | **Export All (Embedded)** | One `_embedded.md` per conversation, artifacts inlined. |
-| **Export All (Mega-Zip)** | A single `claude-takeout-<YYYY-MM-DD>.zip` containing one folder per conversation (full ZIP structure each), plus an `index.md` master table and an `export-manifest.json` listing every chat it holds, with each chat's `updated_at`, at the root. |
+| **Export All (Mega-Zip)** | A single `claude-takeout-<your name>-<YYYY-MM-DD>.zip` (your claude.ai display name; left out if claude.ai doesn't give one) containing one folder per conversation (full ZIP structure each), plus an `index.md` master table and an `export-manifest.json` listing every chat it holds, with each chat's `updated_at`, at the root. |
 | **Export All (JSON)** | One `.json` per conversation. |
 
-**Only new or changed chats.** Set **Mega-Zip exports** in Settings to **Only new or changed**, and the Mega-Zip button becomes **Export Changes (Mega-Zip)**. It makes a `claude-takeout-changes-<YYYY-MM-DD>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold. The default is **All chats**.
+**Only new or changed chats.** Set **Mega-Zip exports** in Settings to **Only new or changed**, and the Mega-Zip button becomes **Export Changes (Mega-Zip)**. It makes a `claude-takeout-<your name>-changes-<YYYY-MM-DD>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold. The default is **All chats**.
 
 Progress shows below the buttons as `X / Y`. There's a 200–300 ms pause between conversations to be polite to Claude's API. 100 conversations takes about 30 seconds; 1000 will take under 10 minutes.
 
@@ -160,6 +160,8 @@ The viewer lists the chats, searches across them, and shows each message with it
 The text of uploads, and of files Claude made, over 64 KB is in `viewer-files/` beside `viewer.html`, and loads when you open the upload or file. Keep that folder with the viewer. Search covers prompts, responses, pasted text and file names, but not the text inside uploads. Results are grouped by chat, best match first. Words match in any order; use quotes for an exact phrase, `OR` (in capitals) for either word, and `-word` to leave a word out. Press `/` to jump to the search box, the arrow keys to move through results, and Escape or ✕ to clear. Opening a result shows a bar with “match 1 of N”: its arrows, or Enter and Shift+Enter, step through every occurrence in that chat.
 
 Code blocks with a language label get syntax colors as they scroll into view, as do files in Code view and text uploads. Blocks with no label stay plain, as do blocks over 200 KB and any that take too long to color.
+
+Next to the chat's model and date, **Open on claude.ai** opens the chat on claude.ai in a new tab. It may no longer exist there if you deleted it.
 
 The Files button in a chat's top bar lists every file in that chat: Outputs, the files Claude shared with you, each once with its version count; Uploads, what you uploaded or pasted; and Working files, what Claude wrote along the way without sharing, such as helper scripts. A file shared on another branch of the chat is listed under Outputs too. Click one to open it; Tab out of the list or press Escape to close it.
 

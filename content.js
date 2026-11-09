@@ -65,6 +65,22 @@
     return await response.json();
   }
 
+  // The account's display name, for the mega-ZIP's file name. Only that one field leaves this function.
+  async function fetchAccountName() {
+    try {
+      const response = await fetch('https://claude.ai/api/account', {
+        credentials: 'include',
+        headers: { 'Accept': 'application/json' }
+      });
+      if (!response.ok) return null;
+      const account = await response.json();
+      const name = account && (account.display_name || account.full_name);
+      return typeof name === 'string' && name.trim() ? name.trim() : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
   // Listen for messages from popup
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
@@ -84,7 +100,8 @@
         }
         try {
           const conversations = await fetchAllConversations(id);
-          sendResponse({ data: conversations, orgId: id });
+          const accountName = request.withAccountName ? await fetchAccountName() : null;
+          sendResponse({ data: conversations, orgId: id, accountName });
         } catch (e) {
           sendResponse({ error: e.message });
         }

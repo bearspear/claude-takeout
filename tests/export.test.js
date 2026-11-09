@@ -1381,7 +1381,7 @@ test('changedSince picks chats that are new or updated since the record', () => 
 });
 
 // Runs bulkExportZip in the sandbox with a chat list and chats, a real JSZip, and storage kept in memory.
-async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null }) {
+async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null, accountName = null }) {
   const JSZip = require('../jszip.min.js');
   const popup = exportPopup();
   const sb = popup.sandbox;
@@ -1390,7 +1390,7 @@ async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null
   sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
   sb.chrome.tabs.query = async () => [{ id: 1, url: 'https://claude.ai/chat/x' }];
   sb.chrome.tabs.sendMessage = (id, msg, cb) => {
-    if (msg.action === 'fetchAllConversations') cb({ data: list, orgId: 'org-1' });
+    if (msg.action === 'fetchAllConversations') cb({ data: list, orgId: 'org-1', accountName: msg.withAccountName ? accountName : undefined });
     else if (msg.action === 'fetchConversation') cb({ data: chats[msg.conversationId] });
     else cb({});
   };
@@ -1462,6 +1462,20 @@ test('the Mega-Zip exports setting defaults to all chats, and "only new or chang
     assert.ok(!html.includes('exportChangesZip'), `${page}: no separate Export Changes button`);
     assert.match(html, /<select id="megaZipScope"[^>]*>\s*<option value="all">All chats<\/option>/, `${page}: All chats is the first option`);
   }
+});
+
+test('the mega-ZIP name carries the account display name, cleaned for a file name', async () => {
+  const megaZipName = vm.runInContext('megaZipName', exportPopup().sandbox);
+  assert.strictEqual(megaZipName('Mika', 'full', '2026-11-09'), 'claude-takeout-Mika-2026-11-09.zip');
+  assert.strictEqual(megaZipName('Mika Example', 'changes', '2026-11-09'), 'claude-takeout-Mika_Example-changes-2026-11-09.zip');
+  assert.strictEqual(megaZipName('../José/ <x>', 'full', '2026-11-09'), 'claude-takeout-José_x-2026-11-09.zip');
+  assert.strictEqual(megaZipName('', 'full', '2026-11-09'), 'claude-takeout-2026-11-09.zip');
+  assert.strictEqual(megaZipName('***', 'full', '2026-11-09'), 'claude-takeout-2026-11-09.zip');
+  assert.strictEqual(megaZipName(null, 'changes', '2026-11-09'), 'claude-takeout-changes-2026-11-09.zip');
+  assert.strictEqual(megaZipName('x'.repeat(80), 'full', 'd').length, 'claude-takeout--d.zip'.length + 40);
+  const list = [listed('a', '2026-01-01T00:00:00Z')];
+  const { saved } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, accountName: 'Mika' });
+  assert.match(saved.name, /^claude-takeout-Mika-\d{4}-\d{2}-\d{2}\.zip$/);
 });
 
 test('a chat that failed is not recorded, so the next Export changes tries it again', async () => {

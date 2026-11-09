@@ -354,6 +354,31 @@ const tests = {
     await new Promise((r) => onMessage({ action: 'fetchConversation', conversationId: B }, {}, r));
     assert.match(urls[0], /organizations\/captured-org\//);
   },
+
+  'content.js adds only the display name to the chat list, and only when asked': async () => {
+    const urls = [];
+    let onMessage;
+    const account = { display_name: 'Mika', full_name: 'Mika Example', email_address: 'mika@example.com', uuid: 'acc-1' };
+    const sandbox = {
+      window: { addEventListener() {}, location: {} }, console: { log() {} }, setTimeout,
+      document: { createElement: () => ({}), head: { appendChild() {} }, cookie: 'lastActiveOrg=11111111-0000-4000-8000-000000000001' },
+      fetch: async (u) => { urls.push(u); return { ok: true, json: async () => (/\/api\/account$/.test(u) ? account : []) }; },
+      chrome: {
+        runtime: { getURL: (p) => p, lastError: null, onMessage: { addListener: (f) => { onMessage = f; } }, sendMessage() {} },
+        storage: { local: { set() {}, remove() {}, get: (k, cb) => cb({}) } },
+      },
+    };
+    vm.runInNewContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), sandbox);
+    const plain = await new Promise((r) => onMessage({ action: 'fetchAllConversations' }, {}, r));
+    assert.strictEqual(plain.accountName, null);
+    assert.ok(!urls.some((u) => /\/api\/account$/.test(u)), 'no account request unless asked');
+    const named = await new Promise((r) => onMessage({ action: 'fetchAllConversations', withAccountName: true }, {}, r));
+    assert.strictEqual(named.accountName, 'Mika');
+    assert.ok(!JSON.stringify(named).includes('mika@example.com'), 'nothing else from the account');
+    account.display_name = '';
+    const full = await new Promise((r) => onMessage({ action: 'fetchAllConversations', withAccountName: true }, {}, r));
+    assert.strictEqual(full.accountName, 'Mika Example', 'full name when there is no display name');
+  },
 };
 
 for (const [name, fn] of Object.entries(tests)) test(name, fn);

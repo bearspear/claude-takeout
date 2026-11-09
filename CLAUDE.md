@@ -234,7 +234,7 @@ Upload text over `UPLOAD_INLINE_LIMIT` (64 KB of UTF-8) is not in `viewer.html` 
 
 Mega-ZIP only:
 ```
-claude-takeout-<YYYY-MM-DD>.zip
+claude-takeout-[<display name>-][changes-]<YYYY-MM-DD>.zip   (megaZipName; display name from /api/account)
 ├── index.md                   # Master table w/ per-conversation issue counts
 ├── export-manifest.json       # { format, exported_at, kind: full|changes, since, listed, chats: [{ uuid, name, updated_at, folder }] }
 ├── projects/<project>/        # files/ and files.json, stored once and linked from each chat's README
@@ -252,6 +252,7 @@ All called with `credentials: 'include'` so the user's existing Claude session a
 | Endpoint | Used by | Purpose |
 |---|---|---|
 | `GET /api/organizations/<orgId>/chat_conversations` | `content.js` `fetchAllConversations` | Bulk export conversation list. |
+| `GET /api/account` | `content.js` `fetchAccountName` | The display name for the mega-ZIP's file name. Only `display_name` (or `full_name`) leaves `content.js`. |
 | `GET /api/organizations/<orgId>/chat_conversations/<convUuid>?tree=True&rendering_mode=messages&render_all_tools=true` | `content.js` `fetchConversation` | Bulk-mode full conversation re-fetch with project metadata included. |
 | `GET /api/organizations/<orgId>/projects/<projectUuid>` | `popup.js` `ensureProjectName` + `fetchProjectDocs` | Project metadata, especially `name`. |
 | `GET /api/organizations/<orgId>/projects/<projectUuid>/docs` | `fetchProjectDocs` | List of project documents. Empty for uploaded knowledge files. |

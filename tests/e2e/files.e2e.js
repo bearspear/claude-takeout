@@ -127,6 +127,11 @@ const empty = {
   await button.click();
   check('the button toggles it', !(await menu.isVisible()));
 
+  // The chat's link back to claude.ai: only for a uuid id, opening in a new tab.
+  check('a chat whose id is not a uuid gets no claude.ai link', (await page.locator('#meta .live-link').count()) === 0);
+  const live = await page.evaluate(() => [chatUrl('0A1B2C3D-0000-4000-8000-000000000001'), chatUrl('javascript:alert(1)'), chatUrl('../x')]);
+  check('a uuid id links to claude.ai/chat/<uuid>, anything else to nothing', live[0] === 'https://claude.ai/chat/0a1b2c3d-0000-4000-8000-000000000001' && live[1] === null && live[2] === null, JSON.stringify(live));
+
   // A chat with no files has no button.
   await page.goto('file://' + file + '#chat=e');
   await page.waitForSelector('.msg[data-id="x"]');
