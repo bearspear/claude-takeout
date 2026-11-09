@@ -3679,6 +3679,15 @@ async function saveExportRecord(org, at, exportedChats) {
   }
 }
 
+// claude-takeout-[<display name>-][changes-]<date>.zip. The name keeps letters and digits from any
+// script; anything else becomes _, and it is left out when claude.ai didn't give one.
+function megaZipName(accountName, kind, dateStr) {
+  const name = typeof accountName === 'string'
+    ? Array.from(accountName.normalize('NFC').replace(/[^\p{L}\p{N}\p{M}]+/gu, '_').replace(/^_+|_+$/g, '')).slice(0, 40).join('')
+    : '';
+  return `claude-takeout-${name ? `${name}-` : ''}${kind === 'changes' ? 'changes-' : ''}${dateStr}.zip`;
+}
+
 // Bulk export all conversations as a single mega-zip.
 // options.changesOnly: only chats new or updated since the last mega-ZIP from this browser. Without it,
 // the "Mega-Zip exports" setting decides (settings.megaZipScope: 'all', the default, or 'changes').
@@ -3698,7 +3707,7 @@ async function bulkExportZip(options = {}) {
 
   // Get all conversations
   // Awaited to the end, so the export lock holds until every file is written.
-  const response = await new Promise((resolve) => chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations' },
+  const response = await new Promise((resolve) => chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations', withAccountName: true },
     (r) => resolve(chrome.runtime && chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : r)));
   await (async () => {
     if (!response || response.error) {
@@ -3867,7 +3876,7 @@ async function bulkExportZip(options = {}) {
       });
 
       const dateStr = new Date().toISOString().slice(0, 10);
-      download(zipBlob, `claude-takeout-${kind === 'changes' ? 'changes-' : ''}${dateStr}.zip`, 'application/zip');
+      download(zipBlob, megaZipName(response.accountName, kind, dateStr), 'application/zip');
       // Only chats really in the archive are recorded, so one that failed is tried again next time.
       if (org && exportedChats.length) await saveExportRecord(org, startedAt, exportedChats);
 

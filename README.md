@@ -368,6 +368,11 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.7.2
+
+- **Your name in the Mega-Zip's file name** - A Mega-Zip is now `claude-takeout-<your display name>-<date>.zip`, so archives from different accounts don't mix. The name comes from your claude.ai account; only the display name is read.
+- **Open on claude.ai** - The viewer links each chat back to its page on claude.ai, next to the model and date.
+
 ### v1.7.1
 
 - **Export Changes is a setting** - The separate Export Changes button is gone. **Mega-Zip exports** in Settings chooses what the Mega-Zip button exports: **All chats** (the default) or **Only new or changed**, which makes it Export Changes (Mega-Zip).

@@ -854,6 +854,11 @@ function siblingCounts(messages) {
 
 // Any later call cancels the batches still pending from this one. leaf: the branch to show.
 // anchor: { id, top } keeps that message where it was on screen, top being its offset in the scroll box.
+// The chat's page on claude.ai, for a chat id that is a uuid; anything else gets no link.
+function chatUrl(id) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || '')) ? `https://claude.ai/chat/${id.toLowerCase()}` : null;
+}
+
 function renderChat(chat, leaf = chat.leaf, anchor = null) {
   const generation = ++renderGeneration;
   const box = document.getElementById('chat');
@@ -863,7 +868,18 @@ function renderChat(chat, leaf = chat.leaf, anchor = null) {
   box.replaceChildren();
   if (!anchor) scroll.scrollTop = 0;
   document.getElementById('title').textContent = title;
-  document.getElementById('meta').textContent = [chat.model, shortDate(chat.created)].filter(Boolean).join(' · ');
+  const meta = document.getElementById('meta');
+  meta.textContent = [chat.model, shortDate(chat.created)].filter(Boolean).join(' · ');
+  const live = chatUrl(chat.id);
+  if (live) {
+    const link = el('a', 'live-link', 'Open on claude.ai');
+    link.href = live;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.title = 'The chat on claude.ai. It may no longer exist there.';
+    if (meta.textContent) meta.append(' · ');
+    meta.append(link);
+  }
   renderFilesButton(chat);
   document.title = `${title} - Claude Takeout`;
   document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
