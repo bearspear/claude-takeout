@@ -368,6 +368,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.9.1
+
+- **Wrap long lines** - Popups and the file panel's Code view have a **Wrap** button next to Copy, so a text file with long lines, such as a transcript, reads without scrolling sideways. The viewer remembers the choice. Older exports get this when their viewer is rebuilt with `--force`.
+
 ### v1.9.0
 
 - **Search inside files** - The viewer's search box has a new **Also search inside files** checkbox. When ticked, search also looks in the text of uploads and of files Claude made, loading their text part by part, and lists matches under "Inside files". Off by default, since it is slower on a large archive. Older exports get this when their viewer is rebuilt with `--force`.
