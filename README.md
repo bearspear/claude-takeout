@@ -368,6 +368,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.7.1
+
+- **Export Changes is a setting** - The separate Export Changes button is gone. **Mega-Zip exports** in Settings chooses what the Mega-Zip button exports: **All chats** (the default) or **Only new or changed**, which makes it Export Changes (Mega-Zip).
+
 ### v1.7.0
 
 - **Export Changes** - A new **Export Changes (Mega-Zip)** button makes a mega-ZIP of only the chats that are new or changed since the last mega-ZIP from this browser, so a regular backup no longer downloads every chat again. The first time it exports everything and says so; when nothing changed, it says so and downloads nothing. A chat that failed is tried again next time.

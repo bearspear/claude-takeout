@@ -1381,7 +1381,7 @@ test('changedSince picks chats that are new or updated since the record', () => 
 });
 
 // Runs bulkExportZip in the sandbox with a chat list and chats, a real JSZip, and storage kept in memory.
-async function runBulkZip({ list, chats, stored = {}, options = {} }) {
+async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null }) {
   const JSZip = require('../jszip.min.js');
   const popup = exportPopup();
   const sb = popup.sandbox;
@@ -1399,6 +1399,7 @@ async function runBulkZip({ list, chats, stored = {}, options = {} }) {
   sb.download = (blob, name) => { saved = { blob, name }; };
   sb.setTimeout = (f) => setTimeout(f, 0);
   vm.runInContext('orgId = "org-1"', sb);
+  if (setup) setup(sb);
   sb.__opts = options;
   await vm.runInContext('bulkExportZip(__opts)', sb);
   const zip = saved ? await JSZip.loadAsync(await saved.blob.arrayBuffer()) : null;
@@ -1443,6 +1444,24 @@ test('Export changes with no record exports everything and says why', async () =
   assert.ok(saved);
   assert.strictEqual(JSON.parse(await zip.file('export-manifest.json').async('string')).kind, 'full');
   assert.match(status.textContent, /no earlier export/i);
+});
+
+test('the Mega-Zip exports setting defaults to all chats, and "only new or changed" makes Export All export changes', async () => {
+  const fs = require('fs');
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' } } } };
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-09T00:00:00Z')];
+  const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-09T00:00:00Z') };
+  assert.strictEqual(vm.runInContext('defaultSettings.megaZipScope', exportPopup().sandbox), 'all');
+  const all = await runBulkZip({ list, chats, stored });
+  assert.strictEqual(JSON.parse(await all.zip.file('export-manifest.json').async('string')).kind, 'full');
+  const changes = await runBulkZip({ list, chats, stored, setup: (sb) => vm.runInContext("settings.megaZipScope = 'changes'", sb) });
+  const manifest = JSON.parse(await changes.zip.file('export-manifest.json').async('string'));
+  assert.deepStrictEqual([manifest.kind, manifest.chats.map((c) => c.uuid)], ['changes', ['b']]);
+  for (const page of ['popup.html', 'sidepanel.html']) {
+    const html = fs.readFileSync(path.join(REPO, page), 'utf8');
+    assert.ok(!html.includes('exportChangesZip'), `${page}: no separate Export Changes button`);
+    assert.match(html, /<select id="megaZipScope"[^>]*>\s*<option value="all">All chats<\/option>/, `${page}: All chats is the first option`);
+  }
 });
 
 test('a chat that failed is not recorded, so the next Export changes tries it again', async () => {

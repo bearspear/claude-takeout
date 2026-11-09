@@ -77,7 +77,7 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 | `updateUI`, `showProgress`, `hideProgress`, `requestData` | DOM glue. |
 | `bulkExport`, `bulkExportZip` | Multi-conversation paths. `bulkExport` downloads one file per conversation (MD/embedded/JSON). `bulkExportZip` builds a single mega-zip with `index.md` + one folder per conversation reusing `populateConversationFolder`. |
 | Click handlers + `refresh` | Button → action mapping. Each per-conversation handler calls `ensureProjectName` before generating the filename or starting the ZIP. |
-| Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
+| Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, megaZipScope, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
 | Keyboard shortcuts | `Alt+M / E / Z / J / A / R`. |
 | `exclusiveExport`, `onExport` | One export at a time: the export buttons are disabled while one runs, and a second click or shortcut does nothing. |
 | `generateFilename` | `[<Project>-project]_` prefix + filenameStyle, with an optional suffix such as `_embedded` added after the title is cut to length. |
@@ -273,11 +273,12 @@ If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a
   "exporterSettings": {
     "filenameStyle": "title" | "title_date" | "date_title",
     "includeThinking": true,
+    "megaZipScope": "all" | "changes",  // what Export All (Mega-Zip) exports; "changes" relabels it Export Changes
     "showShortcuts": true,
     "useSidePanel": false
   },
   "useSidePanel": false,  // mirrored at top level so background.js can read it
-  "exportRecord": {       // written after each mega-ZIP; "Export Changes" exports chats whose listed updated_at differs
+  "exportRecord": {       // written after each mega-ZIP; with megaZipScope "changes", the mega-ZIP takes chats whose listed updated_at differs
     "<org id>": { "at": "ISO time of that export", "chats": { "<chat uuid>": "updated_at as the chat list gave it" } }
   }
 }
