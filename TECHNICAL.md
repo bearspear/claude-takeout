@@ -344,6 +344,17 @@ node tools/build_viewer.js <folder> [--out <dir>] [--force] [--dry-run] [--json]
 
 The `build-archive-viewer` skill wraps it.
 
+`tools/merge_archives.js` combines archives, typically a full Mega-Zip and the change archives after it:
+
+```
+node tools/merge_archives.js <archive folder or ZIP>... --out <dir> [--name <name>] [--dry-run] [--json]
+```
+
+- Each source is found with `findArchives`; ZIPs are first extracted with `extractZip` into `<out>/.merge-<pid>/`, which is removed at the end.
+- `pickNewest` keeps one copy per chat uuid: latest `updated_at` in `original.json`, then the later `exported_at` from `export-manifest.json`, then the source named later. Chats without a uuid are all kept.
+- The chosen chat folders are copied (`copyTree`: real files and folders only, never links, never overwriting) into `<out>/.<name>.partial-<pid>`, together with each mega source's `projects/` folders (newest source first, the first of a name wins), a new `index.md` and an `export-manifest.json` with `kind: "merged"`, `sources` and each chat's `from`. A single-chat source's `viewer.html`, `viewer-check.gif` and `viewer-files/` are left behind. The folder is then renamed to `<out>/<name>` (default `claude-takeout-merged-<date>`), and `writeViewer` from `build_viewer.js` gives it one viewer.
+- Sources are only read. An existing destination, or `--out` inside a source or an archive, stops the run before anything is written.
+
 ---
 
 ## Security
