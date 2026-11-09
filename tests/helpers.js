@@ -12,7 +12,7 @@ function element(id) {
   return {
     id, disabled: false, textContent: '', className: '', value: '', checked: false, style: {},
     handlers: {}, addEventListener(type, fn) { this.handlers[type] = fn; }, appendChild() {},
-    querySelectorAll: () => [], setAttribute() {}, getAttribute: () => null,
+    querySelectorAll: () => [], querySelector: () => null, setAttribute() {}, getAttribute: () => null,
     classList: { contains: () => false, add() {}, remove() {}, toggle() {} },
   };
 }

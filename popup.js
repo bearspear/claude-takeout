@@ -3680,9 +3680,10 @@ async function saveExportRecord(org, at, exportedChats) {
 }
 
 // Bulk export all conversations as a single mega-zip.
-// options.changesOnly: only chats new or updated since the last mega-ZIP from this browser ("Export changes").
+// options.changesOnly: only chats new or updated since the last mega-ZIP from this browser. Without it,
+// the "Mega-Zip exports" setting decides (settings.megaZipScope: 'all', the default, or 'changes').
 async function bulkExportZip(options = {}) {
-  const changesOnly = !!(options && options.changesOnly);
+  const changesOnly = options && typeof options.changesOnly === 'boolean' ? options.changesOnly : settings.megaZipScope === 'changes';
   const status = document.getElementById('status');
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
@@ -3918,7 +3919,7 @@ function exportedStatus(status, data, done) {
   status.textContent = problems.length ? `${done.replace(/!$/, '.')} But this chat looks incomplete: ${problems[0].message}` : done;
 }
 
-const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportChangesZip', 'exportAllJson'];
+const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportAllJson'];
 let exportRunning = false;
 function exclusiveExport(run) {
   return async (...args) => {
@@ -4039,7 +4040,6 @@ onExport('exportJson', async () => {
 onExport('exportAllMd', () => bulkExport('markdown'));
 onExport('exportAllEmbed', () => bulkExport('embedded'));
 onExport('exportAllZip', () => bulkExportZip());
-onExport('exportChangesZip', () => bulkExportZip({ changesOnly: true }));
 onExport('exportAllJson', () => bulkExport('json'));
 
 document.getElementById('refresh').addEventListener('click', () => scheduleRefresh());
@@ -4051,6 +4051,7 @@ document.getElementById('refresh').addEventListener('click', () => scheduleRefre
 const defaultSettings = {
   filenameStyle: 'title',
   includeThinking: true,
+  megaZipScope: 'all',  // 'all' | 'changes': what Export All (Mega-Zip) exports
   showShortcuts: true,
   useSidePanel: false
 };
@@ -4091,6 +4092,12 @@ async function saveSettings() {
 function applySettings() {
   document.getElementById('filenameStyle').value = settings.filenameStyle;
   document.getElementById('includeThinking').checked = settings.includeThinking;
+  const changes = settings.megaZipScope === 'changes';
+  document.getElementById('megaZipScope').value = changes ? 'changes' : 'all';
+  const megaZip = document.getElementById('exportAllZip');
+  const megaLabel = megaZip && megaZip.querySelector('span');
+  if (megaLabel) megaLabel.textContent = changes ? 'Export Changes (Mega-Zip)' : 'Export All (Mega-Zip)';
+  if (megaZip) megaZip.title = changes ? 'A mega-ZIP of only the chats that are new or changed since the last mega-ZIP from this browser (see Settings)' : '';
   document.getElementById('showShortcuts').checked = settings.showShortcuts;
 
   // Side panel checkbox (may not exist in all views)
@@ -4124,6 +4131,12 @@ document.getElementById('filenameStyle').addEventListener('change', (e) => {
 document.getElementById('includeThinking').addEventListener('change', (e) => {
   settings.includeThinking = e.target.checked;
   saveSettings();
+});
+
+document.getElementById('megaZipScope').addEventListener('change', (e) => {
+  settings.megaZipScope = e.target.value === 'changes' ? 'changes' : 'all';
+  saveSettings();
+  applySettings();
 });
 
 document.getElementById('showShortcuts').addEventListener('change', (e) => {

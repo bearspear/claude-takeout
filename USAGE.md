@@ -80,8 +80,9 @@ For exporting your whole history:
 | **Export All (Markdown)** | One `.md` file per conversation in your downloads folder. |
 | **Export All (Embedded)** | One `_embedded.md` per conversation, artifacts inlined. |
 | **Export All (Mega-Zip)** | A single `claude-takeout-<YYYY-MM-DD>.zip` containing one folder per conversation (full ZIP structure each), plus an `index.md` master table and an `export-manifest.json` listing every chat it holds, with each chat's `updated_at`, at the root. |
-| **Export Changes (Mega-Zip)** | A `claude-takeout-changes-<YYYY-MM-DD>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold. |
 | **Export All (JSON)** | One `.json` per conversation. |
+
+**Only new or changed chats.** Set **Mega-Zip exports** in Settings to **Only new or changed**, and the Mega-Zip button becomes **Export Changes (Mega-Zip)**. It makes a `claude-takeout-changes-<YYYY-MM-DD>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold. The default is **All chats**.
 
 Progress shows below the buttons as `X / Y`. There's a 200–300 ms pause between conversations to be polite to Claude's API. 100 conversations takes about 30 seconds; 1000 will take under 10 minutes.
 
@@ -98,7 +99,7 @@ If a single conversation fails (deleted, server hiccup, rate limit), the bulk ex
 | To preserve everything — uploads, attachments, every artifact version, full chat history, the raw JSON for recovery | **ZIP** |
 | To run analysis or import into another tool | **JSON** |
 | To archive your whole account | **Mega-Zip** |
-| To keep that archive current | **Export Changes** after the first Mega-Zip |
+| To keep that archive current | **Mega-Zip exports: Only new or changed** in Settings, after the first Mega-Zip |
 
 When in doubt: **ZIP**. It's the only format with the structured `errors.txt` report, the per-turn artifact snapshots, and `original.json` for full recovery.
 
@@ -441,6 +442,7 @@ Click the gear icon in the popup to open the settings drawer.
 |---|---|
 | **Filename style** | `title`, `title_date`, or `date_title`. Applies to single-chat Markdown, Embedded Markdown and JSON downloads. ZIPs and bulk exports keep their own names. |
 | **Include thinking blocks** | Whether to include Claude's `<thinking>` content in the Markdown exports and in a ZIP's `full_chat.md` and `integrated_chat.md`. The `responses/*.full.md` files always include it. |
+| **Mega-Zip exports** | **All chats** (the default) or **Only new or changed**: what the Mega-Zip button exports. With **Only new or changed**, it takes only the chats that are new or changed since the last mega-ZIP from this browser, and the button reads **Export Changes (Mega-Zip)**. |
 | **Show shortcuts** | Show keyboard shortcut hints next to buttons. |
 | **Open as sidebar by default** | Use Chrome's side panel instead of the popup, so the export UI stays open while you browse conversations. |
 
