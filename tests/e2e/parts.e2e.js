@@ -150,6 +150,38 @@ const ctx = () => ({ folder: '', artifacts: { 'big.html': BIG_HTML }, artifactIn
   check('the next open tries again', (await miss.locator('.pop .pop-body').textContent()) === BIG_PY);
   check('a missing part throws nothing', missErrors.length === 0, missErrors.join(' | '));
 
+  // "Also search inside files": off by default; when on, it loads parts and finds text in uploads and files.
+  await page.goto('file://' + path.join(dir, 'viewer.html'));
+  await page.waitForSelector('.msg');
+  const search = async q => { await page.fill('.find input', q); await page.waitForTimeout(300); };
+  check('searching inside files is off by default', !(await page.isChecked('#search-files')));
+  const before = partLoads.length;
+  await search('quokka_only');
+  check('off, a word only in a large upload finds nothing and loads no part', /No matches/.test(await page.textContent('#results')) && !(await page.locator('.file-hit').count()) && partLoads.length === before);
+  await page.check('#search-files');
+  await page.waitForSelector('.file-hit', { timeout: 3000 }).catch(() => {});
+  const hits = await page.locator('.file-hit').allTextContents();
+  check('on, it finds the word inside the large upload', hits.length === 1 && /big\.py/.test(hits[0]) && /Upload in Parts/.test(hits[0]) && /quokka_only/.test(hits[0]), hits.join(' | '));
+  check('the section says how many files matched', /Inside files · 1 file/.test(await page.textContent('.file-hits .lab')), await page.textContent('.file-hits .lab'));
+  await search('numbat_page');
+  await page.waitForSelector('.file-hit', { timeout: 3000 }).catch(() => {});
+  check('it finds a word in a large generated file', /big\.html/.test(await page.locator('.file-hit').first().textContent()));
+  await page.locator('.file-hit').first().click();
+  await page.waitForSelector('#panel:not([hidden])', { timeout: 3000 }).catch(() => {});
+  check('a file hit opens that file in the panel', /big\.html/.test(await page.textContent('#panel-head')), await page.textContent('#panel-head'));
+  await search('small upload');
+  await page.waitForSelector('.file-hit', { timeout: 3000 }).catch(() => {});
+  await page.locator('.file-hit', { hasText: 'small.txt' }).click();
+  await page.waitForSelector('.pop', { timeout: 3000 }).catch(() => {});
+  check('an upload hit opens the upload', (await page.locator('.pop .pop-body').textContent().catch(() => '')) === SMALL);
+  await page.keyboard.press('Escape');
+  await page.reload();
+  await page.waitForSelector('.msg');
+  check('the choice is remembered', await page.isChecked('#search-files'));
+  await search('no such word anywhere');
+  await page.waitForFunction(() => /No matches inside files/.test(document.querySelector('.file-hits')?.textContent || ''), null, { timeout: 3000 }).catch(() => {});
+  check('a miss says so', /No matches inside files/.test(await page.textContent('#results')));
+
   check('zero console errors', errors.length === 0, errors.join(' | '));
   check('zero network requests', requests.length === 0, requests.join());
   await browser.close();

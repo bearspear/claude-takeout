@@ -368,6 +368,14 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.9.0
+
+- **Search inside files** - The viewer's search box has a new **Also search inside files** checkbox. When ticked, search also looks in the text of uploads and of files Claude made, loading their text part by part, and lists matches under "Inside files". Off by default, since it is slower on a large archive. Older exports get this when their viewer is rebuilt with `--force`.
+
+### v1.8.0
+
+- **Combining archives** - New `tools/merge_archives.js` combines a full Mega-Zip with the change archives after it, or any set of exports, into one new archive with one viewer. Each chat is taken once, from its newest copy; your source archives are only read. See USAGE.md, "Combining archives".
+
 ### v1.7.2
 
 - **Your name in the Mega-Zip's file name** - A Mega-Zip is now `claude-takeout-<your display name>-<date>.zip`, so archives from different accounts don't mix. The name comes from your claude.ai account; only the display name is read.

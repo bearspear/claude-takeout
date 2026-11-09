@@ -59,6 +59,10 @@ svg.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor
 .hit small { display: block; font-size: 12.5px; line-height: 1.4; color: var(--mute); overflow-wrap: anywhere; }
 .find .clear { all: unset; display: flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 6px; color: var(--mute); cursor: pointer; }
 .find .clear[hidden] { display: none; }
+.find-files { display: flex; align-items: center; gap: 6px; margin: -4px 14px 8px; font-size: 12px; color: var(--mute); cursor: pointer; user-select: none; }
+.find-files input { margin: 0; accent-color: var(--acc); }
+.file-hit .snip { display: block; padding: 2px 0 0; }
+.file-hits { padding-top: 4px; border-top: 1px solid var(--line); margin-top: 4px; }
 .find .clear:hover, .find .clear:focus-visible { background: var(--hover); color: var(--ink); }
 .find .clear svg.ic { width: 13px; height: 13px; }
 .group { padding: 2px 0 6px; }
@@ -360,6 +364,7 @@ button.chip:hover { border-color: var(--line-strong); }
       <input type="text" placeholder="Search all chats" aria-label="Search all chats" autocomplete="off">
       <button class="clear" type="button" aria-label="Clear search" title="Clear search (Esc)" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </label>
+    <label class="find-files" title="Also look in uploads and in files Claude made. Their text loads as you search, so this is slower on a large archive."><input type="checkbox" id="search-files"> Also search inside files</label>
     <div id="recents">
       <div class="lab">Recents</div>
       <div id="chat-list"></div>
