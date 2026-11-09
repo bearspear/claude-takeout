@@ -165,7 +165,7 @@ Next to the chat's model and date, **Open on claude.ai** opens the chat on claud
 
 The Files button in a chat's top bar lists every file in that chat: Outputs, the files Claude shared with you, each once with its version count; Uploads, what you uploaded or pasted; and Working files, what Claude wrote along the way without sharing, such as helper scripts. A file shared on another branch of the chat is listed under Outputs too. Click one to open it; Tab out of the list or press Escape to close it.
 
-Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". Popups and the file panel have a Copy button in their header for the whole file: it copies the file's text, and in Preview the source rather than the rendered page. When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
+Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". Popups and the file panel have a Copy button in their header for the whole file: it copies the file's text, and in Preview the source rather than the rendered page. Beside it, **Wrap** wraps long lines of a file's text; the viewer remembers it for all files. When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
 
 What to know about previews of generated HTML:
 

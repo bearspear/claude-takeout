@@ -76,6 +76,17 @@ const ctx = () => ({ folder: '', artifacts: { 'big.html': BIG_HTML }, artifactIn
   check('it gets colors', (await page.locator('.pop .file-code .hljs-keyword').count()) > 0);
   await page.click('.pop-head .copy');
   check('a large upload copies once loaded', (await page.evaluate(() => navigator.clipboard.readText())) === BIG_PY);
+  const wrapState = sel => page.evaluate(s => {
+    const b = document.querySelector(`${s} .wrap`);
+    const code = document.querySelector(s.startsWith('.pop') ? '.pop .file-code' : '#panel .file-code');
+    return b && code ? `${b.getAttribute('aria-pressed')} ${getComputedStyle(code).whiteSpace}` : 'none';
+  }, sel);
+  check('long lines do not wrap by default', (await wrapState('.pop-head')) === 'false pre');
+  await page.click('.pop-head .wrap');
+  check('Wrap wraps them', (await wrapState('.pop-head')) === 'true pre-wrap');
+  await close();
+  await chip('big.py').click();
+  check('Wrap is remembered', (await wrapState('.pop-head')) === 'true pre-wrap');
   await close();
   await chip('big.md').click();
   await page.waitForFunction(t => document.querySelector('.pop .pop-body')?.textContent === t, BIG_MD, { timeout: 3000 }).catch(() => {});
@@ -88,6 +99,11 @@ const ctx = () => ({ folder: '', artifacts: { 'big.html': BIG_HTML }, artifactIn
   check('a large file opens from its part, in preview', frameDoc.includes('numbat_page'), frameDoc.slice(0, 80));
   await page.click('#panel .tab:has-text("Code")');
   check('and in Code view', (await page.textContent('#panel .file-code')) === BIG_HTML);
+  check('the panel wraps too, with the same setting', (await wrapState('#panel-head')) === 'true pre-wrap');
+  await page.click('#panel-head .wrap');
+  check('and unwraps', (await wrapState('#panel-head')) === 'false pre');
+  await page.click('#panel .tab:has-text("Preview")');
+  check('no Wrap in Preview', (await page.locator('#panel-head .wrap').count()) === 0);
   await page.click('#panel .close');
 
   await page.fill('.find input', 'zebrafinch');

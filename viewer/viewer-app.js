@@ -16,6 +16,7 @@ const ICON_PATHS = {
   search: 'M11 17.5a6.5 6.5 0 1 0 0-13 6.5 6.5 0 0 0 0 13ZM20 20l-4.4-4.4',
   globe: 'M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18ZM3 12h18M12 3c2.5 2.6 3.7 5.6 3.7 9s-1.2 6.4-3.7 9c-2.5-2.6-3.7-5.6-3.7-9S9.5 5.6 12 3Z',
   pencil: 'M4 20l1-4L16 5a1.8 1.8 0 0 1 3 3L8 19l-4 1Z',
+  wrap: 'M4 6h16M4 12h13a3 3 0 0 1 0 6h-5m0 0 2-2m-2 2 2 2M4 18h5',
   wrench: 'M15 6a4 4 0 0 1 5-1l-3 3 1.5 1.5 3-3a4 4 0 0 1-5.5 5L9 18a2 2 0 1 1-3-3l7-6.5A4 4 0 0 1 15 6Z',
 };
 
@@ -100,6 +101,25 @@ function fileCopyButton(name, text) {
   button.addEventListener('click', () => copyWithFeedback(button, text));
   return button;
 }
+
+// Wrap for a file's text in a popup or the panel: one setting for both, remembered.
+const WRAP_KEY = 'claude-takeout-wrap';
+function setWrap(on, remember = true) {
+  document.body.classList.toggle('wrap-code', on);
+  for (const b of document.querySelectorAll('button.wrap')) b.setAttribute('aria-pressed', String(on));
+  if (remember) try { localStorage.setItem(WRAP_KEY, on ? '1' : '0'); } catch (e) { /* kept for this page only */ }
+}
+function wrapButton() {
+  const button = el('button', 'wrap');
+  button.type = 'button';
+  button.title = 'Wrap long lines';
+  button.setAttribute('aria-pressed', String(document.body.classList.contains('wrap-code')));
+  button.append(icon('wrap'), el('span', '', 'Wrap'));
+  button.addEventListener('click', () => setWrap(!document.body.classList.contains('wrap-code')));
+  return button;
+}
+// The header tools for a file's text: Wrap and Copy.
+const fileTextTools = (name, text) => [wrapButton(), fileCopyButton(name, text)];
 
 // A code block's frame: a header with its language and a Copy button. The caller adds the pre.
 function codeBlock(lang) {
@@ -455,7 +475,7 @@ function openPopup(item, trigger) {
   close.addEventListener('click', closePopup);
   const head = el('div', 'pop-head');
   const title = el('b', 'pop-title', item.name || 'Untitled');
-  head.append(title, ...(typeof item.text === 'string' ? [fileCopyButton(item.name || 'Untitled', item.text)] : []), ...(link ? [link] : []), close);
+  head.append(title, ...(typeof item.text === 'string' ? fileTextTools(item.name || 'Untitled', item.text) : []), ...(link ? [link] : []), close);
   const body = el('div', 'pop-body');
   body.append(...nodes);
   pop.append(head, body);
@@ -474,7 +494,7 @@ function openPopup(item, trigger) {
     if (typeof text === 'string') item.text = text;
     if (popup !== mine) return;
     body.replaceChildren(...(typeof text === 'string' ? popupContent(item).nodes : partMissing(item)));
-    if (typeof text === 'string') title.after(fileCopyButton(item.name || 'Untitled', text));
+    if (typeof text === 'string') title.after(...fileTextTools(item.name || 'Untitled', text));
   });
 }
 
@@ -1101,6 +1121,8 @@ function renderPanelHead(chat, id, file, at, shape) {
   });
   const version = file.versions[at];
   const copy = !shape.missing && shape.views.length && version && typeof version.text === 'string' ? [fileCopyButton(file.name || 'Untitled', version.text)] : [];
+  // Wrap only shows with the code view; Preview renders the file.
+  if (copy.length && panelView !== 'preview') copy.unshift(wrapButton());
   head.replaceChildren(name, el('small', 'panel-kind', fileKindLabel(file)), ...tabs, row, ...copy, close);
   if (focused) [...tabs, ...versions].find(b => b.textContent === focused)?.focus();
 }
@@ -1696,6 +1718,7 @@ function start() {
   allChats.forEach(chat => chatsById.set(chat.id, chat));
   renderSidebar(data.chats);
   setupSearch();
+  try { setWrap(localStorage.getItem(WRAP_KEY) === '1', false); } catch (e) { /* no storage: off */ }
   document.getElementById('menu').addEventListener('click', () => setDrawer(true));
   document.getElementById('scrim').addEventListener('click', () => setDrawer(false));
   document.getElementById('panel-body').addEventListener('click', e => {

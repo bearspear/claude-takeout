@@ -199,6 +199,11 @@ sup.cite a:hover { color: var(--ink); background: var(--active); }
 .copy { display: inline-flex; align-items: center; gap: 5px; border: 0; background: none; border-radius: 6px; padding: 3px 7px; font-size: 12px; color: var(--mute); cursor: pointer; }
 .copy:hover { background: var(--hover); color: var(--ink); }
 .copy svg.ic { width: 13px; height: 13px; }
+.wrap { display: inline-flex; align-items: center; gap: 5px; border: 1px solid transparent; background: none; border-radius: 6px; padding: 2px 7px; font-size: 12px; color: var(--mute); cursor: pointer; }
+.wrap:hover { background: var(--hover); color: var(--ink); }
+.wrap[aria-pressed="true"] { background: var(--bub); border-color: var(--line); color: var(--ink); }
+.wrap svg.ic { width: 13px; height: 13px; }
+body.wrap-code .file-code { white-space: pre-wrap; overflow-wrap: anywhere; width: auto; }
 .code pre { margin: 0; padding: 13px 14px; overflow-x: auto; }
 .code code { font: 13px/1.55 var(--mono); color: var(--code-ink); }
 .hljs-keyword, .hljs-selector-tag, .hljs-meta .hljs-keyword, .hljs-doctag { color: var(--hl-keyword); }
@@ -347,7 +352,7 @@ button.chip:hover { border-color: var(--line-strong); }
   .panel-title { flex: 1 1 0; order: 1; }
   .panel-kind { display: none; }
   .close { order: 2; }
-  .tab, .vers, #panel-head .copy { order: 3; }
+  .tab, .vers, #panel-head .copy, #panel-head .wrap { order: 3; }
   #chat { padding: 12px 12px 72px; }
   .prose { font-size: 16px; }
   .bubble { max-width: 90%; }
