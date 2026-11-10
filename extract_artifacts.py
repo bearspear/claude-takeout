@@ -288,29 +288,109 @@ def render_doc_block(b) -> str:
         return str(b.get("value") or "")
     if b["type"] == "mention":
         return ""
+    if b["type"] == "embed":
+        caption = " ".join(b["caption"].split()) if isinstance(b.get("caption"), str) else ""
+        return f"[embedded content: {caption}]" if caption else "[embedded content]"
     return f"*(A {b['type']} block isn't included in this export.)*"
+
+
+def doc_find_all(d: dict, text: str) -> list:
+    """docFindAll in export-core.js: [(order, at, section)] in reading order."""
+    hits = []
+
+    def walk(source, name, order, depth):
+        spans = list(DOC_PLACEHOLDER_RE.finditer(source))
+        i = source.find(text)
+        while i != -1:
+            if not any(i < s.end() and i + len(text) > s.start() for s in spans):
+                hits.append((order + [i], i, name))
+            i = source.find(text, i + len(text))
+        for s in spans:
+            child = s.group(1) if name is None else f"{name}/{s.group(1)}"
+            if child in d["contents"] and depth < 8:
+                walk(d["contents"][child], child, order + [s.start()], depth + 1)
+    walk(d["markdown"], None, [], 0)
+    return sorted(hits, key=lambda h: h[0])
+
+
+def doc_pending_ids(ack, op: int) -> list:
+    """docPendingIds in export-core.js."""
+    if not isinstance(ack, dict) or not isinstance(ack.get("xml"), str):
+        return []
+    xml = ack["xml"]
+    parts = re.split(r"(?=<doc op=')", xml)
+    mine = next((p for p in parts if p.startswith(f"<doc op='{op}'")), xml if len(parts) <= 2 else "")
+    m = re.search(r"id='([^'.]+)\.", xml)
+    session = ack["session"] if isinstance(ack.get("session"), str) else (m.group(1) if m else "")
+    return [i if not i.startswith(".") else session + i for i in re.findall(r"<pending id='([^']+)'", mine)]
+
+
+def apply_doc_ops(d: dict, ops, ack=None) -> tuple:
+    """applyDocOps in export-core.js: (changed, unreplayed)."""
+    ops = ops if isinstance(ops, list) else []
+    changed, unreplayed = False, not ops
+    for index, op in enumerate(ops):
+        ok = isinstance(op, dict) and op.get("op") == "replace" and isinstance(op.get("target"), dict)
+        target = op["target"] if ok else {}
+        w = op.get("with") if ok and isinstance(op.get("with"), dict) else {}
+        frm = w.get("from") if isinstance(w.get("from"), dict) else {}
+        content = frm.get("content")
+        ids = target.get("ids") if isinstance(target.get("ids"), list) else []
+        text = target.get("text")
+        nth = target.get("nth")
+        if ok and target.get("kind") != "find" and len(ids) == 1 and isinstance(ids[0], str) and ids[0] in d["idmap"] and isinstance(content, str):
+            section = d["idmap"][ids[0]]
+            local = w.get("blocks") if isinstance(w.get("blocks"), dict) else None
+            d["contents"][section] = content
+            d["section_blocks"][section] = local
+            planted = [k for k in DOC_PLACEHOLDER_RE.findall(content)
+                       if local and isinstance(local.get(k), dict) and local[k].get("type") == "pending"]
+            for i, pid in enumerate(doc_pending_ids(ack, index)):
+                if i < len(planted):
+                    d["idmap"][pid] = f"{section}/{planted[i]}"
+            changed = True
+        elif (ok and target.get("kind") == "find" and isinstance(text, str) and text and not target.get("within")
+              and w.get("as") in ("text", "markdown") and isinstance(content, str)):
+            n = nth if isinstance(nth, int) and not isinstance(nth, bool) and nth > 0 else 1
+            hits = doc_find_all(d, text)
+            if len(hits) < n:
+                unreplayed = True
+                continue
+            _, at, section = hits[n - 1]
+            if section is None:
+                d["markdown"] = d["markdown"][:at] + content + d["markdown"][at + len(text):]
+            else:
+                c = d["contents"][section]
+                d["contents"][section] = c[:at] + content + c[at + len(text):]
+            changed = True
+        else:
+            unreplayed = True
+    return changed, unreplayed
 
 
 def render_claude_doc(d: dict) -> str:
     """renderClaudeDoc in export-core.js."""
+    def is_pending(b):
+        return isinstance(b, dict) and b.get("type") == "pending"
+
+    def section(name, depth):
+        if name not in d["contents"]:
+            return "*(This section wasn't written.)*"
+        local = d["section_blocks"].get(name)
+        local = local if isinstance(local, dict) else {}
+
+        def inner(m2):
+            k2 = m2.group(1)
+            if k2 not in local:
+                return render_doc_block(d["blocks"][k2]) if k2 in d["blocks"] else ""
+            return section(f"{name}/{k2}", depth + 1) if is_pending(local[k2]) and depth < 8 else render_doc_block(local[k2])
+        return DOC_PLACEHOLDER_RE.sub(inner, d["contents"][name])
+
     def fill(m):
         k = m.group(1)
         if k not in d["blocks"]:
             return ""
-        b = d["blocks"][k]
-        if isinstance(b, dict) and b.get("type") == "pending":
-            if k not in d["contents"]:
-                return "*(This section wasn't written.)*"
-            local = d["section_blocks"].get(k)
-            local = local if isinstance(local, dict) else {}
-
-            def inner(m2):
-                k2 = m2.group(1)
-                if k2 in local:
-                    return render_doc_block(local[k2])
-                return render_doc_block(d["blocks"][k2]) if k2 in d["blocks"] else ""
-            return DOC_PLACEHOLDER_RE.sub(inner, d["contents"][k])
-        return render_doc_block(b)
+        return section(k, 0) if is_pending(d["blocks"][k]) else render_doc_block(d["blocks"][k])
     out = DOC_PLACEHOLDER_RE.sub(fill, d["markdown"])
     out = re.sub(r" · (?=\n|$)", "", out)
     out = re.sub(r"(^|\n) · ", r"\1", out)
@@ -464,9 +544,31 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
                 elif action == "batch":
                     container = inp.get("container") if isinstance(inp.get("container"), dict) else {}
                     target = container.get("id")
-                    key = next((k for k in docs if target and (k == f"doc:{target}" or docs[k]["project"] == target)), None)
-                    if key:
-                        warn_doc(docs[key], key, "A batch of edits to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.")
+                    members = inp.get("batch") if isinstance(inp.get("batch"), list) else []
+                    touched = {}
+                    unknown = not members
+                    reply = leading_json(result_text(results_by_id.get(block.get("id")))) or {}
+                    acks = reply.get("acks") if isinstance(reply, dict) and isinstance(reply.get("acks"), list) else []
+                    for i, m in enumerate(members):
+                        ref = m.get("ref") if isinstance(m, dict) and isinstance(m.get("ref"), dict) else {}
+                        doc_key = f"doc:{ref['id']}" if ref.get("id") else None
+                        if doc_key and doc_key in docs and m.get("verb") == "update" and m.get("engine") == "prose":
+                            d = docs[doc_key]
+                            if target:
+                                d["project"] = str(target)
+                            payload = doc_payload(m.get("payload"))
+                            changed, bad = apply_doc_ops(d, payload.get("ops") if isinstance(payload, dict) else None, acks[i] if i < len(acks) else None)
+                            if changed:
+                                set_content(doc_key, render_claude_doc(d), d["filename"])
+                            touched[doc_key] = touched.get(doc_key, False) or bad
+                        elif not (isinstance(m, dict) and m.get("verb") == "create" and m.get("engine") == "widget"):
+                            unknown = True
+                    fallback = next((k for k in docs if target and (k == f"doc:{target}" or docs[k]["project"] == target)), None)
+                    if unknown and fallback and fallback not in touched:
+                        touched[fallback] = True
+                    for key, bad in touched.items():
+                        if bad or unknown:
+                            warn_doc(docs[key], key, "A batch of edits to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.")
                 elif action in ("update", "create"):
                     payload = doc_payload(inp.get("payload"))
                     payload = payload if isinstance(payload, dict) else {}
@@ -483,22 +585,7 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
                         d["comments"].append({"anchor": str(anchor.get("text") or ""), "body": value["body"]})
                         set_content(key, render_claude_doc(d), d["filename"])
                     elif d and action == "update":
-                        ops = payload.get("ops") if isinstance(payload.get("ops"), list) else []
-                        changed, unreplayed = False, not ops
-                        for op in ops:
-                            ok = isinstance(op, dict)
-                            target = op.get("target") if ok and isinstance(op.get("target"), dict) else {}
-                            ids = target.get("ids") if isinstance(target.get("ids"), list) else []
-                            w = op.get("with") if ok and isinstance(op.get("with"), dict) else {}
-                            frm = w.get("from") if isinstance(w.get("from"), dict) else {}
-                            content = frm.get("content")
-                            if ok and op.get("op") == "replace" and len(ids) == 1 and isinstance(ids[0], str) and ids[0] in d["idmap"] and isinstance(content, str):
-                                section = d["idmap"][ids[0]]
-                                d["contents"][section] = content
-                                d["section_blocks"][section] = w.get("blocks") if isinstance(w.get("blocks"), dict) else None
-                                changed = True
-                            else:
-                                unreplayed = True
+                        changed, unreplayed = apply_doc_ops(d, payload.get("ops"), leading_json(result_text(results_by_id.get(block.get("id")))))
                         if changed:
                             set_content(key, render_claude_doc(d), d["filename"])
                         if unreplayed:

@@ -1161,6 +1161,73 @@ test('Claude Docs edits that are not section fills, empty updates and a missing 
   assert.deepStrictEqual(pythonArtifacts(lost), out);
 });
 
+// A batch on an existing document, as claude.ai writes one to add a diagram: a widget, then a section
+// filled with Markdown that embeds it.
+const diagramBatch = (id, sectionId, content, { caption = 'How the parts fit', extra = [] } = {}) => ({ type: 'tool_use', id, name: 'mcp__Claude_Docs__batch', input: {
+  container: { kind: 'project', id: 'proj' },
+  batch: [
+    { $lid: 'w', engine: 'widget', object: 'node', verb: 'create', payload: { code: 'export default () => null', parent: { object: 'file', id: 'tab-1' } } },
+    { verb: 'update', engine: 'prose', ref: { object: 'node', id: 'node-1' }, payload: { ops: [{ op: 'replace', target: { kind: 'blocks', ids: [sectionId] },
+      with: { as: 'markdown', blocks: { dia: { type: 'embed', caption, ref: 'node/$lid:w' } }, from: { kind: 'inline', content } } }] } },
+    ...extra,
+  ] } });
+const findEdit = (id, text, content, extra = {}) => ({ type: 'tool_use', id, name: 'mcp__Claude_Docs__update', input: { ref: { object: 'node', id: 'node-1' }, engine: 'prose', container: { kind: 'project', id: 'proj' },
+  payload: { ops: [{ op: 'replace', target: { kind: 'find', text, ...extra }, with: { as: 'text', from: { kind: 'inline', content } } }] } } });
+
+test('a batch that adds a diagram and fills a section is replayed, in both implementations', () => {
+  const t = docTools();
+  const data = turns(
+    [t.batch, t.batchResult, t.update('u1', 'sess.10', '## Alpha\n\nalpha text'), t.result('u1', '{}')],
+    [diagramBatch('b2', 'sess.11', '## Beta\n\n<?claude block dia?>\n\nUnder the picture.\n\n| a | b |\n| --- | --- |\n| 1 | 2 |'), t.result('b2', '{}')],
+  );
+  const md = plain(artifacts(data))['Lorber_Notes.md'];
+  assert.match(md, /## Beta\n\n\[embedded content: How the parts fit\]\n\nUnder the picture\.\n\n\| a \| b \|/);
+  assert.ok(!md.includes("wasn't written"), md);
+  assert.deepStrictEqual(docWarnings(data), []);
+  assert.deepStrictEqual(pythonArtifacts(data)['Lorber_Notes.md'], md);
+  assert.strictEqual(require('../export-core.js').claudeDocKey(diagramBatch('b2', 'sess.11', 'x'), null), 'doc:node-1', 'the viewer shows a card for the document it edits');
+  // A batch member the export doesn't know still warns.
+  const odd = turns([t.batch, t.batchResult], [diagramBatch('b3', 'sess.11', 'text', { extra: [{ verb: 'create', object: 'file', payload: { value: { birthName: 'Tab 2' } } }] }), t.result('b3', '{}')]);
+  assert.match(plain(artifacts(odd))['Lorber_Notes.md'], /text/);
+  assert.deepStrictEqual(docWarnings(odd), [['claude_doc_unreplayed', 'Lorber_Notes.md']]);
+});
+
+test('a placeholder made inside a section is filled later, in both implementations', () => {
+  const t = docTools();
+  // The fill plants its own pending block; the update's reply gives its id.
+  const fill = t.update('u1', 'sess.10', '## Alpha\n\nalpha text\n\n<?claude block dg?>\n\nafter it', { blocks: { dg: { type: 'pending', intent: 'Diagram: the parts' } } });
+  const reply = t.result('u1', JSON.stringify({ verdict: 'allow', rev: 2, session: 'sess', xml: "<doc op='0'><paragraph id='.20'>Alpha</paragraph><pending id='.25' intent='Diagram: the parts'/></doc>" }));
+  const unfilled = turns([t.batch, t.batchResult, fill, reply]);
+  assert.match(plain(artifacts(unfilled))['Lorber_Notes.md'], /alpha text\n\n\*\(This section wasn't written\.\)\*\n\nafter it/);
+  const data = turns([t.batch, t.batchResult, fill, reply],
+    [diagramBatch('b2', 'sess.25', '### At a glance\n\n<?claude block dia?>\n\nOne (1:1) line.'), t.result('b2', '{}'), findEdit('f1', '(1:1)', '(2:1)'), t.result('f1', '{}')]);
+  const md = plain(artifacts(data))['Lorber_Notes.md'];
+  assert.match(md, /alpha text\n\n### At a glance\n\n\[embedded content: How the parts fit\]\n\nOne \(2:1\) line\.\n\nafter it/);
+  assert.deepStrictEqual(docWarnings(data), []);
+  assert.deepStrictEqual(pythonArtifacts(data)['Lorber_Notes.md'], md);
+});
+
+test('a Claude Docs find-and-replace edit is replayed, in both implementations', () => {
+  const t = docTools();
+  const base = [t.batch, t.batchResult, t.update('u1', 'sess.10', '## Alpha\n\nratios (1:1, 2:1) and (1:1, 2:1)'), t.result('u1', '{}')];
+  const fixed = turns(base, [findEdit('f1', '(1:1, 2:1)', '(2:1, 3:1)'), t.result('f1', '{}'), findEdit('f2', 'A subtitle', 'A better subtitle'), t.result('f2', '{}')]);
+  const md = plain(artifacts(fixed))['Lorber_Notes.md'];
+  assert.match(md, /ratios \(2:1, 3:1\) and \(1:1, 2:1\)/, 'the first match by default');
+  assert.match(md, /^# Lorber Notes\n\nA better subtitle\n/, 'text outside the sections too');
+  assert.deepStrictEqual(docWarnings(fixed), []);
+  assert.deepStrictEqual(pythonArtifacts(fixed)['Lorber_Notes.md'], md);
+  const second = turns(base, [findEdit('f1', '(1:1, 2:1)', '(4:3)', { nth: 2 }), t.result('f1', '{}')]);
+  assert.match(plain(artifacts(second))['Lorber_Notes.md'], /ratios \(1:1, 2:1\) and \(4:3\)/);
+  assert.deepStrictEqual(pythonArtifacts(second), plain(artifacts(second)));
+  // Not found, or only inside a table cell: nothing is guessed, and it warns.
+  for (const edit of [findEdit('f1', 'not in the document', 'x'), findEdit('f1', '(1:1, 2:1)', 'x', { within: { kind: 'cell', table: 't', row: 1, col: 1 } })]) {
+    const data = turns(base, [edit, t.result('f1', '{}')]);
+    assert.match(plain(artifacts(data))['Lorber_Notes.md'], /ratios \(1:1, 2:1\) and \(1:1, 2:1\)/);
+    assert.deepStrictEqual(docWarnings(data), [['claude_doc_unreplayed', 'Lorber_Notes.md']]);
+    assert.deepStrictEqual(pythonArtifacts(data), plain(artifacts(data)));
+  }
+});
+
 test('a section filled with chips expands them, in both implementations', () => {
   const t = docTools();
   const data = turns([t.batch, t.batchResult, t.update('u1', 'sess.10', 'Owner <?claude block me?>, due <?claude block due?>.', { blocks: { me: { type: 'mention', user: 'me' }, due: { type: 'date', value: '2026-10-06' } } }), t.result('u1', '{}')]);

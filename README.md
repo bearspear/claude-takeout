@@ -368,6 +368,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.9.2
+
+- **Claude Docs documents come out complete** - A section Claude filled together with a diagram, a correction Claude made by find-and-replace, and a section Claude planted inside another one are now rebuilt, so the exported `.md` and `.html` match the document on claude.ai and no longer show **May not match** for these edits. A diagram appears as `[embedded content: <caption>]`, as in claude.ai's own Markdown export. Edits made by hand on claude.ai still aren't in the chat. `extract_artifacts.py` rebuilds the same way. Needs a fresh export.
+
 ### v1.9.1
 
 - **Wrap long lines** - Popups and the file panel's Code view have a **Wrap** button next to Copy, so a text file with long lines, such as a transcript, reads without scrolling sideways. The viewer remembers the choice. Older exports get this when their viewer is rebuilt with `--force`.
