@@ -368,6 +368,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.10.0
+
+- **Claude Docs diagrams: a note says where to find them** - claude.ai draws a document's diagrams only on the document's own page, so the export shows each by its caption. When Claude made a self-contained HTML copy of the document in the chat (you asked it to export the document as HTML), the document's `.md` and `.html` now say so under the title and link that copy in `artefacts/`. When there is no copy, a **Diagram not included** note says so and how to get one: ask Claude in the chat for a self-contained HTML file, then export again. `errors.txt` lists those documents as `doc_diagram`. A copy is found from the turn that exported the document, or by a page whose title is the document's. Needs a fresh export.
+
 ### v1.9.2
 
 - **Claude Docs documents come out complete** - A section Claude filled together with a diagram, a correction Claude made by find-and-replace, and a section Claude planted inside another one are now rebuilt, so the exported `.md` and `.html` match the document on claude.ai and no longer show **May not match** for these edits. A diagram appears as `[embedded content: <caption>]`, as in claude.ai's own Markdown export. Edits made by hand on claude.ai still aren't in the chat. `extract_artifacts.py` rebuilds the same way. Needs a fresh export.

@@ -96,6 +96,9 @@ class ExportErrorCollector {
       case 'claude_doc_unreplayed':
         return 'Claude edited this Claude Docs document in a way the export can\'t rebuild from the chat. The exported .md and .html hold what could be rebuilt; open the live document on claude.ai (link in the note) for the current version.';
 
+      case 'doc_diagram':
+        return 'claude.ai draws a Claude Docs document\'s diagrams only on the document\'s own page, so the export shows each by its caption. To keep them, ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again: that copy is saved in artefacts/ and linked from the document. Or open the live document (link in the note).';
+
       default:
         return 'Check original.json for the raw conversation data that may contain this content.';
     }
@@ -2376,6 +2379,33 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         urlsTried: err.urlsTried || [],
         httpStatus: err.httpStatus || null
       });
+    }
+  }
+
+  // Claude Docs diagrams show by caption, as only claude.ai's page draws them. A self-contained HTML copy
+  // Claude made in the chat (docCompanions) is linked under the document's title; without one, the note
+  // says the diagrams aren't included and how to get them, and errors.txt says so too. Only the final
+  // document has the note: its versions stay as rebuilt.
+  const pathNames = {};  // sandbox path -> its name in artefacts/: the replayed file first, then presented, then delivered
+  for (const f of savedDeliveries) pathNames[f.path] = f.filename;  // the final copy comes last
+  Object.assign(pathNames, presentedNames);
+  for (const [key, entry] of Object.entries(artifactIndex)) {
+    if (entry && !key.startsWith('doc:') && !key.startsWith('artifact:')) pathNames[key] = entry.filename;
+  }
+  const companions = docCompanions(data, artifacts, artifactIndex, pathNames);
+  for (const [key, entry] of Object.entries(artifactIndex)) {
+    if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
+    const names = companions[key] || [];
+    const { markdown, captions } = docCompanionNote(artifacts[entry.filename], names);
+    if (markdown !== artifacts[entry.filename]) {
+      artifacts[entry.filename] = markdown;
+      addFileWithBOM(folder, `artefacts/${entry.filename}`, markdown);
+    }
+    if (captions && !names.length) {
+      const url = (/^\*Live document on claude\.ai: (\S+)\*$/m.exec(markdown) || [])[1];
+      errorCollector.addWarning('doc_diagram', entry.filename,
+        `${captions} diagram${captions === 1 ? '' : 's'} in this Claude Docs document ${captions === 1 ? 'is' : 'are'} not in the export: claude.ai draws ${captions === 1 ? 'it' : 'them'} only on the document's page, and this chat has no self-contained HTML copy of the document.`,
+        { path: key, note: url ? `Open the live document: ${url}` : 'Open the document on claude.ai.' });
     }
   }
 

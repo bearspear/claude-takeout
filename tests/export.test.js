@@ -1550,3 +1550,94 @@ test('a chat that failed is not recorded, so the next Export changes tries it ag
   const { store } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') } });
   assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats), ['a']);
 });
+
+// ---- Companion HTML for Claude Docs documents ----
+// claude.ai draws a document's diagrams only on its own page, so the rebuilt .md shows them by caption.
+// A self-contained HTML copy Claude made in the chat is linked from the document; without one, the
+// document says the diagrams aren't included.
+const companionChat = (...extraTurns) => {
+  const t = docTools();
+  return Object.assign(turns(
+    [t.batch, t.batchResult, t.update('u1', 'sess.10', '## Alpha\n\nalpha text'), t.result('u1', '{}')],
+    [diagramBatch('b2', 'sess.11', '## Beta\n\n<?claude block dia?>\n\nUnder the picture.'), t.result('b2', '{}')],
+    ...extraTurns,
+  ), { uuid: 'cc', name: 'cc' });
+};
+const docExport = (id, url = DOC_URL) => [
+  use(id, 'mcp__Claude_Docs__export', { container: { kind: 'project', id: 'proj' }, file: 'tab-1', format: 'html' }),
+  { type: 'tool_result', tool_use_id: id, name: 'mcp__Claude_Docs__export', content: [{ type: 'text', text: JSON.stringify({ verdict: 'allow', data: { format: 'html', bytes_b64: 'PGgxPng8L2gxPg==' }, frame: { url } }) }] },
+];
+const page = (title, h1) => `<!doctype html><html><head><title>${title}</title></head><body><h1>${h1}</h1><svg></svg></body></html>`;
+const companions = (data) => {
+  const index = {};
+  const made = artifacts(data, null, index);
+  const pathNames = {};
+  for (const [key, e] of Object.entries(index)) if (!key.startsWith('doc:') && !key.startsWith('artifact:')) pathNames[key] = e.filename;
+  return plain(fn('docCompanions')(data, made, index, pathNames));
+};
+
+test('an HTML file sent in the turn that exported the document is its companion', () => {
+  const data = companionChat([
+    ...docExport('x1'),
+    use('w1', 'Write', { file_path: '/home/claude/out/notes_page.html', content: page('Something else', 'Not the title') }), result('w1'),
+    use('s1', 'SendUserFile', { files: ['/home/claude/out/notes_page.html'] }),
+  ]);
+  assert.deepStrictEqual(companions(data), { 'doc:node-1': ['notes_page.html'] });
+  // An export of another document links nothing here.
+  const other = companionChat([
+    ...docExport('x1', 'https://claude.ai/artifact/OTHER'),
+    use('w1', 'Write', { file_path: '/home/claude/out/notes_page.html', content: page('Something else', 'Not the title') }), result('w1'),
+    use('s1', 'SendUserFile', { files: ['/home/claude/out/notes_page.html'] }),
+  ]);
+  assert.deepStrictEqual(companions(other), {});
+});
+
+test("an HTML file whose title or first heading is the document's title is its companion", () => {
+  const byH1 = companionChat([use('w1', 'Write', { file_path: '/home/claude/a/page.html', content: page('Page', 'Lorber <i>Notes</i>') }), result('w1')]);
+  assert.deepStrictEqual(companions(byH1), { 'doc:node-1': ['page.html'] });
+  const byTitle = companionChat([use('w1', 'Write', { file_path: '/home/claude/a/page.html', content: page('  lorber\n NOTES ', 'x') }), result('w1')]);
+  assert.deepStrictEqual(companions(byTitle), { 'doc:node-1': ['page.html'] });
+  const curly = docTools('mcp__Claude_Docs__', { title: "Verbeke's L'évolution" });
+  const quotes = Object.assign(turns([curly.batch, curly.batchResult], [use('w1', 'Write', { file_path: '/h/v.html', content: page('V', 'Verbeke’s <i>L’évolution</i>') }), result('w1')]), { uuid: 'q', name: 'q' });
+  assert.deepStrictEqual(companions(quotes), { 'doc:node-1': ['v.html'] });
+  // A piece Claude put a page together from is not a copy of the document.
+  const piece = companionChat([use('w1', 'Write', { file_path: '/home/claude/a/body.html', content: '</head>\n<body>\n<h1>Lorber Notes</h1>' }), result('w1')]);
+  assert.deepStrictEqual(companions(piece), {});
+  const unrelated = companionChat([use('w1', 'Write', { file_path: '/home/claude/a/page.html', content: page('Lorber Notes, part two', 'Lorber Notes, part two') }), result('w1')]);
+  assert.deepStrictEqual(companions(unrelated), {});
+});
+
+test('a document with diagrams links its companion, or says plainly the diagrams are not included', async () => {
+  const withCopy = companionChat([
+    ...docExport('x1'),
+    use('w1', 'Write', { file_path: '/home/claude/out/notes page.html', content: page('Other', 'Other') }), result('w1'),
+    use('s1', 'SendUserFile', { files: ['/home/claude/out/notes page.html'] }),
+  ]);
+  const one = await runFolder(exportPopup(), withCopy);
+  const md = docText(one.written, 'artefacts/Lorber_Notes.md');
+  assert.match(md, /^# Lorber Notes\n\n> \*\*Diagram:\*\* .*\[notes page\.html\]\(notes%20page\.html\)/m, md);
+  assert.ok(md.includes('[embedded content: How the parts fit]'), 'the caption stays where the diagram was');
+  assert.ok(!String(docText(one.written, 'errors.txt') || '').includes('doc diagram'));
+  assert.match(docText(one.written, 'artefacts/Lorber_Notes.html'), /notes page\.html/);
+  // The versions stay as rebuilt; only the final document has the note.
+  assert.ok(!docText(one.written, 'artefacts/Lorber_Notes_v2.md').includes('> **Diagram'));
+
+  const without = await runFolder(exportPopup(), companionChat());
+  const bare = docText(without.written, 'artefacts/Lorber_Notes.md');
+  assert.match(bare, /^# Lorber Notes\n\n> \*\*⚠️ Diagram not included\.\*\* .*no self-contained copy.*ask Claude/m, bare);
+  assert.match(docText(without.written, 'artefacts/Lorber_Notes.html'), /Diagram not included/);
+  const errors = docText(without.written, 'errors.txt');
+  assert.match(errors, /Type:\*\* doc diagram/);
+  assert.match(errors, /self-contained HTML/);
+  assert.ok(errors.includes(DOC_URL));
+});
+
+test('a document without diagrams gets no warning, and a note only when it has a companion', async () => {
+  const t = docTools();
+  const text = [t.batch, t.batchResult, t.update('u1', 'sess.10', 'text'), t.result('u1', '{}')];
+  const none = await runFolder(exportPopup(), Object.assign(turns(text), { uuid: 'n', name: 'n' }));
+  assert.ok(!docText(none.written, 'artefacts/Lorber_Notes.md').includes('> **'));
+  assert.ok(!String(docText(none.written, 'errors.txt') || '').includes('doc diagram'));
+  const copy = await runFolder(exportPopup(), Object.assign(turns(text, [use('w1', 'Write', { file_path: '/h/l.html', content: page('Lorber Notes', 'x') }), result('w1')]), { uuid: 'c', name: 'c' }));
+  assert.match(docText(copy.written, 'artefacts/Lorber_Notes.md'), /^# Lorber Notes\n\n> \*\*Self-contained copy:\*\* .*\[l\.html\]\(l\.html\)/m);
+});

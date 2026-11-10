@@ -325,6 +325,114 @@ function claudeDocCreated(input, result, toolUseId = '') {
   return { key: `doc:${ack.id}`, title, markdown: doc.markdown, blocks, url: String(url), idmap, unconfirmed: false };
 }
 
+// ---- Companion HTML for Claude Docs documents ----
+// claude.ai draws a document's diagrams only on the document's own page, so the rebuild shows each by
+// caption. When the owner wants them, they ask Claude for a self-contained HTML copy, which arrives as an
+// ordinary file. docCompanions finds those copies: an HTML file sent (SendUserFile, present_files) in the
+// message that exported the document (Claude_Docs__export, whose result names the document's live link),
+// or else a whole HTML page whose <title> or first <h1> is the document's title. pathNames maps a sandbox path
+// to its name in artefacts/. Returns { <doc key>: [names] }.
+const DOC_CAPTION_RE = /^\[embedded content(?:: .*)?\]$/gm;
+function docTitleKey(text) {
+  const named = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', lsquo: "'", rsquo: "'", ldquo: '"', rdquo: '"' };
+  return String(text || '').replace(/<[^>]*>/g, '')
+    .replace(/&(?:#(\d{1,7})|#x([0-9a-f]{1,6})|(\w+));/gi, (m, dec, hex, name) => {
+      if (name) return Object.prototype.hasOwnProperty.call(named, name.toLowerCase()) ? named[name.toLowerCase()] : m;
+      const cp = dec ? Number(dec) : parseInt(hex, 16);
+      return cp > 0 && cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+    })
+    .normalize('NFC').replace(/[‘’ʼ]/g, "'").replace(/[“”]/g, '"').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+function docCompanions(data, artifacts, index, pathNames = {}) {
+  const has = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+  const docs = [];
+  const docNames = new Set();
+  for (const [key, entry] of Object.entries(index || {})) {
+    if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
+    const md = artifacts[entry.filename];
+    const title = docTitleKey((/^#\s+(.+)$/m.exec(md) || [])[1] || '');
+    const url = (/^\*Live document on claude\.ai: (\S+)\*$/m.exec(md) || [])[1] || '';
+    docs.push({ key, title, url });
+    docNames.add(entry.filename);
+    for (const v of entry.versions || []) docNames.add(v);
+  }
+  const html = (name) => typeof name === 'string' && /\.html?$/i.test(name) && has(artifacts, name) && typeof artifacts[name] === 'string' && !docNames.has(name);
+  const out = {};
+  const add = (key, name) => { out[key] = out[key] || []; if (!out[key].includes(name)) out[key].push(name); };
+
+  for (const msg of getMessageChain(data)) {
+    if (msg.sender !== 'assistant') continue;
+    const results = {};
+    for (const c of msg.content || []) if (c && c.type === 'tool_result' && c.tool_use_id) results[c.tool_use_id] = c;
+    const exported = [];
+    for (const c of msg.content || []) {
+      if (!c || typeof c !== 'object') continue;
+      if (c.type === 'tool_use' && claudeDocsAction(c.name) === 'export') {
+        const parsed = leadingJson(resultText(results[c.id])) || {};
+        const url = parsed.frame && typeof parsed.frame === 'object' ? parsed.frame.url : '';
+        const doc = url ? docs.find((d) => d.url === url) : null;
+        if (doc && !exported.includes(doc)) exported.push(doc);
+        continue;
+      }
+      if (!exported.length) continue;
+      const paths = [];
+      if (c.type === 'tool_use' && /(^|__)(SendUserFile|present_files)$/.test(String(c.name || '')) && c.input) {
+        for (const list of [c.input.files, c.input.filepaths]) if (Array.isArray(list)) paths.push(...list);
+      }
+      for (const d of Array.isArray(c.file_deliveries) ? c.file_deliveries : []) if (d && d.path) paths.push(d.path);
+      for (const p of paths) {
+        const name = typeof p === 'string' && has(pathNames, p) ? pathNames[p] : null;
+        if (html(name)) for (const doc of exported) add(doc.key, name);
+      }
+    }
+  }
+
+  // Versioned snapshots (<base>_vN beside <base>) stand for the same file.
+  const names = Object.keys(artifacts).filter((n) => html(n) && !(/_v\d+(\.html?)$/i.test(n) && has(artifacts, n.replace(/_v\d+(\.html?)$/i, '$1')))).sort();
+  const headings = {};
+  for (const n of names) {
+    const text = artifacts[n].slice(0, 200000);
+    // Only a whole page: a piece Claude assembles one from (a body.html) is not a copy.
+    if (!/<!doctype html|<html[\s>]/i.test(text)) { headings[n] = []; continue; }
+    headings[n] = [(/<title[^>]*>([\s\S]*?)<\/title>/i.exec(text) || [])[1], (/<h1[^>]*>([\s\S]*?)<\/h1>/i.exec(text) || [])[1]]
+      .filter((h) => h !== undefined).map(docTitleKey);
+  }
+  for (const doc of docs) {
+    if (out[doc.key] || !doc.title) continue;
+    for (const n of names) {
+      if (!headings[n].includes(doc.title)) continue;
+      if ((out[doc.key] || []).some((m) => artifacts[m] === artifacts[n])) continue;  // a delivered copy of the same file
+      add(doc.key, n);
+    }
+  }
+  return out;
+}
+
+// The note at the top of a Claude Docs document about its diagrams and its self-contained copies.
+// Returns { markdown, captions }: the text with the note under its title, and how many diagrams show by
+// caption.
+function docCompanionNote(markdown, names = []) {
+  const md = String(markdown);
+  const captions = (md.match(DOC_CAPTION_RE) || []).length;
+  const link = (n) => `[${n.replace(/([\\[\]])/g, '\\$1')}](${encodeURI(n).replace(/\(/g, '%28').replace(/\)/g, '%29')})`;
+  const links = names.map(link).join(', ');
+  const one = captions === 1;
+  const live = /^\*Live document on claude\.ai: \S+\*$/m.test(md);
+  let note = '';
+  if (captions && names.length) {
+    note = `> **Diagram${one ? '' : 's'}:** claude.ai draws ${one ? "this document's diagram" : `this document's ${captions} diagrams`} only on the document's own page, so here ${one ? 'it shows' : 'they show'} by caption. For the ${one ? 'diagram' : 'diagrams'}, see the self-contained copy Claude made in this chat: ${links}.`;
+  } else if (captions) {
+    note = `> **⚠️ Diagram${one ? '' : 's'} not included.** claude.ai draws ${one ? "this document's diagram" : `this document's ${captions} diagrams`} only on the document's own page, so here ${one ? 'it shows' : 'they show'} by caption, and this chat has no self-contained copy of the document. To keep ${one ? 'it' : 'them'}, ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again.${live ? ' The live document is linked at the end.' : ''}`;
+  } else if (names.length) {
+    note = `> **Self-contained copy:** Claude made one of this document in this chat: ${links}.`;
+  }
+  if (!note) return { markdown: md, captions };
+  const heading = /^#\s+.+$/m.exec(md);
+  if (!heading || heading.index !== 0) return { markdown: `${note}\n\n${md}`, captions };
+  const end = heading[0].length;
+  return { markdown: `${md.slice(0, end)}\n\n${note}${md.slice(end)}`, captions };
+}
+
 // The key a Docs call writes to, for the viewer's cards: 'doc:<node id>' (or 'doc:pending:<call id>'
 // for a document whose batch result is missing), or null.
 function claudeDocKey(block, result) {
@@ -1039,7 +1147,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
   };
 }
