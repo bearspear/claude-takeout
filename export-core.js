@@ -256,8 +256,9 @@ function safeFileTitle(label) {
 // ---- Claude Docs documents ----
 // claude.ai's Docs tools (named <connector>Claude_Docs__<action>) write a document in steps: batch
 // creates it from Markdown with <?claude block k?> placeholders, some of them pending sections; update
-// replaces a pending section, by the id its batch result gave it, with Markdown; create adds a
-// comment. The document lives on claude.ai, so it is rebuilt from these calls. extract_artifacts.py
+// replaces a pending section, by the id its batch result gave it, with Markdown, or replaces found
+// text; a later batch on the document can do the same beside creating a diagram it embeds; create adds
+// a comment. The document lives on claude.ai, so it is rebuilt from these calls. extract_artifacts.py
 // does the same; keep them in step.
 const CLAUDE_DOCS_RE = /Claude_Docs__(\w+)$/;
 function claudeDocsAction(name) {
@@ -329,16 +330,27 @@ function claudeDocCreated(input, result, toolUseId = '') {
 function claudeDocKey(block, result) {
   const action = claudeDocsAction(block && block.name);
   const input = (block && block.input) || {};
-  if (action === 'batch') { const made = claudeDocCreated(input, result, block.id); return made ? made.key : null; }
+  if (action === 'batch') {
+    const made = claudeDocCreated(input, result, block.id);
+    if (made) return made.key;
+    // A batch on an existing document: the document its first prose update edits.
+    const edit = (Array.isArray(input.batch) ? input.batch : []).find((m) => m && typeof m === 'object' && m.verb === 'update' && m.ref && typeof m.ref === 'object' && m.ref.id);
+    return edit ? `doc:${edit.ref.id}` : null;
+  }
   if (action === 'update' && input.ref && input.ref.id) return `doc:${input.ref.id}`;
   return null;
 }
 
-// One placeholder's text: a date as written, a mention left out, other kinds noted.
+// One placeholder's text: a date as written, a mention left out, an embedded diagram or chart by its
+// caption (as claude.ai's own Markdown export shows it), other kinds noted.
 function renderDocBlock(b) {
   if (!b || typeof b !== 'object' || typeof b.type !== 'string') return "*(An unsupported block isn't included in this export.)*";
   if (b.type === 'date') return String(b.value || '');
   if (b.type === 'mention') return '';
+  if (b.type === 'embed') {
+    const caption = typeof b.caption === 'string' ? b.caption.replace(/\s+/g, ' ').trim() : '';
+    return caption ? `[embedded content: ${caption}]` : '[embedded content]';
+  }
   return `*(A ${b.type} block isn't included in this export.)*`;
 }
 
@@ -346,15 +358,20 @@ function renderDocBlock(b) {
 // then Claude's comments and the link to the live document.
 function renderClaudeDoc(d) {
   const own = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+  const isPending = (b) => !!b && typeof b === 'object' && b.type === 'pending';
+  // A section's text, its own chips filled first; a placeholder planted inside it is a section of its
+  // own, named <section>/<key>.
+  const section = (name, depth) => {
+    if (!own(d.contents, name)) return "*(This section wasn't written.)*";
+    const local = own(d.sectionBlocks, name) ? d.sectionBlocks[name] : null;
+    return d.contents[name].replace(DOC_PLACEHOLDER_RE, (m2, k2) => {
+      if (!own(local, k2)) return own(d.blocks, k2) ? renderDocBlock(d.blocks[k2]) : '';
+      return isPending(local[k2]) && depth < 8 ? section(`${name}/${k2}`, depth + 1) : renderDocBlock(local[k2]);
+    });
+  };
   let out = d.markdown.replace(DOC_PLACEHOLDER_RE, (m, k) => {
     if (!own(d.blocks, k)) return '';
-    const b = d.blocks[k];
-    if (b && typeof b === 'object' && b.type === 'pending') {
-      if (!own(d.contents, k)) return "*(This section wasn't written.)*";
-      const local = own(d.sectionBlocks, k) ? d.sectionBlocks[k] : null;
-      return d.contents[k].replace(DOC_PLACEHOLDER_RE, (m2, k2) => (own(local, k2) ? renderDocBlock(local[k2]) : own(d.blocks, k2) ? renderDocBlock(d.blocks[k2]) : ''));
-    }
-    return renderDocBlock(b);
+    return isPending(d.blocks[k]) ? section(k, 0) : renderDocBlock(d.blocks[k]);
   });
   out = out.replace(/ · (?=\n|$)/g, '').replace(/(^|\n) · /g, '$1').replace(/\s+$/, '');
   // A comment's later lines are indented, so a comment of several paragraphs stays one list item.
@@ -363,6 +380,75 @@ function renderClaudeDoc(d) {
   if (d.comments.length) tail.push('## Comments\n\n' + d.comments.map((c) => `- ${c.anchor ? `On “${c.anchor}”: ` : ''}${item(c.body)}`).join('\n'));
   if (d.url) tail.push(`*Live document on claude.ai: ${d.url}*`);
   return out + (tail.length ? '\n\n---\n\n' + tail.join('\n\n') : '') + '\n';
+}
+
+// Where text occurs in a document's source, in reading order: the Markdown around the placeholders
+// (outside them), and each written section at its placeholder. [{ section: null | name, at }]
+function docFindAll(d, text) {
+  const own = (o, k) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k);
+  const hits = [];
+  const walk = (source, name, order, depth) => {
+    const spans = Array.from(source.matchAll(DOC_PLACEHOLDER_RE));
+    for (let i = source.indexOf(text); i !== -1; i = source.indexOf(text, i + text.length)) {
+      if (!spans.some((s) => i < s.index + s[0].length && i + text.length > s.index)) hits.push({ order: [...order, i], at: i, section: name });
+    }
+    for (const s of spans) {
+      const child = name === null ? s[1] : `${name}/${s[1]}`;
+      if (own(d.contents, child) && depth < 8) walk(d.contents[child], child, [...order, s.index], depth + 1);
+    }
+  };
+  walk(d.markdown, null, [], 0);
+  const before = (a, b) => {
+    for (let i = 0; i < Math.min(a.length, b.length); i++) if (a[i] !== b[i]) return a[i] - b[i];
+    return a.length - b.length;
+  };
+  return hits.sort((a, b) => before(a.order, b.order));
+}
+
+// The pending block ids a Docs write's reply gives, in order, in full (a reply prints later ids short:
+// '.25' is '<session>.25'). ack: { session, xml }; op: the operation's index, when the reply has one
+// <doc op='N'> part per operation.
+function docPendingIds(ack, op) {
+  if (!ack || typeof ack !== 'object' || typeof ack.xml !== 'string') return [];
+  const parts = ack.xml.split(/(?=<doc op=')/);
+  const mine = parts.find((p) => p.startsWith(`<doc op='${op}'`)) || (parts.length <= 2 ? ack.xml : '');
+  const session = typeof ack.session === 'string' ? ack.session : ((/id='([^'.]+)\./.exec(ack.xml) || [])[1]) || '';
+  return Array.from(mine.matchAll(/<pending id='([^']+)'/g), (m) => (m[1].startsWith('.') ? session + m[1] : m[1]));
+}
+
+// Applies a Docs update's operations to a rebuilt document: a pending section filled with Markdown, or
+// a find-and-replace of text (the nth match, the first by default). Anything else is left alone.
+// { changed, unreplayed }
+function applyDocOps(d, ops, ack) {
+  const list = Array.isArray(ops) ? ops : [];
+  let changed = false, unreplayed = list.length === 0;  // an update with no operations changed something else
+  for (const [index, op] of list.entries()) {
+    const ok = op && typeof op === 'object' && op.op === 'replace' && op.target && typeof op.target === 'object';
+    const w = ok && op.with && typeof op.with === 'object' ? op.with : {};
+    const content = w.from && typeof w.from === 'object' ? w.from.content : undefined;
+    const ids = ok && Array.isArray(op.target.ids) ? op.target.ids : [];
+    if (ok && op.target.kind !== 'find' && ids.length === 1 && Object.prototype.hasOwnProperty.call(d.idmap, ids[0]) && typeof content === 'string') {
+      const section = d.idmap[ids[0]];
+      const local = w.blocks && typeof w.blocks === 'object' ? w.blocks : null;
+      d.contents[section] = content;
+      d.sectionBlocks[section] = local;
+      // Placeholders the fill plants for later, matched in order to the ids its reply gives.
+      const planted = Array.from(content.matchAll(DOC_PLACEHOLDER_RE), (m) => m[1])
+        .filter((k) => local && Object.prototype.hasOwnProperty.call(local, k) && local[k] && typeof local[k] === 'object' && local[k].type === 'pending');
+      docPendingIds(ack, index).forEach((id, i) => { if (planted[i]) d.idmap[id] = `${section}/${planted[i]}`; });
+      changed = true;
+    } else if (ok && op.target.kind === 'find' && typeof op.target.text === 'string' && op.target.text && !op.target.within
+      && (w.as === 'text' || w.as === 'markdown') && typeof content === 'string') {
+      const nth = Number.isInteger(op.target.nth) && op.target.nth > 0 ? op.target.nth : 1;
+      const hit = docFindAll(d, op.target.text)[nth - 1];
+      if (!hit) { unreplayed = true; continue; }
+      const swap = (s) => s.slice(0, hit.at) + content + s.slice(hit.at + op.target.text.length);
+      if (hit.section === null) d.markdown = swap(d.markdown);
+      else d.contents[hit.section] = swap(d.contents[hit.section]);
+      changed = true;
+    } else unreplayed = true;
+  }
+  return { changed, unreplayed };
 }
 
 // tool_use ids whose tool_result reported an error. A failed file tool changed
@@ -554,10 +640,30 @@ function extractArtifacts(data, errorCollector = null, index = null) {
           setContent(made.key, renderClaudeDoc(docs[made.key]), docs[made.key].filename);
           if (made.unconfirmed) warnDoc(docs[made.key], made.key, "This Claude Docs document's sections couldn't be matched to its edits, because the tool's reply is missing from the chat; they are shown as not written.");
         } else if (action === 'batch') {
-          // A batch that edits an existing document applies operations the export can't replay.
+          // A batch on an existing document: its prose updates are replayed like update calls, and a
+          // widget it creates (a diagram or chart) shows through the section that embeds it. Any other
+          // member can't be replayed.
           const target = input.container && input.container.id;
-          const key = target && Object.keys(docs).find((k) => k === `doc:${target}` || docs[k].project === target);
-          if (key) warnDoc(docs[key], key, 'A batch of edits to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.');
+          const members = Array.isArray(input.batch) ? input.batch : [];
+          const touched = new Map();  // key -> whether some edit to it couldn't be replayed
+          let unknown = members.length === 0;
+          const reply = leadingJson(resultText(resultsById.get(block.id))) || {};
+          const acks = Array.isArray(reply.acks) ? reply.acks : [];  // one per member, in order
+          for (const [i, m] of members.entries()) {
+            const docKey = m && typeof m === 'object' && m.ref && typeof m.ref === 'object' && m.ref.id ? `doc:${m.ref.id}` : null;
+            if (docKey && docs[docKey] && m.verb === 'update' && m.engine === 'prose') {
+              const d = docs[docKey];
+              if (target) d.project = String(target);
+              const r = applyDocOps(d, (docPayload(m.payload) || {}).ops, acks[i]);
+              if (r.changed) setContent(docKey, renderClaudeDoc(d), d.filename);
+              touched.set(docKey, touched.get(docKey) || r.unreplayed);
+            } else if (!(m && typeof m === 'object' && m.verb === 'create' && m.engine === 'widget')) unknown = true;
+          }
+          const fallback = target && Object.keys(docs).find((k) => k === `doc:${target}` || docs[k].project === target);
+          if (unknown && fallback && !touched.has(fallback)) touched.set(fallback, true);
+          for (const [key, bad] of touched) {
+            if (bad || unknown) warnDoc(docs[key], key, 'A batch of edits to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.');
+          }
         } else if (action === 'update' || action === 'create') {
           const payload = docPayload(input.payload) || {};
           const ref = action === 'update' ? input.ref : (payload.value && payload.value.parent);
@@ -569,19 +675,7 @@ function extractArtifacts(data, errorCollector = null, index = null) {
             d.comments.push({ anchor: anchor && anchor.text ? String(anchor.text) : '', body: payload.value.body });
             setContent(key, renderClaudeDoc(d), d.filename);
           } else if (d && action === 'update') {
-            const ops = Array.isArray(payload.ops) ? payload.ops : [];
-            let changed = false, unreplayed = ops.length === 0;  // an update with no operations changed something else
-            for (const op of ops) {
-              const ok = op && typeof op === 'object';
-              const ids = (ok && op.target && Array.isArray(op.target.ids)) ? op.target.ids : [];
-              const content = ok && op.with && op.with.from && op.with.from.content;
-              if (ok && op.op === 'replace' && ids.length === 1 && Object.prototype.hasOwnProperty.call(d.idmap, ids[0]) && typeof content === 'string') {
-                const section = d.idmap[ids[0]];
-                d.contents[section] = content;
-                d.sectionBlocks[section] = op.with.blocks && typeof op.with.blocks === 'object' ? op.with.blocks : null;
-                changed = true;
-              } else unreplayed = true;
-            }
+            const { changed, unreplayed } = applyDocOps(d, payload.ops, leadingJson(resultText(resultsById.get(block.id))));
             if (changed) setContent(key, renderClaudeDoc(d), d.filename);
             if (unreplayed) warnDoc(d, key, 'An edit to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.');
           }
