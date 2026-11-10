@@ -368,6 +368,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.10.1
+
+- **Extension icon on the extensions page** - `chrome://extensions` showed a grey letter instead of the Claude Takeout icon, because the manifest set the icon only for the toolbar button. It now sets it for the extension too. Reload the extension to see it.
+
 ### v1.10.0
 
 - **Claude Docs diagrams: a note says where to find them** - claude.ai draws a document's diagrams only on the document's own page, so the export shows each by its caption. When Claude made a self-contained HTML copy of the document in the chat (you asked it to export the document as HTML), the document's `.md` and `.html` now say so under the title and link that copy in `artefacts/`. When there is no copy, a **Diagram not included** note says so and how to get one: ask Claude in the chat for a self-contained HTML file, then export again. `errors.txt` lists those documents as `doc_diagram`. A copy is found from the turn that exported the document, or by a page whose title is the document's. Needs a fresh export.
