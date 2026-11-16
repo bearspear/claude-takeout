@@ -3042,6 +3042,22 @@ async function webImagesAllowed() {
     return false;
   }
 }
+// Whether the permission is there, as last known (null: not known yet), so a click can decide without awaiting.
+let webImagesGranted = null;
+function noteWebImagesGrant() {
+  webImagesAllowed().then((ok) => { webImagesGranted = ok; });
+}
+noteWebImagesGrant();
+try {
+  if (chrome.permissions && chrome.permissions.onAdded) chrome.permissions.onAdded.addListener(noteWebImagesGrant);
+  if (chrome.permissions && chrome.permissions.onRemoved) chrome.permissions.onRemoved.addListener(noteWebImagesGrant);
+} catch (e) { /* no permission events: the next check corrects it */ }
+// Export Artifacts' card pictures need the same permission: asked in the click (call before any await),
+// only when it isn't known to be granted. Returns the request's promise, or null when nothing was asked.
+function askForCardPictures() {
+  if (webImagesGranted === true) return null;
+  return requestWebImages().then((ok) => { webImagesGranted = !!ok; return !!ok; });
+}
 
 // Images Claude looked at (a photo it opened with Read), which claude.ai keeps and only links: downloaded
 // from claude.ai into images/. Returns file uuid -> 'images/<name>'. A failure is a tool_image warning.
@@ -5018,28 +5034,76 @@ function artifactPayload(got) {
   return texts.length || images.length ? { texts, images } : null;
 }
 
-// claude.ai's card picture for one artifact, fetched by content.js (artifactThumb), saved at
-// viewer-files/thumbs/<id>.<ext>. Returns that path, or null: a picture that isn't there or isn't a PNG, JPEG or
-// WebP is just left out, with no warning.
+// claude.ai's card picture for one artifact, saved at viewer-files/thumbs/<id>.<ext>. content.js gives the
+// picture URL it checked when listing (artifactThumbUrl); the popup fetches it, which needs the optional https
+// permission (the frame host sends no CORS header for claude.ai). The URL is used for that fetch only: it is
+// never stored, logged, shown or written. On a 403 (an expired token), content.js is asked once per export
+// (state.thumbRefreshed) for a fresh URL, and the picture is tried once more. Returns the saved path, or null:
+// a picture that isn't there, fails or isn't a PNG, JPEG or WebP is just left out, with no warning.
 const ARTIFACT_THUMB_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
 const ARTIFACT_THUMB_MAX = 2 * 1024 * 1024;
-function artifactThumbMagic(b, type) {
-  const at = (i, list) => list.every((v, j) => b[i + j] === v);
-  if (type === 'image/png') return at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-  if (type === 'image/jpeg') return at(0, [0xff, 0xd8, 0xff]);
-  return at(0, [0x52, 0x49, 0x46, 0x46]) && at(8, [0x57, 0x45, 0x42, 0x50]);
+// The type, from the leading bytes only.
+function artifactThumbType(b) {
+  const at = (i, list) => b.length >= i + list.length && list.every((v, j) => b[i + j] === v);
+  if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png';
+  if (at(0, [0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (at(0, [0x52, 0x49, 0x46, 0x46]) && at(8, [0x57, 0x45, 0x42, 0x50])) return 'image/webp';
+  return null;
 }
-async function saveArtifactThumb(root, uuid, id, fetchPublished) {
-  const reply = await fetchPublished({ action: 'artifactThumb', uuid });
-  if (!reply || reply.error || typeof reply.base64 !== 'string' || typeof reply.type !== 'string') return null;
-  if (!Object.prototype.hasOwnProperty.call(ARTIFACT_THUMB_TYPES, reply.type)) return null;
-  if (reply.base64.length > Math.ceil(ARTIFACT_THUMB_MAX / 3) * 4 + 4) return null;
-  let bytes;
-  try { bytes = base64ToBytes(reply.base64); } catch (e) { return null; }
-  if (!bytes.length || bytes.length > ARTIFACT_THUMB_MAX || !artifactThumbMagic(bytes, reply.type)) return null;
+// A body read up to max bytes while it streams; null when it passes max or can't be read.
+async function readCapped(res, max) {
+  const body = res.body;
+  if (!body || typeof body.getReader !== 'function') {
+    const ab = await res.arrayBuffer();
+    return ab.byteLength > max ? null : new Uint8Array(ab);
+  }
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) { try { reader.cancel().catch(() => {}); } catch (e) { /* stopped anyway */ } return null; }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.byteLength; }
+  return out;
+}
+// The picture's bytes and type, or null. uuid is lowercased.
+async function fetchArtifactThumb(uuid, fetchPublished, state) {
+  let reply = await fetchPublished({ action: 'artifactThumbUrl', uuid });
+  for (;;) {
+    if (!reply || reply.error || typeof reply.url !== 'string') return null;
+    // content.js checked the URL; this only makes sure it is that artifact's picture on the frame host.
+    if (reply.url.indexOf(`https://${uuid}.frame.claudeusercontent.com/_f/`) !== 0) return null;
+    let res;
+    try {
+      res = await fetch(reply.url, { credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error', cache: 'no-store' });
+    } catch (e) { return null; }
+    reply = null;
+    if (res.status === 403 && !state.thumbRefreshed) {
+      state.thumbRefreshed = true;
+      reply = await fetchPublished({ action: 'artifactThumbUrl', uuid, refresh: true });
+      continue;
+    }
+    if (!res.ok) return null;
+    const ct = String((res.headers && res.headers.get ? res.headers.get('Content-Type') : '') || '').toLowerCase().trim();
+    if (ct.indexOf('text/') === 0 || ct.indexOf('svg') !== -1) return null;
+    let bytes;
+    try { bytes = await readCapped(res, ARTIFACT_THUMB_MAX); } catch (e) { return null; }
+    const type = bytes && bytes.length ? artifactThumbType(bytes) : null;
+    return type ? { bytes, type } : null;
+  }
+}
+async function saveArtifactThumb(root, uuid, id, fetchPublished, state = {}) {
   if (!/^[1-9A-HJ-NP-Za-km-z]+$|^[0-9a-f-]{36}$/.test(id)) return null;
-  const path = `viewer-files/thumbs/${id}.${ARTIFACT_THUMB_TYPES[reply.type]}`;
-  root.file(path, bytes);
+  const got = await fetchArtifactThumb(uuid, fetchPublished, state);
+  if (!got || !Object.prototype.hasOwnProperty.call(ARTIFACT_THUMB_TYPES, got.type)) return null;
+  const path = `viewer-files/thumbs/${id}.${ARTIFACT_THUMB_TYPES[got.type]}`;
+  root.file(path, got.bytes);
   return path;
 }
 
@@ -5362,6 +5426,13 @@ async function exportArtifacts(options = {}) {
     const views = [];
     const writeFailures = [];
     let thumbs = 0;
+    // Card pictures only with the optional https permission (asked in the click: options.ask); without it, tiles.
+    let picturesAllowed = false;
+    try {
+      if (options && options.ask) await options.ask;
+      picturesAllowed = await webImagesAllowed();
+    } catch (e) { picturesAllowed = false; }
+    const thumbState = {};
     let parts = null;
     try {
       parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
@@ -5379,9 +5450,9 @@ async function exportArtifacts(options = {}) {
       let view = { ...saved.view, thumb: null, part: null, key: null };
       // The card picture and the preview part are extras: a failure leaves them out, with no warning.
       try {
-        if (!ctx.state.publishedSignedOut) {
+        if (picturesAllowed && !ctx.state.publishedSignedOut) {
           const uuid = String(artifacts[i].slug).toLowerCase();
-          const thumb = await saveArtifactThumb(root, uuid, view.id, fetchPublished);
+          const thumb = await saveArtifactThumb(root, uuid, view.id, fetchPublished, thumbState);
           if (thumb) {
             view.thumb = thumb;
             thumbs++;
@@ -5602,9 +5673,11 @@ const IS_POPUP = typeof location !== 'undefined' && /popup\.html$/.test(location
 const FOLDER_BUTTON_LABELS = { exportAllZip: 'Export All (Folder)', exportArtifacts: 'Export Artifacts (Folder)' };
 // A label the popup stored with its note, read from the clicked button; anything else falls back to the above.
 const FOLDER_LABEL_RE = /^Export (?:All|Changes|Artifacts) \(Folder\)$/;
-function folderExport(buttonId, name, run) {
+// ask(): optional, called in the click (not from the popup's side-panel hand-off, where the panel's own click
+// asks) to start a permission request; its promise reaches run as options.ask.
+function folderExport(buttonId, name, run, ask = null) {
   return async () => {
-    if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return run();
+    if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return ask ? run({ ask: ask() }) : run();
     const status = document.getElementById('status');
     if (IS_POPUP) {
       if (chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
@@ -5622,17 +5695,21 @@ function folderExport(buttonId, name, run) {
       return;
     }
     let directory;
+    // The picker first, so the user activation it needs is there; the permission request follows in the same task.
+    let picking;
+    try { picking = window.showDirectoryPicker({ mode: 'readwrite', id: 'claude-takeout' }); } catch (e) { picking = Promise.reject(e); }
+    const asked = ask ? ask() : null;
     try {
-      directory = await window.showDirectoryPicker({ mode: 'readwrite', id: 'claude-takeout' });
+      directory = await picking;
     } catch (e) {
       if (e.name !== 'AbortError') { status.className = 'status error'; status.textContent = e.message; }
       return;
     }
-    return run({ directory });
+    return run(ask ? { directory, ask: asked } : { directory });
   };
 }
 onExport('exportAllZip', folderExport('exportAllZip', 'Export All', (options) => bulkExportZip(options)));
-onExport('exportArtifacts', folderExport('exportArtifacts', 'Export Artifacts', (options) => exportArtifacts(options)));
+onExport('exportArtifacts', folderExport('exportArtifacts', 'Export Artifacts', (options) => exportArtifacts(options), askForCardPictures));
 
 // Opened from the popup's Export All or Export Artifacts: say what to do next.
 if (!IS_POPUP && chrome.storage && chrome.storage.session) {

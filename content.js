@@ -235,14 +235,14 @@
 
   // Every artifact claude.ai lists for the account. Only the fields an export keeps leave this function
   // (no owner, audience, thumbnail or URL), and a failure is a code, never a message. Each artifact's card
-  // picture URL is checked and kept in artifactThumbUrls: the thumbnail URL stays here.
-  const ARTIFACT_THUMB_MAX = 2 * 1024 * 1024;
+  // picture URL is checked and kept in artifactThumbUrls; only artifactThumbUrl hands one out, to the popup,
+  // which fetches it (with the optional https permission) and keeps it nowhere.
   let artifactThumbUrls = null; // lowercased uuid -> rebuilt picture URL, replaced by each listing
   let artifactThumbRelisted = false; // one re-list on a 403 per export (reset by listArtifacts)
 
   // The picture URL rebuilt from its checked parts, or null: https, no port, userinfo or hash, host exactly
   // <uuid>.frame.claudeusercontent.com, path /_f/<ver>/_thumb.img, one query parameter, __frame_t.
-  function artifactThumbUrl(uuid, raw) {
+  function checkThumbUrl(uuid, raw) {
     if (typeof raw !== 'string' || raw.indexOf('#') !== -1) return null;
     let u;
     try { u = new URL(raw); } catch (e) { return null; }
@@ -274,7 +274,7 @@
     const thumbs = new Map();
     for (const f of frames) {
       if (typeof f.slug !== 'string' || !PUBLISHED_UUID.test(f.slug)) continue;
-      const url = artifactThumbUrl(f.slug, f.thumbImgURL);
+      const url = checkThumbUrl(f.slug, f.thumbImgURL);
       if (url) thumbs.set(f.slug.toLowerCase(), url);
     }
     artifactThumbUrls = thumbs;
@@ -297,43 +297,22 @@
     return { frames, accountName, orgId: org };
   }
 
-  // The type comes from the leading bytes only: PNG, JPEG or WebP.
-  function artifactThumbType(b) {
-    if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
-        b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a) return 'image/png';
-    if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
-    if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
-        b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
-    return null;
-  }
-
-  // An artifact's card picture as { base64, type }, or a code. The URL never leaves this script.
-  async function artifactThumb(request) {
+  // An artifact's card picture URL as { url }, checked when listed and rebuilt from its parts, or
+  // { error: 'no picture' }. With refresh, the list is fetched again once per export (a 403 picture: one
+  // /api/frame/frames call renews every URL); after that, the URL as it stands. Only the popup asks, and only
+  // to fetch the picture; nothing here logs the URL.
+  async function artifactThumbUrl(request) {
+    const none = { error: 'no picture' };
     const uuid = typeof request.uuid === 'string' && PUBLISHED_UUID.test(request.uuid) ? request.uuid.toLowerCase() : null;
-    if (!uuid || !artifactThumbUrls || !artifactThumbUrls.has(uuid)) return { error: 'no picture' };
-    for (;;) {
-      const url = artifactThumbUrls.get(uuid);
-      if (!url) return { error: 'no picture' };
-      let res;
-      try {
-        res = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error' });
-      } catch (e) { throw new PublishedError('network'); }
-      if (res.status === 403 && !artifactThumbRelisted) {
-        artifactThumbRelisted = true;
-        const org = await getOrgForPublished(request);
-        if (!org) throw new PublishedError('HTTP 403', 403);
-        try { await fetchFrameList(org); } catch (e) { throw new PublishedError('HTTP 403', 403); }
-        continue;
-      }
-      if (!res.ok) throw new PublishedError('HTTP ' + res.status, res.status);
-      const ct = String((res.headers && res.headers.get ? res.headers.get('Content-Type') : '') || '').toLowerCase().trim();
-      if (ct.indexOf('text/') === 0 || ct.indexOf('svg') !== -1) return { error: 'bad response' };
-      const buf = await publishedReadBody(res, ARTIFACT_THUMB_MAX);
-      if (!buf) return { error: 'too large' };
-      const type = artifactThumbType(buf);
-      if (!type) return { error: 'bad response' };
-      return { base64: publishedBase64(buf), type };
+    if (!uuid || !artifactThumbUrls) return none;
+    if (request.refresh === true && !artifactThumbRelisted) {
+      artifactThumbRelisted = true;
+      const org = await getOrgForPublished(request);
+      if (!org) return none;
+      try { await fetchFrameList(org); } catch (e) { artifactThumbUrls = null; return none; }
     }
+    const url = artifactThumbUrls && artifactThumbUrls.get(uuid);
+    return url ? { url } : none;
   }
 
   function publishedBase64(bytes) {
@@ -470,8 +449,8 @@
       return true;
     }
 
-    if (request.action === 'artifactThumb') {
-      runPublished(artifactThumb, request, sendResponse);
+    if (request.action === 'artifactThumbUrl') {
+      runPublished(artifactThumbUrl, request, sendResponse);
       return true;
     }
 

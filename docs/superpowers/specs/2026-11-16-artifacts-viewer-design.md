@@ -82,6 +82,7 @@ Export Artifacts (v1.15.0) writes one folder per artifact plus a plain `index.ht
 ## Decided by the owner
 - Layout like claude.ai/artifacts.
 - Save claude.ai's own card pictures, tile fallback.
+- Card pictures via the optional web permission (2026-11-16, after a real export saved 0 of 19: `_thumb.img` sends no CORS header for claude.ai, so the content-script fetch is refused). The popup fetches the picture with the optional `https://*/*` permission, asked in the Export Artifacts click as web images are, only when not already granted; without it, tiles and no warning. `content.js` `artifactThumbUrl { uuid[, refresh] }` replaces `artifactThumb`. The rule changes from "the picture URL never leaves content.js" to: the picture URL goes from content.js to the popup in memory only, only for this download; it is never written to any file, status line, warning, console or log. This supersedes "Never move this fetch into the popup" above.
 - Design and typed artifacts open on a poster page with "Show saved files anyway".
 - "Open file" for HTML only on the owner's own artifacts; shared ones lose their local HTML link in `index.html` too.
 - A page's own images are embedded, with a size cap.

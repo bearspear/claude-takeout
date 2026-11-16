@@ -35,9 +35,9 @@ function png(w, h) {
   const rows = Buffer.concat(Array.from({ length: h }, () => Buffer.concat([Buffer.from([0]), Buffer.alloc(w * 3, 0x9c)])));
   return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk('IHDR', ihdr), chunk('IDAT', zlib.deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]);
 }
-const GOOD = { base64: png(40, 30).toString('base64'), type: 'image/png' };
+const GOOD = { status: 200, type: 'image/png', body: png(40, 30) };
 // Right magic, nothing after it: saved, but the browser can't decode it.
-const BROKEN = { base64: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]).toString('base64'), type: 'image/png' };
+const BROKEN = { status: 200, type: 'image/png', body: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4]) };
 
 async function exportTo(frames, pages, thumbs) {
   const { raw } = await runArtifacts({ frames, pages, thumbs });

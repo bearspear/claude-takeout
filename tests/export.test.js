@@ -3012,7 +3012,8 @@ test('files of unknown size count their real bytes against the 50 MB page total'
 
 // ---- Export Artifacts: viewer data, card pictures and preview parts ----
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from('picture bytes')]);
-const pngReply = (extra = {}) => ({ base64: PNG.toString('base64'), type: 'image/png', ...extra });
+// The frame host's answer for a card picture (see runArtifacts' thumbs).
+const pic = (body = PNG, type = 'image/png', extra = {}) => ({ status: 200, type, body, ...extra });
 // Runs a part's body and returns { n, data }.
 const readPart = (body) => {
   let got = null;
@@ -3120,10 +3121,16 @@ test('a start file over 2 MB gets no text', async () => {
 test('card pictures are saved outside artifact folders', async () => {
   const frames = [art(U(1), 'One'), art(U(2), 'Two'), art(U(3), 'Three'), art(U(4), 'Four', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' })];
   const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'index.html': 'two' }), [U(3)]: livePage('Three', { 'index.html': 'three' }) };
-  const thumbs = { [U(1)]: pngReply(), [U(2)]: { error: 'no picture' }, [U(3)]: { error: 'HTTP 401', status: 401 }, [U(4)]: pngReply() };
+  const thumbs = { [U(1)]: pic(), [U(2)]: { error: 'no picture' }, [U(3)]: { status: 401 }, [U(4)]: pic() };
   for (const options of [{}, { directory: new FakeDir() }]) {
-    const { files, raw, views, status, fetcher, thumbCalls } = await runArtifacts({ frames, pages, thumbs, options });
+    const { files, raw, views, status, fetcher, thumbCalls, frameReqs } = await runArtifacts({ frames, pages, thumbs, options });
     assert.deepStrictEqual(thumbCalls, [U(1), U(2), U(3), U(4)], 'one after another, Docs included');
+    assert.deepStrictEqual(frameReqs.map((r) => r.url.slice(8, 44)), [U(1), U(3), U(4)]);
+    for (const r of frameReqs) {
+      assert.strictEqual(r.opts.credentials, 'omit');
+      assert.strictEqual(r.opts.referrerPolicy, 'no-referrer');
+      assert.strictEqual(r.opts.redirect, 'error');
+    }
     const p1 = `viewer-files/thumbs/${uuidToBase58(U(1))}.png`;
     const p4 = `viewer-files/thumbs/${uuidToBase58(U(4))}.png`;
     assert.ok(raw[p1].equals(PNG));
@@ -3140,31 +3147,100 @@ test('card pictures are saved outside artifact folders', async () => {
   }
 });
 
-test('a picture reply that is not a PNG, JPEG or WebP is left out', async () => {
-  const frames = [1, 2, 3, 4, 5, 6].map((n) => art(U(n), `A${n}`, { live: '' }));
+test('without the optional permission no picture is asked for or fetched', async () => {
+  const frames = [art(U(1), 'One'), art(U(2), 'Two')];
+  const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) };
+  const { files, views, status, thumbCalls, frameReqs, permissionRequests } = await runArtifacts({ frames, pages, thumbs: { [U(1)]: pic(), [U(2)]: pic() }, granted: false });
+  assert.deepStrictEqual(thumbCalls, []);
+  assert.deepStrictEqual(frameReqs, []);
+  assert.deepStrictEqual(permissionRequests, [], 'the export itself never asks; the click does');
+  assert.deepStrictEqual(views.map((v) => v.thumb), [null, null]);
+  assert.ok(!Object.keys(files).some((n) => n.startsWith('viewer-files/thumbs/')));
+  assert.match(files['index.md'], /\*\*Card pictures:\*\* 0 of 2/);
+  assert.strictEqual(JSON.parse(files['export-manifest.json']).thumbs, 0);
+  assert.ok(!files['errors.txt'], files['errors.txt']);
+  assert.strictEqual(status.className, 'status ready');
+});
+
+test('Export Artifacts asks for the permission in the click, only when it is not granted', async () => {
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  for (const [granted, format] of [[false, 'zip'], [true, 'zip'], [false, 'folder'], [true, 'folder']]) {
+    const order = [];
+    let release;
+    const popup = loadPopup({
+      before: (sb) => {
+        sb.chrome.permissions = {
+          contains: async () => granted,
+          request: (o) => { order.push(['request', o.origins.join()]); return new Promise((r) => { release = r; }); },
+        };
+      },
+    });
+    const sb = popup.sandbox;
+    await tick();
+    vm.runInContext(`settings.megaFormat = '${format}'`, sb);
+    let ran = null;
+    vm.runInContext('exportArtifacts = async (o) => { globalThis.__ran = o; }', sb);
+    sb.window.showDirectoryPicker = async () => { order.push(['picker']); return new FakeDir(); };
+    const clicked = sb.document.getElementById('exportArtifacts').handlers.click();
+    // Synchronously in the click: the picker (folder), then the request (when not granted).
+    const want = [...(format === 'folder' ? [['picker']] : []), ...(granted ? [] : [['request', 'https://*/*']])];
+    assert.deepStrictEqual(order, want, `${granted} ${format}`);
+    if (release) release(true);
+    await clicked;
+    ran = sb.__ran;
+    assert.ok(ran, 'export ran');
+    assert.strictEqual(!!ran.directory, format === 'folder');
+    if (granted) assert.strictEqual(ran.ask, null);
+    else assert.strictEqual(await ran.ask, true);
+    release = null;
+  }
+});
+
+test('a 403 picture asks content.js for a fresh URL once per export', async () => {
+  const frames = [art(U(1), 'One', { live: '' }), art(U(2), 'Two', { live: '' }), art(U(3), 'Three', { live: '' })];
   const thumbs = {
-    [U(1)]: pngReply({ type: 'image/svg+xml' }),
-    [U(2)]: { base64: Buffer.from('<svg/>').toString('base64'), type: 'image/png' },
-    [U(3)]: { base64: '!!!not base64', type: 'image/png' },
-    [U(4)]: { base64: Buffer.concat([PNG, Buffer.alloc(2 * 1024 * 1024)]).toString('base64'), type: 'image/png' },
-    [U(5)]: { base64: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1]).toString('base64'), type: 'image/jpeg' },
-    [U(6)]: { base64: Buffer.from('RIFF\0\0\0\0WEBPVP8 ').toString('base64'), type: 'image/webp' },
+    [U(1)]: (url, n) => (n === 1 ? { status: 403 } : pic()),
+    [U(2)]: () => ({ status: 403 }),
+    [U(3)]: pic(),
+  };
+  const { views, thumbCalls, frameReqs, files } = await runArtifacts({ frames, thumbs });
+  assert.deepStrictEqual(thumbCalls, [U(1), { uuid: U(1), refresh: true }, U(2), U(3)]);
+  assert.deepStrictEqual(frameReqs.map((r) => /TOKEN(\d)X/.exec(r.url)[1] + r.url.slice(8, 16)), ['0' + U(1).slice(0, 8), '1' + U(1).slice(0, 8), '1' + U(2).slice(0, 8), '1' + U(3).slice(0, 8)]);
+  assert.deepStrictEqual(views.map((v) => !!v.thumb), [true, false, true]);
+  assert.ok(!files['errors.txt']);
+});
+
+test('a picture that is not a PNG, JPEG or WebP is left out', async () => {
+  const frames = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => art(U(n), `A${n}`, { live: '' }));
+  const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1]);
+  const WEBP = Buffer.from('RIFF\0\0\0\0WEBPVP8 ');
+  let streamed = null;
+  const thumbs = {
+    [U(1)]: pic(PNG, 'image/svg+xml'),
+    [U(2)]: pic(Buffer.from('<svg/>')),
+    [U(3)]: pic(PNG, 'TEXT/html; charset=utf-8'),
+    [U(4)]: pic(Buffer.concat([PNG, Buffer.alloc(2 * 1024 * 1024)])),
+    [U(5)]: pic(JPEG, 'application/octet-stream'),
+    [U(6)]: pic(WEBP, ''),
+    [U(7)]: () => { streamed = { stream: [PNG, Buffer.alloc(2 * 1024 * 1024)], type: 'image/png' }; return streamed; },
+    [U(8)]: () => { throw new Error('network'); },
+    [U(9)]: pic(Buffer.alloc(0)),
   };
   const { files, views } = await runArtifacts({ frames, thumbs });
-  assert.deepStrictEqual(views.map((v) => v.thumb), [null, null, null, null, `viewer-files/thumbs/${uuidToBase58(U(5))}.jpg`, `viewer-files/thumbs/${uuidToBase58(U(6))}.webp`]);
+  assert.deepStrictEqual(views.map((v) => v.thumb), [null, null, null, null, `viewer-files/thumbs/${uuidToBase58(U(5))}.jpg`, `viewer-files/thumbs/${uuidToBase58(U(6))}.webp`, null, null, null]);
   assert.ok(!files['errors.txt']);
 });
 
 test('no picture is asked for after claude.ai signs the export out', async () => {
   const frames = [art(U(1), 'One'), art(U(2), 'Two'), art(U(3), 'Three')];
   const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: { error: { error: 'HTTP 401', status: 401 } } };
-  const { thumbCalls } = await runArtifacts({ frames, pages, thumbs: { [U(1)]: pngReply() } });
+  const { thumbCalls } = await runArtifacts({ frames, pages, thumbs: { [U(1)]: pic() } });
   assert.deepStrictEqual(thumbCalls, [U(1)]);
 });
 
 test('index and manifest count card pictures', async () => {
   const frames = [art(U(1), 'One'), art(U(2), 'Two'), art(U(3), 'Three')];
-  const { files } = await runArtifacts({ frames, thumbs: { [U(2)]: pngReply() } });
+  const { files } = await runArtifacts({ frames, thumbs: { [U(2)]: pic() } });
   assert.match(files['index.md'], /\*\*Card pictures:\*\* 1 of 3/);
   assert.match(files['index.html'], /Card pictures: 1 of 3/);
   assert.strictEqual(JSON.parse(files['export-manifest.json']).thumbs, 1);
@@ -3211,17 +3287,22 @@ test('index.html and index.md drop a shared artifact\'s local HTML link; index.h
   assert.match(built.files['index.html'], /<a href="viewer\.html">/);
 });
 
-test('no picture URL or token reaches any file', async () => {
-  const leak = { url: 'https://x.frame.claudeusercontent.com/_f/V/_thumb.img?__frame_t=TOKEN9', token: 'TOKEN9' };
-  const frames = [art(U(1), 'One'), art(U(2), 'Two', { live: '' }), art(U(3), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' })];
+test('no picture URL or token reaches any file, status or console', async () => {
+  const frames = [art(U(1), 'One'), art(U(2), 'Two', { live: '' }), art(U(3), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' }), art(U(4), 'Four', { live: '' }), art(U(5), 'Five', { live: '' })];
   const pages = { [U(1)]: livePage('One', { 'index.html': '<p>one</p>', 'a.png': { body: PNG, type: 'image/png' } }) };
-  const thumbs = { [U(1)]: pngReply(leak), [U(2)]: { error: 'no picture', ...leak }, [U(3)]: pngReply(leak) };
+  const thumbs = {
+    [U(1)]: pic(), [U(2)]: { status: 500 }, [U(3)]: (url, n) => (n === 1 ? { status: 403 } : pic()),
+    [U(4)]: (url) => { throw new Error(`failed ${url}`); }, [U(5)]: pic(Buffer.from('<p>not a picture</p>'), 'text/html'),
+  };
   for (const options of [{}, { directory: new FakeDir() }]) {
-    const { files, views } = await runArtifacts({ frames, pages, thumbs, options });
+    const { files, views, status, frameReqs, consoleCalls } = await runArtifacts({ frames, pages, thumbs, options });
+    assert.ok(frameReqs.length >= 5, 'the URL went through the popup');
     assert.ok(Object.keys(files).some((n) => n.startsWith('viewer-files/part-')));
-    for (const [name, text] of Object.entries({ ...files, 'views.json': JSON.stringify(views) })) {
-      for (const bad of ['claudeusercontent', '__frame_t', '_thumb.img', 'TOKEN9']) assert.ok(!name.includes(bad) && !text.includes(bad), `${name} holds ${bad}`);
+    const all = { ...files, 'views.json': JSON.stringify(views), status: status.textContent + status.className, console: JSON.stringify(consoleCalls) };
+    for (const [name, text] of Object.entries(all)) {
+      for (const bad of ['claudeusercontent', '__frame_t', '_thumb.img', 'TOKEN0', 'TOKEN1']) assert.ok(!name.includes(bad) && !text.includes(bad), `${name} holds ${bad}`);
     }
+    assert.ok(!files['errors.txt'], 'a picture never warns');
   }
 });
 
@@ -3245,13 +3326,15 @@ test('a throwing parts step or picture step leaves the artifact exported', async
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
   const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) };
   const { views, files, status } = await runArtifacts({
-    frames, pages, thumbs: { [U(2)]: () => { throw new Error('picture'); } },
+    frames, pages, thumbs: { [U(2)]: pic() },
     setup: (sb) => vm.runInContext(`(() => {
       const orig = CTViewer.artifactViewParts;
       CTViewer.artifactViewParts = (o) => { const p = orig(o); return { add: () => { throw new Error('parts'); }, drain: p.drain, flush: p.flush, count: 0 }; };
+      const thumb = saveArtifactThumb;
+      saveArtifactThumb = async (root, uuid, ...rest) => { if (uuid === '${U(2)}') throw new Error('picture'); return thumb(root, uuid, ...rest); };
     })()`, sb),
   });
-  assert.deepStrictEqual(views.map((v) => [v.notExported, v.part, v.key]), [[false, null, null], [false, null, null]]);
+  assert.deepStrictEqual(views.map((v) => [v.notExported, v.part, v.key, v.thumb]), [[false, null, null, null], [false, null, null, null]]);
   assert.ok(!files['errors.txt'], files['errors.txt']);
   assert.strictEqual(status.className, 'status ready');
   assert.ok(!JSON.parse(files[`${artFolder('One', U(1))}/artifact.json`]).incomplete);

@@ -96,7 +96,7 @@ Saves what claude.ai/artifacts lists: every artifact you made in any chat, proje
 
 You get `claude-takeout-artifacts-<your name>-<YYYY-MM-DD>_<HHMM>` with:
 
-- `viewer.html` and `viewer-files/`: the viewer (see below). `viewer-files/thumbs/` holds the card pictures and `part-NNNN.js` the text and images the previews use.
+- `viewer.html` and `viewer-files/`: the viewer (see below). `viewer-files/thumbs/` holds the card pictures and `part-NNNN.js` the text and images the previews use. Card pictures need the same permission as **Save images from web searches**: Export Artifacts asks for it when you click (Chrome asks once). Without it, the cards show tiles and `index.html` says "Card pictures: 0 of N".
 - `index.html`: a table of every artifact (title, kind, source, files, notes) and "Card pictures: N of M". The title opens the artifact's page from disk, except when an artifact shared with you starts with anything but documents, images, media, archives and plain data files; "claude.ai" opens it online; "Open the artifacts viewer" opens `viewer.html`, when it was written.
 - `index.md` and `export-manifest.json` (`kind: "artifacts"`): the same list for other tools, with "Listed by claude.ai: N", the count claude.ai gave.
 - One folder `<Title>_<id>/` per artifact: its current version's files and an `artifact.json`.
