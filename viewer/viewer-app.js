@@ -303,6 +303,13 @@ function renderTool(block, gallery = null) {
   const target = block.target && label.endsWith(block.target) ? block.target : '';
   const parts = [el('span', 'label', target ? label.slice(0, label.length - target.length) : label)];
   if (target) parts[0].append(el('span', 'target', target));
+  if (typeof block.link === 'string' && /^https?:\/\//i.test(block.link)) {
+    const a = el('a', 'step-link', block.link);
+    a.href = block.link; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    // Following the link mustn't also open or close the step.
+    a.addEventListener('click', e => e.stopPropagation());
+    parts.push(a);
+  }
   if (block.error) parts.push(el('span', 'fail', 'Failed'));
   const body = el('div', 'line-body');
   const images = (block.images || []).filter(toolImageOk);
@@ -404,6 +411,8 @@ function renderSteps(blocks, sources, first = true) {
   const tools = blocks.filter(b => b.t === 'tool');
   const thinking = blocks.filter(b => b.t === 'thinking');
   if (!tools.length && blocks.length === 1 && thinking.length === 1) return renderThinking(blocks[0]);
+  // One step alone is its own line, as claude.ai shows it: "Read github.com https://github.com/...".
+  if (blocks.length === 1 && tools.length === 1) return renderTool(tools[0])[0];
   const box = el('div', 'steps-box');
   const gallery = tools.flatMap(t => (t.images || []).filter(toolImageOk).map(href => ({ href, title: t.label || '' })));
   for (const block of blocks) {
@@ -592,6 +601,30 @@ function fileNote(name, text, known) {
   return [ext && ext.toUpperCase(), lines ? `${lines} line${lines === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
 }
 
+// Prompt text exactly as typed, with web addresses as links, as claude.ai shows them. A trailing
+// full stop or bracket stays text.
+const PROMPT_URL = /https?:\/\/[^\s<>"']+/g;
+function typedText(text) {
+  const box = el('div', 'typed');
+  let at = 0;
+  for (const m of String(text).matchAll(PROMPT_URL)) {
+    let url = m[0];
+    // Punctuation ending a sentence isn't part of the address; a ) is only when it opened no (.
+    for (;;) {
+      if (/[.,;:!?]$/.test(url)) url = url.slice(0, -1);
+      else if (url.endsWith(')') && (url.match(/\)/g) || []).length > (url.match(/\(/g) || []).length) url = url.slice(0, -1);
+      else break;
+    }
+    if (m.index > at) box.append(document.createTextNode(text.slice(at, m.index)));
+    const a = el('a', '', url);
+    a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+    box.append(a);
+    at = m.index + url.length;
+  }
+  if (at < text.length) box.append(document.createTextNode(text.slice(at)));
+  return box;
+}
+
 // About 200px of prompt: more than nine lines, counting a long line as the lines it wraps to.
 const PROMPT_LINES = 9;
 const PROMPT_LINE_CHARS = 70;
@@ -642,7 +675,7 @@ function renderHuman(m) {
     const bubble = el('div', 'bubble');
     const body = el('div', 'bubble-body');
     for (const part of splitFences(text)) {
-      if (part.t === 'text') { body.append(el('div', 'typed', part.text)); continue; }
+      if (part.t === 'text') { body.append(typedText(part.text)); continue; }
       const pre = document.createElement('pre');
       const code = el('code', '', part.text);
       pre.append(code);

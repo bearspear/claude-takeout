@@ -1926,3 +1926,18 @@ test('a file the folder refuses is listed in write-errors.txt; the rest of the c
   assert.strictEqual(disk.status.className, 'status warning');
   assert.match(disk.status.textContent, /1 file could not be written \(see write-errors\.txt\)/);
 });
+
+test('a project document made from a PDF is saved as text with .txt, so it opens', async () => {
+  const data = Object.assign(oneMessage([{ type: 'text', text: 'hi' }]), { uuid: 'c1', name: 'n', project_uuid: 'P' });
+  const routes = [...projectResponses().filter(([re]) => !/docs\$/.test(re.source)),
+    [/\/projects\/P\/docs$/, () => ({ ok: true, status: 200, json: async () => [
+      { uuid: 'd1', file_name: 'Noack_Papers/Das_Mandala.pdf', content: 'Studiengang MAS Spiritualität' },
+      { uuid: 'd2', file_name: 'Notes', content: 'plain notes' },
+      { uuid: 'd3', file_name: 'Brief.md', content: 'be kind' },
+    ] })]];
+  const { written, chat } = await runFolder(exportPopup({ routes }), data);
+  const names = Object.keys(written).filter((n) => /^project\/(?!project\.json|docs\.json|files)/.test(n)).sort();
+  assert.deepStrictEqual(names, ['project/Brief.md', 'project/Noack_Papers_Das_Mandala.pdf.txt', 'project/Notes.txt']);
+  assert.ok(docText(written, 'project/Noack_Papers_Das_Mandala.pdf.txt').includes('Studiengang'));
+  assert.deepStrictEqual(plain(Array.from(chat.project.docs, (d) => d.name)).sort(), ['Brief.md', 'Noack_Papers_Das_Mandala.pdf.txt', 'Notes.txt']);
+});

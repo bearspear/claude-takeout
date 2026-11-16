@@ -75,7 +75,8 @@
     const p = i.path || i.file_path || '';
     switch (name) {
       case 'web_search': return i.query ? `Searched the web: ${i.query}` : 'Searched the web';
-      case 'web_fetch': return i.url ? `Fetched ${i.url}` : 'Fetched a page';
+      // As claude.ai: "Read github.com", the address after it as a link (toolLink).
+      case 'web_fetch': { const host = hostOf(i.url); return host ? `Read ${host}` : 'Fetched a page'; }
       // As claude.ai labels its steps: a command by the description Claude gave it, a file by its name.
       case 'bash_tool': case 'Bash': return typeof i.description === 'string' && i.description.trim() ? i.description.trim() : 'Ran a command';
       case 'create_file': case 'Write': return p ? `Created ${baseName(p)}` : 'Created a file';
@@ -131,6 +132,18 @@
       } catch (e) { /* not the end of the object yet */ }
     }
     return null;
+  }
+
+  // The host of an http(s) address, without www., or ''.
+  function hostOf(url) {
+    const m = /^https?:\/\/([^/?#\s]+)/i.exec(String(url || ''));
+    return m ? m[1].replace(/^www\./i, '').toLowerCase() : '';
+  }
+
+  // The web address a step read, shown as a link after its label, or ''.
+  function toolLink(name, input) {
+    const url = input && typeof input === 'object' ? String(input.url || '') : '';
+    return /^(web_fetch)$/.test(String(name)) && /^https?:\/\/\S+$/i.test(url) ? url : '';
   }
 
   // The file name a step's label ends with, which claude.ai shows darker, or ''.
@@ -485,7 +498,7 @@
         else if (b.type === 'thinking') blocks.push({ t: 'thinking', text: String(b.thinking || ''), summaries: thinkingSummaries(b), summary: thinkingSummary(b), seconds: thinkingSeconds(b) });
         else if (b.type === 'tool_use') {
           const input = compactInput(b.input);
-          const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), target: toolTarget(b.name, b.input), input, result: '', error: false, images: [], missingImages: 0 };
+          const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), target: toolTarget(b.name, b.input), link: toolLink(b.name, b.input), input, result: '', error: false, images: [], missingImages: 0 };
           blocks.push(tool);
           blockOf.set(b, tool);
           if (b.id != null) toolById.set(b.id, tool);

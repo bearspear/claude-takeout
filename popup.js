@@ -2468,6 +2468,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         actualFilename = filename + '_truncated';
       }
     }
+    // A project document is text, even one claude.ai made from a PDF and kept under the PDF's name,
+    // so a name that isn't a text type gets .txt: report.pdf.txt opens, report.pdf would not.
+    if (!isTextFile(actualFilename)) actualFilename += '.txt';
     projectFileMapping[filename] = actualFilename;
     addFileWithBOM(folder, `project/${actualFilename}`, content);
   }
