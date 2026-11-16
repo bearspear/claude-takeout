@@ -213,6 +213,32 @@
     return out;
   }
 
+  // Read a body, stopping once it passes the cap whatever the listing claimed. Null means too large.
+  async function publishedReadBody(res) {
+    const body = res.body;
+    if (!body || typeof body.getReader !== 'function') {
+      let ab;
+      try { ab = await res.arrayBuffer(); } catch (e) { throw new PublishedError('network'); }
+      return ab.byteLength > PUBLISHED_MAX_FILE ? null : new Uint8Array(ab);
+    }
+    const reader = body.getReader();
+    const chunks = [];
+    let total = 0;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > PUBLISHED_MAX_FILE) { try { reader.cancel(); } catch (e) {} return null; }
+        chunks.push(value);
+      }
+    } catch (e) { throw new PublishedError('network'); }
+    const out = new Uint8Array(total);
+    let at = 0;
+    for (const c of chunks) { out.set(c, at); at += c.byteLength; }
+    return out;
+  }
+
   async function publishedPageFile(request) {
     const uuid = request.uuid, ver = request.ver == null ? '' : request.ver, p = request.path;
     if (typeof uuid !== 'string' || !PUBLISHED_UUID.test(uuid) || typeof ver !== 'string' ||
@@ -227,12 +253,12 @@
     if (!listing) listing = await publishedFileList(uuid, ver, org);
     const meta = listing[p];
     if (!meta) return { error: 'not found' };
-    if (Number(meta.size) > PUBLISHED_MAX_FILE) return { error: 'too large' };
+    if (!Number.isFinite(meta.size) || meta.size < 0) return { error: 'bad response' };
+    if (meta.size > PUBLISHED_MAX_FILE) return { error: 'too large' };
     const res = await publishedFrameGet(uuid, ver, org, '_src/' + p.split('/').map(encodeURIComponent).join('/'));
-    let buf;
-    try { buf = await res.arrayBuffer(); } catch (e) { throw new PublishedError('network'); }
-    if (buf.byteLength > PUBLISHED_MAX_FILE) return { error: 'too large' };
-    return { base64: publishedBase64(new Uint8Array(buf)), contentType: meta.contentType, size: buf.byteLength };
+    const buf = await publishedReadBody(res);
+    if (!buf) return { error: 'too large' };
+    return { base64: publishedBase64(buf), contentType: meta.contentType, size: buf.length };
   }
 
   function runPublished(fn, request, sendResponse) {

@@ -95,11 +95,12 @@ function makeEnv({ url = chatUrl(A), captured = conv(A, 'Chat A') } = {}) {
 
 // Real content.js with a recording fetch that serves the frame API, _files.json and _src.
 const PUB = '9fe94226-9819-4551-8836-a76d0c116102';
-function resp(status, { json, bytes, headers = {} } = {}) {
+function resp(status, { json, bytes, stream, headers = {} } = {}) {
   return {
     status, ok: status >= 200 && status < 300,
     headers: { get: (k) => headers[k] ?? null },
     json: async () => json,
+    body: stream ? { getReader: () => { let i = 0; return { read: async () => (i < stream.length ? { done: false, value: stream[i++] } : { done: true }), cancel() { resp.cancelled = true; } }; } } : undefined,
     arrayBuffer: async () => (bytes || new Uint8Array()).buffer.slice(bytes ? bytes.byteOffset : 0, bytes ? bytes.byteOffset + bytes.byteLength : 0),
   };
 }
@@ -488,6 +489,24 @@ const tests = {
     const r2 = await h2.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'big.bin', size: 1 });
     assert.deepStrictEqual(r2, { error: 'too large' });
     for (const x of [h, h2]) assert.ok(!x.reqs.some((r) => r.url.includes('_src/')));
+  },
+
+  'a listing entry without a size is refused before fetching': async () => {
+    const h = publishedHarness({ files: { 'index.html': { sha256: 'x', contentType: 'text/html' } } });
+    const r = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 1 });
+    assert.deepStrictEqual(r, { error: 'bad response' });
+    assert.ok(!h.reqs.some((q) => q.url.includes('_src/')));
+  },
+
+  'a body that streams past the cap is cut off as too large': async () => {
+    const chunk = new Uint8Array(8 * 1024 * 1024);
+    const h = publishedHarness({
+      files: { 'index.html': { sha256: 'x', size: 1024, contentType: 'text/html' } },
+      src: () => resp(200, { stream: [chunk, chunk, chunk, chunk, chunk] }),
+    });
+    const r = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 1024 });
+    assert.deepStrictEqual(r, { error: 'too large' });
+    assert.ok(resp.cancelled, 'reader cancelled');
   },
 
   '429 waits once for Retry-After': async () => {
