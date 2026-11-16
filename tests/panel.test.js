@@ -655,6 +655,23 @@ const tests = {
     assert.deepStrictEqual(await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html' }), { error: 'too large' });
   },
 
+  'a fallback status with no files in the frame info keeps the error': async () => {
+    const h = publishedHarness({ filesJson: () => resp(404) });
+    assert.deepStrictEqual(await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' }), { error: 'HTTP 404', status: 404 });
+    const h2 = publishedHarness({ info: (b) => { const { files, ...rest } = b; return rest; }, filesJson: () => resp(404) });
+    assert.deepStrictEqual(await h2.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' }), { error: 'HTTP 404', status: 404 });
+    const h3 = publishedHarness({ info: (b) => { const { assetToken, ...rest } = b; return rest; }, filesJson: () => resp(403) });
+    assert.deepStrictEqual(await h3.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' }), { error: 'HTTP 403', status: 403 });
+  },
+
+  'a page with no asset token whose _files.json is 404 uses the frame info list': async () => {
+    const tokenless = (b) => { const { assetToken, ...rest } = b; return { ...rest, files: [{ path: '__proto__', contentType: 'text/plain' }, { path: 'index.html', contentType: 'text/html' }] }; };
+    const h = publishedHarness({ info: tokenless, filesJson: () => resp(404) });
+    const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.deepStrictEqual(res.files.map((f) => f.path), ['__proto__', 'index.html']);
+    assert.ok(!h.reqs.some((r) => r.url.includes('__frame_t')));
+  },
+
   'published actions reject a bad uuid or version before any fetch': async () => {
     const h = publishedHarness();
     assert.deepStrictEqual(await h.call({ action: 'publishedPageInfo', uuid: 'nope', ver: '' }), { error: 'bad request' });

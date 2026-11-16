@@ -179,7 +179,7 @@ function publishedFetcher(pages) {
         files: Object.entries(v.files).map(([path, raw]) => {
           const f = fileOf(raw);
           const body = Buffer.from(f.body);
-          if (f.unverified) return { path, size: null, contentType: f.type === undefined ? 'text/html' : f.type, sha256: null };
+          if (f.unverified) return { path, size: f.size === undefined ? null : f.size, contentType: f.type === undefined ? 'text/html' : f.type, sha256: null };
           return { path, size: body.length, contentType: f.type === undefined ? 'text/html' : f.type, sha256: f.sha256 || crypto.createHash('sha256').update(body).digest('hex') };
         }),
       };

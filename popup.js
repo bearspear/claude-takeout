@@ -3322,8 +3322,8 @@ const publishedSignedOutReply = (r) => !!(r && (r.status === 401 || r.error === 
 
 // Fetch one page version's files (from cleanPublishedInfo) through content.js and write each to
 // target at prefix + its saved name (names: path -> saved name). Each file is checked against the listing:
-// size caps (PUBLISHED_MAX_FILE each, PUBLISHED_MAX_BYTES in all) and SHA-256. A file listed with no SHA-256
-// (claude.ai's frame info, as for Cowork and Claude Code pages) is saved unchecked, its real size counted against
+// size caps (PUBLISHED_MAX_FILE each, PUBLISHED_MAX_BYTES in all) and SHA-256. A file listed with neither size
+// nor SHA-256 (claude.ai's frame info, as for Cowork and Claude Code pages) is saved unchecked, its real size counted against
 // the total, and noted in unverified (path -> SHA-256 of the saved bytes, null when not saved). A 401 sets
 // state.publishedSignedOut, calls onSignedOut once, and every later file is skipped. Returns { saved,
 // missing: [path], problems: ['path (why)'], incomplete, start, startSaved, startText, needsRuntime, unverified }.
@@ -3337,10 +3337,11 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   const unverified = new Map();
   for (const f of files) {
     const fail = (why) => { missing.push(f.path); if (why) problems.push(`${f.path} (${why})`); };
-    const checked = !!f.sha256;
+    // Unverified only when the listing has neither size nor checksum (claude.ai's frame info list).
+    const checked = !(f.size == null && !f.sha256);
     if (!checked) unverified.set(f.path, null);
     if (state.publishedSignedOut) { fail(null); continue; }
-    if (checked && f.size == null) { fail('bad listing'); continue; }
+    if (checked && (f.size == null || !f.sha256)) { fail('bad listing'); continue; }
     if (f.size != null) {
       if (f.size > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
       if (total + f.size > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }

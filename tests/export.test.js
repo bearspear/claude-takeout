@@ -2147,6 +2147,32 @@ test('a published file with no checksum from claude.ai is saved and marked unver
   assert.deepStrictEqual(plain(pubWarnings(output)), []);
 });
 
+test('a listed file with a size but no valid checksum is still a bad listing', async () => {
+  const data = pubChat([pubMsg('a', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G' }), result('w'),
+    ...publish('p1', PUB_U, 'v1', guideAs),
+  ])]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: {
+    'index.html': { body: 'G', sha256: 'not-a-hash' }, 'b.html': { body: 'B', unverified: true, size: 1 },
+  } } } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  const json = JSON.parse(fileText(written, 'published/Guide_Short1/published.json'));
+  assert.deepStrictEqual(json.versions.v1.missing, ['index.html', 'b.html']);
+  assert.ok(json.versions.v1.files.every((f) => !('verified' in f)));
+  assert.strictEqual(fetcher.count('publishedPageFile'), 0);
+  assert.ok(pubWarnings(output).some((w) => /index\.html \(bad listing\)/.test(w.message) && /b\.html \(bad listing\)/.test(w.message)));
+});
+
+test('a page claude.ai answers with no file list is still a warning in a chat export', async () => {
+  const data = pubChat([pubMsg('a', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G' }), result('w'),
+    ...publish('p1', PUB_U, 'v1', guideAs),
+  ])]);
+  const fetcher = publishedFetcher({ [PUB_U]: { error: { error: 'HTTP 404', status: 404 } } });
+  const { output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  assert.ok(pubWarnings(output).some((w) => /could not be fetched: HTTP 404/.test(w.message)));
+});
+
 test('a version identical to the text Claude wrote is not copied; one edited later is', async () => {
   const data = pubChat([
     pubMsg('m1', null, [use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G1' }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs)]),

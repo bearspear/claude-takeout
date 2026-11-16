@@ -182,8 +182,8 @@
   }
 
   // The version's files from _files.json. Pages made outside chats (Cowork, Claude Code) have none (404),
-  // and a page without a token may not read it (403): those use the frame info's list, which has no
-  // size or checksum.
+  // and a page without a token may not read it (403, or 404): those use the frame info's list, which has
+  // no size or checksum. With no files in the frame info, the error stands.
   async function publishedFileList(uuid, ver, org) {
     let entry = await publishedToken(uuid, ver, org, false);
     let files;
@@ -194,8 +194,9 @@
       files = body && body.files && typeof body.files === 'object' ? body.files : {};
     } catch (e) {
       entry = publishedTokens.get(uuid + ':' + ver) || entry;
-      if (!(e instanceof PublishedError) || e.status !== (entry.token ? 404 : 403)) throw e;
-      files = {};
+      const fallback = entry.token ? e.status === 404 : (e.status === 403 || e.status === 404);
+      if (!(e instanceof PublishedError) || !fallback || !entry.files || !entry.files.length) throw e;
+      files = Object.create(null);
       for (const f of entry.files || []) {
         files[f.path] = { contentType: f.contentType, size: null, sha256: null, fromInfo: true };
       }
