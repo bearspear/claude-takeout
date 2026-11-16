@@ -304,7 +304,7 @@ async function exportTo(frames, pages, thumbs) {
     + '<script src="app.js"></script><script src="js/Util.js"></script><script src="js/util.js"></script><script src="../../escape.js"></script></body></html>';
   const FORMS = '<form id="f"><input name="q" value="1"><button id="b">Go</button></form><p id="out"></p><button id="al" type="button">Alert</button>'
     + "<script>document.getElementById('f').addEventListener('submit', e => { e.preventDefault(); document.getElementById('out').textContent = 'submitted'; });"
-    + "document.getElementById('al').onclick = () => alert('x');</script>";
+    + "document.getElementById('al').onclick = () => alert('x'); document.body.dataset.ready = '1';</script>";
   // With the storage shim, storage works inside the frame and stays there.
   const attacks = { ...ATTACKS, storage: "(localStorage.setItem('k', 'v'), sessionStorage.setItem('s', 'w'), localStorage.getItem('k') + sessionStorage.getItem('s'))" };
   const attackEnds = { ...ATTACK_ENDS, storage: 'gave vw' };
@@ -461,7 +461,7 @@ async function exportTo(frames, pages, thumbs) {
   for (const [i, [name]] of navs.entries()) {
     const nv = await openPrev(`#a=${p(40 + i)}`);
     await frameOf(nv).catch(() => null);
-    const refused = () => nv.seen.logs.some(l => /Refused to (frame|navigate)/.test(l) || l.includes('Blocked'));
+    const refused = () => nv.seen.logs.some(l => /Refused to (frame|navigate)|violates the following Content Security Policy|blocked/i.test(l));
     const ran = await waitLog(nv, `NAV ran ${name}`) || (name === 'navrefresh' && refused());
     await nv.page.waitForTimeout(500);
     check(`${name}: the attempt ran`, ran, nv.seen.logs.join(' | '));
@@ -483,10 +483,15 @@ async function exportTo(frames, pages, thumbs) {
   // Forms and alerts.
   const fm = await openPrev(`#a=${p(33)}`);
   const ff = await frameOf(fm);
-  await ff.click('#b');
+  // The frame's own script adds the handlers after the form is parsed: wait for it before clicking.
+  await ff.waitForFunction(() => document.body && document.body.dataset.ready === '1', null, { timeout: 3000 }).catch(() => {});
+  // Clicked from inside the frame: the check is that the sandbox lets the page's own submit handler run, and a
+  // coordinate click could miss while the top bar settles.
+  await ff.evaluate(() => document.getElementById('b').click());
   await ff.waitForFunction(() => document.getElementById('out').textContent === 'submitted', null, { timeout: 2000 }).catch(() => {});
-  check('forms: a submit handler runs', await ff.evaluate(() => document.getElementById('out').textContent) === 'submitted');
-  await ff.click('#al');
+  const fState = await ff.evaluate(() => ({ out: document.getElementById('out').textContent, ready: document.body.dataset.ready || '', url: location.href })).catch(e => ({ err: e.message }));
+  check('forms: a submit handler runs', fState.out === 'submitted', JSON.stringify({ fState, logs: fm.seen.logs.slice(-5), errors: fm.seen.errors }));
+  await ff.evaluate(() => document.getElementById('al').click());
   await fm.page.waitForTimeout(200);
   check('alerts: alert() shows a dialog', JSON.stringify(fm.seen.dialogs) === JSON.stringify(['x']), JSON.stringify(fm.seen.dialogs));
   check('forms: no requests, no errors', fm.seen.requests.length === 0 && fm.seen.errors.length === 0, JSON.stringify(fm.seen));

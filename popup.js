@@ -5418,7 +5418,7 @@ async function exportArtifacts(options = {}) {
     if (run) {
       const failed = await root.flush();
       writeFailures.push(...failed);
-      if (failed.some((f) => f.path === 'viewer.html')) viewerBuilt = false;
+      if (failed.some((f) => f.path === 'viewer.html' || f.path === CTViewer.VIEWER_CHECK_FILE)) viewerBuilt = false;
     }
 
     const warnings = collector.warnings.length + collector.errors.length;
