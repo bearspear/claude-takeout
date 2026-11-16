@@ -19,6 +19,10 @@
 //                                      { text: null, part, key }, keys f0, f1, ...; code reading version.text
 //                                      must allow for null until the part is loaded. Attachments stay
 //   PART_LIMIT, UPLOAD_INLINE_LIMIT    4 MB per part; 64 KB of upload text stays in the page
+//   artifactViewParts({partLimit, budget})  Export Artifacts' preview parts: { add(view, payload) -> view with
+//                                      part and key, drain() -> parts closed so far, flush() -> the rest, count }.
+//                                      Payload { texts: [[path, text]], images: [[path, dataUri]] }, keys a0, a1, ...;
+//                                      ARTIFACT_PARTS_BUDGET (256 MB) bounds all part bodies of one export
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
 //   joinPath(folder, rel)              folder + rel with '..' resolved; null if it climbs above the folder
 //   escapeJson(data)                   JSON that is safe inside a <script> tag
@@ -55,6 +59,7 @@
   const TEXT_EMBED_LIMIT = 2 * 1024 * 1024; // longest upload or project text a caller should embed
   const PART_LIMIT = 4 * 1024 * 1024; // largest viewer-files part, unless one text alone is larger
   const UPLOAD_INLINE_LIMIT = 64 * 1024; // upload text over this many UTF-8 bytes goes to a part
+  const ARTIFACT_PARTS_BUDGET = 256 * 1024 * 1024; // Export Artifacts: all part bodies together, at most
   const VIEWER_CHECK_FILE = 'viewer-check.gif';
   const VIEWER_CHECK_BASE64 = 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
   const SAFE_IMAGE = /^image\/(png|jpeg|gif|webp)$/;
@@ -753,6 +758,50 @@
     return { data: parts.length ? { ...data, chats } : data, parts };
   }
 
+  // Export Artifacts: each artifact's preview texts and images ({ texts: [[path, text]], images: [[path, dataUri]] })
+  // go to viewer-files parts as the artifact finishes, under key a0, a1, ... (one key per add, in add order).
+  // A part closes when the next payload would pass partLimit, or as soon as it reaches it; one payload is never
+  // split, so a part may pass the limit by that payload. Past budget bytes of part bodies, payloads are left out (part: null) for the
+  // rest of the export. add(view, payload) returns the view with part and key set (null without a payload);
+  // drain() returns the parts closed since the last drain; flush() closes the open part and returns those
+  // and any not yet drained. count: parts made so far.
+  function artifactViewParts({ partLimit = PART_LIMIT, budget = ARTIFACT_PARTS_BUDGET, firstPart = 1 } = {}) {
+    const encoder = new TextEncoder();
+    const head = n => `window.__archivePart(${n}, {`;
+    let pending = [], pendingBytes = 0, number = firstPart, keys = 0, used = 0, full = false, count = 0;
+    let ready = [];
+    const close = () => {
+      if (!pending.length) return;
+      ready.push({ name: `part-${String(number).padStart(4, '0')}.js`, body: `${head(number)}${pending.join(',')}});` });
+      number++;
+      count++;
+      pending = [];
+      pendingBytes = 0;
+    };
+    const add = (view, payload) => {
+      const key = 'a' + keys++;
+      const has = payload && ((Array.isArray(payload.texts) && payload.texts.length) || (Array.isArray(payload.images) && payload.images.length));
+      if (!has || full) return { ...view, part: null, key: null };
+      const item = `${escapeJson(key)}:${escapeJson({ texts: payload.texts || [], images: payload.images || [] })}`;
+      const bytes = encoder.encode(item).length + 1;
+      if (used + bytes > budget) {
+        full = true;
+        return { ...view, part: null, key: null };
+      }
+      if (pending.length && pendingBytes + bytes + head(number).length + 3 > partLimit) close();
+      pending.push(item);
+      pendingBytes += bytes;
+      used += bytes;
+      const part = number;
+      // A part that has reached the limit closes now, so it can be written with this artifact.
+      if (pendingBytes + head(number).length + 3 >= partLimit) close();
+      return { ...view, part, key };
+    };
+    const drain = () => { const out = ready; ready = []; return out; };
+    const flush = () => { close(); return drain(); };
+    return { add, drain, flush, get count() { return count; } };
+  }
+
   // Each '/'-separated part is encoded per segment. '..' or '.' anywhere: null (never leave the export).
   function relHref(...parts) {
     const segs = [];
@@ -809,7 +858,7 @@
     return page.replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
-  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT };
+  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT, artifactViewParts, ARTIFACT_PARTS_BUDGET };
   root.CTViewer = Object.assign(root.CTViewer || {}, api);
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);

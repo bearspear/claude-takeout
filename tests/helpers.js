@@ -196,18 +196,24 @@ function publishedFetcher(pages) {
   return { fetch, calls, count: (action, uuid) => calls.filter((c) => c.action === action && (!uuid || c.uuid === uuid)).length };
 }
 
+// The extension's own files, as chrome.runtime.getURL serves them: a fetch route for exportPopup.
+const assetRoutes = () => [[/^chrome-extension:\/\/test\/(.*)$/, (url) => ({ ok: true, status: 200, text: async () => fs.readFileSync(path.join(REPO, url.replace('chrome-extension://test/', '')), 'utf8') })]];
+
 // Runs exportArtifacts in the sandbox: content.js's listArtifacts answers { frames, accountName } (or list,
 // when given, as the whole reply), publishedPageInfo and publishedPageFile come from publishedFetcher(pages),
-// with a real JSZip and storage kept in memory. options go to exportArtifacts ({ directory } for a folder).
-// Returns { store, saved (the download), zip, files (path -> text, from the ZIP or the run folder), status,
-// fetcher, listCalls, popup }.
-async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}, accountName = 'Mika', list = null, setup = null } = {}) {
+// artifactThumb from thumbs (uuid -> reply, or a function (msg) -> reply; anything else { error: 'no picture' }),
+// with a real JSZip and storage kept in memory. options go to exportArtifacts ({ directory } for a folder);
+// routes go to exportPopup's fetch. Returns { store, saved (the download), zip, files (path -> text, from the ZIP
+// or the run folder), raw (path -> Buffer), views (what writeArtifactsViewer was given, or null), status,
+// fetcher, listCalls, thumbCalls, popup }.
+async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}, accountName = 'Mika', list = null, setup = null, thumbs = {}, routes = [] } = {}) {
   const JSZip = require('../jszip.min.js');
-  const popup = exportPopup();
+  const popup = exportPopup({ routes });
   const sb = popup.sandbox;
   const store = JSON.parse(JSON.stringify(stored));
   const fetcher = publishedFetcher(pages);
   const listCalls = [];
+  const thumbCalls = [];
   sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
   sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
   sb.chrome.tabs.query = async () => [{ id: 1, url: 'https://claude.ai/artifacts' }];
@@ -217,6 +223,10 @@ async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}
       cb(list || { frames: JSON.parse(JSON.stringify(frames)), accountName: msg.withAccountName ? accountName : null, orgId: 'org-1' });
     } else if (msg.action === 'publishedPageInfo' || msg.action === 'publishedPageFile') {
       fetcher.fetch(msg).then(cb);
+    } else if (msg.action === 'artifactThumb') {
+      thumbCalls.push(msg.uuid);
+      const t = typeof thumbs === 'function' ? thumbs(msg) : Object.prototype.hasOwnProperty.call(thumbs, msg.uuid) ? thumbs[msg.uuid] : { error: 'no picture' };
+      Promise.resolve(typeof t === 'function' ? t(msg) : t).then(cb);
     } else cb({});
   };
   sb.JSZip = JSZip;
@@ -225,20 +235,33 @@ async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}
   sb.download = (blob, name) => { saved = { blob, name }; };
   sb.setTimeout = (f) => setTimeout(f, 0);
   vm.runInContext('orgId = "org-1"', sb);
+  // Records the views the export hands the viewer step, then runs that step as it is.
+  vm.runInContext(`(() => {
+    const orig = writeArtifactsViewer;
+    globalThis.__views = null;
+    writeArtifactsViewer = async (root, views, opts) => { globalThis.__views = views; return orig(root, views, opts); };
+  })()`, sb);
   if (setup) setup(sb);
   sb.__opts = options;
   await vm.runInContext('exportArtifacts(__opts)', sb);
   const zip = saved ? await JSZip.loadAsync(await saved.blob.arrayBuffer()) : null;
   const files = {};
+  const raw = {};
   const text = (d) => (typeof d === 'string' ? d : Buffer.from(d).toString('utf8'));
+  const buffer = (d) => (typeof d === 'string' ? Buffer.from(d, 'utf8') : Buffer.from(d));
   if (zip) {
-    for (const n of Object.keys(zip.files)) if (!zip.files[n].dir) files[n] = await zip.file(n).async('string');
+    for (const n of Object.keys(zip.files)) {
+      if (zip.files[n].dir) continue;
+      raw[n] = await zip.file(n).async('nodebuffer');
+      files[n] = raw[n].toString('utf8');
+    }
   } else if (options.directory && typeof options.directory.flat === 'function') {
     const runs = [...options.directory.entries.values()];
     const run = runs[runs.length - 1];
-    if (run && typeof run.flat === 'function') for (const [n, d] of Object.entries(run.flat())) files[n] = text(d);
+    if (run && typeof run.flat === 'function') for (const [n, d] of Object.entries(run.flat())) { files[n] = text(d); raw[n] = buffer(d); }
   }
-  return { store, saved, zip, files, status: sb.document.getElementById('status'), fetcher, listCalls, popup };
+  const views = sb.__views ? JSON.parse(JSON.stringify(sb.__views)) : null;
+  return { store, saved, zip, files, raw, views, status: sb.document.getElementById('status'), fetcher, listCalls, thumbCalls, popup };
 }
 
-module.exports = { runArtifacts, DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };
+module.exports = { runArtifacts, assetRoutes, DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };

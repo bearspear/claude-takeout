@@ -1,5 +1,6 @@
 // An Export Artifacts folder's index.html over file:// in Chromium: one row per artifact, sorted by title; a title
-// links the artifact's start file; a Docs row has its note and no local link; a shared artifact is labelled;
+// links the artifact's start file; a Docs row has its note and no local link; a shared artifact is labelled and its
+// HTML has no local link;
 // claude.ai links are rebuilt from the short id. No network requests, no page errors.
 const { chromium } = require(process.env.PW);
 const fs = require('fs'), os = require('os'), path = require('path');
@@ -61,8 +62,7 @@ const live = (title, files) => ({ title, live: LIVE, versions: { [LIVE]: { files
     && await docs.locator('a:not(.remote)').count() === 0 && await docs.locator('a.remote').count() === 1);
   const shared = page.locator('tbody tr').nth(2);
   check('shared row is labelled', (await shared.textContent()).includes('shared with you'));
-  const shareLink = await shared.locator('a:not(.remote)').getAttribute('href');
-  check('shared row links its start file', /\/deck\.html$/.test(shareLink || ''), shareLink);
+  check('shared row has no local link to its HTML, only claude.ai', await shared.locator('a:not(.remote)').count() === 0 && await shared.locator('a.remote').count() === 1);
   check('hostile title is text, not markup', await page.locator('tbody tr').nth(0).locator('a').first().textContent() === 'Alpha <report> & "co"');
 
   check('no network requests', requests.length === 0, requests.join(' '));
