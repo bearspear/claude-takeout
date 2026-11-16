@@ -394,7 +394,7 @@ function readAttrs(html, from) {
 // Offers each script and link to visit(tag, attrs), skipping comments, attribute values and raw text such
 // as a string in a script. visit returns a replacement or null. One pass that stops at anything unfinished, so a huge
 // file of unclosed tags can't stall the page.
-function rewriteTags(html, visit) {
+function rewriteTags(html, visit, extra) {
   const out = [];
   let from = 0;
   const open = new RegExp(TAG_OPEN);
@@ -419,7 +419,7 @@ function rewriteTags(html, visit) {
       end++;
     }
     open.lastIndex = end;
-    const swap = tag === 'script' || tag === 'link' ? visit(tag, read.attrs) : null;
+    const swap = tag === 'script' || tag === 'link' || (extra && extra.has(tag)) ? visit(tag, read.attrs) : null;
     if (swap !== null) {
       out.push(html.slice(from, hit.index), swap);
       from = end;
@@ -491,6 +491,133 @@ function previewDoc(text, lookup) {
     srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${inlineSiblings(rest, lookup)}`,
     remote: remoteScripts(rest),
   };
+}
+
+// ---- Artifacts ----
+// An artifact's pages come with a part payload { texts: [[path, text]], images: [[path, dataUri]] }, keyed by the file's
+// original path. Maps are built from those arrays and read with string paths only, so a path like __proto__ is plain data.
+
+// The original path a relative URL in the start file points to, or null. Rejects a scheme, a leading /, //, ?, #,
+// any .. past the artifact root and a decoded segment holding a slash. A backslash counts as a slash.
+function resolveArtifactPath(startPath, url) {
+  if (typeof startPath !== 'string' || typeof url !== 'string') return null;
+  const raw = url.trim().replace(/\\/g, '/');
+  if (!raw || /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw[0] === '/' || /[?#]/.test(raw)) return null;
+  const stack = startPath.replace(/\\/g, '/').split('/').filter(Boolean);
+  stack.pop();
+  for (const part of raw.split('/')) {
+    if (part === '' || part === '.') continue;
+    if (part === '..') {
+      if (!stack.length) return null;
+      stack.pop();
+      continue;
+    }
+    const seg = safeDecode(part);
+    if (seg === null || /[/\\]/.test(seg) || seg === '.' || seg === '..' || seg === '') return null;
+    stack.push(seg);
+  }
+  return stack.length ? stack.join('/') : null;
+}
+
+const mapOf = pairs => new Map(Array.isArray(pairs) ? pairs.filter(p => Array.isArray(p) && typeof p[0] === 'string') : []);
+
+// Like inlineSiblings, resolving through resolveArtifactPath against payload.texts (scripts and stylesheets) and
+// payload.images (img src, with the first srcset candidate when src is not saved). CSS keeps its own url() and @import
+// unresolved, and module imports are not inlined.
+function inlineArtifact(html, startPath, payload) {
+  const texts = mapOf(payload && payload.texts);
+  const images = mapOf(payload && payload.images);
+  const text = (attr, type) => {
+    const path = attr ? resolveArtifactPath(startPath, attr.value) : null;
+    return path !== null && type.test(path) && texts.has(path) ? texts.get(path) : null;
+  };
+  const image = value => {
+    const path = resolveArtifactPath(startPath, value);
+    const uri = path !== null && images.has(path) ? images.get(path) : null;
+    return typeof uri === 'string' && /^data:image\//i.test(uri) && !/["'<>\s]/.test(uri) ? uri : null;
+  };
+  const late = [];
+  const kept = attrs => attrs.map(a => ' ' + a.raw.replace(/^[\s/]+/, '')).join('');
+  const out = rewriteTags(String(html), (tag, attrs) => {
+    if (tag === 'img') {
+      const src = attrOf(attrs, 'src');
+      const set = attrOf(attrs, 'srcset');
+      let uri = src ? image(src.value) : null;
+      if (uri === null && set) {
+        const first = set.value.split(',')[0].trim().split(/\s+/)[0];
+        uri = first ? image(first) : null;
+      }
+      if (uri === null) return null;
+      const rest = kept(attrs.filter(a => a !== src && a !== set));
+      return `<img${rest} src="${uri}">`;
+    }
+    if (tag === 'script') {
+      const src = attrOf(attrs, 'src');
+      const code = text(src, /\.m?js$/i);
+      if (code == null) return null;
+      const rest = kept(attrs.filter(a => a !== src));
+      const script = `<script${rest}>${String(code).replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\x21--')}</script>`;
+      const type = attrOf(attrs, 'type');
+      if ((attrOf(attrs, 'defer') || attrOf(attrs, 'async')) && !(type && /^\s*module\s*$/i.test(type.value))) {
+        late.push(script);
+        return '';
+      }
+      return script;
+    }
+    const rel = attrOf(attrs, 'rel');
+    if (!rel || !/(^|\s)stylesheet(\s|$)/i.test(rel.value)) return null;
+    const css = text(attrOf(attrs, 'href'), /\.css$/i);
+    if (css == null) return null;
+    const media = attrOf(attrs, 'media');
+    return `<style${media ? kept([media]) : ''}>${String(css).replace(/<\/(style)/gi, '<\\/$1')}</style>`;
+  }, new Set(['img']));
+  return out + late.join('');
+}
+
+// Storage is blocked in a sandbox without allow-same-origin, and a page that touches it would throw; this gives it memory.
+const STORAGE_SHIM = `<script>(function(){function mem(){var d=Object.create(null);return{getItem:function(k){k=String(k);return k in d?d[k]:null},setItem:function(k,v){d[String(k)]=String(v)},removeItem:function(k){delete d[String(k)]},clear:function(){d=Object.create(null)},key:function(i){var k=Object.keys(d);return i<k.length?k[i]:null},get length(){return Object.keys(d).length}}}['localStorage','sessionStorage'].forEach(function(n){var ok=true;try{window[n].getItem('x')}catch(e){ok=false}if(!ok){try{Object.defineProperty(window,n,{value:mem(),configurable:true})}catch(e){}}})})()</script>`;
+
+// The sandboxed document for an artifact's start file: policy first, then the storage shim, then the page.
+function artifactPreviewDoc(text, startPath, payload) {
+  const rest = String(text).replace(/^﻿?\s*<!doctype[^>]*>/i, '');
+  return {
+    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${STORAGE_SHIM}${inlineArtifact(rest, startPath, payload)}`,
+    remote: remoteScripts(rest),
+  };
+}
+
+// tab: 'all' | 'yours' | 'shared'. Newest update first, an unparsable date last, ties by title.
+function artifactTabs(views, tab, query) {
+  const q = String(query || '').trim().toLowerCase();
+  const time = v => { const t = Date.parse(v.updatedAt); return Number.isNaN(t) ? null : t; };
+  return (views || [])
+    .filter(v => (tab === 'yours' ? !v.shared : tab === 'shared' ? !!v.shared : true))
+    .filter(v => !q || String(v.title || '').toLowerCase().includes(q))
+    .sort((a, b) => {
+      const x = time(a), y = time(b);
+      if (x !== y) return x === null ? 1 : y === null ? -1 : y - x;
+      return String(a.title || '').localeCompare(String(b.title || ''));
+    });
+}
+
+// now: a Date or milliseconds.
+function relativeTime(iso, now) {
+  const t = Date.parse(iso);
+  if (Number.isNaN(t)) return '';
+  const secs = (+now - t) / 1000;
+  if (secs < 60) return 'just now';
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+  if (secs < 7 * 86400) return `${Math.floor(secs / 86400)}d ago`;
+  return new Date(t).toISOString().slice(0, 10);
+}
+
+function parseArtifactHash(hash) {
+  for (const part of String(hash || '').replace(/^#/, '').split('&')) {
+    const m = /^a=([A-Za-z0-9_-]{1,64})$/.exec(part);
+    if (m) return m[1];
+  }
+  return null;
 }
 
 // The file and version a hash can really open, or null. A bad version means the latest.
@@ -1024,5 +1151,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
+  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, artifactTabs, relativeTime, parseArtifactHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
 }
