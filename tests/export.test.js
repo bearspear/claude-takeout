@@ -2032,12 +2032,19 @@ test('artifactsFromList keeps only the safe fields', () => {
   assert.strictEqual(r.artifacts.length, 2);
   assert.strictEqual(r.full, false);
   assert.strictEqual(r.artifacts[1].live, '');
-  assert.deepStrictEqual(Object.keys(r.artifacts[0]).sort(), ['createdAt', 'live', 'rel', 'slug', 'sourceSurface', 'title', 'typeSlug', 'typeTitle', 'updatedAt']);
+  assert.deepStrictEqual(Object.keys(r.artifacts[0]).sort(), ['createdAt', 'live', 'public', 'rel', 'slug', 'sourceSurface', 'title', 'typeSlug', 'typeTitle', 'updatedAt']);
   assert.ok(!JSON.stringify(r).includes('a@b.c') && !JSON.stringify(r).includes('http'));
   const n = (k) => core.artifactsFromList({ frames: Array.from({ length: k }, (_, i) => ({ slug: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` })) }).full;
   for (const k of [60, 70, 500, 1000]) assert.strictEqual(n(k), true, String(k));
   for (const k of [0, 19, 59, 61, 499]) assert.strictEqual(n(k), false, String(k));
   assert.deepStrictEqual(plain(core.artifactsFromList({})), { artifacts: [], full: false, listed: 0 });
+});
+
+test('artifactsFromList keeps public as a boolean', () => {
+  const pub = (v) => core.artifactsFromList({ frames: [{ slug: PUB_U, public: v }] }).artifacts[0].public;
+  assert.strictEqual(pub(true), true);
+  for (const v of [false, undefined, 'true', 1, null]) assert.strictEqual(pub(v), false, String(v));
+  assert.ok(!('audience' in core.artifactsFromList({ frames: [{ slug: PUB_U, audience: 'public' }] }).artifacts[0]));
 });
 
 test('bad ids and versions are dropped', () => {

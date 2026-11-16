@@ -234,10 +234,29 @@
   }
 
   // Every artifact claude.ai lists for the account. Only the fields an export keeps leave this function
-  // (no owner, thumbnail or URL), and a failure is a code, never a message.
-  async function listArtifacts(request) {
-    const org = await getOrgForPublished(request);
-    if (!org) return { error: 'no org' };
+  // (no owner, audience, thumbnail or URL), and a failure is a code, never a message. Each artifact's card
+  // picture URL is checked and kept in artifactThumbUrls: the thumbnail URL stays here.
+  const ARTIFACT_THUMB_MAX = 2 * 1024 * 1024;
+  let artifactThumbUrls = null; // lowercased uuid -> rebuilt picture URL, replaced by each listing
+  let artifactThumbRelisted = false; // one re-list on a 403 per export (reset by listArtifacts)
+
+  // The picture URL rebuilt from its checked parts, or null: https, no port, userinfo or hash, host exactly
+  // <uuid>.frame.claudeusercontent.com, path /_f/<ver>/_thumb.img, one query parameter, __frame_t.
+  function artifactThumbUrl(uuid, raw) {
+    if (typeof raw !== 'string' || raw.indexOf('#') !== -1) return null;
+    let u;
+    try { u = new URL(raw); } catch (e) { return null; }
+    const host = uuid.toLowerCase() + '.frame.claudeusercontent.com';
+    if (u.protocol !== 'https:' || u.port !== '' || u.username !== '' || u.password !== '' || u.hash !== '' ||
+        u.hostname !== host || u.host !== host) return null;
+    const m = /^\/_f\/([^/]+)\/_thumb\.img$/.exec(u.pathname);
+    if (!m || !PUBLISHED_VER.test(m[1])) return null;
+    const params = Array.from(u.searchParams);
+    if (params.length !== 1 || params[0][0] !== '__frame_t' || !params[0][1]) return null;
+    return 'https://' + host + '/_f/' + m[1] + '/_thumb.img?__frame_t=' + encodeURIComponent(params[0][1]);
+  }
+
+  async function fetchFrameList(org) {
     let res;
     try {
       res = await fetch('https://claude.ai/api/frame/frames?org=' + encodeURIComponent(org) + '&limit=1000',
@@ -247,14 +266,69 @@
     let body;
     try { body = await res.json(); } catch (e) { throw new PublishedError('bad response'); }
     if (!body || !Array.isArray(body.frames)) throw new PublishedError('bad response');
+    const frames = body.frames.filter((f) => f && typeof f === 'object');
+    const thumbs = new Map();
+    for (const f of frames) {
+      if (typeof f.slug !== 'string' || !PUBLISHED_UUID.test(f.slug)) continue;
+      const url = artifactThumbUrl(f.slug, f.thumbImgURL);
+      if (url) thumbs.set(f.slug.toLowerCase(), url);
+    }
+    artifactThumbUrls = thumbs;
+    return frames;
+  }
+
+  async function listArtifacts(request) {
+    const org = await getOrgForPublished(request);
+    if (!org) return { error: 'no org' };
+    artifactThumbRelisted = false;
+    const raw = await fetchFrameList(org);
     const str = (v) => (typeof v === 'string' ? v : '');
-    const frames = body.frames.filter((f) => f && typeof f === 'object').map((f) => ({
+    const frames = raw.map((f) => ({
       slug: str(f.slug), title: str(f.title), typeSlug: str(f.type_slug), typeTitle: str(f.type_title),
       sourceSurface: str(f.source_surface), rel: str(f.rel), live: str(f.live),
-      updatedAt: str(f.updatedAt), createdAt: str(f.created_at),
+      updatedAt: str(f.updatedAt), createdAt: str(f.created_at), public: f.audience === 'public',
     }));
     const accountName = request.withAccountName ? await fetchAccountName() : null;
     return { frames, accountName, orgId: org };
+  }
+
+  // The type comes from the leading bytes only: PNG, JPEG or WebP.
+  function artifactThumbType(b) {
+    if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47 &&
+        b[4] === 0x0d && b[5] === 0x0a && b[6] === 0x1a && b[7] === 0x0a) return 'image/png';
+    if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return 'image/jpeg';
+    if (b.length >= 12 && b[0] === 0x52 && b[1] === 0x49 && b[2] === 0x46 && b[3] === 0x46 &&
+        b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'image/webp';
+    return null;
+  }
+
+  // An artifact's card picture as { base64, type }, or a code. The URL never leaves this script.
+  async function artifactThumb(request) {
+    const uuid = typeof request.uuid === 'string' && PUBLISHED_UUID.test(request.uuid) ? request.uuid.toLowerCase() : null;
+    if (!uuid || !artifactThumbUrls || !artifactThumbUrls.has(uuid)) return { error: 'no picture' };
+    for (;;) {
+      const url = artifactThumbUrls.get(uuid);
+      if (!url) return { error: 'no picture' };
+      let res;
+      try {
+        res = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error' });
+      } catch (e) { throw new PublishedError('network'); }
+      if (res.status === 403 && !artifactThumbRelisted) {
+        artifactThumbRelisted = true;
+        const org = await getOrgForPublished(request);
+        if (!org) throw new PublishedError('HTTP 403', 403);
+        try { await fetchFrameList(org); } catch (e) { throw new PublishedError('HTTP 403', 403); }
+        continue;
+      }
+      if (!res.ok) throw new PublishedError('HTTP ' + res.status, res.status);
+      const ct = String((res.headers && res.headers.get ? res.headers.get('Content-Type') : '') || '').toLowerCase().trim();
+      if (ct.indexOf('text/') === 0 || ct.indexOf('svg') !== -1) return { error: 'bad response' };
+      const buf = await publishedReadBody(res, ARTIFACT_THUMB_MAX);
+      if (!buf) return { error: 'too large' };
+      const type = artifactThumbType(buf);
+      if (!type) return { error: 'bad response' };
+      return { base64: publishedBase64(buf), type };
+    }
   }
 
   function publishedBase64(bytes) {
@@ -267,12 +341,12 @@
   }
 
   // Read a body, stopping once it passes the cap whatever the listing claimed. Null means too large.
-  async function publishedReadBody(res) {
+  async function publishedReadBody(res, max = PUBLISHED_MAX_FILE) {
     const body = res.body;
     if (!body || typeof body.getReader !== 'function') {
       let ab;
       try { ab = await res.arrayBuffer(); } catch (e) { throw new PublishedError('network'); }
-      return ab.byteLength > PUBLISHED_MAX_FILE ? null : new Uint8Array(ab);
+      return ab.byteLength > max ? null : new Uint8Array(ab);
     }
     const reader = body.getReader();
     const chunks = [];
@@ -282,7 +356,7 @@
         const { done, value } = await reader.read();
         if (done) break;
         total += value.byteLength;
-        if (total > PUBLISHED_MAX_FILE) { try { reader.cancel().catch(() => {}); } catch (e) {} return null; }
+        if (total > max) { try { reader.cancel().catch(() => {}); } catch (e) {} return null; }
         chunks.push(value);
       }
     } catch (e) { throw new PublishedError('network'); }
@@ -388,6 +462,11 @@
 
     if (request.action === 'listArtifacts') {
       runPublished(listArtifacts, request, sendResponse);
+      return true;
+    }
+
+    if (request.action === 'artifactThumb') {
+      runPublished(artifactThumb, request, sendResponse);
       return true;
     }
 

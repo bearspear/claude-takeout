@@ -328,7 +328,7 @@ function uuidToBase58(uuid) {
 const PUBLISH_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PUBLISH_VER_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
 
-// The frames claude.ai listed, reduced to the fields an export may keep. Anything else (owner, thumbnail,
+// The frames claude.ai listed, reduced to the fields an export may keep (public: a boolean). Anything else (owner, audience, thumbnail,
 // URLs) is dropped, a slug that is not a UUID is dropped, and a uuid appears once. full: the list may be cut
 // short (no paging is known): 60 or more frames and a multiple of 10, which includes a limit of 1000.
 // listed: how many frames claude.ai sent, before any was dropped.
@@ -346,7 +346,7 @@ function artifactsFromList(reply) {
       slug: f.slug, title: str(f.title), typeSlug: str(f.typeSlug), typeTitle: str(f.typeTitle),
       sourceSurface: str(f.sourceSurface), rel: str(f.rel),
       live: typeof f.live === 'string' && PUBLISH_VER_RE.test(f.live) ? f.live : '',
-      updatedAt: str(f.updatedAt), createdAt: str(f.createdAt),
+      updatedAt: str(f.updatedAt), createdAt: str(f.createdAt), public: f.public === true,
     });
   }
   return { artifacts, full: frames.length >= 60 && frames.length % 10 === 0, listed: frames.length };

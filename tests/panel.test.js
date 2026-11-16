@@ -106,7 +106,7 @@ function resp(status, { json, bytes, stream, headers = {} } = {}) {
 }
 // info(body): changes the /api/frame/<uuid> reply; filesJson(): the _files.json response; direct(): a file
 // fetched by its own path under /_f/<ver>/ (not _src/).
-function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, cookie = 'lastActiveOrg=11111111-0000-4000-8000-000000000001', account, info, filesJson, direct } = {}) {
+function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, cookie = 'lastActiveOrg=11111111-0000-4000-8000-000000000001', account, info, filesJson, direct, thumb } = {}) {
   const reqs = [], delays = [], logs = [];
   const record = (...a) => { logs.push(a.map(String).join(' ')); };
   const listing = files || {
@@ -124,6 +124,7 @@ function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, cook
     fetch: async (url, opts) => {
       reqs.push({ url, opts });
       if (url.includes('/api/frame/frames')) return frames();
+      if (thumb && !url.startsWith('https://claude.ai/')) return thumb(url);
       if (url.includes('/api/account')) return resp(200, { json: account });
       if (url.includes('/api/frame/')) {
         const exp = Math.floor(Date.now() / 1000) + expiresIn;
@@ -148,6 +149,23 @@ function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, cook
   };
 }
 
+
+const PUB2 = '8ee94226-9819-4551-8836-a76d0c116102';
+const PUB3 = '7de94226-9819-4551-8836-a76d0c116102';
+const PNG = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]);
+const JPEG = new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2]);
+const WEBP = new Uint8Array([0x52, 0x49, 0x46, 0x46, 9, 0, 0, 0, 0x57, 0x45, 0x42, 0x50, 1]);
+const thumbUrl = (uuid = PUB, tok = 'secrettok.1') => `https://${uuid}.frame.claudeusercontent.com/_f/V/_thumb.img?__frame_t=${tok}`;
+// thumb(url): the response for a picture request; frames(): the /api/frame/frames reply (default: PUB with a valid picture URL).
+function thumbHarness({ thumb, frames } = {}) {
+  const h = publishedHarness({
+    frames: frames || (() => resp(200, { json: { frames: [{ slug: PUB, thumbImgURL: thumbUrl() }, { slug: PUB2 }] } })),
+    thumb,
+  });
+  h.thumbReqs = () => h.reqs.filter((r) => !r.url.startsWith('https://claude.ai/'));
+  h.listCalls = () => h.reqs.filter((r) => r.url.includes('/api/frame/frames')).length;
+  return h;
+}
 
 // Every request carrying the token goes to the page's own frame host; the token is never in an /api/frame URL or a log.
 function assertTokenStaysHome(h) {
@@ -477,7 +495,7 @@ const tests = {
     const call = h.reqs.find((r) => r.url.includes('/api/frame/frames'));
     assert.strictEqual(call.opts.headers['X-Frame-CP'], 'go');
     assert.ok(call.url.includes('limit=1000') && call.url.includes('org=11111111-0000-4000-8000-000000000001'));
-    assert.deepStrictEqual(res.frames, [{ slug: PUB, title: 'T', typeSlug: 'ts', typeTitle: 'Tt', sourceSurface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', createdAt: 'c' }]);
+    assert.deepStrictEqual(res.frames, [{ slug: PUB, title: 'T', typeSlug: 'ts', typeTitle: 'Tt', sourceSurface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', createdAt: 'c', public: false }]);
     assert.strictEqual(res.accountName, 'Mika');
     assert.ok(!JSON.stringify(res).includes('o@x.y') && !JSON.stringify(res).includes('t/x.png'));
     const bare = await publishedHarness({ frames: () => resp(200, { json: { frames: [] } }) }).call({ action: 'listArtifacts' });
@@ -488,6 +506,118 @@ const tests = {
     assert.deepStrictEqual(await err(() => ({ ...resp(200), json: async () => { throw new Error('x'); } })), { error: 'bad response' });
     assert.deepStrictEqual(await err(() => resp(200, {}), { cookie: '' }), { error: 'no org' });
     assert.deepStrictEqual(await err(() => { throw new Error('secret https://x'); }), { error: 'network' });
+  },
+
+  'listArtifacts maps audience to public and never returns it': async () => {
+    const frames = [{ slug: PUB, audience: 'public', thumbImgURL: thumbUrl() }, { slug: PUB2, audience: 'owner' }, { slug: PUB3 }];
+    const h = publishedHarness({ frames: () => resp(200, { json: { frames } }) });
+    const res = await h.call({ action: 'listArtifacts' });
+    assert.deepStrictEqual(res.frames.map((f) => f.public), [true, false, false]);
+    const text = JSON.stringify(res);
+    for (const s of ['audience', 'thumbImgURL', '_thumb', 'claudeusercontent', '__frame_t']) assert.ok(!text.includes(s), s);
+  },
+
+  'artifactThumb fetches the listed picture without credentials': async () => {
+    for (const [bytes, type] of [[PNG, 'image/png'], [JPEG, 'image/jpeg'], [WEBP, 'image/webp']]) {
+      const h = thumbHarness({ thumb: () => resp(200, { bytes, headers: { 'Content-Type': type } }) });
+      await h.call({ action: 'listArtifacts' });
+      const res = await h.call({ action: 'artifactThumb', uuid: PUB });
+      assert.deepStrictEqual(res, { base64: Buffer.from(bytes).toString('base64'), type });
+      const req = h.thumbReqs()[0];
+      assert.strictEqual(req.url, thumbUrl());
+      assert.strictEqual(req.opts.credentials, 'omit');
+      assert.strictEqual(req.opts.redirect, 'error');
+      assert.strictEqual(req.opts.referrerPolicy, 'no-referrer');
+    }
+  },
+
+  'artifactThumb rejects what isn\'t a picture': async () => {
+    const one = async (bytes, ct) => {
+      const h = thumbHarness({ thumb: () => resp(200, { bytes, headers: ct ? { 'Content-Type': ct } : {} }) });
+      await h.call({ action: 'listArtifacts' });
+      return h.call({ action: 'artifactThumb', uuid: PUB });
+    };
+    const bad = { error: 'bad response' };
+    assert.deepStrictEqual(await one(new TextEncoder().encode('<svg xmlns="http://www.w3.org/2000/svg"></svg>'), 'image/svg+xml'), bad);
+    assert.deepStrictEqual(await one(new TextEncoder().encode('<!doctype html><p>x'), ''), bad);
+    assert.deepStrictEqual(await one(PNG, 'text/html'), bad);
+    assert.deepStrictEqual(await one(PNG, 'image/svg+xml'), bad);
+    assert.deepStrictEqual(await one(PNG, 'TEXT/plain; charset=utf-8'), bad);
+    assert.strictEqual((await one(PNG, 'application/octet-stream')).type, 'image/png');
+    assert.strictEqual((await one(PNG, '')).type, 'image/png');
+    const big = new Uint8Array(2 * 1024 * 1024 + 1); big.set(PNG);
+    assert.deepStrictEqual(await one(big, 'image/png'), { error: 'too large' });
+    const h = thumbHarness({ thumb: () => resp(200, { stream: [PNG, new Uint8Array(2 * 1024 * 1024)] }) });
+    await h.call({ action: 'listArtifacts' });
+    assert.deepStrictEqual(await h.call({ action: 'artifactThumb', uuid: PUB }), { error: 'too large' });
+  },
+
+  'artifactThumb re-lists once on 403': async () => {
+    let n = 0;
+    const h = thumbHarness({ thumb: (url) => (url.includes('tok2') ? resp(200, { bytes: PNG }) : resp(403)),
+      frames: () => resp(200, { json: { frames: [{ slug: PUB, thumbImgURL: thumbUrl(PUB, ++n === 1 ? 'tok1' : 'tok2') }, { slug: PUB2, thumbImgURL: thumbUrl(PUB2, 'old') }] } }) });
+    await h.call({ action: 'listArtifacts' });
+    const res = await h.call({ action: 'artifactThumb', uuid: PUB });
+    assert.strictEqual(res.type, 'image/png');
+    assert.strictEqual(h.listCalls(), 2);
+    assert.deepStrictEqual(h.thumbReqs().map((r) => r.url), [thumbUrl(PUB, 'tok1'), thumbUrl(PUB, 'tok2')]);
+    // PUB2 still 403 after the re-list: final, and no second re-list.
+    assert.deepStrictEqual(await h.call({ action: 'artifactThumb', uuid: PUB2 }), { error: 'HTTP 403', status: 403 });
+    assert.strictEqual(h.listCalls(), 2);
+    // A new export (listArtifacts) allows one re-list again.
+    const h2 = thumbHarness({ thumb: () => resp(403) });
+    await h2.call({ action: 'listArtifacts' });
+    assert.deepStrictEqual(await h2.call({ action: 'artifactThumb', uuid: PUB }), { error: 'HTTP 403', status: 403 });
+    assert.strictEqual(h2.listCalls(), 2);
+    assert.deepStrictEqual(await h2.call({ action: 'artifactThumb', uuid: PUB }), { error: 'HTTP 403', status: 403 });
+    assert.strictEqual(h2.listCalls(), 2);
+    await h2.call({ action: 'listArtifacts' });
+    await h2.call({ action: 'artifactThumb', uuid: PUB });
+    assert.strictEqual(h2.listCalls(), 4);
+  },
+
+  'artifactThumb refuses a URL that isn\'t exactly claude.ai\'s picture path': async () => {
+    const host = `${PUB}.frame.claudeusercontent.com`;
+    const bads = [
+      'https://evil.example/_f/V/_thumb.img?__frame_t=t',
+      `https://${PUB2}.frame.claudeusercontent.com/_f/V/_thumb.img?__frame_t=t`,
+      `http://${host}/_f/V/_thumb.img?__frame_t=t`,
+      `https://${host}:8443/_f/V/_thumb.img?__frame_t=t`,
+      `https://u:p@${host}/_f/V/_thumb.img?__frame_t=t`,
+      `https://${host}/_f/V/_thumb.img?__frame_t=t#x`,
+      `https://${host}/_f/V/x.png?__frame_t=t`,
+      `https://${host}/_f/../_thumb.img?__frame_t=t`,
+      `https://${host}/_f/V/_thumb.img?__frame_t=t&a=b`,
+      `https://${host}/_f/V/_thumb.img?other=t`,
+      `https://${host}/_f/V/_thumb.img`,
+      `https://${host}.evil.example/_f/V/_thumb.img?__frame_t=t`,
+      'not a url', 42,
+    ];
+    for (const u of bads) {
+      const h = thumbHarness({ thumb: () => resp(200, { bytes: PNG }), frames: () => resp(200, { json: { frames: [{ slug: PUB, thumbImgURL: u }] } }) });
+      await h.call({ action: 'listArtifacts' });
+      assert.deepStrictEqual(await h.call({ action: 'artifactThumb', uuid: PUB }), { error: 'no picture' }, String(u));
+      assert.strictEqual(h.thumbReqs().length, 0, String(u));
+    }
+    const h = thumbHarness({ thumb: () => resp(200, { bytes: PNG }) });
+    assert.deepStrictEqual(await h.call({ action: 'artifactThumb', uuid: PUB }), { error: 'no picture' }, 'no listArtifacts yet');
+    await h.call({ action: 'listArtifacts' });
+    assert.deepStrictEqual(await h.call({ action: 'artifactThumb', uuid: PUB3 }), { error: 'no picture' });
+    assert.strictEqual(h.thumbReqs().length, 0);
+    assert.strictEqual((await h.call({ action: 'artifactThumb', uuid: PUB.toUpperCase() })).type, 'image/png');
+  },
+
+  'artifactThumb answers codes only': async () => {
+    const one = async (thumb) => {
+      const h = thumbHarness({ thumb });
+      await h.call({ action: 'listArtifacts' });
+      const res = await h.call({ action: 'artifactThumb', uuid: PUB });
+      const text = JSON.stringify(res) + h.logs.join('\n');
+      for (const s of ['claudeusercontent', '__frame_t', 'secrettok', '_thumb']) assert.ok(!text.includes(s), s);
+      return res;
+    };
+    assert.deepStrictEqual(await one(() => resp(401)), { error: 'HTTP 401', status: 401 });
+    assert.deepStrictEqual(await one(() => { throw new Error('failed ' + thumbUrl()); }), { error: 'network' });
   },
 
   'publishedPageFile retries once on 403 and encodes in chunks': async () => {
