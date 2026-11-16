@@ -2034,9 +2034,9 @@ test('artifactsFromList keeps only the safe fields', () => {
   assert.strictEqual(r.artifacts[1].live, '');
   assert.deepStrictEqual(Object.keys(r.artifacts[0]).sort(), ['createdAt', 'live', 'rel', 'slug', 'sourceSurface', 'title', 'typeSlug', 'typeTitle', 'updatedAt']);
   assert.ok(!JSON.stringify(r).includes('a@b.c') && !JSON.stringify(r).includes('http'));
-  const many = Array.from({ length: 500 }, (_, i) => ({ slug: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` }));
-  assert.strictEqual(core.artifactsFromList({ frames: many }).full, true);
-  assert.strictEqual(core.artifactsFromList({ frames: many.slice(1) }).full, false);
+  const n = (k) => core.artifactsFromList({ frames: Array.from({ length: k }, (_, i) => ({ slug: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` })) }).full;
+  for (const k of [60, 70, 500, 1000]) assert.strictEqual(n(k), true, String(k));
+  for (const k of [0, 19, 59, 61, 499]) assert.strictEqual(n(k), false, String(k));
   assert.deepStrictEqual(plain(core.artifactsFromList({})), { artifacts: [], full: false });
 });
 

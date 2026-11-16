@@ -314,7 +314,8 @@ function base58ToUuid(shortId) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-// The short id for a UUID: base58 of its 128 bits, no leading-zero padding. '' for anything but a UUID.
+// The short id for a UUID: base58 of its 128 bits, no leading-zero padding. Ids under 21 characters (uuids
+// below ~2^117) aren't accepted by base58ToUuid; they are used only for naming. '' for anything but a UUID.
 function uuidToBase58(uuid) {
   const u = String(uuid || '');
   if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(u)) return '';
@@ -328,8 +329,8 @@ const PUBLISH_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 const PUBLISH_VER_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
 
 // The frames claude.ai listed, reduced to the fields an export may keep. Anything else (owner, thumbnail,
-// URLs) is dropped, a slug that is not a UUID is dropped, and a uuid appears once. full: the reply had 500
-// frames, so the list may be cut short.
+// URLs) is dropped, a slug that is not a UUID is dropped, and a uuid appears once. full: the list may be cut
+// short (no paging is known): 60 or more frames and a multiple of 10, which includes a limit of 1000.
 function artifactsFromList(reply) {
   const frames = reply && Array.isArray(reply.frames) ? reply.frames : [];
   const str = (v) => (typeof v === 'string' ? v : '');
@@ -347,7 +348,7 @@ function artifactsFromList(reply) {
       updatedAt: str(f.updatedAt), createdAt: str(f.createdAt),
     });
   }
-  return { artifacts, full: frames.length === 500 };
+  return { artifacts, full: frames.length >= 60 && frames.length % 10 === 0 };
 }
 
 // The pages a chat published, one entry per uuid + version, in chat order over every message (also
