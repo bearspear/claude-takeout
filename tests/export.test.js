@@ -2140,7 +2140,7 @@ test('a published file with no checksum from claude.ai is saved and marked unver
   assert.strictEqual(fileText(written, `${dir}/v1/index.html`), 'G');
   const json = JSON.parse(fileText(written, `${dir}/published.json`));
   assert.deepStrictEqual(json.versions.v1.files, [
-    { path: 'index.html', savedAs: 'index.html', size: null, contentType: 'text/html', sha256: sha('G'), verified: false },
+    { path: 'index.html', savedAs: 'index.html', size: 1, contentType: 'text/html', sha256: sha('G'), verified: false },
     { path: 'data.json', savedAs: 'data.json', size: 7, contentType: 'text/html', sha256: sha('{"a":1}') },
   ]);
   assert.strictEqual(json.versions.v1.incomplete, false);
@@ -2920,7 +2920,7 @@ test('Cowork and Code artifacts listed without checksums are saved unverified', 
   const meta = (name, n) => JSON.parse(files[`${artFolder(name, U(n))}/artifact.json`]);
   assert.strictEqual(files[`${artFolder('Cowork_Page', U(1))}/index.html`], '<p>cowork</p>');
   const cowork = meta('Cowork_Page', 1);
-  assert.deepStrictEqual(cowork.files, [{ path: 'index.html', savedAs: 'index.html', size: null, contentType: 'text/html', sha256: sha('<p>cowork</p>'), verified: false }]);
+  assert.deepStrictEqual(cowork.files, [{ path: 'index.html', savedAs: 'index.html', size: 13, contentType: 'text/html', sha256: sha('<p>cowork</p>'), verified: false }]);
   assert.strictEqual(cowork.incomplete, false);
   assert.strictEqual(cowork.note, "files not checked against claude.ai's checksum");
   const shared = meta('Shared', 2);

@@ -3365,7 +3365,7 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
         if (total + bytes.length > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
         total += bytes.length;
       }
-      unverified.set(f.path, await sha256Hex(bytes));
+      unverified.set(f.path, { sha256: await sha256Hex(bytes), size: bytes.length });
     }
     target.file(`${prefix}${names.get(f.path)}`, bytes);
     written++;
@@ -3379,11 +3379,13 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   };
 }
 
-// File entries (for published.json or artifact.json) of files saved unchecked: sha256 of the saved bytes and
-// verified: false.
+// File entries (for published.json or artifact.json) of files saved unchecked: sha256 and size of the saved
+// bytes and verified: false.
 function markUnverified(files, unverified) {
   for (const f of files) {
-    if (unverified.has(f.path)) Object.assign(f, { sha256: unverified.get(f.path), verified: false });
+    if (!unverified.has(f.path)) continue;
+    const got = unverified.get(f.path);
+    Object.assign(f, got ? { sha256: got.sha256, size: got.size, verified: false } : { sha256: null, verified: false });
   }
 }
 

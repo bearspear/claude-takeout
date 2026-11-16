@@ -302,14 +302,19 @@
       if (meta.size > PUBLISHED_MAX_FILE) return { error: 'too large' };
     }
     const encoded = p.split('/').map(encodeURIComponent).join('/');
+    const entry = publishedTokens.get(uuid + ':' + ver);
     let res;
-    try {
-      res = await publishedFrameGet(uuid, ver, org, '_src/' + encoded);
-    } catch (e) {
-      // A file from the frame info's list may be served only at its own path.
-      const entry = publishedTokens.get(uuid + ':' + ver);
-      if (!meta.fromInfo || !(e instanceof PublishedError) || !(e.status === 404 || (e.status === 403 && entry && !entry.token))) throw e;
+    if (meta.fromInfo && entry && !entry.token) {
+      // Without a token, _src fails before any status (observed 2026-11-16); the page is served at its own path.
       res = await publishedFrameGet(uuid, ver, org, encoded);
+    } else {
+      try {
+        res = await publishedFrameGet(uuid, ver, org, '_src/' + encoded);
+      } catch (e) {
+        // A file from the frame info's list may be served only at its own path.
+        if (!meta.fromInfo || !(e instanceof PublishedError) || e.status !== 404) throw e;
+        res = await publishedFrameGet(uuid, ver, org, encoded);
+      }
     }
     const buf = await publishedReadBody(res);
     if (!buf) return { error: 'too large' };
