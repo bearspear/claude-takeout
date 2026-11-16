@@ -195,13 +195,38 @@
     const info = await publishedFrameInfo(uuid, ver, org);
     const listing = await publishedFileList(uuid, ver, org);
     const files = [], rejected = [];
+    let runtimeSkipped = 0;
     for (const p of Object.keys(listing)) {
-      if (p.indexOf('artifact-type/') === 0) continue;
+      if (p.indexOf('artifact-type/') === 0) { runtimeSkipped++; continue; }
       if (!publishedPathOk(p)) { rejected.push(p); continue; }
       const f = listing[p] || {};
       files.push({ path: p, size: f.size, contentType: f.contentType, sha256: f.sha256 });
     }
-    return { ver: info.entry.ver, title: info.title, history: info.history, files, rejected };
+    return { ver: info.entry.ver, title: info.title, history: info.history, files, rejected, runtimeSkipped };
+  }
+
+  // Every artifact claude.ai lists for the account. Only the fields an export keeps leave this function
+  // (no owner, thumbnail or URL), and a failure is a code, never a message.
+  async function listArtifacts(request) {
+    const org = await getOrgForPublished(request);
+    if (!org) return { error: 'no org' };
+    let res;
+    try {
+      res = await fetch('https://claude.ai/api/frame/frames?org=' + encodeURIComponent(org) + '&limit=1000',
+        { credentials: 'same-origin', headers: { 'X-Frame-CP': 'go', 'Accept': 'application/json' } });
+    } catch (e) { throw new PublishedError('network'); }
+    if (!res.ok) throw new PublishedError('HTTP ' + res.status, res.status);
+    let body;
+    try { body = await res.json(); } catch (e) { throw new PublishedError('bad response'); }
+    if (!body || !Array.isArray(body.frames)) throw new PublishedError('bad response');
+    const str = (v) => (typeof v === 'string' ? v : '');
+    const frames = body.frames.filter((f) => f && typeof f === 'object').map((f) => ({
+      slug: str(f.slug), title: str(f.title), typeSlug: str(f.type_slug), typeTitle: str(f.type_title),
+      sourceSurface: str(f.source_surface), rel: str(f.rel), live: str(f.live),
+      updatedAt: str(f.updatedAt), createdAt: str(f.created_at),
+    }));
+    const accountName = request.withAccountName ? await fetchAccountName() : null;
+    return { frames, accountName, orgId: org };
   }
 
   function publishedBase64(bytes) {
@@ -314,6 +339,11 @@
 
     if (request.action === 'publishedPageInfo') {
       runPublished(publishedPageInfo, request, sendResponse);
+      return true;
+    }
+
+    if (request.action === 'listArtifacts') {
+      runPublished(listArtifacts, request, sendResponse);
       return true;
     }
 

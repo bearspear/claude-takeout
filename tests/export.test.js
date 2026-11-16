@@ -2009,6 +2009,37 @@ test('an old publish result with only a url gets the current version', () => {
   assert.strictEqual(core.base58ToUuid('LkJGYP3ZBnSGbvhLfeWAG1'), '9fe94226-9819-4551-8836-a76d0c116102');
 });
 
+test('uuidToBase58 round-trips with base58ToUuid', () => {
+  assert.strictEqual(core.uuidToBase58('9fe94226-9819-4551-8836-a76d0c116102'), 'LkJGYP3ZBnSGbvhLfeWAG1');
+  for (let i = 0; i < 50; i++) {
+    const u = require('crypto').randomUUID();
+    assert.strictEqual(core.base58ToUuid(core.uuidToBase58(u)), u);
+  }
+  assert.strictEqual(core.uuidToBase58('x'), '');
+});
+
+test('uuidToBase58 keeps leading zero bytes unpadded', () => {
+  const u = '00ffffff-ffff-4fff-8fff-ffffffffffff';
+  const id = core.uuidToBase58(u);
+  assert.ok(!id.startsWith('1'));
+  assert.strictEqual(core.base58ToUuid(id), u);
+});
+
+test('artifactsFromList keeps only the safe fields', () => {
+  const good = { slug: PUB_U, title: 'T', typeSlug: 'ts', typeTitle: 'Tt', sourceSurface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', createdAt: 'c',
+    owner_email: 'a@b.c', thumbImgURL: 'https://x/y.png', link: 'https://claude.ai/z' };
+  const r = plain(core.artifactsFromList({ frames: [good, { ...good }, { ...good, slug: '../x' }, { ...good, slug: PUB_U.replace('0a1b', '0a1c'), live: '../v' }] }));
+  assert.strictEqual(r.artifacts.length, 2);
+  assert.strictEqual(r.full, false);
+  assert.strictEqual(r.artifacts[1].live, '');
+  assert.deepStrictEqual(Object.keys(r.artifacts[0]).sort(), ['createdAt', 'live', 'rel', 'slug', 'sourceSurface', 'title', 'typeSlug', 'typeTitle', 'updatedAt']);
+  assert.ok(!JSON.stringify(r).includes('a@b.c') && !JSON.stringify(r).includes('http'));
+  const many = Array.from({ length: 500 }, (_, i) => ({ slug: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` }));
+  assert.strictEqual(core.artifactsFromList({ frames: many }).full, true);
+  assert.strictEqual(core.artifactsFromList({ frames: many.slice(1) }).full, false);
+  assert.deepStrictEqual(plain(core.artifactsFromList({})), { artifacts: [], full: false });
+});
+
 test('bad ids and versions are dropped', () => {
   const data = oneMessage([
     use('p1', PUB, { files: [] }), pubResult('p1', { slug: '../x', version: 'v1' }),

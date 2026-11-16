@@ -314,8 +314,41 @@ function base58ToUuid(shortId) {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
+// The short id for a UUID: base58 of its 128 bits, no leading-zero padding. '' for anything but a UUID.
+function uuidToBase58(uuid) {
+  const u = String(uuid || '');
+  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(u)) return '';
+  let n = BigInt('0x' + u.replace(/-/g, ''));
+  let out = '';
+  for (; n > 0n; n /= 58n) out = BASE58[Number(n % 58n)] + out;
+  return out;
+}
+
 const PUBLISH_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PUBLISH_VER_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
+
+// The frames claude.ai listed, reduced to the fields an export may keep. Anything else (owner, thumbnail,
+// URLs) is dropped, a slug that is not a UUID is dropped, and a uuid appears once. full: the reply had 500
+// frames, so the list may be cut short.
+function artifactsFromList(reply) {
+  const frames = reply && Array.isArray(reply.frames) ? reply.frames : [];
+  const str = (v) => (typeof v === 'string' ? v : '');
+  const seen = new Set();
+  const artifacts = [];
+  for (const f of frames) {
+    if (!f || typeof f.slug !== 'string' || !PUBLISH_UUID_RE.test(f.slug)) continue;
+    const uuid = f.slug.toLowerCase();
+    if (seen.has(uuid)) continue;
+    seen.add(uuid);
+    artifacts.push({
+      slug: f.slug, title: str(f.title), typeSlug: str(f.typeSlug), typeTitle: str(f.typeTitle),
+      sourceSurface: str(f.sourceSurface), rel: str(f.rel),
+      live: typeof f.live === 'string' && PUBLISH_VER_RE.test(f.live) ? f.live : '',
+      updatedAt: str(f.updatedAt), createdAt: str(f.createdAt),
+    });
+  }
+  return { artifacts, full: frames.length === 500 };
+}
 
 // The pages a chat published, one entry per uuid + version, in chat order over every message (also
 // branches that are no longer current). A result with no slug and version but an artifact url stands for
@@ -1405,7 +1438,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, base58ToUuid, publishedPagesOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
   };

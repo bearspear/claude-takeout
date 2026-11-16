@@ -104,7 +104,7 @@ function resp(status, { json, bytes, stream, headers = {} } = {}) {
     arrayBuffer: async () => (bytes || new Uint8Array()).buffer.slice(bytes ? bytes.byteOffset : 0, bytes ? bytes.byteOffset + bytes.byteLength : 0),
   };
 }
-function publishedHarness({ src, srcThrow, files, expiresIn = 3600 } = {}) {
+function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, cookie = 'lastActiveOrg=11111111-0000-4000-8000-000000000001', account } = {}) {
   const reqs = [], delays = [], logs = [];
   const record = (...a) => { logs.push(a.map(String).join(' ')); };
   const listing = files || {
@@ -118,9 +118,11 @@ function publishedHarness({ src, srcThrow, files, expiresIn = 3600 } = {}) {
     window: { addEventListener() {}, location: {} }, console: { log: record, warn: record, error: record },
     setTimeout: (f, ms) => { delays.push(ms); f(); },
     crypto: require('crypto').webcrypto, btoa, atob, TextEncoder, URL, Uint8Array, String, Math, Number, Date, Map, Error,
-    document: { createElement: () => ({}), head: { appendChild() {} }, cookie: 'lastActiveOrg=11111111-0000-4000-8000-000000000001' },
+    document: { createElement: () => ({}), head: { appendChild() {} }, cookie },
     fetch: async (url, opts) => {
       reqs.push({ url, opts });
+      if (url.includes('/api/frame/frames')) return frames();
+      if (url.includes('/api/account')) return resp(200, { json: account });
       if (url.includes('/api/frame/')) {
         const exp = Math.floor(Date.now() / 1000) + expiresIn;
         return resp(200, { json: { ver: 'V', title: 'T', history: ['V'], files: [], assetToken: 'a.b.c.' + exp } });
@@ -454,6 +456,34 @@ const tests = {
     assert.strictEqual(src.opts.referrerPolicy, 'no-referrer');
     await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 3 });
     assertTokenStaysHome(h);
+  },
+
+  'publishedPageInfo counts the runtime files it drops': async () => {
+    const h = publishedHarness({ files: { 'index.html': { size: 1 }, 'artifact-type/a.js': { size: 1 }, 'artifact-type/b.js': { size: 1 } } });
+    const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.strictEqual(res.runtimeSkipped, 2);
+    assert.deepStrictEqual(res.files.map((f) => f.path), ['index.html']);
+  },
+
+  'listArtifacts sends X-Frame-CP, returns only allowed fields and codes on failure': async () => {
+    const frame = { slug: PUB, title: 'T', type_slug: 'ts', type_title: 'Tt', source_surface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', created_at: 'c',
+      owner_email: 'o@x.y', thumbImgURL: 'https://t/x.png', owner_account: { a: 1 } };
+    const h = publishedHarness({ frames: () => resp(200, { json: { frames: [frame] } }), account: { display_name: 'Mika' } });
+    const res = await h.call({ action: 'listArtifacts', withAccountName: true });
+    const call = h.reqs.find((r) => r.url.includes('/api/frame/frames'));
+    assert.strictEqual(call.opts.headers['X-Frame-CP'], 'go');
+    assert.ok(call.url.includes('limit=1000') && call.url.includes('org=11111111-0000-4000-8000-000000000001'));
+    assert.deepStrictEqual(res.frames, [{ slug: PUB, title: 'T', typeSlug: 'ts', typeTitle: 'Tt', sourceSurface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', createdAt: 'c' }]);
+    assert.strictEqual(res.accountName, 'Mika');
+    assert.ok(!JSON.stringify(res).includes('o@x.y') && !JSON.stringify(res).includes('t/x.png'));
+    const bare = await publishedHarness({ frames: () => resp(200, { json: { frames: [] } }) }).call({ action: 'listArtifacts' });
+    assert.strictEqual(bare.accountName, null);
+    const err = (frames, extra) => publishedHarness({ frames, ...extra }).call({ action: 'listArtifacts' });
+    assert.deepStrictEqual(await err(() => resp(401)), { error: 'HTTP 401', status: 401 });
+    assert.deepStrictEqual(await err(() => resp(200, { json: { frames: {} } })), { error: 'bad response' });
+    assert.deepStrictEqual(await err(() => ({ ...resp(200), json: async () => { throw new Error('x'); } })), { error: 'bad response' });
+    assert.deepStrictEqual(await err(() => resp(200, {}), { cookie: '' }), { error: 'no org' });
+    assert.deepStrictEqual(await err(() => { throw new Error('secret https://x'); }), { error: 'network' });
   },
 
   'publishedPageFile retries once on 403 and encodes in chunks': async () => {
