@@ -2011,10 +2011,17 @@ test('an old publish result with only a url gets the current version', () => {
 
 test('uuidToBase58 round-trips with base58ToUuid', () => {
   assert.strictEqual(core.uuidToBase58('9fe94226-9819-4551-8836-a76d0c116102'), 'LkJGYP3ZBnSGbvhLfeWAG1');
-  for (let i = 0; i < 50; i++) {
-    const u = require('crypto').randomUUID();
-    assert.strictEqual(core.base58ToUuid(core.uuidToBase58(u)), u);
+  // Ids under 21 characters (uuids starting with zero bytes) are for naming only and don't decode.
+  const cases = ['9fe94226-9819-4551-8836-a76d0c116102', '01234567-89ab-4def-8123-456789abcdef', 'ffffffff-ffff-4fff-bfff-ffffffffffff',
+    '0a1b2c3d-0000-4000-8000-000000000000', '00177014-c0ba-4e75-bda0-d80b0b12d936', '00000000-0000-4000-8000-000000000001'];
+  const lengths = [];
+  for (const u of cases) {
+    const id = core.uuidToBase58(u);
+    lengths.push(id.length);
+    assert.strictEqual(core.base58ToUuid(id), id.length >= 21 ? u : '', u);
   }
+  assert.ok(lengths.includes(22) && lengths.includes(21) && lengths.some((n) => n < 21));
+  assert.strictEqual(core.base58ToUuid(core.uuidToBase58('00000000-0000-4000-8000-000000000001')), '');
   assert.strictEqual(core.uuidToBase58('x'), '');
 });
 

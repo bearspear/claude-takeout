@@ -607,6 +607,30 @@ const tests = {
     assert.strictEqual((await h.call({ action: 'artifactThumb', uuid: PUB.toUpperCase() })).type, 'image/png');
   },
 
+  'artifactThumb keeps the token as listed': async () => {
+    const listed = thumbUrl(PUB, 'a+b%2Fc.1~_-');
+    const h = thumbHarness({ thumb: () => resp(200, { bytes: PNG }), frames: () => resp(200, { json: { frames: [{ slug: PUB, thumbImgURL: listed }] } }) });
+    await h.call({ action: 'listArtifacts' });
+    assert.strictEqual((await h.call({ action: 'artifactThumb', uuid: PUB })).type, 'image/png');
+    assert.strictEqual(h.thumbReqs()[0].url, listed);
+    for (const tok of ['a b', 'a&b', 'a=b', 'a"b', '']) {
+      const h2 = thumbHarness({ thumb: () => resp(200, { bytes: PNG }), frames: () => resp(200, { json: { frames: [{ slug: PUB, thumbImgURL: thumbUrl(PUB, tok) }] } }) });
+      await h2.call({ action: 'listArtifacts' });
+      assert.deepStrictEqual(await h2.call({ action: 'artifactThumb', uuid: PUB }), { error: 'no picture' }, tok);
+      assert.strictEqual(h2.thumbReqs().length, 0, tok);
+    }
+  },
+
+  'a failed listing leaves no pictures': async () => {
+    let n = 0;
+    const h = thumbHarness({ thumb: () => resp(200, { bytes: PNG }),
+      frames: () => (++n === 1 ? resp(200, { json: { frames: [{ slug: PUB, thumbImgURL: thumbUrl() }] } }) : resp(500)) });
+    await h.call({ action: 'listArtifacts' });
+    assert.deepStrictEqual(await h.call({ action: 'listArtifacts' }), { error: 'HTTP 500', status: 500 });
+    assert.deepStrictEqual(await h.call({ action: 'artifactThumb', uuid: PUB }), { error: 'no picture' });
+    assert.strictEqual(h.thumbReqs().length, 0);
+  },
+
   'artifactThumb answers codes only': async () => {
     const one = async (thumb) => {
       const h = thumbHarness({ thumb });

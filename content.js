@@ -253,7 +253,11 @@
     if (!m || !PUBLISHED_VER.test(m[1])) return null;
     const params = Array.from(u.searchParams);
     if (params.length !== 1 || params[0][0] !== '__frame_t' || !params[0][1]) return null;
-    return 'https://' + host + '/_f/' + m[1] + '/_thumb.img?__frame_t=' + encodeURIComponent(params[0][1]);
+    // The token is kept as listed (decoding and encoding again would turn '+' into '%20'), and only in this
+    // plain form: the query exactly as the listing wrote it, nothing the parser had to encode.
+    const q = /^\?__frame_t=([A-Za-z0-9._~%+-]+)$/.exec(u.search);
+    if (!q || raw.slice(raw.indexOf('?')) !== u.search) return null;
+    return 'https://' + host + '/_f/' + m[1] + '/_thumb.img?__frame_t=' + q[1];
   }
 
   async function fetchFrameList(org) {
@@ -279,6 +283,7 @@
 
   async function listArtifacts(request) {
     const org = await getOrgForPublished(request);
+    artifactThumbUrls = null; // a failed listing leaves no pictures
     if (!org) return { error: 'no org' };
     artifactThumbRelisted = false;
     const raw = await fetchFrameList(org);
