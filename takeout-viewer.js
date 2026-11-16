@@ -275,6 +275,12 @@
     return hasText ? 'code' : 'binary';
   }
 
+  // export-core.js's versionAsOf: a global where export-core.js is loaded first, else required (Node).
+  function coreVersionAsOf() {
+    if (typeof root.versionAsOf === 'function') return root.versionAsOf;
+    return require('./export-core.js').versionAsOf;
+  }
+
   const missingFile = name => ({ name, kind: 'missing', versions: [{ label: '', text: null, href: null }] });
 
   // Cards for the files each message made. Mutates the blocks of `messages` and returns the GenFile map.
@@ -311,11 +317,8 @@
       }
       return null;
     };
-    const versionAsOf = (entry, at) => {
-      let v = -1;
-      Array.from(entry.messages || []).forEach((id, i) => { if (pos.has(id) && (at == null || pos.get(id) <= at)) v = i; });
-      return v;
-    };
+    // versionAsOf from export-core.js: the version of entry as of a message on chain (null: the last).
+    const versionAsOf = coreVersionAsOf();
 
     // Same rule as failedToolUseIds in export-core.js.
     const failed = new Set();
@@ -358,7 +361,6 @@
     source.forEach((m, mi) => {
       const message = messages[mi];
       const active = pos.has(m.uuid);
-      const at = active ? pos.get(m.uuid) : null;
       const touches = new Map(); // fileKey -> { after, build, version }; the last block touching a file wins
       const touch = (after, fileKey, build, version) => { touches.delete(fileKey); touches.set(fileKey, { after, build, version }); };
       const offKey = (k, build) => { if (k.startsWith('x:')) offBranch.set(k.slice(k.indexOf(':', 2) + 1), { key: k, build }); };
@@ -395,7 +397,7 @@
         if (key && (edit || text)) {
           if (active) {
             const entry = hasOwn(index, key) ? index[key] : null;
-            const v = entry ? versionAsOf(entry, at) : -1;
+            const v = entry ? versionAsOf(entry, chain, m.uuid) : -1;
             if (entry && v >= 0) touch(after, key, () => entryFile(entry.filename, entry.versions, mime), v);
           } else if (edit) {
             missingKey(after, 'x:' + m.uuid + ':' + key, baseName(key));
@@ -406,7 +408,7 @@
           for (const { path: p, text: body } of heredocs(input.command)) {
             if (active) {
               const entry = hasOwn(index, p) ? index[p] : null;
-              const v = entry ? versionAsOf(entry, at) : -1;
+              const v = entry ? versionAsOf(entry, chain, m.uuid) : -1;
               if (entry && v >= 0) touch(after, p, () => entryFile(entry.filename, entry.versions, null), v);
             } else if (body) {
               contentKey(after, 'x:' + m.uuid + ':' + p, baseName(p), String(body), null);
@@ -415,6 +417,7 @@
         } else if (b.name === 'present_files') {
           const paths = Array.isArray(input.filepaths) ? input.filepaths : (Array.isArray(input.paths) ? input.paths : []);
           const where = effectivePos(m.uuid);
+          const whereId = where == null ? null : chain[where].uuid;
           for (const p of paths) {
             if (typeof p !== 'string' || !p) continue;
             const base = baseName(p);
@@ -428,7 +431,7 @@
             let entry = hasOwn(index, p) ? index[p] : null;
             if (!entry) entry = Object.values(index).find(e => e && e.filename === base) || null;
             if (entry) {
-              const v = Math.max(versionAsOf(entry, where), 0);
+              const v = Math.max(versionAsOf(entry, chain, whereId), 0);
               sharedKeys.add(entry.path);
               touch(after, entry.path, () => entryFile(entry.filename, entry.versions, null), v);
             } else if (hasOwn(arts, base)) {
@@ -451,7 +454,7 @@
             const written = hasOwn(index, d.path) ? index[d.path] : null;
             if (written) {
               sharedKeys.add(written.path);
-              touch(after, written.path, () => entryFile(written.filename, written.versions, null), Math.max(versionAsOf(written, at), 0));
+              touch(after, written.path, () => entryFile(written.filename, written.versions, null), Math.max(versionAsOf(written, chain, m.uuid), 0));
               continue;
             }
             const uuids = deliveredUuids.get(d.path) || [];

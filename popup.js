@@ -102,6 +102,9 @@ class ExportErrorCollector {
       case 'web_image':
         return 'An image Claude found with image search could not be saved: the site refused it, it is gone, or Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to it. To save these images, turn on Settings > Save images from web searches (Chrome asks once), then export again.';
 
+      case 'published_page':
+        return 'A page Claude published on claude.ai (publish_files) could not be saved, or only in part, or its file names were changed to be safe on disk. The chat itself is exported. Open the page on claude.ai (link in the note) while signed in, and export again; a page that was unpublished or deleted can no longer be saved.';
+
       case 'doc_diagram':
         return 'claude.ai draws a Claude Docs document\'s diagrams only on the document\'s own page, so the export shows each by its caption. To keep them, ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again: that copy is saved in artefacts/ and linked from the document. Or open the live document (link in the note).';
 
@@ -1961,7 +1964,7 @@ function generateLinksAndSources(urls, webSources) {
 // In a mega-ZIP, sharedProjects stores each project's files once at the archive
 // root: { root, byUuid: Map, usedDirs: Set }. Without it, files go in this folder.
 // folderName is this folder's path from the ZIP root, for the viewer's links.
-async function populateConversationFolder(folder, data, onProgress = null, organizationId = null, sharedProjects = null, folderName = '') {
+async function populateConversationFolder(folder, data, onProgress = null, organizationId = null, sharedProjects = null, folderName = '', fetchPublished = null) {
   const title = data.name || 'Claude Conversation';
   const messages = getMessageChain(data);
 
@@ -2620,10 +2623,12 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
   // Files claude.ai attached to Claude's own messages (a page it published) are its output: saved in
   // artefacts/, unless a replayed artifact there already has the name, and shown on that message in the viewer.
+  const attachedSaved = [];  // the ones downloaded, for savePublishedPages
   for (const file of extractAttachedFiles(data, Object.keys(artifacts))) {
     if (!file.existing) {
       try {
         await addArtefactBlob(folder, artifacts, file.filename, await fetchUploadedFile(null, file.uuid, organizationId, data.uuid, null));
+        attachedSaved.push(file);
       } catch (err) {
         console.error(`Failed to download attached file ${file.filename}:`, err);
         errorCollector.addError('delivered_file', file.filename, err.message, {
@@ -2672,6 +2677,14 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
   }
 
+  // Pages the chat published, after the inline pass, so "same" compares the text as written to disk.
+  if (onProgress) onProgress(70, 100, 'Saving published pages...');
+  const published = await savePublishedPages(folder, data, {
+    errorCollector, artifacts: { ...artifacts, ...viewerArtifacts }, artifactIndex, attached: attachedSaved,
+    fetchPublished, shared: sharedProjects, chatFolder: folderName,
+  });
+  const pageLinks = publishedLinks(published);
+
   // Generate all markdown files (with BOM for proper browser encoding)
   addFileWithBOM(folder, 'meta.md', generateMeta(data, messages, artifacts, codeBlocks, urls, textAttachments, projectFiles, downloadedFiles, webSources, failedFiles.length, projectUploads.length));
   addFileWithBOM(folder, 'prompts.md', generatePrompts(messages, responseFiles, attachmentIdMap, savedUploadNames, attachmentFiles));
@@ -2686,7 +2699,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   // The Markdown links to what this export really saved.
-  const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames, webImages, toolImages };
+  const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames, webImages, toolImages, publishedLinks: pageLinks };
   addFileWithBOM(folder, 'full_chat.md', convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking, ...saved }));
   const integratedChatMd = convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking, ...saved });
   addFileWithBOM(folder, 'integrated_chat.md', integratedChatMd);
@@ -2757,6 +2770,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   for (const filename of artefactNames.sort()) {
     readmeLines.push(`- [${filename}](artefacts/${encodeURIComponent(filename)})`);
   }
+  readmeLines.push(...publishedReadmeLines(published));
 
   // Add text attachments section
   if (Object.keys(textAttachments).length > 0) {
@@ -2875,11 +2889,11 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
   }
 
-  return { messages, artifacts, textAttachments, uploadedFiles: downloadedFiles, failedFiles, errorCollector, codeBlocks, urls, responseFiles, viewerChat, healthIssues };
+  return { messages, artifacts, textAttachments, uploadedFiles: downloadedFiles, failedFiles, errorCollector, codeBlocks, urls, responseFiles, viewerChat, healthIssues, published };
 }
 
 // Create full zip export with progress callback
-async function createZipExport(data, onProgress = null) {
+async function createZipExport(data, onProgress = null, fetchPublished = null) {
   const zip = new JSZip();
   const title = data.name || 'Claude Conversation';
 
@@ -2890,7 +2904,7 @@ async function createZipExport(data, onProgress = null) {
   report(5, 100, 'Analyzing conversation...');
 
   // Use shared helper to populate the zip
-  const result = await populateConversationFolder(zip, data, onProgress, orgId);
+  const result = await populateConversationFolder(zip, data, onProgress, orgId, null, '', fetchPublished);
 
   report(85, 100, 'Building viewer...');
   const viewerBuilt = await writeViewer(zip, result.viewerChat ? [result.viewerChat] : []);
@@ -3144,15 +3158,460 @@ function displayLines(name, input, result, webImages = {}, up = '') {
   return lines;
 }
 
-// The page a publish_files call put on claude.ai, as a quoted link, or [] when its reply has no URL.
-function publishedLines(block) {
+// ============================================================================
+// Published pages: the pages a chat published with publish_files, saved in published/
+// ============================================================================
+// content.js fetches them (publishedPageInfo, publishedPageFile); the asset token never reaches the popup.
+// A version is "same" when every file of it equals, by SHA-256, the text this export already holds for its
+// source as of the publishing message; then nothing is copied. Otherwise its files go to
+// published/<page>/<version>/, beside the chat or, in Export All, once at the export root.
+
+const PUBLISHED_MAX_FILE = 32 * 1024 * 1024;   // one file, raw bytes, checked from _files.json before fetching
+const PUBLISHED_MAX_BYTES = 50 * 1024 * 1024;  // all files of one page version
+const PUBLISHED_VER_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
+const PUBLISHED_TYPE_RE = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+(\s*;\s*[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+)*$/;
+
+// An error from content.js or chrome messaging as a short code, never free text that could hold a URL.
+function publishedCode(r) {
+  if (!r || typeof r !== 'object') return 'no response';
+  if (r.connectionError) return 'no connection to the claude.ai tab';
+  const e = String(r.error || '');
+  return /^(HTTP [1-5]\d\d|[a-z][a-z ]{0,30})$/.test(e) ? e : 'bad response';
+}
+
+function publishedPathOk(p) {
+  return typeof p === 'string' && p !== '' && p.charAt(0) !== '/' && p.split('/').every((s) => s !== '' && s !== '.' && s !== '..');
+}
+
+// content.js's publishedPageInfo reply, keeping only well-formed values: claude.ai's reply is passed through
+// there unchecked, and nothing from it may carry a URL into published.json or errors.txt.
+function cleanPublishedInfo(r) {
+  if (!r || typeof r !== 'object' || r.error || r.connectionError) {
+    return { error: publishedCode(r), status: r && Number.isInteger(r.status) ? r.status : null };
+  }
+  if (typeof r.ver !== 'string' || !PUBLISHED_VER_RE.test(r.ver) || !Array.isArray(r.files)) return { error: 'bad response', status: null };
+  const files = [];
+  const rejected = (Array.isArray(r.rejected) ? r.rejected : []).filter((p) => typeof p === 'string').map((p) => p.slice(0, 200));
+  const seen = new Set();
+  for (const f of r.files) {
+    if (!f || typeof f.path !== 'string' || seen.has(f.path) || f.path.startsWith('artifact-type/')) continue;
+    if (!publishedPathOk(f.path)) { rejected.push(f.path.slice(0, 200)); continue; }
+    seen.add(f.path);
+    files.push({
+      path: f.path,
+      size: Number.isFinite(f.size) && f.size >= 0 ? f.size : null,
+      contentType: typeof f.contentType === 'string' && PUBLISHED_TYPE_RE.test(f.contentType) ? f.contentType : null,
+      sha256: typeof f.sha256 === 'string' && /^[0-9a-f]{64}$/i.test(f.sha256) ? f.sha256.toLowerCase() : null,
+    });
+  }
+  return {
+    ver: r.ver,
+    title: typeof r.title === 'string' ? r.title : '',
+    history: (Array.isArray(r.history) ? r.history : []).filter((h) => typeof h === 'string' && PUBLISHED_VER_RE.test(h)),
+    files, rejected,
+  };
+}
+
+// Base64 to bytes, a piece at a time.
+function base64ToBytes(b64) {
+  const s = String(b64 || '');
+  const STEP = 4 * 16384;
+  const parts = [];
+  let total = 0;
+  for (let i = 0; i < s.length; i += STEP) {
+    const bin = atob(s.slice(i, i + STEP));
+    const part = new Uint8Array(bin.length);
+    for (let j = 0; j < bin.length; j++) part[j] = bin.charCodeAt(j);
+    parts.push(part);
+    total += part.length;
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of parts) { out.set(p, at); at += p.length; }
+  return out;
+}
+
+async function sha256Hex(bytes) {
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Saved names for a version's file paths, in listing order: each segment through publishedSegment, and a
+// name that a file or folder already has, whatever the case, gets _2, _3, ... Returns { names: Map, renames }.
+function publishedSavedNames(paths) {
+  const used = new Set();
+  const folders = new Map();
+  const names = new Map();
+  const renames = [];
+  const free = (parent, seg, isFile) => {
+    const dot = isFile ? seg.lastIndexOf('.') : -1;
+    const base = dot > 0 ? seg.slice(0, dot) : seg;
+    const ext = dot > 0 ? seg.slice(dot) : '';
+    let name = seg;
+    for (let n = 2; used.has((parent + name).toLowerCase()); n++) name = `${base}_${n}${ext}`;
+    used.add((parent + name).toLowerCase());
+    return parent + name;
+  };
+  for (const p of paths) {
+    const segs = p.split('/');
+    let parent = '';
+    for (let i = 0; i < segs.length - 1; i++) {
+      const key = segs.slice(0, i + 1).join('/');
+      if (!folders.has(key)) folders.set(key, free(parent, publishedSegment(segs[i]), false));
+      parent = `${folders.get(key)}/`;
+    }
+    const saved = free(parent, publishedSegment(segs[segs.length - 1]), true);
+    names.set(p, saved);
+    if (saved !== p) renames.push(`${p} as ${saved}`);
+  }
+  return { names, renames };
+}
+
+// The file a version opens with: index.html, else the first .html, else the first file.
+function publishedStart(files) {
+  return files.find((f) => f.path === 'index.html') || files.find((f) => /\.html?$/i.test(f.path)) || files[0] || null;
+}
+
+const isPublishedText = (f) => isTextFile(f.path) || /^text\//i.test(f.contentType || '');
+const publishedNeedsRuntime = (text) => typeof text === 'string' && /artifact-type\/|\/_f\//.test(text);
+const encodePath = (p) => String(p).split('/').map(encodeURIComponent).join('/');
+
+// A version's label and place: v1, v2, ... by its index in the page's history (oldest first); 'current'
+// for a publish that named no version, last.
+function publishedLabel(rec, v) {
+  if (v.key === '') return { label: 'current', order: rec.history.length + 1 };
+  const i = rec.history.indexOf(v.ver);
+  return i >= 0 ? { label: `v${i + 1}`, order: i } : { label: v.ver, order: rec.history.length };
+}
+
+function publishedJson(rec) {
+  const versions = {};
+  const list = [...rec.versions.values()].filter((v) => v.ver).sort((a, b) => publishedLabel(rec, a).order - publishedLabel(rec, b).order);
+  for (const v of list) {
+    const { label, order } = publishedLabel(rec, v);
+    versions[v.folderName] = {
+      ver: v.ver, label, order, saved: v.saved, files: v.files, start: v.start, startSaved: v.startSaved,
+      incomplete: v.incomplete, needsRuntime: v.needsRuntime, missing: v.missing, publishedIn: v.publishedIn,
+    };
+  }
+  return { format: 1, title: rec.title, url: rec.url, shortId: rec.shortId, uuid: rec.uuid, versions };
+}
+
+// Export All: each page's published.json, once, at the export root, after every chat added to it.
+function writeSharedPublished(shared) {
+  if (!shared || !shared.published) return;
+  for (const rec of shared.published.values()) {
+    if ([...rec.versions.values()].some((v) => v.ver)) shared.root.file(`published/${rec.dir}/published.json`, JSON.stringify(publishedJson(rec), null, 2));
+  }
+}
+
+// Save the pages a chat published. ctx: { errorCollector, artifacts (the text as on disk, inlined), artifactIndex,
+// attached (extractAttachedFiles entries saved by this export), fetchPublished(message) -> Promise<response>,
+// shared (Export All: the shared object with published: Map, root), chatFolder }. Returns one PublishedEntry per
+// page: { uuid, shortId, title, url, current, dir (relative to the chat folder), versions: [{ ver, folderName,
+// label, order, start, startSaved, same, writtenAs, incomplete, needsRuntime, text, publishes }] }.
+async function savePublishedPages(folder, data, ctx = {}) {
+  const { errorCollector = null, artifacts = {}, artifactIndex = {}, attached = [], fetchPublished = null, shared = null } = ctx;
+  const found = publishedPagesOf(data);
+  if (!found.length) return [];
+  const exportAll = !!(shared && shared.published && typeof shared.published.get === 'function');
+  const pages = exportAll ? shared.published : new Map();
+  const dirs = exportAll ? (shared.publishedDirs || (shared.publishedDirs = new Set())) : new Set();
+  const state = exportAll ? shared : {};  // publishedSignedOut: one 401 stops fetching for the whole export
+  const target = exportAll ? shared.root : folder;
+  const chain = getMessageChain(data);
+  const has = (o, k) => o != null && Object.prototype.hasOwnProperty.call(o, k);
+  const limit = typeof CTViewer !== 'undefined' && CTViewer.TEXT_EMBED_LIMIT ? CTViewer.TEXT_EMBED_LIMIT : 2 * 1024 * 1024;
+  const warn = (filename, message, note = null) => { if (errorCollector) errorCollector.addWarning('published_page', filename, message, { note }); };
+  const openNote = (rec) => (rec.url ? `Open it on claude.ai: ${rec.url}` : null);
+
+  const byUuid = new Map();
+  for (const p of found) {
+    if (!byUuid.has(p.uuid)) byUuid.set(p.uuid, []);
+    byUuid.get(p.uuid).push(p);
+  }
+
+  // One record per page for the export: its folder is chosen once, as titles change.
+  const pageRecord = (first) => {
+    if (pages.has(first.uuid)) return pages.get(first.uuid);
+    const shortId = /^[A-Za-z0-9_-]{1,64}$/.test(first.shortId || '') ? first.shortId : '';
+    const name = `${safeFileTitle(first.title) || 'page'}_${shortId || first.uuid}`;
+    let dir = name;
+    for (let n = 2; dirs.has(dir.toLowerCase()); n++) dir = `${name}_${n}`;
+    dirs.add(dir.toLowerCase());
+    const rec = {
+      uuid: first.uuid, shortId, url: shortId ? `https://claude.ai/artifact/${shortId}` : '', title: String(first.title || ''), dir,
+      history: [], infos: new Map(), versions: new Map(), folders: new Set(['published.json']),
+    };
+    pages.set(first.uuid, rec);
+    return rec;
+  };
+  const dirOf = (rec) => `${exportAll ? '../' : ''}published/${rec.dir}`;
+
+  if (typeof fetchPublished !== 'function') {
+    const links = [...byUuid.values()].map((g) => pageRecord(g[0]).url).filter(Boolean);
+    warn('published pages', `Published page not fetched: no claude.ai tab. ${byUuid.size} page${byUuid.size === 1 ? '' : 's'} this chat published ${byUuid.size === 1 ? 'is' : 'are'} not in the export.`,
+      links.length ? `Open ${links.length === 1 ? 'it' : 'them'} on claude.ai: ${links.join(', ')}` : null);
+    return [...byUuid.values()].map((group) => {
+      const rec = pageRecord(group[0]);
+      return {
+        uuid: rec.uuid, shortId: rec.shortId, title: rec.title, url: rec.url, current: group.some((p) => p.current), dir: dirOf(rec),
+        versions: group.map((p, i) => ({
+          ver: p.ver, folderName: p.ver ? publishedSegment(p.ver) : 'current', label: p.ver || 'current', order: i, start: null, startSaved: null,
+          same: false, writtenAs: null, incomplete: true, needsRuntime: false, text: null, publishes: p.publishes.slice(),
+        })),
+      };
+    });
+  }
+
+  const markSignedOut = () => {
+    if (state.publishedSignedOut) return;
+    state.publishedSignedOut = true;
+    warn('published pages', 'Published pages not fetched: claude.ai answered HTTP 401, as if you were signed out. Pages after this one in the export were skipped.',
+      'Sign in to claude.ai in this tab and export again.');
+  };
+  const signedOutReply = (r) => r && (r.status === 401 || r.error === 'HTTP 401');
+
+  const getInfo = async (rec, ver) => {
+    if (rec.infos.has(ver)) return rec.infos.get(ver);
+    if (state.publishedSignedOut) return { error: 'signed out', skipped: true };
+    const reply = await fetchPublished({ action: 'publishedPageInfo', uuid: rec.uuid, ver });
+    if (signedOutReply(reply)) { markSignedOut(); return { error: 'signed out', skipped: true }; }
+    const info = cleanPublishedInfo(reply);
+    rec.infos.set(ver, info);
+    if (!info.error) {
+      if (!rec.infos.has(info.ver)) rec.infos.set(info.ver, info);
+      if (info.history.length >= rec.history.length) rec.history = info.history;
+      if (info.title) rec.title = info.title;
+    }
+    return info;
+  };
+
+  const folderFor = (rec, key) => {
+    if (rec.versions.has(key)) return rec.versions.get(key);
+    const want = key === '' ? 'current' : publishedSegment(key);
+    let name = want;
+    for (let n = 2; rec.folders.has(name.toLowerCase()); n++) name = `${want}_${n}`;
+    rec.folders.add(name.toLowerCase());
+    const v = {
+      key, folderName: name, ver: null, files: [], names: null, renames: [], rejected: [], saved: false, attempted: false,
+      start: null, startSaved: null, incomplete: false, needsRuntime: false, missing: [], text: null, publishedIn: [],
+    };
+    rec.versions.set(key, v);
+    return v;
+  };
+
+  // The text this export holds for a source file as of a publishing message: the artefact version then (on the
+  // active branch only), or a file claude.ai attached to that message and this export downloaded.
+  const hashes = new Map();
+  const hashText = async (text) => {
+    if (!hashes.has(text)) hashes.set(text, await sha256Hex(new TextEncoder().encode(text)));
+    return hashes.get(text);
+  };
+  const candidates = (src, messageUuid) => {
+    const out = [];
+    const textOf = (name) => (name && isTextFile(name) && has(artifacts, name) && typeof artifacts[name] === 'string' ? artifacts[name] : null);
+    const entry = has(artifactIndex, src.path) ? artifactIndex[src.path] : null;
+    if (entry) {
+      const i = versionAsOf(entry, chain, messageUuid);
+      const name = i >= 0 ? entry.versions[i] : null;
+      if (textOf(name) !== null) out.push({ name, text: textOf(name) });
+    }
+    const base = zipSafeName(src.path.split('/').pop()).normalize('NFC');
+    for (const a of attached) {
+      if (a && !a.existing && a.messageUuid === messageUuid && a.filename === base && textOf(a.filename) !== null) out.push({ name: a.filename, text: textOf(a.filename) });
+    }
+    return out;
+  };
+  // path -> { name, text } when every file matches for one publish, else null.
+  const judge = async (files, publishes, sources) => {
+    if (!files.length) return null;
+    for (const pub of publishes) {
+      const matched = new Map();
+      for (const f of files) {
+        const src = f.sha256 ? sources.find((s) => (s.as || s.path.split('/').pop()) === f.path) : null;
+        let hit = null;
+        for (const c of src ? candidates(src, pub.messageUuid) : []) {
+          if (await hashText(c.text) === f.sha256) { hit = c; break; }
+        }
+        if (!hit) break;
+        matched.set(f.path, hit);
+      }
+      if (matched.size === files.length) return matched;
+    }
+    return null;
+  };
+
+  const fetchVersion = async (rec, v) => {
+    v.attempted = true;
+    const start = publishedStart(v.files);
+    const missing = [];
+    const problems = [];
+    let total = 0;
+    let written = 0;
+    let startText = null;
+    for (const f of v.files) {
+      const fail = (why) => { missing.push(f.path); if (why) problems.push(`${f.path} (${why})`); };
+      if (state.publishedSignedOut) { fail(null); continue; }
+      if (f.size == null || !f.sha256) { fail('bad listing'); continue; }
+      if (f.size > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
+      if (total + f.size > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
+      total += f.size;
+      const reply = await fetchPublished({ action: 'publishedPageFile', uuid: rec.uuid, ver: v.ver, path: f.path, size: f.size });
+      if (signedOutReply(reply)) { markSignedOut(); fail(null); continue; }
+      if (!reply || reply.error || reply.connectionError || typeof reply.base64 !== 'string') { fail(publishedCode(reply)); continue; }
+      let bytes;
+      try { bytes = base64ToBytes(reply.base64); } catch (e) { fail('bad response'); continue; }
+      if (bytes.length > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
+      if (await sha256Hex(bytes) !== f.sha256) { fail('checksum does not match'); continue; }
+      target.file(`published/${rec.dir}/${v.folderName}/${v.names.get(f.path)}`, bytes);
+      written++;
+      if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
+    }
+    v.saved = written > 0;
+    v.missing = missing;
+    v.incomplete = missing.length > 0;
+    const startOk = start && !missing.includes(start.path);
+    v.start = startOk ? start.path : null;
+    v.startSaved = startOk ? v.names.get(start.path) : null;
+    v.needsRuntime = publishedNeedsRuntime(startText);
+    v.text = startText !== null && startText.length <= limit ? startText : null;
+    if (problems.length) {
+      warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): ${problems.length} file${problems.length === 1 ? '' : 's'} could not be saved: ${problems.join(', ')}.`, openNote(rec));
+    }
+  };
+
+  const entries = [];
+  const warned = new Set();
+  for (const [uuid, group] of byUuid) {
+    const rec = pageRecord(group[0]);
+    // This chat's versions of the page. A publish that named no version joins the version it resolves to
+    // when this chat published that one by name.
+    const mine = new Map();
+    for (const p of [...group.filter((g) => !g.current), ...group.filter((g) => g.current)]) {
+      const info = await getInfo(rec, p.ver);
+      const key = p.current ? (!info.error && mine.has(info.ver) ? info.ver : '') : p.ver;
+      if (!mine.has(key)) mine.set(key, { key, info, publishes: [], sources: p.sources });
+      mine.get(key).publishes.push(...p.publishes);
+    }
+
+    const versions = [];
+    for (const m of mine.values()) {
+      const { info } = m;
+      if (info.error) {
+        if (!info.skipped && !warned.has(`${uuid} ${info.error}`)) {
+          warned.add(`${uuid} ${info.error}`);
+          warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}"${m.key ? ` (${m.key})` : ''} could not be fetched: ${info.error}.`, openNote(rec));
+        }
+        versions.push({
+          ver: m.key, folderName: m.key ? publishedSegment(m.key) : 'current', ...publishedLabel(rec, { key: m.key, ver: m.key }), start: null, startSaved: null,
+          same: false, writtenAs: null, incomplete: true, needsRuntime: false, text: null, publishes: m.publishes.slice(),
+        });
+        continue;
+      }
+      const v = folderFor(rec, m.key);
+      if (!v.ver) {
+        v.ver = info.ver;
+        const { names, renames } = publishedSavedNames(info.files.map((f) => f.path));
+        v.files = info.files.map((f) => ({ path: f.path, savedAs: names.get(f.path), size: f.size, contentType: f.contentType, sha256: f.sha256 }));
+        v.names = names;
+        const start = publishedStart(v.files);
+        v.start = start ? start.path : null;
+        v.startSaved = start ? names.get(start.path) : null;
+        if (renames.length || info.rejected.length) {
+          const parts = [];
+          if (renames.length) parts.push(`saved ${renames.join(', ')}`);
+          if (info.rejected.length) parts.push(`not fetched, unsafe: ${info.rejected.join(', ')}`);
+          warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): file names changed to stay inside its folder: ${parts.join('; ')}.`, openNote(rec));
+        }
+      }
+      const matched = await judge(v.files, m.publishes, m.sources);
+      const same = !!matched;
+      if (!same && !v.attempted && !state.publishedSignedOut) await fetchVersion(rec, v);
+      if (!same && !v.saved) v.incomplete = true;
+      const startFile = publishedStart(v.files);
+      const own = same && startFile ? matched.get(startFile.path) : null;
+      for (const pub of m.publishes) {
+        v.publishedIn.push({ chat: data.uuid, messageUuid: pub.messageUuid, toolUseId: pub.toolUseId, same, writtenAs: own ? own.name : null });
+      }
+      if (same && !v.saved && !v.attempted) v.needsRuntime = v.needsRuntime || publishedNeedsRuntime(own && own.text);
+      const usable = same || v.saved;
+      versions.push({
+        ver: v.ver, folderName: v.folderName, ...publishedLabel(rec, v),
+        start: same ? (startFile ? startFile.path : null) : (usable ? v.start : null),
+        startSaved: same ? (startFile ? v.names.get(startFile.path) : null) : (usable ? v.startSaved : null),
+        same, writtenAs: own ? own.name : null,
+        incomplete: same ? false : (usable ? v.incomplete : true),
+        needsRuntime: same ? publishedNeedsRuntime(own && own.text) : v.needsRuntime,
+        text: same ? (own && own.text.length <= limit ? own.text : null) : (usable ? v.text : null),
+        publishes: m.publishes.slice(),
+      });
+    }
+    versions.sort((a, b) => a.order - b.order);
+    entries.push({ uuid: rec.uuid, shortId: rec.shortId, title: rec.title, url: rec.url, current: group.some((p) => p.current), dir: dirOf(rec), versions });
+  }
+
+  if (!exportAll) {
+    for (const rec of pages.values()) {
+      if ([...rec.versions.values()].some((v) => v.ver)) target.file(`published/${rec.dir}/published.json`, JSON.stringify(publishedJson(rec), null, 2));
+    }
+  }
+  return entries;
+}
+
+// Where a publish's saved copy is, relative to the chat folder, by tool_use id: the written artefact when the
+// version is the same, else the start file under published/. Versions with nothing to open are left out.
+function publishedLinks(entries) {
+  const links = {};
+  for (const e of entries || []) {
+    for (const v of e.versions) {
+      const href = v.same && v.writtenAs ? `artefacts/${encodePath(v.writtenAs)}`
+        : v.startSaved ? `${encodePath(e.dir)}/${encodePath(v.folderName)}/${encodePath(v.startSaved)}` : null;
+      if (href) for (const p of v.publishes) links[p.toolUseId] = href;
+    }
+  }
+  return links;
+}
+
+// README.md's "Published pages" section.
+function publishedReadmeLines(entries) {
+  if (!entries || !entries.length) return [];
+  const lines = ['', '---', '', `## Published pages (${entries.length})`, ''];
+  for (const e of entries) {
+    const name = escapeMarkdown(e.title || 'Page');
+    lines.push(e.url ? `- **${name}** - [claude.ai](${mdUrl(e.url)})` : `- **${name}**`);
+    for (const v of e.versions) {
+      if (v.same && v.writtenAs) lines.push(`  - ${v.label}: same as [${escapeMarkdown(v.writtenAs)}](artefacts/${encodePath(v.writtenAs)})`);
+      else if (v.startSaved) lines.push(`  - ${v.label}: [${escapeMarkdown(v.startSaved)}](${encodePath(e.dir)}/${encodePath(v.folderName)}/${encodePath(v.startSaved)})${v.incomplete ? ' *(incomplete, see errors.txt)*' : ''}`);
+      else lines.push(`  - ${v.label}: not saved (see errors.txt)`);
+    }
+  }
+  return lines;
+}
+
+// The tab content.js answers in, for savePublishedPages: injected once if needed, then messaged directly.
+function tabPublishedFetcher(tabId) {
+  if (tabId == null) return null;
+  let first = true;
+  return async (message) => {
+    const send = first ? sendToTab : sendOnce;
+    first = false;
+    return (await send(tabId, message)) || {};
+  };
+}
+
+// The page a publish_files call put on claude.ai, as a quoted link, with a link to the export's copy when
+// links (publishedLinks) has one for this call; [] when there is neither.
+function publishedLines(block, links = null, up = '') {
   const reply = leadingJson(resultText(block)) || {};
-  return reply.url ? [`> **Published on claude.ai:** [${mdLinkText(reply.title || reply.url)}](${mdUrl(reply.url)})`, ''] : [];
+  const local = links && block && Object.prototype.hasOwnProperty.call(links, block.tool_use_id) ? `${up}${links[block.tool_use_id]}` : null;
+  if (!reply.url) return local ? [`> **Published page:** [saved copy](${local})`, ''] : [];
+  return [`> **Published on claude.ai:** [${mdLinkText(reply.title || reply.url)}](${mdUrl(reply.url)})${local ? ` · [saved copy](${local})` : ''}`, ''];
 }
 
 function convertToMarkdown(data, options = {}) {
   const { embedArtifacts = false, seamlessMd = false, includeThinking = true,
-    attachmentFiles = null, uploadNames = null, presentedNames = {}, webImages = {}, toolImages = {} } = options;
+    attachmentFiles = null, uploadNames = null, presentedNames = {}, webImages = {}, toolImages = {}, publishedLinks: pageLinks = null } = options;
   const lines = [];
   const title = data.name || 'Claude Conversation';
 
@@ -3543,8 +4002,8 @@ function convertToMarkdown(data, options = {}) {
             lines.push(...toolImageLines(block, toolImages));
           } else if (isImageSearchTool(toolName) && imagesOf(block).length) {
             lines.push(...imageSearchLines(block, webImages));
-          } else if (isPublishTool(toolName) && publishedLines(block).length) {
-            lines.push(...publishedLines(block));
+          } else if (isPublishTool(toolName) && publishedLines(block, pageLinks).length) {
+            lines.push(...publishedLines(block, pageLinks));
           } else if (toolName === 'web_search' && Array.isArray(block.content)) {
             // Format web search results nicely
             for (const result of block.content) {
@@ -3824,7 +4283,7 @@ async function requestData({ preserveStatus = false } = {}) {
 
 // Fetch the selected chat for an export, so it includes messages added since
 // the panel last loaded it. Throws rather than exporting an older copy.
-async function loadConversationForExport() {
+async function loadConversationForExport({ withTab = false } = {}) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   const chatId = getChatIdFromUrl(tab?.url || '');
   if (!chatId) throw new Error('No conversation selected.');
@@ -3836,7 +4295,7 @@ async function loadConversationForExport() {
 
   latestRefreshId++;
   updateUI(result.data, orgId, { preserveStatus: true });
-  return result.data;
+  return withTab ? { data: result.data, tabId: tab.id } : result.data;
 }
 
 // Coalesce bursts of tab events. An export shows the progress bar
@@ -4149,9 +4608,10 @@ async function bulkExportZip(options = {}) {
     let totalFileErrors = 0;  // File-level errors across all conversations
     let totalFileWarnings = 0;  // File-level warnings across all conversations
     let incomplete = 0;  // chats whose data looks incomplete (export_health)
-    // `projects` holds the shared project files, so no chat may take that name.
-    const usedFolderNames = new Set(['projects']);
-    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set() };
+    // `projects` and `published` hold the files chats share, so no chat may take those names.
+    const usedFolderNames = new Set(['projects', 'published']);
+    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), published: new Map() };
+    const fetchPublished = tabPublishedFetcher(tab.id);
     const viewerChats = [];
     const exportedChats = [];  // { uuid, name, updated_at (as listed), folder }, for the manifest and the record
 
@@ -4183,7 +4643,7 @@ async function bulkExportZip(options = {}) {
         const folder = megaZip.folder(folderName);
 
         // Use shared helper to populate the folder (same structure as individual zip)
-        const folderResult = await populateConversationFolder(folder, data, null, orgId, sharedProjects, folderName);
+        const folderResult = await populateConversationFolder(folder, data, null, orgId, sharedProjects, folderName, fetchPublished);
         if (folderResult.viewerChat) viewerChats.push(folderResult.viewerChat);
 
         // Track file-level errors/warnings
@@ -4218,6 +4678,9 @@ async function bulkExportZip(options = {}) {
       // Small delay to avoid overwhelming
       await new Promise(r => setTimeout(r, 200));
     }
+
+    // Each published page's published.json, now that every chat has added to it.
+    writeSharedPublished(sharedProjects);
 
     // Create index.md at root
     const indexLines = [
@@ -4421,11 +4884,11 @@ onExport('exportZip', async () => {
     status.className = 'status waiting';
     status.textContent = 'Creating zip archive...';
 
-    const data = await loadConversationForExport();
+    const { data, tabId } = await loadConversationForExport({ withTab: true });
     await ensureProjectName(data, orgId);
     const result = await createZipExport(data, (step, total, message) => {
       showProgress(step, total, message);
-    });
+    }, tabPublishedFetcher(tabId));
 
     hideProgress();
 

@@ -6,7 +6,7 @@ const os = require('os');
 const { execFileSync } = require('child_process');
 const path = require('path');
 const vm = require('vm');
-const { DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads } = require('./helpers');
+const { DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher } = require('./helpers');
 
 const { fn, sandbox } = loadPopup({
   fetch: async (url) => {
@@ -1462,6 +1462,7 @@ async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null
     else cb({});
   };
   sb.JSZip = JSZip;
+  sb.Uint8Array = Uint8Array;  // bytes the popup makes, in the realm JSZip checks them against
   let saved = null;
   sb.download = (blob, name) => { saved = { blob, name }; };
   sb.setTimeout = (f) => setTimeout(f, 0);
@@ -1702,8 +1703,8 @@ test("files on Claude's own messages are its output, not uploads", () => {
   const data = publishChat();
   assert.deepStrictEqual(plain(fn('extractUploadedFiles')(data).map((f) => f.filename)), ['p01_IMG_1.HEIC']);
   assert.deepStrictEqual(plain(fn('extractAttachedFiles')(data, ['guide.html', 'extra.pdf'])), [
-    { filename: 'guide.html', uuid: 'att-1', path: '', existing: true },
-    { filename: 'extra.pdf', uuid: 'att-2', path: '', existing: true },
+    { filename: 'guide.html', uuid: 'att-1', path: '', existing: true, messageUuid: 'b' },
+    { filename: 'extra.pdf', uuid: 'att-2', path: '', existing: true, messageUuid: 'b' },
   ]);
   assert.deepStrictEqual(plain(fn('extractAttachedFiles')(data, ['guide.html']).map((f) => [f.filename, f.existing])), [['guide.html', true], ['extra.pdf', false]]);
 });
@@ -2032,4 +2033,248 @@ test('page versions follow the allowed pattern', () => {
   const vers = (v) => core.publishedPagesOf(oneMessage([use('p', PUB, { files: [] }), pubResult('p', { slug: PUB_U, version: v })])).map((p) => p.ver);
   for (const ok of ['v1.2', '_a', '-b', 'a'.repeat(64)]) assert.deepStrictEqual(vers(ok), [ok]);
   for (const bad of ['a'.repeat(65), '../../a', '.a', '']) assert.deepStrictEqual(vers(bad), []);
+});
+
+// ---- published pages saved in the export ----
+const PUB_U2 = '1a1b2c3d-1111-4222-8333-444455556666';
+const PUB_U3 = '2a1b2c3d-1111-4222-8333-444455556666';
+const PUB_U4 = '3a1b2c3d-1111-4222-8333-444455556666';
+const pubOf = (uuid, version, short = 'Short1', title = 'Guide') => ({ slug: uuid, version, url: `https://claude.ai/artifact/${short}`, title });
+const pubMsg = (uuid, parent, content, extra = {}) => ({ uuid, parent_message_uuid: parent, sender: 'assistant', content, ...extra });
+const pubChat = (messages, extra = {}) => ({
+  uuid: 'c1', name: 'Pub', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z',
+  current_leaf_message_uuid: messages[messages.length - 1].uuid, chat_messages: messages, ...extra,
+});
+const publish = (id, uuid, ver, files, short, title) => [use(id, PUB, { files, title: title || 'Guide' }), { ...pubResult(id, pubOf(uuid, ver, short, title)), name: PUB }];
+const guideAs = [{ as: 'index.html', path: '/home/claude/guide.html' }];
+const fileText = (written, k) => {
+  const v = written[k];
+  if (v === undefined) return undefined;
+  if (ArrayBuffer.isView(v)) return Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString('utf8');
+  return docText(written, k);
+};
+const pubWarnings = (output) => output.errorCollector.warnings.filter((w) => w.type === 'published_page').map((w) => ({ ...w, message: w.error }));
+const sha = (text) => require('crypto').createHash('sha256').update(Buffer.from(text)).digest('hex');
+
+test('a published page is saved in published/ with published.json, and no frame URL reaches any file', async () => {
+  const frame = 'https://u.frame.claudeusercontent.com/_f/v1/index.html?__frame_t=SECRET';
+  const data = pubChat([pubMsg('a', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: '<html>guide</html>' }), result('w'),
+    ...publish('p1', PUB_U, 'v1', [...guideAs, { as: 'data.json', path: '/home/claude/data.json' }]),
+  ])]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1', frame, 7], versions: { v1: { files: {
+    'index.html': '<html>guide, published</html>', 'data.json': { body: '{"a":1}', type: `application/json; x=${frame}` },
+  } } } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  const dir = 'published/Guide_Short1';
+  assert.strictEqual(fileText(written, `${dir}/v1/index.html`), '<html>guide, published</html>');
+  assert.strictEqual(fileText(written, `${dir}/v1/data.json`), '{"a":1}');
+  const json = JSON.parse(fileText(written, `${dir}/published.json`));
+  assert.deepStrictEqual(json, {
+    format: 1, title: 'Guide', url: 'https://claude.ai/artifact/Short1', shortId: 'Short1', uuid: PUB_U,
+    versions: { v1: {
+      ver: 'v1', label: 'v1', order: 0, saved: true,
+      files: [
+        { path: 'index.html', savedAs: 'index.html', size: 29, contentType: 'text/html', sha256: sha('<html>guide, published</html>') },
+        { path: 'data.json', savedAs: 'data.json', size: 7, contentType: null, sha256: sha('{"a":1}') },
+      ],
+      start: 'index.html', startSaved: 'index.html', incomplete: false, needsRuntime: false, missing: [],
+      publishedIn: [{ chat: 'c1', messageUuid: 'a', toolUseId: 'p1', same: false, writtenAs: null }],
+    } },
+  });
+  const [entry] = plain(output.published);
+  assert.strictEqual(entry.dir, dir);
+  assert.deepStrictEqual(entry.versions.map((v) => [v.ver, v.folderName, v.label, v.start, v.startSaved, v.same, v.writtenAs, v.incomplete, v.text]),
+    [['v1', 'v1', 'v1', 'index.html', 'index.html', false, null, false, '<html>guide, published</html>']]);
+  assert.deepStrictEqual(entry.versions[0].publishes, [{ messageUuid: 'a', toolUseId: 'p1' }]);
+  assert.ok(docText(written, 'README.md').includes('## Published pages (1)'));
+  assert.ok(docText(written, 'README.md').includes(`(${dir}/v1/index.html)`));
+  assert.ok(docText(written, 'full_chat.md').includes(`(${dir}/v1/index.html)`));
+  for (const k of Object.keys(written)) {
+    const t = fileText(written, k);
+    assert.ok(!/frame\.claudeusercontent\.com|__frame_t/.test(t), k);
+  }
+});
+
+test('a version identical to the text Claude wrote is not copied; one edited later is', async () => {
+  const data = pubChat([
+    pubMsg('m1', null, [use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G1' }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs)]),
+    pubMsg('m2', 'm1', [use('e', 'Edit', { file_path: '/home/claude/guide.html', old_string: 'G1', new_string: 'G2' }), result('e'), ...publish('p2', PUB_U, 'v2', guideAs)]),
+    pubMsg('m3', 'm2', [use('o', 'Write', { file_path: '/home/claude/other.txt', content: 'x' }), result('o'), ...publish('p3', PUB_U, 'v3', guideAs)]),
+  ]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1', 'v2', 'v3'], versions: {
+    v1: { files: { 'index.html': 'G1' } }, v2: { files: { 'index.html': 'G2' } }, v3: { files: { 'index.html': 'G3, the page\'s own change' } },
+  } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  const versions = plain(output.published[0].versions);
+  assert.deepStrictEqual(versions.map((v) => [v.label, v.order, v.same, v.writtenAs, v.text]),
+    [['v1', 0, true, 'guide_v1.html', 'G1'], ['v2', 1, true, 'guide_v2.html', 'G2'], ['v3', 2, false, null, 'G3, the page\'s own change']]);
+  const saved = Object.keys(written).filter((k) => k.startsWith('published/')).sort();
+  assert.deepStrictEqual(saved, ['published/Guide_Short1/published.json', 'published/Guide_Short1/v3/index.html']);
+  assert.strictEqual(fetcher.count('publishedPageFile'), 1);
+  const json = JSON.parse(fileText(written, 'published/Guide_Short1/published.json'));
+  assert.strictEqual(json.versions.v1.saved, false);
+  assert.deepStrictEqual(json.versions.v1.publishedIn, [{ chat: 'c1', messageUuid: 'm1', toolUseId: 'p1', same: true, writtenAs: 'guide_v1.html' }]);
+  assert.ok(docText(written, 'full_chat.md').includes('(artefacts/guide_v1.html)'));
+});
+
+test('a page attached by claude.ai to the publishing message counts as the written copy', async () => {
+  const attachedChat = pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', [{ as: 'index.html', path: '/mnt/user-data/outputs/guide.html' }]),
+    { files_v2: [{ success: true, file_name: 'guide.html', file_uuid: 'att-1', file_kind: 'blob' }] })]);
+  const pages = { [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': '<p>page</p>' } } } } };
+  const one = await runFolder(exportPopup({ texts: { 'att-1': textBlob('<p>page</p>') } }), attachedChat, { fetchPublished: publishedFetcher(pages).fetch });
+  assert.deepStrictEqual(plain(one.output.published[0].versions.map((v) => [v.same, v.writtenAs])), [[true, 'guide.html']]);
+
+  // The attachment has the name of a file Claude wrote, so it isn't downloaded: the written text at the publish decides.
+  const existing = pubChat([
+    pubMsg('m1', null, [use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'A' }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs)],
+      { files_v2: [{ success: true, file_name: 'guide.html', file_uuid: 'att-1', file_kind: 'blob' }] }),
+    pubMsg('m2', 'm1', [use('e', 'Edit', { file_path: '/home/claude/guide.html', old_string: 'A', new_string: '<p>page</p>' }), result('e')]),
+  ]);
+  const two = await runFolder(exportPopup({ texts: { 'att-1': textBlob('<p>page</p>') } }), existing, { fetchPublished: publishedFetcher(pages).fetch });
+  assert.deepStrictEqual(plain(two.output.published[0].versions.map((v) => [v.same, v.writtenAs])), [[false, null]]);
+  assert.strictEqual(fileText(two.written, 'published/Guide_Short1/v1/index.html'), '<p>page</p>');
+});
+
+test('a page whose source inlined an upload compares the inlined text on disk', async () => {
+  const page = '<img src="/mnt/user-data/uploads/x.png">';
+  const data = pubChat([
+    { uuid: 'h', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'hi' }], files_v2: [{ success: true, file_name: 'x.png', file_uuid: 'up-x', file_kind: 'image' }] },
+    pubMsg('m1', 'h', [use('w', 'Write', { file_path: '/home/claude/guide.html', content: page }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs)]),
+  ]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': page } } } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  assert.ok(!fileText(written, 'artefacts/guide.html').includes('/mnt/user-data/uploads/x.png'));
+  assert.deepStrictEqual(plain(output.published[0].versions.map((v) => [v.same, v.writtenAs])), [[false, null]]);
+  assert.strictEqual(fileText(written, 'published/Guide_Short1/v1/index.html'), page);
+});
+
+test('a two-file page where only index.html matches is copied', async () => {
+  const data = pubChat([pubMsg('m1', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G' }), result('w'),
+    use('d', 'Write', { file_path: '/home/claude/data.json', content: '{"a":1}' }), result('d'),
+    ...publish('p1', PUB_U, 'v1', [...guideAs, { as: 'data.json', path: '/home/claude/data.json' }]),
+  ])]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': 'G', 'data.json': '{"a":2}' } } } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  assert.deepStrictEqual(plain(output.published[0].versions.map((v) => [v.same, v.writtenAs])), [[false, null]]);
+  assert.strictEqual(fileText(written, 'published/Guide_Short1/v1/index.html'), 'G');
+  assert.strictEqual(fileText(written, 'published/Guide_Short1/v1/data.json'), '{"a":2}');
+});
+
+test('a binary artefact is never the same as a published file', async () => {
+  const data = pubChat([pubMsg('m1', null, [
+    use('w', 'Write', { file_path: '/home/claude/pic.png', content: 'PNGDATA' }), result('w'),
+    ...publish('p1', PUB_U, 'v1', [{ as: 'pic.png', path: '/home/claude/pic.png' }]),
+  ])]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'pic.png': { body: 'PNGDATA', type: 'image/png' } } } } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  assert.deepStrictEqual(plain(output.published[0].versions.map((v) => [v.same, v.writtenAs, v.start, v.text])), [[false, null, 'pic.png', null]]);
+  assert.strictEqual(fileText(written, 'published/Guide_Short1/v1/pic.png'), 'PNGDATA');
+});
+
+test('pages that can\'t be fetched are warnings, and the chat still exports', async () => {
+  const data = pubChat([pubMsg('m1', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G' }), result('w'),
+    ...publish('p1', PUB_U, 'v1', guideAs, 'Gone1', 'Gone'),
+    ...publish('p4', PUB_U4, 'v1', guideAs, 'Bad4', 'Bad'),
+    // After a 401, later pages are skipped without fetching.
+    ...publish('p2', PUB_U2, 'v1', guideAs, 'Out2', 'Out'),
+    ...publish('p3', PUB_U3, 'v1', guideAs, 'Out3', 'Out too'),
+  ])]);
+  const signedOut = { error: 'HTTP 401', status: 401 };
+  const fetcher = publishedFetcher({
+    [PUB_U2]: { error: signedOut }, [PUB_U3]: { error: signedOut },
+    [PUB_U4]: { title: 'Bad', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'tampered', sha256: sha('original') }, 'app.js': 'x()' } } } },
+  });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  assert.ok(docText(written, 'full_chat.md'));
+  const warnings = pubWarnings(output);
+  assert.ok(warnings.some((w) => /HTTP 404/.test(w.message) && /https:\/\/claude\.ai\/artifact\/Gone1/.test(`${w.message} ${w.details.note}`)));
+  assert.strictEqual(warnings.filter((w) => /signed out/i.test(w.message)).length, 1);
+  assert.strictEqual(fetcher.count('publishedPageInfo', PUB_U3), 0);
+  const bad = plain(output.published.find((e) => e.uuid === PUB_U4));
+  assert.deepStrictEqual(bad.versions.map((v) => [v.incomplete, v.start, v.startSaved]), [[true, null, null]]);
+  const json = JSON.parse(fileText(written, 'published/Bad_Bad4/published.json'));
+  assert.deepStrictEqual(json.versions.v1.missing, ['index.html']);
+  assert.strictEqual(json.versions.v1.incomplete, true);
+  assert.strictEqual(json.versions.v1.start, null);
+  assert.strictEqual(fileText(written, 'published/Bad_Bad4/v1/app.js'), 'x()');
+  assert.strictEqual(written['published/Bad_Bad4/v1/index.html'], undefined);
+  assert.ok(warnings.some((w) => /index\.html/.test(w.message) && /Bad4/.test(`${w.message} ${w.details.note}`)));
+  assert.ok(/published_page|published page/i.test(fileText(written, 'errors.txt')));
+  assert.ok(!/__frame_t|frame\.claudeusercontent/.test(fileText(written, 'errors.txt')));
+});
+
+test('published file paths stay inside the page folder with distinct names', async () => {
+  const data = pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { rejected: ['../evil'], files: {
+    'Index.html': 'I', 'index.html': 'i', a: 'file a', 'a/b': 'file b', 'con.txt': 'c', 'x:y.txt': 'xy',
+  } } } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  const json = JSON.parse(fileText(written, 'published/Guide_Short1/published.json'));
+  assert.deepStrictEqual(json.versions.v1.files.map((f) => [f.path, f.savedAs]), [
+    ['Index.html', 'Index.html'], ['index.html', 'index_2.html'], ['a', 'a'], ['a/b', 'a_2/b'], ['con.txt', '_con.txt'], ['x:y.txt', 'x_y.txt'],
+  ]);
+  assert.strictEqual(json.versions.v1.start, 'index.html');
+  assert.strictEqual(json.versions.v1.startSaved, 'index_2.html');
+  assert.strictEqual(fileText(written, 'published/Guide_Short1/v1/index_2.html'), 'i');
+  assert.strictEqual(fileText(written, 'published/Guide_Short1/v1/a_2/b'), 'file b');
+  assert.ok(Object.keys(written).every((k) => !k.includes('..') && !k.includes(':')));
+  const warnings = pubWarnings(output);
+  assert.strictEqual(warnings.length, 1);
+  for (const s of ['index_2.html', 'a_2/b', '_con.txt', 'x_y.txt', '../evil']) assert.ok(warnings[0].message.includes(s), s);
+});
+
+test('a ZIP export without a claude.ai tab warns that pages were not fetched', async () => {
+  const data = pubChat([pubMsg('m1', null, [...publish('p1', PUB_U, 'v1', guideAs), ...publish('p2', PUB_U2, 'v1', guideAs, 'S2')])]);
+  const { written, output } = await runFolder(exportPopup(), data);
+  const warnings = pubWarnings(output);
+  assert.strictEqual(warnings.length, 1);
+  assert.match(warnings[0].message, /page not fetched: no claude\.ai tab/);
+  assert.ok(!Object.keys(written).some((k) => k.startsWith('published/')));
+});
+
+const bulkWithPages = (fetcher, scripting) => (sb) => {
+  const orig = sb.chrome.tabs.sendMessage;
+  sb.chrome.tabs.sendMessage = (id, msg, cb) => (/^publishedPage/.test(msg.action) ? fetcher.fetch(msg).then(cb) : orig(id, msg, cb));
+  sb.chrome.scripting = { executeScript: async () => { scripting.calls++; } };
+};
+
+test('the extension\'s message wiring is used', async () => {
+  const chats = { a: Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' }) };
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': 'page' } } } } });
+  const scripting = { calls: 0 };
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats, setup: bulkWithPages(fetcher, scripting) });
+  assert.strictEqual(await zip.file('published/Guide_Short1/v1/index.html').async('string'), 'page');
+  assert.strictEqual(scripting.calls, 0);
+  assert.strictEqual(fetcher.count('publishedPageInfo'), 1);
+});
+
+test('Export All stores a page published from two chats once and lists both', async () => {
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'one' }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs),
+  ])]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, [...publish('q1', PUB_U, 'v1', guideAs), ...publish('q2', PUB_U, 'v2', guideAs)])]), { uuid: 'b', name: 'Chat b' });
+  const chatC = Object.assign(pubChat([{ uuid: 'h', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'hi' }] }]), { uuid: 'p', name: 'published' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1', 'v2'], versions: { v1: { files: { 'index.html': 'one' } }, v2: { files: { 'index.html': 'two' } } } } });
+  const scripting = { calls: 0 };
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z'), listed('p', '2026-01-03T00:00:00Z')];
+  const { zip } = await runBulkZip({ list, chats: { a: chatA, b: chatB, p: chatC }, setup: bulkWithPages(fetcher, scripting) });
+  const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir);
+  assert.deepStrictEqual(names.filter((n) => /(^|\/)published\//.test(n) && !n.startsWith('published_2/')).sort(),
+    ['published/Guide_Short1/published.json', 'published/Guide_Short1/v1/index.html', 'published/Guide_Short1/v2/index.html']);
+  assert.ok(names.some((n) => n.startsWith('published_2/README.md')));
+  const json = JSON.parse(await zip.file('published/Guide_Short1/published.json').async('string'));
+  assert.deepStrictEqual(Object.keys(json.versions), ['v1', 'v2']);
+  assert.deepStrictEqual(json.versions.v1.publishedIn, [
+    { chat: 'a', messageUuid: 'm1', toolUseId: 'p1', same: true, writtenAs: 'guide.html' },
+    { chat: 'b', messageUuid: 'n1', toolUseId: 'q1', same: false, writtenAs: null },
+  ]);
+  assert.strictEqual(json.versions.v1.saved, true);
+  assert.deepStrictEqual(json.versions.v2.publishedIn, [{ chat: 'b', messageUuid: 'n1', toolUseId: 'q2', same: false, writtenAs: null }]);
+  assert.strictEqual(fetcher.count('publishedPageInfo'), 2);
+  assert.strictEqual(fetcher.count('publishedPageFile'), 2);
+  const readmeB = await zip.file('Chat_b/README.md').async('string');
+  assert.ok(readmeB.includes('(../published/Guide_Short1/v2/index.html)'));
 });

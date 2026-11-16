@@ -33,7 +33,7 @@ function loadPopup({ fetch = async () => ({ ok: false, status: 404 }) } = {}) {
       querySelectorAll: () => [], querySelector: () => null, addEventListener() {},
     },
     window: { close() {} },
-    setTimeout, clearTimeout, URL, encodeURIComponent, btoa, atob, TextEncoder, TextDecoder,
+    setTimeout, clearTimeout, URL, encodeURIComponent, btoa, atob, TextEncoder, TextDecoder, crypto: require('crypto').webcrypto,
     JSZip: function () {},
     FileReader: class { readAsDataURL() { this.result = 'data:x;base64,'; if (this.onload) this.onload(); } },
     fetch,
@@ -105,12 +105,13 @@ function exportPopup({ failing = [], routes = [], texts = {} } = {}) {
     },
   });
 }
-async function runFolder(popup, data, { folderName = '', shared = null, target = zipStub() } = {}) {
+async function runFolder(popup, data, { folderName = '', shared = null, target = zipStub(), fetchPublished = null } = {}) {
   popup.sandbox.__folder = target;
   popup.sandbox.__data = data;
   popup.sandbox.__shared = shared;
   popup.sandbox.__name = folderName;
-  const output = await vm.runInContext("populateConversationFolder(__folder, __data, null, 'org', __shared, __name)", popup.sandbox);
+  popup.sandbox.__fetchPublished = fetchPublished;
+  const output = await vm.runInContext("populateConversationFolder(__folder, __data, null, 'org', __shared, __name, __fetchPublished)", popup.sandbox);
   return { written: target.written, output, chat: output.viewerChat };
 }
 const withUploads = () => {
@@ -144,4 +145,41 @@ function docTools(prefix = 'mcp__Claude_Docs__', { node = 'node-1', title = 'Lor
   return { batch, batchResult: result(idPrefix + 'd1', batchResult), update, comment, result };
 }
 
-module.exports = { DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads };
+// Answers content.js's publishedPageInfo and publishedPageFile from a table, and records every call.
+// pages: { <uuid>: { title, history, live: <ver of ''>, error: <info response>, versions: { <ver>: { rejected,
+// files: { <path>: text | { body, sha256, type, error } } } } } }. A file's sha256 defaults to that of its body.
+function publishedFetcher(pages) {
+  const crypto = require('crypto');
+  const calls = [];
+  const fileOf = (f) => (typeof f === 'string' ? { body: f } : f);
+  const fetch = async (msg) => {
+    calls.push(JSON.parse(JSON.stringify(msg)));
+    const page = pages[msg.uuid];
+    if (!page) return { error: 'HTTP 404', status: 404 };
+    if (page.error) return page.error;
+    const ver = msg.ver === '' ? page.live : msg.ver;
+    const v = page.versions[ver];
+    if (!v) return { error: 'HTTP 404', status: 404 };
+    if (msg.action === 'publishedPageInfo') {
+      return {
+        ver, title: page.title, history: page.history || Object.keys(page.versions), rejected: v.rejected || [],
+        files: Object.entries(v.files).map(([path, raw]) => {
+          const f = fileOf(raw);
+          const body = Buffer.from(f.body);
+          return { path, size: body.length, contentType: f.type === undefined ? 'text/html' : f.type, sha256: f.sha256 || crypto.createHash('sha256').update(body).digest('hex') };
+        }),
+      };
+    }
+    if (msg.action === 'publishedPageFile') {
+      if (!Object.prototype.hasOwnProperty.call(v.files, msg.path)) return { error: 'not found' };
+      const f = fileOf(v.files[msg.path]);
+      if (f.error) return f.error;
+      const body = Buffer.from(f.body);
+      return { base64: body.toString('base64'), contentType: f.type || 'text/html', size: body.length };
+    }
+    return { error: 'bad request' };
+  };
+  return { fetch, calls, count: (action, uuid) => calls.filter((c) => c.action === action && (!uuid || c.uuid === uuid)).length };
+}
+
+module.exports = { DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };

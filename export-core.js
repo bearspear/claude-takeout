@@ -367,6 +367,35 @@ function publishedPagesOf(data) {
   return pages;
 }
 
+// The index in entry.versions (extractArtifacts' index entry) of the version an artifact had as of a message:
+// the last of entry.messages at or before it on chain. messageUuid null or undefined: the last version made on
+// chain. -1 when there is none yet, or when the message is not on chain.
+const chainPositions = new WeakMap();
+function versionAsOf(entry, chain, messageUuid) {
+  let pos = chainPositions.get(chain);
+  if (!pos) {
+    pos = new Map(Array.from(chain || [], (m, i) => [m && m.uuid, i]));
+    if (chain && typeof chain === 'object') chainPositions.set(chain, pos);
+  }
+  let at = null;
+  if (messageUuid != null) {
+    if (!pos.has(messageUuid)) return -1;
+    at = pos.get(messageUuid);
+  }
+  let v = -1;
+  Array.from((entry && entry.messages) || []).forEach((id, i) => { if (pos.has(id) && (at == null || pos.get(id) <= at)) v = i; });
+  return v;
+}
+
+// One segment of a published page's file path as a name that is safe on every system: zipSafeName, then
+// <>:"|?* as _, trailing dots and spaces trimmed, and a Windows device name (CON, PRN, AUX, NUL, COM1-9,
+// LPT1-9, any case, with or without an extension) prefixed with _. Never empty.
+function publishedSegment(name) {
+  let safe = zipSafeName(name).replace(/[<>:"|?*]/g, '_').replace(/[. ]+$/, '');
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(safe)) safe = '_' + safe;
+  return safe || '_';
+}
+
 function docPayload(payload) {
   if (payload && typeof payload === 'object') return payload;
   try { return JSON.parse(payload); } catch (e) { return null; }
@@ -1191,7 +1220,7 @@ function extractDeliveredFiles(data, takenNames = []) {
 // Files claude.ai attached to Claude's own messages, such as a page Claude published. They are Claude's
 // output, so they go to artefacts/, not uploads/. One whose name a replayed artifact already has is that
 // file (existing: true) and isn't saved again. takenNames: names already in artefacts/. Returns
-// [{ filename, uuid, path, existing }].
+// [{ filename, uuid, path, existing, messageUuid }], messageUuid the message the file is on.
 function extractAttachedFiles(data, takenNames = []) {
   const taken = new Set(takenNames);
   const seen = new Set();
@@ -1207,7 +1236,7 @@ function extractAttachedFiles(data, takenNames = []) {
       seen.add(file.file_uuid);
       const name = zipSafeName(raw).normalize('NFC');
       if (taken.has(name)) {
-        files.push({ filename: name, uuid: file.file_uuid, path: file.path || '', existing: true });
+        files.push({ filename: name, uuid: file.file_uuid, path: file.path || '', existing: true, messageUuid: msg.uuid });
         continue;
       }
       const dot = name.lastIndexOf('.');
@@ -1216,7 +1245,7 @@ function extractAttachedFiles(data, takenNames = []) {
       let out = name;
       for (let n = 2; taken.has(out); n++) out = `${base}_${n}${ext}`;
       taken.add(out);
-      files.push({ filename: out, uuid: file.file_uuid, path: file.path || '', existing: false });
+      files.push({ filename: out, uuid: file.file_uuid, path: file.path || '', existing: false, messageUuid: msg.uuid });
     }
   }
   return files;
@@ -1376,7 +1405,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, base58ToUuid, publishedPagesOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, base58ToUuid, publishedPagesOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
   };
