@@ -1700,3 +1700,16 @@ test('parseArtifactHash', () => {
   assert.strictEqual(parseArtifactHash('#a=LkJG_x-1'), 'LkJG_x-1');
   for (const h of ['#chat=abc', '#a=', '#a=<script>', '', null]) assert.strictEqual(parseArtifactHash(h), null);
 });
+
+test('artifact logic edges', () => {
+  assert.strictEqual(resolveArtifactPath('index.html', 'java\tscript:x'), null);
+  assert.strictEqual(resolveArtifactPath('index.html', ' \x01a.css '), 'a.css');
+  assert.strictEqual(resolveArtifactPath('index.html', 'a\n/b.css'), 'a/b.css');
+  const p = { texts: [['a.js', 'go()']], images: [['i.png', 'data:image/png;base64,AAA']] };
+  assert.strictEqual(inlineArtifact('<img src="i.png" src="x.png">', 'index.html', p), '<img src="data:image/png;base64,AAA">');
+  assert.strictEqual(inlineArtifact('<script src="a.js" src="b.js"></script>', 'index.html', p), '<script>go()</script>');
+  const { STORAGE_SHIM } = require('../viewer/viewer-logic.js');
+  assert.ok(STORAGE_SHIM.includes('i>=0&&i<k.length'));
+  assert.strictEqual(parseArtifactHash('#chat=x&a=abc'), null);
+  assert.strictEqual(parseArtifactHash('#a=abc&x=1'), null);
+});

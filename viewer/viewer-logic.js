@@ -501,7 +501,7 @@ function previewDoc(text, lookup) {
 // any .. past the artifact root and a decoded segment holding a slash. A backslash counts as a slash.
 function resolveArtifactPath(startPath, url) {
   if (typeof startPath !== 'string' || typeof url !== 'string') return null;
-  const raw = url.trim().replace(/\\/g, '/');
+  const raw = url.replace(/[\t\n\r]/g, '').replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/\\/g, '/');
   if (!raw || /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw[0] === '/' || /[?#]/.test(raw)) return null;
   const stack = startPath.replace(/\\/g, '/').split('/').filter(Boolean);
   stack.pop();
@@ -548,14 +548,14 @@ function inlineArtifact(html, startPath, payload) {
         uri = first ? image(first) : null;
       }
       if (uri === null) return null;
-      const rest = kept(attrs.filter(a => a !== src && a !== set));
+      const rest = kept(attrs.filter(a => a.name !== 'src' && a.name !== 'srcset'));
       return `<img${rest} src="${uri}">`;
     }
     if (tag === 'script') {
       const src = attrOf(attrs, 'src');
       const code = text(src, /\.m?js$/i);
       if (code == null) return null;
-      const rest = kept(attrs.filter(a => a !== src));
+      const rest = kept(attrs.filter(a => a.name !== 'src'));
       const script = `<script${rest}>${String(code).replace(/<\/(script)/gi, '<\\/$1').replace(/<!--/g, '<\\x21--')}</script>`;
       const type = attrOf(attrs, 'type');
       if ((attrOf(attrs, 'defer') || attrOf(attrs, 'async')) && !(type && /^\s*module\s*$/i.test(type.value))) {
@@ -575,7 +575,7 @@ function inlineArtifact(html, startPath, payload) {
 }
 
 // Storage is blocked in a sandbox without allow-same-origin, and a page that touches it would throw; this gives it memory.
-const STORAGE_SHIM = `<script>(function(){function mem(){var d=Object.create(null);return{getItem:function(k){k=String(k);return k in d?d[k]:null},setItem:function(k,v){d[String(k)]=String(v)},removeItem:function(k){delete d[String(k)]},clear:function(){d=Object.create(null)},key:function(i){var k=Object.keys(d);return i<k.length?k[i]:null},get length(){return Object.keys(d).length}}}['localStorage','sessionStorage'].forEach(function(n){var ok=true;try{window[n].getItem('x')}catch(e){ok=false}if(!ok){try{Object.defineProperty(window,n,{value:mem(),configurable:true})}catch(e){}}})})()</script>`;
+const STORAGE_SHIM = `<script>(function(){function mem(){var d=Object.create(null);return{getItem:function(k){k=String(k);return k in d?d[k]:null},setItem:function(k,v){d[String(k)]=String(v)},removeItem:function(k){delete d[String(k)]},clear:function(){d=Object.create(null)},key:function(i){var k=Object.keys(d);i=Number(i);return i>=0&&i<k.length?k[i]:null},get length(){return Object.keys(d).length}}}['localStorage','sessionStorage'].forEach(function(n){var ok=true;try{window[n].getItem('x')}catch(e){ok=false}if(!ok){try{Object.defineProperty(window,n,{value:mem(),configurable:true})}catch(e){}}})})()</script>`;
 
 // The sandboxed document for an artifact's start file: policy first, then the storage shim, then the page.
 function artifactPreviewDoc(text, startPath, payload) {
@@ -613,11 +613,8 @@ function relativeTime(iso, now) {
 }
 
 function parseArtifactHash(hash) {
-  for (const part of String(hash || '').replace(/^#/, '').split('&')) {
-    const m = /^a=([A-Za-z0-9_-]{1,64})$/.exec(part);
-    if (m) return m[1];
-  }
-  return null;
+  const m = /^#a=([A-Za-z0-9_-]{1,64})$/.exec(String(hash || ''));
+  return m ? m[1] : null;
 }
 
 // The file and version a hash can really open, or null. A bad version means the latest.
