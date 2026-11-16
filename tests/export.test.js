@@ -1974,3 +1974,47 @@ test('product cards, comparisons and questions read as Markdown, and product ima
   const carousel = chat.messages[0].blocks.find((b) => b.t === 'tool' && b.display && b.display.kind === 'carousel');
   assert.deepStrictEqual(plain(carousel.display.products.map((p) => [p.name, p.images.map((i) => /^images\//.test(i.href))])), [['HD 560S', [true]], ['HE400se', [true]]]);
 });
+
+const core = require('../export-core.js');
+const pubResult = (id, body, isError) => ({ type: 'tool_result', tool_use_id: id, is_error: !!isError, content: [{ type: 'text', text: typeof body === 'string' ? body : JSON.stringify(body) }] });
+const PUB = 'mcp__claude-artifacts__publish_files';
+const PUB_U = '0a1b2c3d-1111-4222-8333-444455556666';
+
+test('publishedPagesOf lists each page version once with every message that published it', () => {
+  const files = [{ as: 'index.html', path: '/home/claude/guide.html' }];
+  const data = { chat_messages: [
+    { uuid: 'm1', sender: 'assistant', content: [use('p1', PUB, { files }), pubResult('p1', { slug: PUB_U, version: 'v1', url: 'https://claude.ai/artifact/x', title: 'T1' })] },
+    { uuid: 'm2', sender: 'assistant', content: [use('p2', PUB, { files }), pubResult('p2', { slug: PUB_U, version: 'v2', title: 'T2' })] },
+    { uuid: 'm3', sender: 'assistant', content: [use('p3', PUB, { files }), pubResult('p3', { slug: PUB_U, version: 'v2', title: 'T2' }),
+      use('p4', PUB, { files }), pubResult('p4', { slug: PUB_U, version: 'v3' }, true),
+      use('p5', PUB, { files }), pubResult('p5', 'not json at all')] },
+  ] };
+  const pages = plain(core.publishedPagesOf(data));
+  assert.deepStrictEqual(pages.map((p) => [p.uuid, p.ver, p.publishes.length]), [[PUB_U, 'v1', 1], [PUB_U, 'v2', 2]]);
+  assert.deepStrictEqual(pages[0].sources, files);
+  assert.deepStrictEqual(pages[1].publishes.map((p) => p.messageUuid), ['m2', 'm3']);
+  assert.strictEqual(pages[1].publishes[0].toolUseId, 'p2');
+  assert.strictEqual(pages[0].current, false);
+  assert.ok(core.isPublishTool('publish_files') && !core.isPublishTool('xpublish_files'));
+});
+
+test('an old publish result with only a url gets the current version', () => {
+  const data = oneMessage([use('p1', PUB, { files: [] }), pubResult('p1', { url: 'https://claude.ai/artifact/LkJGYP3ZBnSGbvhLfeWAG1', title: 'T' })]);
+  const pages = plain(core.publishedPagesOf(data));
+  assert.strictEqual(pages.length, 1);
+  assert.strictEqual(pages[0].uuid, '9fe94226-9819-4551-8836-a76d0c116102');
+  assert.strictEqual(pages[0].ver, '');
+  assert.strictEqual(pages[0].current, true);
+  assert.strictEqual(core.base58ToUuid('LkJGYP3ZBnSGbvhLfeWAG1'), '9fe94226-9819-4551-8836-a76d0c116102');
+});
+
+test('bad ids and versions are dropped', () => {
+  const data = oneMessage([
+    use('p1', PUB, { files: [] }), pubResult('p1', { slug: '../x', version: 'v1' }),
+    use('p2', PUB, { files: [] }), pubResult('p2', { slug: PUB_U, version: '../../a' }),
+  ]);
+  assert.deepStrictEqual(plain(core.publishedPagesOf(data)), []);
+  assert.deepStrictEqual(plain(core.publishedPagesOf(publishChat())), []);
+  assert.strictEqual(core.base58ToUuid('XYZ'), '');
+  assert.strictEqual(core.base58ToUuid('0OIl0OIl0OIl0OIl0OIl0O'), '');
+});

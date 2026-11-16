@@ -294,6 +294,76 @@ function resultText(result) {
   return first ? String(first.text || '') : '';
 }
 
+// Pages Claude published with publish_files. Names may carry a connector prefix.
+const isPublishTool = (name) => /(^|__|:)publish_files$/.test(String(name || ''));
+
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+// A claude.ai/artifact short id (base58 of the 16 bytes of a UUID) as the UUID it stands for, or ''
+// unless it is 21-22 alphabet characters that decode to under 2^128 and encode back to the same text.
+function base58ToUuid(shortId) {
+  const id = String(shortId || '');
+  if (!/^[1-9A-HJ-NP-Za-km-z]{21,22}$/.test(id)) return '';
+  let n = 0n;
+  for (const c of id) n = n * 58n + BigInt(BASE58.indexOf(c));
+  if (n >= (1n << 128n)) return '';
+  const hex = n.toString(16).padStart(32, '0');
+  let again = '';
+  for (let v = n; v > 0n; v /= 58n) again = BASE58[Number(v % 58n)] + again;
+  if (again !== id) return '';
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const PUBLISH_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PUBLISH_VER_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+
+// The pages a chat published, one entry per uuid + version, in chat order over every message (also
+// branches that are no longer current). A result with no slug and version but an artifact url stands for
+// the live version: ver '' and current true.
+function publishedPagesOf(data) {
+  const pages = [];
+  const byKey = new Map();
+  for (const msg of (data && data.chat_messages) || []) {
+    const blocks = Array.isArray(msg.content) ? msg.content : [];
+    const results = new Map();
+    for (const b of blocks) if (b && b.type === 'tool_result') results.set(b.tool_use_id, b);
+    for (const b of blocks) {
+      if (!b || b.type !== 'tool_use' || !isPublishTool(b.name)) continue;
+      const r = results.get(b.id);
+      if (!r || r.is_error) continue;
+      const info = leadingJson(resultText(r));
+      if (!info || typeof info !== 'object' || Array.isArray(info)) continue;
+      let uuid = '', ver = '', current = false;
+      const url = typeof info.url === 'string' ? info.url : '';
+      if (info.slug != null || info.version != null) {
+        uuid = String(info.slug == null ? '' : info.slug).toLowerCase();
+        ver = String(info.version == null ? '' : info.version);
+        if (!PUBLISH_UUID_RE.test(uuid) || !PUBLISH_VER_RE.test(ver)) continue;
+      } else {
+        const m = /^https:\/\/claude\.ai\/artifact\/([^/?#]+)/.exec(url);
+        uuid = m ? base58ToUuid(m[1]) : '';
+        if (!uuid) continue;
+        current = true;
+      }
+      const shortId = (/\/artifact\/([^/?#]+)/.exec(url) || [])[1] || '';
+      const key = `${uuid} ${ver}`;
+      let page = byKey.get(key);
+      if (!page) {
+        const files = b.input && Array.isArray(b.input.files) ? b.input.files : [];
+        page = {
+          uuid, shortId, ver, title: String(info.title || (b.input && b.input.title) || ''), url, current,
+          publishes: [],
+          sources: files.filter((f) => f && typeof f.path === 'string').map((f) => ({ as: String(f.as || ''), path: f.path })),
+        };
+        byKey.set(key, page);
+        pages.push(page);
+      }
+      page.publishes.push({ messageUuid: msg.uuid, toolUseId: b.id });
+    }
+  }
+  return pages;
+}
+
 function docPayload(payload) {
   if (payload && typeof payload === 'object') return payload;
   try { return JSON.parse(payload); } catch (e) { return null; }
@@ -1303,7 +1373,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, base58ToUuid, publishedPagesOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
   };

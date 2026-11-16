@@ -2957,7 +2957,6 @@ function formatTimestamp(isoString) {
 // Tools convertToMarkdown shows in a line of their own. Names may carry a connector prefix (mcp__visualize__...).
 const isGuidanceTool = (name) => /(__|:)(read_me|guide|list_types)$/.test(String(name || ''));
 const isImageSearchTool = (name) => /(^|__|:)image_search$/.test(String(name || ''));
-const isPublishTool = (name) => /(^|__|:)publish_files$/.test(String(name || ''));
 const imagesOf = (result) => (Array.isArray(result && result.content) ? result.content : []).flatMap((c) => (c && Array.isArray(c.images) ? c.images.filter(Boolean) : []));
 // Text inside [...] of a Markdown link, and a URL for (...): brackets, parentheses and spaces escaped.
 const mdLinkText = (text) => String(text).replace(/[\\[\]]/g, '\\$&').replace(/\s+/g, ' ');
