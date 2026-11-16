@@ -9,9 +9,11 @@
 <title>Artifacts - Claude Takeout</title>
 <style>
 :root {
-  --bg: #faf9f5; --side: #f5f4ed; --ink: #29261b; --soft: #3d3d3a; --mute: #73726c; --faint: #a3a198;
+  --bg: #fff; --side: #f5f4ed; --ink: #29261b; --soft: #3d3d3a; --mute: #73726c; --faint: #a3a198;
   --line: #e8e6dc; --line-strong: #dedcd1; --card: #fff; --tile: #e8e6dc;
   --acc: #c96442; --err: #b53333; --hover: rgba(61, 57, 41, .06); --active: #e8e6dc;
+  --pill: #eceae4; --pic: #f0eee8; --page-line: #e5e3dd; --tile-bg: #f5f4ef; --tile-ink: #8a887f;
+  --docs-bg: #e3ecfb; --docs-ink: #2f6bd6; --design-bg: #ece5fb; --design-ink: #7650d8;
   --serif: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, "Times New Roman", serif;
   --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -22,6 +24,8 @@
     --bg: #262624; --side: #1f1e1d; --ink: #ece9e0; --soft: #c2c0b6; --mute: #9c9a92; --faint: #76746d;
     --line: #3a3936; --line-strong: #4a4945; --card: #30302e; --tile: #3e3e3a;
     --acc: #d97757; --err: #e5806f; --hover: rgba(236, 233, 224, .06); --active: #141413;
+    --pill: #3a3936; --pic: #262624; --page-line: #4a4945; --tile-bg: #353532; --tile-ink: #a3a198;
+    --docs-bg: #233350; --docs-ink: #8fb4f5; --design-bg: #34284f; --design-ink: #b9a2f2;
     color-scheme: dark;
   }
 }
@@ -30,16 +34,57 @@ html, body { margin: 0; }
 body { background: var(--bg); color: var(--ink); font: 14px/1.5 var(--sans); -webkit-font-smoothing: antialiased; }
 button { font: inherit; color: inherit; }
 :focus-visible { outline: 2px solid var(--acc); outline-offset: 1px; }
-#home { max-width: 1120px; margin: 0 auto; padding: 40px 16px 64px; }
-#home h1 { font: 500 30px/1.2 var(--serif); letter-spacing: -.01em; margin: 0 0 6px; }
-#count { color: var(--mute); font-size: 13px; margin: 0; }
+#home { max-width: 817px; margin: 0 auto; padding: 48px 16px 64px; }
+#home h1 { font: 400 32px/1.2 var(--serif); letter-spacing: -.01em; margin: 0 0 20px; color: var(--ink); }
+.bar { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+[role=tablist] { display: flex; gap: 2px; flex: 1; min-width: 0; flex-wrap: wrap; }
+[role=tab] { border: 0; background: none; padding: 5px 10px; border-radius: 6px; font-size: 13px; color: var(--mute); cursor: pointer; }
+[role=tab]:hover { color: var(--ink); background: var(--hover); }
+[role=tab][aria-selected=true] { background: var(--pill); color: var(--ink); }
+.search { position: relative; display: flex; align-items: center; width: 200px; flex: 0 1 200px; }
+.search svg { position: absolute; left: 9px; width: 14px; height: 14px; color: var(--mute); pointer-events: none; }
+#search { width: 100%; font: inherit; font-size: 13px; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px 5px 29px; outline: none; }
+#search::placeholder { color: var(--faint); }
+#search:focus { border-color: var(--line-strong); box-shadow: 0 0 0 3px var(--hover); }
+#search::-webkit-search-cancel-button { cursor: pointer; }
+#grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 20px; }
+.card { display: flex; flex-direction: column; text-align: left; padding: 0; background: var(--card); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; cursor: pointer; transition: border-color .15s, box-shadow .15s; min-width: 0; }
+.card:hover { border-color: var(--line-strong); box-shadow: 0 2px 8px rgba(0, 0, 0, .06); }
+.pic { display: block; height: 124px; padding: 24px 24px 0; background: var(--pic); overflow: hidden; border-bottom: 1px solid var(--line); }
+.pic img { display: block; width: 100%; min-height: 100%; object-fit: cover; object-position: top; background: #fff; border: 1px solid var(--page-line); border-bottom: 0; border-radius: 4px 4px 0 0; }
+.tile { display: flex; align-items: center; justify-content: center; height: 100%; border-radius: 4px 4px 0 0; background: var(--tile-bg); color: var(--tile-ink); border: 1px solid var(--page-line); border-bottom: 0; }
+.tile svg { width: 28px; height: 28px; }
+.tile.docs { background: var(--docs-bg); color: var(--docs-ink); }
+.tile.design { background: var(--design-bg); color: var(--design-ink); }
+.info { display: block; padding: 10px 12px 11px; min-width: 0; }
+.title { display: block; font-size: 13px; line-height: 18px; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.sub { display: flex; align-items: center; gap: 6px; margin-top: 2px; font-size: 11px; line-height: 16px; color: var(--mute); }
+.sub .dot { color: var(--faint); }
+.sub time:empty, .sub time:empty + .dot { display: none; }
+.globe { margin-left: auto; width: 13px; height: 13px; color: var(--mute); flex: none; }
+#empty { color: var(--mute); font-size: 14px; text-align: center; padding: 64px 0; margin: 0; }
+@media (max-width: 560px) {
+  #home { padding-top: 28px; }
+  .bar { flex-wrap: wrap; }
+  .search { flex: 1 1 100%; width: auto; }
+  #grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
+  .pic { height: 104px; padding: 16px 16px 0; }
+}
 </style>
 </head>
 <body>
 <main id="home">
   <h1>Artifacts</h1>
-  <p id="count"></p>
-  <div id="grid"></div>
+  <div class="bar">
+    <div role="tablist" aria-label="Which artifacts">
+      <button type="button" role="tab" id="tab-all" data-tab="all" aria-controls="grid">All</button>
+      <button type="button" role="tab" id="tab-yours" data-tab="yours" aria-controls="grid">Yours</button>
+      <button type="button" role="tab" id="tab-shared" data-tab="shared" aria-controls="grid">Shared with you</button>
+    </div>
+    <label class="search"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.75"/><path d="m10.5 10.5 3.5 3.5" stroke-linecap="round"/></svg><input type="search" id="search" placeholder="Search artifacts" aria-label="Search artifacts" autocomplete="off" spellcheck="false"></label>
+  </div>
+  <div id="grid" role="tabpanel" aria-label="Artifacts"></div>
+  <p id="empty" role="status" hidden></p>
 </main>
 <script id="data" type="application/json">/*DATA_JSON*/</script>
 <script>/*MARKED_JS*/</script>
