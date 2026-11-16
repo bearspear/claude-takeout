@@ -394,13 +394,13 @@
       };
       versions.forEach((v, i) => {
         for (const p of Array.isArray(v.publishes) ? v.publishes : []) {
-          if (p && p.toolUseId != null) pageOf.set(p.toolUseId, { key: 'published:' + entry.uuid, build, version: i });
+          if (p && p.toolUseId != null) pageOf.set(p.toolUseId, { key: 'published:' + entry.uuid, build, version: i, same: !!v.same, writtenAs: v.writtenAs ? String(v.writtenAs) : '' });
         }
       });
     }
-    // The names a page's files had in Claude's sandbox, from the publish call itself.
-    const sourceNames = input => new Set((Array.isArray(input.files) ? input.files : []).filter(f => f && typeof f === 'object')
-      .flatMap(f => [f.as, baseName(f.path)]).filter(n => typeof n === 'string' && n));
+    // The names of the files Claude wrote that a publish published (their sandbox paths), from the call itself.
+    const sourceNames = input => (Array.isArray(input.files) ? input.files : []).filter(f => f && typeof f === 'object')
+      .map(f => baseName(f.path)).filter(n => typeof n === 'string' && n);
 
     source.forEach((m, mi) => {
       const message = messages[mi];
@@ -431,7 +431,9 @@
           touch(after, page.key, page.build, page.version);
           sharedKeys.add(page.key);
           delete after.published;
-          for (const n of sourceNames(input)) pageSources.add(n);
+          // Only a version the same as the written file makes claude.ai's attached copy a duplicate; otherwise the
+          // attachment is Claude's own file, which differs from the page, and stays listed.
+          if (page.same) for (const n of [...sourceNames(input), page.writtenAs]) if (n) pageSources.add(n);
           continue;
         }
 

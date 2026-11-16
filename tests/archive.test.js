@@ -385,6 +385,20 @@ test('parity: published pages on disk rebuild the same viewer chat', async () =>
   assert.deepStrictEqual(after.versions.map(v => v.href), ['artefacts/guide.html', null, null]);
 });
 
+test('a published version folder that is a link is not read, and counts as not in this export', async () => {
+  const dir = tmpRoot();
+  const { written } = await runFolder(exportPopup(), pagesChat(), { fetchPublished: publishedFetcher(pagesTable()).fetch });
+  writeFolder(dir, written);
+  const outside = tmpRoot();
+  put(outside, 'index.html', '<p>SECRET from outside the archive</p>');
+  fs.rmSync(`${dir}/published/Guide_ShortA/v2`, { recursive: true });
+  fs.symlinkSync(outside, `${dir}/published/Guide_ShortA/v2`);
+  const got = chatFromDisk(singleOf(dir), singleOf(dir).chats[0]);
+  assert.ok(!JSON.stringify(got.viewerChat).includes('SECRET'));
+  const page = Object.values(got.viewerChat.files).find(f => f.published);
+  assert.deepStrictEqual(page.versions.map(v => [v.label, v.href, v.text]), [['v1', 'artefacts/guide.html', '<p>G1</p>'], ['v2', null, null], ['v3', null, null]]);
+});
+
 test('parity: Export All published pages at the export root rebuild the same viewer chats', async () => {
   const mega = tmpRoot();
   const popup = exportPopup();

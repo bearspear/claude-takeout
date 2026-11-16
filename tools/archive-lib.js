@@ -380,7 +380,9 @@ function publishedFromDisk(archive, chat, data, artifacts, diskName, warnings) {
         continue;
       }
       // Stored here, with its start file: the files were saved and the start file is on disk.
-      const startFile = v.saved === true && startSaved && plainSegments(folderName) ? realFileUnder(path.join(disk.abs, folderName), startSaved) : null;
+      // The version folder itself must be a real folder: a link to somewhere else is never read.
+      const versionDir = plainSegments(folderName) && !folderName.includes('/') ? path.join(disk.abs, folderName) : null;
+      const startFile = v.saved === true && startSaved && versionDir && isRealDir(versionDir) ? realFileUnder(versionDir, startSaved) : null;
       if (!startFile) {
         versions.push({ ...base, start: null, startSaved: null, same: false, writtenAs: null, incomplete: true, needsRuntime: !!v.needsRuntime, text: null });
         continue;

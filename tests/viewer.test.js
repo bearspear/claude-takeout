@@ -1617,7 +1617,7 @@ test('an incomplete version has no link', () => {
   assert.strictEqual(Object.values(none.files)[0].kind, 'missing');
 });
 
-test('an off-branch publish shares the page card, and the attached copy of the page is not listed again', () => {
+test('an off-branch publish shares the page card, and an attached copy of a version that differs stays listed', () => {
   const data = pubChain(2);
   // m1b: another answer to m0, off the active branch, publishing ver1 again.
   data.chat_messages.push({ uuid: 'm1b', parent_message_uuid: 'm0', sender: 'assistant', content: pubBlocks('p1b', 'ver1'),
@@ -1629,5 +1629,15 @@ test('an off-branch publish shares the page card, and the attached copy of the p
   assert.strictEqual(Object.keys(chat.files).length, 1);
   const id = Object.keys(chat.files)[0];
   assert.deepStrictEqual(pageCards(chat), [[{ t: 'card', file: id, version: 0 }], [{ t: 'card', file: id, version: 1 }], [{ t: 'card', file: id, version: 1 }]]);
-  assert.deepStrictEqual(chat.messages.map(m => m.uploads.map(u => u.name)), [[], [], ['other.txt']]);
+  // ver1 is not the same as the file Claude wrote, so claude.ai's attached copy is Claude's own file and stays.
+  assert.deepStrictEqual(chat.messages.map(m => m.uploads.map(u => u.name)), [[], ['guide.html'], ['guide.html', 'other.txt']]);
+});
+
+test('the attached copy of a same version is not listed again; an upload named like the published file is', () => {
+  const data = pubChain(1);
+  data.chat_messages[0].files_v2 = [{ success: true, file_name: 'guide.html', file_uuid: 'att-1' }, { success: true, file_name: 'index.html', file_uuid: 'att-i' }];
+  const uploads = { 'att-1': { path: 'artefacts/guide.html', text: null }, 'att-i': { path: 'artefacts/index.html', text: null } };
+  const entry = pageEntry([pubVersion(0, { same: true, writtenAs: 'guide.html', text: 'G' })]);
+  const chat = buildViewerChat(data, ctxFor(data, { published: [entry], uploads }));
+  assert.deepStrictEqual(chat.messages[0].uploads.map(u => u.name), ['index.html']);
 });
