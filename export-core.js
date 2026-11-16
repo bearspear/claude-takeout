@@ -315,7 +315,7 @@ function base58ToUuid(shortId) {
 }
 
 const PUBLISH_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const PUBLISH_VER_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
+const PUBLISH_VER_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
 
 // The pages a chat published, one entry per uuid + version, in chat order over every message (also
 // branches that are no longer current). A result with no slug and version but an artifact url stands for
@@ -323,10 +323,13 @@ const PUBLISH_VER_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/;
 function publishedPagesOf(data) {
   const pages = [];
   const byKey = new Map();
-  for (const msg of (data && data.chat_messages) || []) {
+  const messages = (data && data.chat_messages) || [];
+  const results = new Map();
+  for (const msg of messages) {
+    for (const b of Array.isArray(msg.content) ? msg.content : []) if (b && b.type === 'tool_result') results.set(b.tool_use_id, b);
+  }
+  for (const msg of messages) {
     const blocks = Array.isArray(msg.content) ? msg.content : [];
-    const results = new Map();
-    for (const b of blocks) if (b && b.type === 'tool_result') results.set(b.tool_use_id, b);
     for (const b of blocks) {
       if (!b || b.type !== 'tool_use' || !isPublishTool(b.name)) continue;
       const r = results.get(b.id);

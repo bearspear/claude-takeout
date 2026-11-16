@@ -2018,3 +2018,18 @@ test('bad ids and versions are dropped', () => {
   assert.strictEqual(core.base58ToUuid('XYZ'), '');
   assert.strictEqual(core.base58ToUuid('0OIl0OIl0OIl0OIl0OIl0O'), '');
 });
+
+test('a publish result in a later message still pairs with its tool_use', () => {
+  const data = { chat_messages: [
+    { uuid: 'm1', sender: 'assistant', content: [use('p1', PUB, { files: [] })] },
+    { uuid: 'm2', sender: 'human', content: [pubResult('p1', { slug: PUB_U, version: 'v1' })] },
+  ] };
+  const pages = plain(core.publishedPagesOf(data));
+  assert.deepStrictEqual(pages.map((p) => [p.uuid, p.ver, p.publishes[0].messageUuid]), [[PUB_U, 'v1', 'm1']]);
+});
+
+test('page versions follow the allowed pattern', () => {
+  const vers = (v) => core.publishedPagesOf(oneMessage([use('p', PUB, { files: [] }), pubResult('p', { slug: PUB_U, version: v })])).map((p) => p.ver);
+  for (const ok of ['v1.2', '_a', '-b', 'a'.repeat(64)]) assert.deepStrictEqual(vers(ok), [ok]);
+  for (const bad of ['a'.repeat(65), '../../a', '.a', '']) assert.deepStrictEqual(vers(bad), []);
+});
