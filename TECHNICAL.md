@@ -219,6 +219,10 @@ The viewer folds what Claude did before its answer into one line per response, a
 
 A prompt longer than about nine lines, counting a long line as the lines it wraps to (`longPrompt`), is collapsed to 200px with a fade and a **Show more** button, as claude.ai shows it (`renderHuman`, `setCollapsed`). Code fenced in a prompt wraps. A search match inside a collapsed prompt or a closed fold opens it (`reveal`).
 
+### Product cards, comparisons and questions
+
+claude.ai's display tools (`product_carousel_display_v0`, `featured_card_display_v0`, `comparison_card_display_v0`) carry products in their input (`name`, `price`, `blurb`, and for a comparison `attributes: [{ label, value }]`), and the carousel and featured cards' results carry their pictures as `images` with ids `product_<n>_<m>`. Those are web images (`isImageResultTool`), saved like image-search images. The viewer gets them as a tool block's `display` (`displayData`: kind, products, each with its pictures) and shows them where Claude placed them (`renderDisplay`): a scrolling carousel with arrows and dots, a featured card, or a comparison table. `ask_user_input_v0`, claude.ai's multiple-choice question, isn't shown once answered (the answers are the next prompt). `full_chat.md` writes the products as headings with price, description and pictures, a comparison as a table, and questions as lists (`displayLines`). A citation whose metadata names the site shows as a pill with that name (`citeSite`), and a web search's query follows its label (`toolDetail`).
+
 ### Files on Claude's messages
 
 claude.ai can attach a file to Claude's own message, such as a page Claude published with `publish_files`. `extractUploadedFiles` lists only files on your messages; `extractAttachedFiles` lists these. One whose name a replayed or downloaded artifact already has is that file and is not saved again; any other is downloaded by UUID into `artefacts/` (a failure is a `delivered_file` error). The viewer shows them on Claude's message, linked to `artefacts/`. Exports before v1.11.0 saved them in `uploads/` as `p<NN>_<name>`, and the old-archive tool links them there.

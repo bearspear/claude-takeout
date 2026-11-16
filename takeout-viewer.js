@@ -74,7 +74,7 @@
     const i = input && typeof input === 'object' ? input : {};
     const p = i.path || i.file_path || '';
     switch (name) {
-      case 'web_search': return i.query ? `Searched the web: ${i.query}` : 'Searched the web';
+      case 'web_search': return 'Searched the web';
       // As claude.ai: "Read github.com", the address after it as a link (toolLink).
       case 'web_fetch': { const host = hostOf(i.url); return host ? `Read ${host}` : 'Fetched a page'; }
       // As claude.ai labels its steps: a command by the description Claude gave it, a file by its name.
@@ -121,6 +121,34 @@
     return Number.isFinite(start) && Number.isFinite(stop) && stop >= start ? Math.max(1, Math.round((stop - start) / 1000)) : null;
   }
 
+  // claude.ai's product cards from a display tool's input, each with the images its result found
+  // (ids product_<n>_<m>; href the saved copy, ctx.webImages): { kind, summary, products: [{ name, price,
+  // blurb, attributes: [{ label, value }], images: [{ href, source, title }] }] }. kind: carousel, featured
+  // or comparison.
+  function displayData(name, input, content, c) {
+    const i = input && typeof input === 'object' ? input : {};
+    const kind = /product_carousel/.test(name) ? 'carousel' : /featured_card/.test(name) ? 'featured' : /comparison_card/.test(name) ? 'comparison' : 'cards';
+    const saved = c.webImages && typeof c.webImages === 'object' ? c.webImages : {};
+    const byProduct = new Map();
+    for (const part of Array.isArray(content) ? content : []) {
+      for (const img of (part && Array.isArray(part.images) ? part.images : [])) {
+        const m = img && /^product_(\d+)_/.exec(String(img.id || ''));
+        if (!m) continue;
+        const url = /^https:\/\//i.test(String(img.url || '')) ? String(img.url) : '';
+        const file = url && Object.prototype.hasOwnProperty.call(saved, url) ? saved[url] : null;
+        if (!byProduct.has(m[1])) byProduct.set(m[1], []);
+        byProduct.get(m[1]).push({ href: file ? relHref(c.folder || '', file) : null, source: String(img.source || ''), title: String(img.title || '') });
+      }
+    }
+    const text = v => (typeof v === 'string' ? v : '');
+    const products = (Array.isArray(i.products) ? i.products : []).filter(p => p && typeof p === 'object').map((p, n) => ({
+      name: text(p.name), price: text(p.price), blurb: text(p.blurb),
+      attributes: (Array.isArray(p.attributes) ? p.attributes : []).filter(a => a && typeof a === 'object').map(a => ({ label: text(a.label), value: text(a.value) })),
+      images: byProduct.get(String(n)) || [],
+    }));
+    return { kind, summary: text(i.summary), products };
+  }
+
   // The page a publish_files call put on claude.ai, from its reply's JSON: { title, url }, or null.
   function publishedPage(content) {
     const text = (Array.isArray(content) ? content : []).filter(p => p && p.type === 'text').map(p => String(p.text || '')).join('\n').trim();
@@ -138,6 +166,12 @@
   function hostOf(url) {
     const m = /^https?:\/\/([^/?#\s]+)/i.exec(String(url || ''));
     return m ? m[1].replace(/^www\./i, '').toLowerCase() : '';
+  }
+
+  // Grey text after a step's label, as claude.ai shows a search's query, or ''.
+  function toolDetail(name, input) {
+    const i = input && typeof input === 'object' ? input : {};
+    return String(name) === 'web_search' && typeof i.query === 'string' ? i.query : '';
   }
 
   // The web address a step read, shown as a link after its label, or ''.
@@ -193,11 +227,19 @@
     return { text: cut(texts.join('\n')), images, missingImages: imageItems - images.length };
   }
 
+  // The name claude.ai puts on a citation's pill: the site's name from its metadata, or '' when the
+  // chat gives none (the viewer then shows the citation's number).
+  function citeSite(c) {
+    const m = c.metadata && typeof c.metadata === 'object' ? c.metadata : {};
+    const src = Array.isArray(c.sources) && c.sources[0] && typeof c.sources[0] === 'object' ? c.sources[0] : {};
+    return String(m.site_name || src.source || '');
+  }
+
   function buildCites(citations) {
     if (!Array.isArray(citations)) return [];
     return citations
       .filter(c => c && /^https?:\/\//i.test(String(c.url)))
-      .map(c => ({ end: c.end_index, url: String(c.url), title: c.title || 'Source' }))
+      .map(c => ({ end: c.end_index, url: String(c.url), title: c.title || 'Source', site: citeSite(c) }))
       .sort((a, b) => a.end - b.end);
   }
 
@@ -489,6 +531,7 @@
 
     // tool_use_id -> tool block, across every message, so a result can land in an earlier message's block.
     const toolById = new Map();
+    const toolInputs = new Map(); // tool_use_id -> the call's input, uncut
     const blockOf = new Map(); // raw tool_use block -> its viewer block
     const messages = source.map(m => {
       const blocks = [];
@@ -498,10 +541,10 @@
         else if (b.type === 'thinking') blocks.push({ t: 'thinking', text: String(b.thinking || ''), summaries: thinkingSummaries(b), summary: thinkingSummary(b), seconds: thinkingSeconds(b) });
         else if (b.type === 'tool_use') {
           const input = compactInput(b.input);
-          const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), target: toolTarget(b.name, b.input), link: toolLink(b.name, b.input), input, result: '', error: false, images: [], missingImages: 0 };
+          const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), target: toolTarget(b.name, b.input), link: toolLink(b.name, b.input), detail: toolDetail(b.name, b.input), input, result: '', error: false, images: [], missingImages: 0 };
           blocks.push(tool);
           blockOf.set(b, tool);
-          if (b.id != null) toolById.set(b.id, tool);
+          if (b.id != null) { toolById.set(b.id, tool); toolInputs.set(b.id, b.input); }
         }
       }
       return {
@@ -524,6 +567,7 @@
         tool.error = !!b.is_error;
         if (/(^|__|:)image_search$/.test(String(b.name || tool.name))) tool.web = webImages(b.content, c);
         if (/(^|__|:)publish_files$/.test(String(b.name || tool.name))) tool.published = publishedPage(b.content);
+        if (/_display_v\d+$/.test(String(tool.name))) tool.display = displayData(tool.name, toolInputs.get(b.tool_use_id), b.content, c);
       }
     }
 

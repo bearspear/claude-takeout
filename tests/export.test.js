@@ -1941,3 +1941,36 @@ test('a project document made from a PDF is saved as text with .txt, so it opens
   assert.ok(docText(written, 'project/Noack_Papers_Das_Mandala.pdf.txt').includes('Studiengang'));
   assert.deepStrictEqual(plain(Array.from(chat.project.docs, (d) => d.name)).sort(), ['Brief.md', 'Noack_Papers_Das_Mandala.pdf.txt', 'Notes.txt']);
 });
+
+// ---- claude.ai's product cards, comparisons and questions ----
+const displayChat = () => ({
+  uuid: 'c', name: 'Headphones', current_leaf_message_uuid: 'a',
+  chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant', content: [
+    use('p1', 'product_carousel_display_v0', { products: [{ name: 'HD 560S', price: '~$180', blurb: 'Neutral | detailed.' }, { name: 'HE400se', price: '~$150', blurb: 'Planar.' }] }),
+    { type: 'tool_result', tool_use_id: 'p1', name: 'product_carousel_display_v0', content: [{ type: 'text', text: '{}' }, { images: [
+      { id: 'product_0_0', url: 'https://img.example/560.jpg', title: '560S', source: 'head-fi' }, { id: 'product_1_0', url: 'https://img.example/400.jpg', title: '400se' }] }] },
+    use('k1', 'comparison_card_display_v0', { products: [
+      { name: 'HD 559', price: '$149', attributes: [{ label: 'Design', value: 'Open-back' }, { label: 'Mic', value: 'No' }] },
+      { name: 'HD 569', price: '$179', attributes: [{ label: 'Design', value: 'Closed-back' }, { label: 'Mic', value: 'Yes' }] }] }),
+    { type: 'tool_result', tool_use_id: 'k1', name: 'comparison_card_display_v0', content: [{ type: 'text', text: '{}' }] },
+    use('q1', 'ask_user_input_v0', { questions: [{ type: 'single_select', question: 'Need a mic?', options: ['Yes', 'No'] }] }),
+    { type: 'tool_result', tool_use_id: 'q1', name: 'ask_user_input_v0', content: [{ type: 'text', text: '{"questions": []}' }] },
+    { type: 'text', text: 'Done.' },
+  ] }],
+});
+
+test('product cards, comparisons and questions read as Markdown, and product images are web images', async () => {
+  const core = require('../export-core.js');
+  assert.deepStrictEqual(core.webImagesOf(displayChat()).map((i) => i.url), ['https://img.example/560.jpg', 'https://img.example/400.jpg']);
+  const md = fn('convertToMarkdown')(displayChat(), {});
+  assert.ok(md.includes('#### HD 560S (~$180)\n\nNeutral | detailed.'));
+  assert.ok(md.includes('| | **HD 559** ($149) | **HD 569** ($179) |\n|---|---|---|\n| Design | Open-back | Closed-back |\n| Mic | No | Yes |'));
+  assert.ok(md.includes('**Need a mic?**\n\n- Yes\n- No'));
+  assert.ok(!md.includes('"products"') && !md.includes('{"questions"'));
+  const popup = exportPopup({ routes: [[/img\.example/, () => ({ ok: true, status: 200, headers: { get: () => 'image/jpeg' }, blob: async () => ({ size: 3, type: 'image/jpeg', marker: 'jpg' }) })]] });
+  popup.sandbox.chrome.permissions = { contains: async () => true };
+  const { written, chat } = await runFolder(popup, displayChat());
+  assert.match(docText(written, 'full_chat.md'), /#### HD 560S \(~\$180\)\n\nNeutral \| detailed\.\n\n!\[HD 560S\]\(images\/[0-9a-f]{8}_560S\.jpg\)/);
+  const carousel = chat.messages[0].blocks.find((b) => b.t === 'tool' && b.display && b.display.kind === 'carousel');
+  assert.deepStrictEqual(plain(carousel.display.products.map((p) => [p.name, p.images.map((i) => /^images\//.test(i.href))])), [['HD 560S', [true]], ['HE400se', [true]]]);
+});

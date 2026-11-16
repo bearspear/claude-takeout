@@ -181,7 +181,7 @@ function addCitations(text, cites, seen, mark = placeholderMark(text)) {
   let out = '', from = 0;
   for (const { c, end } of marks) {
     let src = sources.find(s => s.url === c.url);
-    if (!src) { src = { n: sources.length + 1, url: c.url, title: c.title }; sources.push(src); }
+    if (!src) { src = { n: sources.length + 1, url: c.url, title: c.title, site: c.site || '' }; sources.push(src); }
     out += `${t.slice(from, end)}${mark}C${src.n}${PLACEHOLDER_END}`;
     from = end;
   }
@@ -194,11 +194,12 @@ function beforeCitation(src) {
   return at < 0 ? src : src.slice(0, at);
 }
 
+// A citation as claude.ai shows it: a small pill with the site's name ("SoundGuys"), the number when there is none.
 function citeNode(doc, source) {
   const sup = doc.createElement('sup');
   sup.className = 'cite';
   const link = doc.createElement('a');
-  link.textContent = source.n;
+  link.textContent = source.site || String(source.n);
   link.setAttribute('title', source.title || '');
   if (/^https?:\/\//i.test(source.url)) {
     link.setAttribute('href', source.url);

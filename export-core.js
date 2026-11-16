@@ -1158,7 +1158,7 @@ function webImagesOf(data) {
   const https = (u) => (typeof u === 'string' && /^https:\/\//i.test(u) ? u : '');
   for (const msg of (data.chat_messages || [])) {
     for (const block of (msg && msg.content) || []) {
-      if (!block || block.type !== 'tool_result' || !/(^|__|:)image_search$/.test(String(block.name || ''))) continue;
+      if (!block || block.type !== 'tool_result' || !isImageResultTool(block.name)) continue;
       for (const part of Array.isArray(block.content) ? block.content : []) {
         for (const img of (part && Array.isArray(part.images) ? part.images : [])) {
           const url = https(img && img.url);
@@ -1204,6 +1204,12 @@ function toolImagesOf(data) {
 function toolImageName(img, ext) {
   const base = safeFileTitle(img.base).slice(0, 40);
   return `${img.uuid.slice(0, 8)}${base ? `_${base}` : ''}${ext}`;
+}
+
+// Tools whose results carry web images: image_search, and claude.ai's product cards
+// (product_carousel_display_v0, featured_card_display_v0), whose images are product_<n>_<m>.
+function isImageResultTool(name) {
+  return /(^|__|:)(image_search|\w+_display_v\d+)$/.test(String(name || ''));
 }
 
 // FNV-1a over the URL's UTF-16 code units, as 8 hex digits.
@@ -1298,7 +1304,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
-    WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
+    WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
   };
 }

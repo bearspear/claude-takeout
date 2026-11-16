@@ -370,6 +370,13 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.13.0
+
+- **Product cards and comparisons** - When Claude shows products as cards on claude.ai, the viewer now shows them the same way: a carousel of cards with arrows and dots, a single featured card, or a comparison table of two products with a row per feature. Each card has its pictures (saved in `images/` like other web images, with the site on each; a click opens the gallery), its name, description and price. `full_chat.md` lists the products with their pictures and the comparison as a table, instead of raw JSON.
+- **Questions Claude asked** - claude.ai's multiple-choice questions aren't shown in the viewer once answered, as on claude.ai; your answers are the next prompt. `full_chat.md` lists the questions and their options.
+- **Citations as pills** - A citation shows as a small pill with the site's name ("SoundGuys"), as on claude.ai, where the chat names the site; otherwise it keeps its number.
+- **Searches show their query** - "Searched the web" is followed by what was searched, in grey.
+
 ### v1.12.2
 
 - **Project documents open** - claude.ai keeps some project documents only as text it extracted, under the original file's name, such as `Paper.pdf`. The export saved that text as `project/Paper.pdf`, which no PDF reader opens. A project document whose name isn't a text type is now saved with `.txt` added (`project/Paper.pdf.txt`), and the viewer lists it so.
