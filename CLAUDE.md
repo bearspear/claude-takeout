@@ -228,7 +228,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 ├── responses/<NNN>_<title>_response.full.md  (thinking/tools/embedded)
 ├── artefacts/<base>(_vN)?<ext>               (versioning — see §6; a Claude Docs document also gets <title>.html)
 ├── attachments/p01_<filename>, p02_<filename>, ...  (prompt-numbered)
-├── project/project.json, prompt_template.md, docs.json, files.json, <doc>.md, files/<name>
+├── project/project.json, prompt_template.md, docs.json, files.json, <doc> (text; .txt added when its name is not a text type), files/<name>
 ├── images/<key>_<title><ext>                 (images from web searches; only with the optional https permission)
 ├── images/<uuid8>_<name><ext>                (images Claude looked at, from claude.ai: toolImagesOf, saveToolImages)
 └── uploads/p01_<filename>, p02_<filename>, ...

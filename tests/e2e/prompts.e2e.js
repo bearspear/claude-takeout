@@ -13,8 +13,11 @@ const chat = {
   chat_messages: [
     msg('h1', null, 'human', 1, long),
     msg('a1', 'h1', 'assistant', 2, 'Option 2.'),
-    msg('h2', 'a1', 'human', 3, 'thanks, short one'),
-    msg('a2', 'h2', 'assistant', 4, 'Welcome.'),
+    msg('h2', 'a1', 'human', 3, 'thanks, short one: https://github.com/juliusbrussee/caveman.'),
+    { ...msg('a2', 'h2', 'assistant', 4, ''), content: [
+      { type: 'tool_use', id: 'f1', name: 'web_fetch', input: { url: 'https://github.com/juliusbrussee/caveman' } },
+      { type: 'tool_result', tool_use_id: 'f1', name: 'web_fetch', content: [{ type: 'text', text: 'page text' }] },
+      { type: 'text', text: 'Welcome.' }] },
   ],
 };
 
@@ -52,6 +55,14 @@ const chat = {
   await page.waitForTimeout(300);
   check('a search hit inside a collapsed prompt expands it and is visible', !(await longBubble.getAttribute('class')).includes('collapsed')
     && await page.locator('#chat mark').evaluate(m => { const r = m.getBoundingClientRect(); return r.height > 0 && r.top >= 0 && r.bottom <= innerHeight; }));
+  const link = shortBubble.locator('.typed a');
+  check('a web address in a prompt is a link, its full stop left out', await link.count() === 1 && (await link.getAttribute('href')) === 'https://github.com/juliusbrussee/caveman'
+    && (await shortBubble.locator('.typed').textContent()).endsWith('caveman.') && (await link.getAttribute('rel')).includes('noopener'));
+  const fetchLine = page.locator('.msg.assistant').nth(1).locator(':scope > details.tool');
+  check('a single fetch is its own line: Read <host> and the address', await fetchLine.count() === 1
+    && (await fetchLine.locator(':scope > summary .label').textContent()).trim() === 'Read github.com'
+    && (await fetchLine.locator('.step-link').getAttribute('href')) === 'https://github.com/juliusbrussee/caveman');
+  check('no group line for one step', await page.locator('.msg.assistant').nth(1).locator(':scope > details.steps').count() === 0);
   check('no page errors', errors.length === 0, errors.join(' | '));
 
   await browser.close();

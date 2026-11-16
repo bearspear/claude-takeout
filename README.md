@@ -370,6 +370,12 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.12.2
+
+- **Project documents open** - claude.ai keeps some project documents only as text it extracted, under the original file's name, such as `Paper.pdf`. The export saved that text as `project/Paper.pdf`, which no PDF reader opens. A project document whose name isn't a text type is now saved with `.txt` added (`project/Paper.pdf.txt`), and the viewer lists it so.
+- **Links in prompts** - In the viewer, a web address in your prompt is a link, as on claude.ai. A full stop or bracket after it stays text.
+- **A single step is its own line** - When Claude took one step before answering, the viewer shows that step as claude.ai does instead of a group: a page Claude read is "Read github.com" with the address as a link, where it said "Fetched a page".
+
 ### v1.12.1
 
 - **Export All names carry the time, in lowercase** - The folder and the Mega-Zip are now named `claude-takeout-<your name>-<YYYY-MM-DD>_<HHMM>`, in your local time and all lowercase, as Grok Takeout and Gemini Takeout name theirs (for example `claude-takeout-michael-2026-11-15_2142`). Before, the date was in UTC, so an evening export could carry tomorrow's date, and a second export that day got `_2`.
