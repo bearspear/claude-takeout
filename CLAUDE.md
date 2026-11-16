@@ -25,7 +25,7 @@ For deeper dives, two companion docs live alongside this one:
 |---|---|---|
 | `manifest.json` | MV3 declaration. | Hosts: `claude.ai/*`; optional `https://*/*`, only for saving web-search images (`requestWebImages`, asked during a click). Perms: `activeTab`, `scripting`, `storage`, `sidePanel`. Web-accessible: `injected.js`. |
 | `injected.js` | Page-context org ID fallback (runs in the page's world). | Wraps `window.fetch`, reads the org ID from request URLs, relays it via `window.postMessage`. |
-| `content.js` | Isolated-world bridge (runs at `document_start`). | Injects `injected.js`, resolves the org ID, and exposes `getOrgId` / `fetchAllConversations` / `fetchConversation` / `listArtifacts` / `publishedPageInfo` / `publishedPageFile` to the popup via `chrome.runtime.onMessage`. The two published-page actions fetch a page's details and files from claude.ai's frame host; they keep the asset token to themselves and answer only with error codes, never URLs or messages. |
+| `content.js` | Isolated-world bridge (runs at `document_start`). | Injects `injected.js`, resolves the org ID, and exposes `getOrgId` / `fetchAllConversations` / `fetchConversation` / `listArtifacts` / `artifactThumb` / `publishedPageInfo` / `publishedPageFile` to the popup via `chrome.runtime.onMessage`. The two published-page actions fetch a page's details and files from claude.ai's frame host; they keep the asset token to themselves and answer only with error codes, never URLs or messages. |
 | `background.js` | MV3 service worker. | Only manages side-panel "open on action click" preference. Listens to `chrome.storage.onChanged` for `useSidePanel` to re-apply behavior. |
 | `popup.html` | Popup UI (action click). | Buttons, status pill, settings drawer. Includes `.status.ready` / `.waiting` / `.error` / `.warning` styles. |
 | `sidepanel.html` | Side Panel UI. | Same buttons/handlers as the popup, just a different host. |
@@ -52,10 +52,11 @@ For deeper dives, two companion docs live alongside this one:
 | `tests/e2e/webimages.e2e.js` | Browser test of web-search images: one mosaic per response, `+N`, unsaved cards, the gallery's keys and closing. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/parts.e2e.js` | Browser test of upload and generated-file text loaded from `viewer-files/`. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/published.e2e.js` | Browser test of published-page cards: one card per page, versions, "Same as published", "Needs claude.ai to run", the claude.ai link, Export All links. | Optional; needs `playwright-core` and Chromium. |
+| `tests/e2e/artifacts-viewer.e2e.js` | Browser test of the Export Artifacts viewer: grid, tabs, routing, sandboxed previews and their files, shims, hostile pages, no-network checks. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/artifacts.e2e.js` | Browser test of an Export Artifacts `index.html` over `file://`: rows sorted, title link opens the artifact, Docs row note and no local link, shared label, no network or page errors. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/hostile.js` | Hostile-input fixtures for the viewer e2e tests. | Not a test by itself. |
 | `takeout-viewer.js` | Builds the offline viewer's data. | Classic script loaded by `popup.html` and `sidepanel.html`, exposing `CTViewer` (`buildViewerChat`, `buildViewerData`, `assembleViewer`, ...). Header comment documents the contract. |
-| `viewer/` | Viewer page sources. | `viewer-template.html`, `viewer-logic.js`, `viewer-app.js`, `marked.min.js`, `katex.min.js`, `katex-inline.css`, `highlight.min.js`, `THIRD-PARTY-NOTICES.txt`. `writeViewer` inlines them into one `viewer.html`. |
+| `viewer/` | Viewer page sources. | `viewer-template.html`, `viewer-logic.js`, `viewer-app.js`, `artifacts-template.html` and `artifacts-app.js` (the Export Artifacts viewer; they share `viewer-logic.js`), `marked.min.js`, `katex.min.js`, `katex-inline.css`, `highlight.min.js`, `THIRD-PARTY-NOTICES.txt`. `writeViewer` inlines them into one `viewer.html`. |
 | `tests/` | Regression tests. | `sh tests/run.sh`. Uses Node's and Python's built-in test runners, with a synthetic fixture only. Not used by the extension at runtime. |
 | `docs/WASM_REPLAY_APPROACH.md` | Architecture record. | Comprehensive evaluation of running Pyodide in the extension as an alternative to the CLI. We chose the CLI; this doc explains why and what would change the answer. |
 | `icon16.png` / `icon48.png` / `icon128.png` / `icon.svg` | Extension icons. | |
@@ -84,7 +85,7 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 | `convertToMarkdown` | The single-MD / embedded-MD renderer. Walks `getMessageChain`, formats prompts and responses, renders thinking blocks, tool uses (`create_file`, `present_files`, `web_search`, `bash_tool`, `str_replace`, `view`, etc.), citations, and references. Honors `embedArtifacts`, `seamlessMd`, `includeThinking`. |
 | `extractTextContent`, `download`, `safeFilename` | Small utilities. |
 | `updateUI`, `showProgress`, `hideProgress`, `requestData` | DOM glue. |
-| `exportArtifacts`, `artifactsIndexHtml`, `artifactsIndexMd`, `saveArtifact`, `fetchPublishedFiles` | Export Artifacts: lists claude.ai's artifacts (`content.js` `listArtifacts`, then `artifactsFromList` in export-core.js), fetches each one's current files through `fetchPublishedFiles` (shared with `savePublishedPages`), writes a folder per artifact with `artifact.json`, plus `index.html`, `index.md`, `export-manifest.json` (`kind: "artifacts"`). Folder or ZIP by `settings.megaFormat`; `folderExport` is shared with Export All. See TECHNICAL.md "Export Artifacts". |
+| `exportArtifacts`, `artifactsIndexHtml`, `artifactsIndexMd`, `saveArtifact`, `fetchPublishedFiles` | Export Artifacts: lists claude.ai's artifacts (`content.js` `listArtifacts`, then `artifactsFromList` in export-core.js), fetches each one's current files through `fetchPublishedFiles` (shared with `savePublishedPages`), writes a folder per artifact with `artifact.json`, plus `index.html`, `index.md`, `export-manifest.json` (`kind: "artifacts"`). Folder or ZIP by `settings.megaFormat`; `folderExport` is shared with Export All. `writeArtifactsViewer` builds its `viewer.html` (see TECHNICAL.md "Artifacts viewer"). See TECHNICAL.md "Export Artifacts". |
 | `bulkExport`, `bulkExportZip` | Multi-conversation paths. `bulkExportZip({ directory })` writes into a folder instead (`createDiskFolder`, `makeRunFolder`; the default, `settings.megaFormat`). `bulkExport` downloads one file per conversation (MD/embedded/JSON). `bulkExportZip` builds a single mega-zip with `index.md` + one folder per conversation reusing `populateConversationFolder`. |
 | Click handlers + `refresh` | Button → action mapping. Each per-conversation handler calls `ensureProjectName` before generating the filename or starting the ZIP. |
 | Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, megaZipScope, megaFormat, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
@@ -263,8 +264,10 @@ claude-takeout-[<display name>-][changes-]<YYYY-MM-DD>_<HHMM>.zip   (megaZipName
 
 Export Artifacts (a separate export, `claude-takeout-artifacts-[<name>-]<stamp>`, folder or ZIP; no chats, so the old-archive and merge tools find no archive in it):
 ```
-├── index.html, index.md       # Every artifact: title link to its start file, kind, source, files, notes; "Listed by claude.ai: N"
-├── export-manifest.json       # { format: 1, kind: "artifacts", exported_at, listed, artifacts: [{ uuid, title, folder, ver }] }
+├── viewer.html                # Cards and sandboxed previews (viewer/artifacts-*; opens from disk)
+├── viewer-files/              # part-NNNN.js (preview text and images) and thumbs/<shortId>.<png|jpg|webp> (card pictures)
+├── index.html, index.md       # Every artifact: title link to its start file, kind, source, files, notes; "Listed by claude.ai: N", "Card pictures: N of M"; a shared artifact's HTML/SVG gets no local link
+├── export-manifest.json       # { format: 1, kind: "artifacts", exported_at, listed, thumbs, artifacts: [{ uuid, title, folder, ver }] }
 ├── errors.txt                 # Only with warnings (artifact_export)
 └── <Title>_<shortId>/         # Current version's files at the top level + artifact.json
 ```
@@ -278,7 +281,8 @@ All called with `credentials: 'include'` so the user's existing Claude session a
 | Endpoint | Used by | Purpose |
 |---|---|---|
 | `GET /api/organizations/<orgId>/chat_conversations` | `content.js` `fetchAllConversations` | Bulk export conversation list. |
-| `GET /api/frame/frames?org=<orgId>&limit=1000` (header `X-Frame-CP: go`) | `content.js` `listArtifacts` | The artifacts claude.ai lists, for Export Artifacts. Only `slug`, `title`, type, source, `rel`, `live` and dates are kept; no paging is known, so a round-number length warns. |
+| `GET /api/frame/frames?org=<orgId>&limit=1000` (header `X-Frame-CP: go`) | `content.js` `listArtifacts` | The artifacts claude.ai lists, for Export Artifacts. Only `slug`, `title`, type, source, `rel`, `live`, dates and `public` (a boolean) are kept, and the picture URL stays in `content.js`; no paging is known, so a round-number length warns. |
+| `GET https://<uuid>.frame.claudeusercontent.com/_f/<ver>/_thumb.img` (query `__frame_t`, from the listing) | `content.js` `artifactThumb` | An artifact's card picture. The URL is kept in `content.js` (`artifactThumbUrls`), rebuilt from checked parts, fetched without cookies or referrer, 2 MB cap, type by leading bytes; one re-list on a 403. Never written or logged. |
 | `GET /api/account` | `content.js` `fetchAccountName` | The display name for the mega-ZIP's file name. Only `display_name` (or `full_name`) leaves `content.js`. |
 | `GET /api/organizations/<orgId>/chat_conversations/<convUuid>?tree=True&rendering_mode=messages&render_all_tools=true` | `content.js` `fetchConversation` | Bulk-mode full conversation re-fetch with project metadata included. |
 | `GET /api/organizations/<orgId>/projects/<projectUuid>` | `popup.js` `ensureProjectName` + `fetchProjectDocs` | Project metadata, especially `name`. |
