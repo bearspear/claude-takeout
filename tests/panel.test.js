@@ -625,13 +625,13 @@ const tests = {
 
   'a shared page with no asset token is fetched without one': async () => {
     const tokenless = (b) => { const { assetToken, ...rest } = b; return { ...rest, authoredByOthers: true, files: [{ path: 'index.html', contentType: 'text/html' }] }; };
-    const h = publishedHarness({ info: tokenless, filesJson: () => resp(403), src: () => { throw new TypeError('Failed to fetch'); }, direct: () => resp(200, { bytes: new Uint8Array([1, 2]) }) });
+    const h = publishedHarness({ info: tokenless, filesJson: () => { throw new TypeError('Failed to fetch'); }, src: () => { throw new TypeError('Failed to fetch'); }, direct: () => resp(200, { bytes: new Uint8Array([1, 2]) }) });
     const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
     assert.deepStrictEqual(res.files, [{ path: 'index.html', size: null, contentType: 'text/html', sha256: null }]);
     const file = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html' });
     assert.strictEqual(file.base64, 'AQI=');
     const host = h.reqs.filter((r) => r.url.includes('.frame.claudeusercontent.com/'));
-    assert.deepStrictEqual(host.map((r) => r.url), [`https://${PUB}.frame.claudeusercontent.com/_f/V/_files.json`, `https://${PUB}.frame.claudeusercontent.com/_f/V/index.html`], 'without a token _src is skipped (it fails before any status on claude.ai)');
+    assert.deepStrictEqual(host.map((r) => r.url), [`https://${PUB}.frame.claudeusercontent.com/_f/V/index.html`], 'without a token _files.json and _src are skipped (both fail before any status on claude.ai)');
     assert.ok(!h.reqs.some((r) => r.url.includes('__frame_t')));
     assert.strictEqual(h.frameCalls().length, 1, 'no token refresh for a page without one');
     for (const r of host) assert.deepStrictEqual([r.opts.credentials, r.opts.redirect, r.opts.referrerPolicy], ['omit', 'error', 'no-referrer']);
