@@ -198,7 +198,7 @@ What to know about previews of generated HTML:
 
 - The file's scripts run in a sandbox, cut off from the viewer, from other chats and from files on disk.
 - Normal web requests from the preview are blocked.
-- The browser doesn't let the viewer block every route. A generated file that contains injected code could still send out its own text, and the `.js` and `.css` files from that chat, when you preview it.
+- The browser doesn't let the viewer block every route. A generated file that contains injected code could still send out its own text, and the `.js` and `.css` files from that chat, when you preview it. WebRTC is one such route: Chrome's content policy doesn't cover it. The artifacts viewer removes WebRTC from the previewed page itself, but a frame the page creates gets it back.
 - So the viewer is not a security boundary for untrusted exports. Be careful previewing files from someone else's export. Your own exports of your own chats are the intended use.
 
 A viewer stays the version it was made with. To get later viewer fixes in an existing export, see [Updating a viewer](#updating-a-viewer).

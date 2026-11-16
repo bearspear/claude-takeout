@@ -1742,3 +1742,36 @@ test('markdownParser: raw HTML stays text, Markdown still renders, after a tag t
   // Two parsers don't share state.
   assert.notStrictEqual(markdownParser(marked), md);
 });
+
+test('artifactPreviewDoc removes WebRTC before the page runs', () => {
+  const { srcdoc } = artifactPreviewDoc('<script>go()</script>', 'index.html', { texts: [], images: [] });
+  const shim = srcdoc.indexOf('RTCPeerConnection');
+  assert.ok(shim > 0 && shim < srcdoc.indexOf('go()'));
+  for (const n of ['webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription', 'RTCIceCandidate']) assert.ok(srcdoc.includes(n), n);
+  // Runs: in a fake window, every name reads undefined and can't be put back.
+  const { RTC_SHIM } = require('../viewer/viewer-logic.js');
+  const vm = require('vm');
+  const win = { RTCPeerConnection: function () {}, RTCDataChannel: function () {} };
+  win.window = win;
+  vm.runInNewContext(RTC_SHIM.replace(/^<script>|<\/script>$/g, ''), win);
+  assert.strictEqual(win.RTCPeerConnection, undefined);
+  win.RTCPeerConnection = function () {};
+  assert.strictEqual(win.RTCPeerConnection, undefined);
+  assert.throws(() => Object.defineProperty(win, 'RTCDataChannel', { value: 1 }));
+});
+
+test('inlineArtifact decodes entities in src and href; inlineSiblings is unchanged', () => {
+  const p = { texts: [['R&D.js', 'rd()'], ['a"b.css', 'x{}'], ["it's.js", 'q()'], ['é.js', 'e()']], images: [['R&D.png', 'data:image/png;base64,AAA']] };
+  assert.strictEqual(inlineArtifact('<script src="R&amp;D.js"></script>', 'index.html', p), '<script>rd()</script>');
+  assert.strictEqual(inlineArtifact('<link rel="stylesheet" href="a&quot;b.css">', 'index.html', p), '<style>x{}</style>');
+  assert.strictEqual(inlineArtifact('<script src="it&#39;s.js"></script>', 'index.html', p), '<script>q()</script>');
+  assert.strictEqual(inlineArtifact('<script src="&#xe9;.js"></script>', 'index.html', p), '<script>e()</script>');
+  assert.strictEqual(inlineArtifact('<script src="&#233;.js"></script>', 'index.html', p), '<script>e()</script>');
+  assert.strictEqual(inlineArtifact('<img src="R&amp;D.png">', 'index.html', p), '<img src="data:image/png;base64,AAA">');
+  assert.strictEqual(inlineArtifact('<img srcset="R&amp;D.png 2x">', 'index.html', p), '<img src="data:image/png;base64,AAA">');
+  // An entity can't smuggle in a path the resolver rejects.
+  assert.strictEqual(inlineArtifact('<script src="&#46;&#46;/&#46;&#46;/x.js"></script>', 'site/index.html', { texts: [['x.js', 'bad()']] }), '<script src="&#46;&#46;/&#46;&#46;/x.js"></script>');
+  assert.strictEqual(inlineArtifact('<script src="&#x2F;x.js"></script>', 'index.html', { texts: [['x.js', 'bad()']] }), '<script src="&#x2F;x.js"></script>');
+  // The chat viewer's inliner keeps taking the value as written.
+  assert.strictEqual(inlineSiblings('<script src="R&amp;D.js"></script>', n => (n === 'R&D.js' ? 'rd()' : null)), '<script src="R&amp;D.js"></script>');
+});

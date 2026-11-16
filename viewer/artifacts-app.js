@@ -332,7 +332,7 @@
   // data ever becomes its src.
   const partsListed = new Set();
   for (const v of views) if (Number.isSafeInteger(v.part) && v.part > 0) partsListed.add(v.part);
-  const partsLoaded = new Map(); // n -> Promise<object|null>, the most recently used last
+  const partsLoaded = new Map(); // n -> the part's object, the most recently used last
   const PARTS_KEPT = 2; // a part is about 4 MB; older ones are dropped and load again if needed
   const partsWaiting = new Map(); // n -> resolve, only while its script is loading
   if (partsListed.size) {
@@ -346,14 +346,18 @@
     });
   }
 
+  // Loaded parts are kept (the PARTS_KEPT most recently used); one still loading is shared through partsInFlight,
+  // which nothing evicts, so a second open of it waits on the same script instead of replacing its resolver.
+  const partsInFlight = new Map(); // n -> Promise<object|null>
   function loadPart(n) {
     if (!partsListed.has(n)) return Promise.resolve(null);
     if (partsLoaded.has(n)) {
-      const cached = partsLoaded.get(n);
+      const kept = partsLoaded.get(n);
       partsLoaded.delete(n);
-      partsLoaded.set(n, cached);
-      return cached;
+      partsLoaded.set(n, kept);
+      return Promise.resolve(kept);
     }
+    if (partsInFlight.has(n)) return partsInFlight.get(n);
     const loading = new Promise(resolve => {
       partsWaiting.set(n, resolve);
       const script = document.createElement('script');
@@ -362,16 +366,22 @@
         const done = partsWaiting.get(n);
         if (!done) return; // the part called in, and this was its load event
         partsWaiting.delete(n);
-        partsLoaded.delete(n); // so opening the artifact later tries again
         done(null);
       };
       script.addEventListener('load', finish);
       script.addEventListener('error', finish);
       script.src = `viewer-files/part-${String(n).padStart(4, '0')}.js`;
       document.head.append(script);
+    }).then(part => {
+      partsInFlight.delete(n);
+      // A part that failed isn't kept, so opening the artifact later tries again.
+      if (part) {
+        partsLoaded.set(n, part);
+        while (partsLoaded.size > PARTS_KEPT) partsLoaded.delete(partsLoaded.keys().next().value);
+      }
+      return part;
     });
-    partsLoaded.set(n, loading);
-    while (partsLoaded.size > PARTS_KEPT) partsLoaded.delete(partsLoaded.keys().next().value);
+    partsInFlight.set(n, loading);
     return loading;
   }
 
@@ -396,6 +406,8 @@
   // ---- The preview ----
   const pageNote = document.getElementById('page-note');
   const PART_FAILED = "The artifact couldn't load, because viewer-files/ is missing or blocked.";
+  // The chat viewer's REMOTE_NOTE points to its Code view, which this page doesn't have.
+  const PAGE_REMOTE_NOTE = 'This page loads a script from the internet, which the viewer blocks, so it may not work here.';
   let mdParser = null;
 
   function markdownPage(text) {
@@ -415,14 +427,6 @@
       a.setAttribute('target', '_blank');
       a.setAttribute('rel', 'noopener noreferrer');
     }
-    return box;
-  }
-
-  function codePage(text) {
-    const box = el('div', 'code-page');
-    const pre = el('pre');
-    pre.append(el('code', '', text));
-    box.append(el('p', 'note', OFFLINE_NOTE), pre);
     return box;
   }
 
@@ -450,11 +454,10 @@
     if (v.startKind === 'html' || v.startKind === 'svg') {
       if (text === null) return box.replaceChildren(failedPage(v));
       const doc = artifactPreviewDoc(text, v.start, payload);
-      if (doc.remote) { pageNote.textContent = REMOTE_NOTE; pageNote.hidden = false; }
+      if (doc.remote) { pageNote.textContent = PAGE_REMOTE_NOTE; pageNote.hidden = false; }
       return box.replaceChildren(previewFrame(v, doc.srcdoc));
     }
     if (v.startKind === 'md') return box.replaceChildren(text === null ? failedPage(v) : markdownPage(text));
-    if (CODE_KINDS.has(v.startKind)) return box.replaceChildren(text === null ? detailsPage(v) : codePage(text));
     if (v.startKind === 'image') {
       // The owner's own image can also come from its saved file.
       const src = images.has(v.start) ? images.get(v.start) : v.shared === false ? openHref(v, v.startSaved) : null;
@@ -470,7 +473,7 @@
   }
 
   // The start file, shown in place: an HTML or SVG page in a sandboxed frame, Markdown rendered as the chat viewer
-  // does, an image, or React and Mermaid source as code. Its texts and images come from its part, loaded now.
+  // does, or an image. Its texts and images come from its part, loaded now.
   function openPreview(v) {
     const box = el('div', 'preview');
     box.dataset.id = String(v.id);
@@ -483,14 +486,11 @@
     });
   }
 
-  const CODE_KINDS = new Set(['react', 'mermaid']);
-
   function fillBody(v) {
     if (v.docs) return pageBody.replaceChildren(docsPage(v));
     if (isPoster(v)) return pageBody.replaceChildren(posterPage(v));
     const shown = !v.notExported && v.start && !v.tooLarge && unzipped !== false;
     if (shown && PREVIEW_KINDS.has(v.startKind) && !v.startMissing) return openPreview(v);
-    if (shown && CODE_KINDS.has(v.startKind) && partsListed.has(v.part)) return openPreview(v);
     pageBody.replaceChildren(detailsPage(v));
   }
 

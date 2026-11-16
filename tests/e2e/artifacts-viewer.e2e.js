@@ -6,14 +6,15 @@
 // (not exported, no start file, too large, other kinds), and a run without viewer-check.gif (tiles, "unzip first", no Open file).
 // Previews: a nested page with its CSS, JS, image and a renamed file; a hostile shared page and self-navigations get
 // nothing out; white frame in dark mode; forms and alerts; Markdown like the chat viewer; image, SVG, the remote note;
-// Show saved files anyway; a shared poster's HTML and SVG rows have no Open file; a missing part says so.
+// Show saved files anyway; a shared poster's HTML and SVG rows have no Open file; a missing part says so; WebRTC to a local
+// STUN listener gets nothing out of the page (a nested frame still can: logged as KNOWN RESIDUAL, not failed).
 // No requests outside file:, no page errors.
 // Run: PW=<playwright-core> CHROME_EXE=<chrome> node tests/e2e/artifacts-viewer.e2e.js [screenshot-dir]
 const { chromium } = require(process.env.PW);
 const fs = require('fs'), os = require('os'), path = require('path'), zlib = require('zlib');
 const { runArtifacts } = require('../helpers');
 const { HIT, ATTACKS, ATTACK_ENDS, hostileHtml, navArtifact } = require('./hostile');
-const { REMOTE_NOTE } = require('../../viewer/viewer-logic.js');
+const dgram = require('dgram');
 const { uuidToBase58 } = require('../../export-core.js');
 
 const DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
@@ -320,6 +321,21 @@ async function exportTo(frames, pages, thumbs) {
     ['navtoplink', "const a = document.createElement('a'); a.href = 'https://remote.test/top-link'; a.target = '_top'; document.body.append(a); a.click();"],
   ];
   const navUuid = i => U(40 + i);
+  // WebRTC: Chrome's CSP doesn't cover it, so the preview removes it. Each case has its own local STUN listener.
+  const udpListener = () => new Promise(done => {
+    const sock = dgram.createSocket('udp4');
+    const got = [];
+    sock.on('message', (m, r) => got.push(r.address + ':' + r.port));
+    sock.bind(0, '127.0.0.1', () => done({ sock, got, port: sock.address().port }));
+  });
+  const rtcTop = await udpListener(), rtcNested = await udpListener();
+  const rtcTry = (who, port, ctor) => `try { const pc = new (${ctor})({ iceServers: [{ urls: 'stun:127.0.0.1:${port}' }] }); pc.createDataChannel('x');`
+    + ` pc.onicecandidate = e => say('cand ' + !!e.candidate); pc.createOffer().then(o => pc.setLocalDescription(o)).then(() => say('offer ok'), e => say('err ' + e.name)); say('made'); } catch (e) { say('threw ' + e.name); }`;
+  const RTC_TOP = `<p>rtc</p><script>const say = m => console.log('RTC top ' + m); say('ran'); say('type ' + typeof RTCPeerConnection + ' ' + typeof webkitRTCPeerConnection + ' ' + typeof RTCDataChannel + ' ' + typeof RTCSessionDescription + ' ' + typeof RTCIceCandidate);`
+    + ` ${rtcTry('top', rtcTop.port, 'window.RTCPeerConnection')} try { RTCPeerConnection = function () {}; } catch (e) {} try { delete window.RTCPeerConnection; } catch (e) {} say('after ' + typeof RTCPeerConnection);<\/script>`;
+  // A frame of its own has a fresh window, with WebRTC in it again: a known residual unless Chrome's policy blocks it.
+  const nestedCode = `const say = m => parent.postMessage('RTC nested ' + m, '*'); say('ran'); say('type ' + typeof RTCPeerConnection); ${rtcTry('nested', rtcNested.port, 'window.RTCPeerConnection')}`;
+  const RTC_NESTED = `<p>rtc nested</p><script>window.addEventListener('message', e => { if (typeof e.data === 'string' && e.data.startsWith('RTC nested ')) console.log(e.data); }); const f = document.createElement('iframe'); f.srcdoc = '<script>' + ${JSON.stringify(nestedCode)} + '<\\/script>'; document.body.append(f);<\/script>`;
   const prevFrames = [
     art(U(31), 'Nested site'),
     art(U(32), 'Hostile', { rel: 'shared' }),
@@ -330,6 +346,9 @@ async function exportTo(frames, pages, thumbs) {
     art(U(37), 'Diagram'),
     art(U(38), 'Remote script'),
     art(U(39), 'Shared board', { rel: 'shared', typeSlug: DESIGN_TYPE, typeTitle: 'Design' }),
+    art(U(60), 'rtc top', { rel: 'shared' }),
+    art(U(61), 'rtc nested', { rel: 'shared' }),
+    art(U(62), 'Component'),
     ...navs.map(([name], i) => art(navUuid(i), name, { rel: 'shared' })),
   ];
   const prevPages = {
@@ -345,6 +364,9 @@ async function exportTo(frames, pages, thumbs) {
     [U(36)]: live('Picture', { 'pic.png': { body: png(40, 30), type: 'image/png' } }),
     [U(37)]: live('Diagram', { 'd.svg': { body: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect id="r" width="100" height="50" fill="red"/></svg>', type: 'image/svg+xml' } }),
     [U(38)]: live('Remote script', { 'index.html': '<script src="https://cdn.remote.test/x.js"></script><p id="t">remote</p>' }),
+    [U(60)]: live('rtc top', { 'index.html': RTC_TOP }),
+    [U(61)]: live('rtc nested', { 'index.html': RTC_NESTED }),
+    [U(62)]: live('Component', { 'App.jsx': 'export default () => <div/>', 'app.js': 'x()' }),
     [U(39)]: live('Shared board', { 'index.html': '<h1>Shared board</h1>', 'art.svg': { body: '<svg xmlns="http://www.w3.org/2000/svg"/>', type: 'image/svg+xml' }, 'notes.pdf': { body: '%PDF-1.4', type: 'application/pdf' } }),
   };
   navs.forEach(([name, attempt, head], i) => { prevPages[navUuid(i)] = live(name, { 'index.html': navArtifact(name, attempt, head).versions[0] }); });
@@ -484,7 +506,16 @@ async function exportTo(frames, pages, thumbs) {
   check('svg: shown in the sandboxed frame', await sf.waitForSelector('#r', { timeout: 3000 }).then(() => true).catch(() => false));
   await md.page.goto(md.url + `#a=${p(38)}`);
   await frameOf(md);
-  check('remote script: the note shows', await md.page.locator('#page-note').isVisible() && (await md.page.locator('#page-note').textContent()) === REMOTE_NOTE, await md.page.locator('#page-note').textContent());
+  check('remote script: the note shows', await md.page.locator('#page-note').isVisible()
+    && (await md.page.locator('#page-note').textContent()) === 'This page loads a script from the internet, which the viewer blocks, so it may not work here.', await md.page.locator('#page-note').textContent());
+  check('no note mentions a code view', !/code view/i.test(await md.page.locator('#page').textContent()));
+
+  // React start: straight to the details page, no part load, no Loading.
+  const partLoads = () => md.page.evaluate(() => performance.getEntriesByType('resource').filter(e => /part-\d+\.js$/.test(e.name)).length);
+  await md.page.goto(md.url + `#a=${p(62)}`);
+  await md.page.waitForSelector('#page-body .details');
+  check('react start: details page at once, no part loaded', await md.page.locator('#page-body .preview').count() === 0 && await partLoads() === 0
+    && /source code that needs claude\.ai to run/.test(await md.page.locator('#page-body').textContent()), await md.page.locator('#page-body').textContent());
   check('markdown/image/svg: no requests, no errors', md.seen.requests.length === 0 && md.seen.errors.length === 0, JSON.stringify(md.seen));
 
   // Show saved files anyway on a Design poster.
@@ -500,6 +531,31 @@ async function exportTo(frames, pages, thumbs) {
   check('shared poster: no Open file on .html and .svg rows', JSON.stringify(rows) === JSON.stringify([['index.html', false], ['art.svg', false], ['notes.pdf', true]]), JSON.stringify(rows));
   check('shared poster: no top-bar Open file', await md.page.locator('#page-links a.open-file').count() === 0);
   await md.context.close();
+
+  // WebRTC from the preview's own window gets nothing out.
+  const rt = await openPrev(`#a=${p(60)}`);
+  await frameOf(rt);
+  await waitLog(rt, 'RTC top threw');
+  await rt.page.waitForTimeout(1500);
+  const topSaid = rt.seen.logs.filter(l => l.startsWith('RTC top'));
+  check('webrtc: the attempt ran', topSaid.includes('RTC top ran'), topSaid.join(' | '));
+  check('webrtc: every name is gone and stays gone', topSaid.includes('RTC top type undefined undefined undefined undefined undefined') && topSaid.includes('RTC top after undefined'), topSaid.join(' | '));
+  check('webrtc: no peer connection could be made', topSaid.some(l => l.startsWith('RTC top threw')) && !topSaid.includes('RTC top made'), topSaid.join(' | '));
+  check('webrtc: no packet reached the local STUN listener', rtcTop.got.length === 0, rtcTop.got.join(' '));
+  check('webrtc: no viewer page errors', rt.seen.errors.length === 0, rt.seen.errors.join(' '));
+  await rt.context.close();
+  // From a nested frame's fresh window: logged, not failed, so the gap stays visible.
+  const rn = await openPrev(`#a=${p(61)}`);
+  await frameOf(rn);
+  await waitLog(rn, 'RTC nested ran');
+  await rn.page.waitForTimeout(1500);
+  const nestedRtc = rn.seen.logs.filter(l => l.startsWith('RTC nested'));
+  check('webrtc nested: the attempt ran', nestedRtc.includes('RTC nested ran'), nestedRtc.join(' | '));
+  console.log(`${rtcNested.got.length ? 'KNOWN RESIDUAL' : 'INFO'}  webrtc from a nested frame's window: ${rtcNested.got.length} STUN packet(s) reached 127.0.0.1 (${nestedRtc.join(' | ')})`);
+  check('webrtc nested: no viewer page errors', rn.seen.errors.length === 0, rn.seen.errors.join(' '));
+  await rn.context.close();
+  rtcTop.sock.close();
+  rtcNested.sock.close();
 
   // A missing part says so.
   for (const n of fs.readdirSync(path.join(prevDir, 'viewer-files'))) if (/^part-\d+\.js$/.test(n)) fs.unlinkSync(path.join(prevDir, 'viewer-files', n));

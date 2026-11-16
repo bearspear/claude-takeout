@@ -545,6 +545,17 @@ function resolveArtifactPath(startPath, url) {
 
 const mapOf = pairs => new Map(Array.isArray(pairs) ? pairs.filter(p => Array.isArray(p) && typeof p[0] === 'string') : []);
 
+// An attribute value as the browser reads it: character references decoded (named &amp; &quot; &apos; &lt; &gt;,
+// decimal and hex), so src="R&amp;D.js" names R&D.js. Any other named reference stays as written.
+const NAMED_REFS = { amp: '&', AMP: '&', quot: '"', QUOT: '"', apos: "'", lt: '<', LT: '<', gt: '>', GT: '>' };
+function decodeAttr(value) {
+  return String(value).replace(/&(?:#(\d+)|#[xX]([0-9a-fA-F]+)|([A-Za-z]+));?/g, (m, dec, hex, name) => {
+    if (name !== undefined) return Object.prototype.hasOwnProperty.call(NAMED_REFS, name) ? NAMED_REFS[name] : m;
+    const code = dec !== undefined ? Number(dec) : parseInt(hex, 16);
+    return code > 0 && code <= 0x10ffff && !(code >= 0xd800 && code <= 0xdfff) ? String.fromCodePoint(code) : '\uFFFD';
+  });
+}
+
 // Like inlineSiblings, resolving through resolveArtifactPath against payload.texts (scripts and stylesheets) and
 // payload.images (img src, with the first srcset candidate when src is not saved). CSS keeps its own url() and @import
 // unresolved, and module imports are not inlined.
@@ -552,11 +563,11 @@ function inlineArtifact(html, startPath, payload) {
   const texts = mapOf(payload && payload.texts);
   const images = mapOf(payload && payload.images);
   const text = (attr, type) => {
-    const path = attr ? resolveArtifactPath(startPath, attr.value) : null;
+    const path = attr ? resolveArtifactPath(startPath, decodeAttr(attr.value)) : null;
     return path !== null && type.test(path) && texts.has(path) ? texts.get(path) : null;
   };
   const image = value => {
-    const path = resolveArtifactPath(startPath, value);
+    const path = resolveArtifactPath(startPath, decodeAttr(value));
     const uri = path !== null && images.has(path) ? images.get(path) : null;
     return typeof uri === 'string' && /^data:image\//i.test(uri) && !/["'<>\s]/.test(uri) ? uri : null;
   };
@@ -568,7 +579,7 @@ function inlineArtifact(html, startPath, payload) {
       const set = attrOf(attrs, 'srcset');
       let uri = src ? image(src.value) : null;
       if (uri === null && set) {
-        const first = set.value.split(',')[0].trim().split(/\s+/)[0];
+        const first = decodeAttr(set.value).split(',')[0].trim().split(/\s+/)[0];
         uri = first ? image(first) : null;
       }
       if (uri === null) return null;
@@ -601,11 +612,16 @@ function inlineArtifact(html, startPath, payload) {
 // Storage is blocked in a sandbox without allow-same-origin, and a page that touches it would throw; this gives it memory.
 const STORAGE_SHIM = `<script>(function(){function mem(){var d=Object.create(null);return{getItem:function(k){k=String(k);return k in d?d[k]:null},setItem:function(k,v){d[String(k)]=String(v)},removeItem:function(k){delete d[String(k)]},clear:function(){d=Object.create(null)},key:function(i){var k=Object.keys(d);i=Number(i);return i>=0&&i<k.length?k[i]:null},get length(){return Object.keys(d).length}}}['localStorage','sessionStorage'].forEach(function(n){var ok=true;try{window[n].getItem('x')}catch(e){ok=false}if(!ok){try{Object.defineProperty(window,n,{value:mem(),configurable:true})}catch(e){}}})})()</script>`;
 
-// The sandboxed document for an artifact's start file: policy first, then the storage shim, then the page.
+// WebRTC sends packets that Chrome's CSP doesn't stop. (Chrome doesn't know the webrtc directive and logs a console error
+// for it, so PREVIEW_CSP leaves it out.) So the page's own window loses these names, for good. A frame the page makes
+// has a fresh window with them back: a known gap (USAGE.md, "What to know about previews").
+const RTC_SHIM = `<script>(function(){['RTCPeerConnection','webkitRTCPeerConnection','RTCDataChannel','RTCSessionDescription','RTCIceCandidate'].forEach(function(n){try{Object.defineProperty(window,n,{get:function(){return undefined},set:function(){},configurable:false,enumerable:false})}catch(e){try{delete window[n]}catch(e){}}})})()</script>`;
+
+// The sandboxed document for an artifact's start file: policy first, then the storage and WebRTC shims, then the page.
 function artifactPreviewDoc(text, startPath, payload) {
   const rest = String(text).replace(/^﻿?\s*<!doctype[^>]*>/i, '');
   return {
-    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${STORAGE_SHIM}${inlineArtifact(rest, startPath, payload)}`,
+    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${STORAGE_SHIM}${RTC_SHIM}${inlineArtifact(rest, startPath, payload)}`,
     remote: remoteScripts(rest),
   };
 }
@@ -1172,5 +1188,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, artifactTabs, relativeTime, parseArtifactHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
 }
