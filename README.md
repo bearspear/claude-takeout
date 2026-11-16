@@ -42,6 +42,7 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
    - **Export All (Embedded)** - One `.md` file per conversation with artifacts inline
    - **Export All (Mega-Zip)** - Single zip containing all conversations
    - **Export All (JSON)** - One `.json` file per conversation
+   - **Export Artifacts (Folder or ZIP)** - Every artifact on claude.ai (your own and any shared with you), as it is now, with an `index.html` to browse them
 5. Watch the progress bar as conversations are exported
 
 ## Export Formats
@@ -116,6 +117,23 @@ Creates a comprehensive archive:
 **"Export Current (JSON)"**
 - Raw API response with complete data
 - Useful for backup or custom processing
+
+### Export Artifacts
+
+**"Export Artifacts (Folder)"** or **"(ZIP)"**, following **Export All and Export Artifacts save as** in Settings. It saves every artifact on claude.ai/artifacts, whichever chat or project made it:
+
+```
+claude-takeout-artifacts-<your name>-2026-11-16_1530/
+├── index.html                       # Browse the artifacts; no scripts, works from disk
+├── index.md                         # The same list as Markdown
+├── export-manifest.json             # kind: "artifacts", every artifact's uuid, title, folder and version
+├── errors.txt                       # Only when something went wrong
+└── <Title>_<id>/                    # One folder per artifact
+    ├── artifact.json                # Title, kind, source, version, files with SHA-256, notes
+    └── <the artifact's files>       # Its current version
+```
+
+A Claude Docs document is listed with a link, not saved: its text isn't available as a file.
 
 ### Mega-Zip (Bulk Export)
 **"Export All (Mega-Zip)"**
@@ -373,6 +391,10 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.15.0
+
+- **Export Artifacts** - A new **Export Artifacts** button saves every artifact on claude.ai/artifacts, from any chat, project or Claude Code session, and any shared with you (marked "shared with you"), in its current version. Each goes in its own folder with an `artifact.json`, and `index.html` and `index.md` list them all. The list is fetched first, and nothing is written when it is empty or fails. Claude Docs documents are listed with a link, since their text isn't available as a file; artifacts built on claude.ai's own page code are marked "needs claude.ai to run". Like Export All it saves into a folder (or a ZIP, see **Export All and Export Artifacts save as** in Settings); use the folder for a large account, since a ZIP is built in memory. It needs a claude.ai tab open and signed in. If claude.ai lists a round number of artifacts (60 or more) the list may be cut short, and `errors.txt` says so.
 
 ### v1.14.0
 

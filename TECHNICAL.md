@@ -317,6 +317,14 @@ Encoding rules:
 
 ---
 
+### Export Artifacts
+
+Export Artifacts (`exportArtifacts`) saves the artifacts claude.ai lists, not those found in chats. `content.js` `listArtifacts` calls `GET /api/frame/frames?org=<org>&limit=1000` (header `X-Frame-CP: go`, same-origin) and returns, per frame, only `slug`, `title`, `typeSlug`, `typeTitle`, `sourceSurface`, `rel`, `live`, `updatedAt`, `createdAt`; no owner, thumbnail or URL leaves it. `artifactsFromList` (export-core.js) checks each again (the slug by the uuid rule, `live` by the version rule). No paging parameter is known (`offset`, `cursor`, `page`, `skip` are ignored, and limits 60, 200, 1000 and none all returned the same 19), so a list whose length is 60 or more and a multiple of 10, or exactly 1000, warns `artifact_export` that it may be cut short. The list is fetched first through `tabPublishedFetcher`; an empty list or a failure writes nothing.
+
+Each artifact is fetched at its listed version with the same code a chat's published page uses, `fetchPublishedFiles` (`publishedPageInfo` then `publishedPageFile`, the 32 MB and 50 MB caps, SHA-256, `publishedSegment` names, the 401 latch). `publishedPageInfo` also reports `runtimeSkipped`, the count of `artifact-type/` paths dropped; `needsRuntime` is true when that is above zero, when the artifact has a type, or when the start text needs claude.ai's page code. Claude Docs (type `c8f0b311-af6a-4d22-a07b-61eb818fc35d`, or title "Docs" when the type is missing) are not fetched: they get a row and the note that their text isn't a file. A typed artifact with no files of its own gets `artifact.json` only. A shared one (`rel` not `mine`) is exported and labelled in `artifact.json`'s `note` and in the Source column.
+
+Layout: `claude-takeout-artifacts-<name>-<stamp>` (`megaZipName(name, 'artifacts', stamp)`), one folder `<safeFileTitle(title)>_<shortId>` per artifact (`shortId` from `uuidToBase58`, compared case-insensitively), the version's files at its top level, and `artifact.json` (a page file of that name becomes `artifact_2.json`). The root has `index.html`, `index.md` and `export-manifest.json` (`kind: 'artifacts'`, `listed`, `artifacts[]`), and `errors.txt` from one collector labelled "Export Artifacts". `artifactsIndexHtml` is static: a CSP meta first (`default-src 'none'`), no scripts, every value escaped, local links `encodeURIComponent`-ed per segment, claude.ai links rebuilt from the short id with `rel="noopener noreferrer"`. `index.md` goes through `mdLinkText`. A folder export flushes after each artifact and writes `write-errors.txt` like Export All (`folderExport` is shared by both buttons). The export ignores `megaZipScope` and never reads or writes `exportRecord`. The old-archive tool and `merge_archives.js` find no archive in it (no `original.json`, no chat folders) and ignore it.
+
 ## Error reporting
 
 `ExportErrorCollector` collects errors (something is missing) and warnings (something may be incomplete) during one export. `generateErrorReport` writes them to `errors.txt` with a recovery hint per type, and the status pill turns amber.
@@ -337,6 +345,7 @@ Encoding rules:
 | `claude_doc_unreplayed` | A Claude Docs edit could not be rebuilt from the chat; the note links the live document. |
 | `export_health` | The chat's data looks incomplete, the likely sign of a change in claude.ai's API (`chatHealth`): no messages although the chat changed, messages with no content, no current branch in a branched chat, unknown content block types, or none of several uploads downloaded. A mega-ZIP's `index.md` counts these chats, and the chats claude.ai listed. |
 | `published_page` | A published page could not be saved, or only partly: no claude.ai tab, a failed request (401 once per export), a file too large, a checksum mismatch, a renamed or rejected path. |
+| `artifact_export` | Export Artifacts could not save an artifact or part of one: a failed request (401 once, then it stops), a file too large, a checksum mismatch, a renamed or rejected path, or a list that may be cut short. |
 | `viewer` | One chat could not be added to `viewer.html`. |
 
 Each error records the URLs tried, HTTP status and fallback result. A new kind of failure gets a new type and a `_getRecoveryHint` case.
@@ -443,6 +452,7 @@ All `GET`, all authenticated by session cookie.
 | `/api/organizations/<org>/projects/<project>` | `ensureProjectName`, `fetchProjectDocs` | Project metadata. |
 | `/api/organizations/<org>/projects/<project>/docs` | `fetchProjectDocs` | Project documents. |
 | `/api/organizations/<org>/projects/<project>/docs/<doc>/content` | `fetchProjectDocs` | A document's text (falls back to `/docs/<doc>`). |
+| `/api/frame/frames?org=<org>&limit=1000` (header `X-Frame-CP: go`) | `content.js` `listArtifacts` | The artifacts claude.ai lists (Export Artifacts); only the fields it needs are returned. |
 | `/api/frame/<uuid>?org=<org>[&ver=<ver>]` (header `X-Frame-CP: go`) | `publishedPageInfo` | A published page's versions, title and asset token. |
 | `https://<uuid>.frame.claudeusercontent.com/_f/<ver>/_files.json`, `…/_src/<path>` (query `__frame_t`) | `publishedPageFile`, `publishedPageInfo` | A published page's file list and files. No cookies sent. |
 | `/api/organizations/<org>/projects/<project>/files` | `fetchProjectFileList` | Project knowledge files. |

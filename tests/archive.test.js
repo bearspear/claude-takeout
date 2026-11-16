@@ -44,6 +44,17 @@ test('finds a single, a mega with a renamed chat folder, and a parent of two sin
   assert.ok(!res.archives.some(a => a.root === path.join(tmp, 'parent')));
 });
 
+test('an Export Artifacts folder holds no archive', () => {
+  const tmp = tmpRoot();
+  put(tmp, 'index.md');
+  put(tmp, 'index.html');
+  put(tmp, 'export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', listed: 1, artifacts: [] }));
+  put(tmp, 'Game_abc/index.html');
+  put(tmp, 'Game_abc/artifact.json', '{}');
+  const res = find(tmp);
+  assert.deepStrictEqual(res.archives, []);
+});
+
 test('index.md without chat subfolders is not a mega; the root itself can be an archive', () => {
   const tmp = tmpRoot();
   put(tmp, 'index.md');
