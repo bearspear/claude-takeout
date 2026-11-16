@@ -461,8 +461,12 @@ async function exportTo(frames, pages, thumbs) {
   for (const [i, [name]] of navs.entries()) {
     const nv = await openPrev(`#a=${p(40 + i)}`);
     await frameOf(nv).catch(() => null);
-    const refused = () => nv.seen.logs.some(l => /Refused to (frame|navigate)|violates the following Content Security Policy|blocked/i.test(l));
-    const ran = await waitLog(nv, `NAV ran ${name}`) || (name === 'navrefresh' && refused());
+    const REFUSAL = /Refused to (frame|navigate)|violates the following Content Security Policy|blocked/i;
+    const refused = () => nv.seen.logs.some(l => REFUSAL.test(l));
+    // Chrome may stop the navigation before the attempt's own log line; the policy's refusal of remote.test
+    // shows it ran (navrefresh has no URL of its own, so any refusal counts).
+    const refusedFor = (n) => (n === 'navrefresh' ? refused() : nv.seen.logs.some(l => l.includes('remote.test') && REFUSAL.test(l)));
+    const ran = await waitLog(nv, `NAV ran ${name}`) || refusedFor(name);
     await nv.page.waitForTimeout(500);
     check(`${name}: the attempt ran`, ran, nv.seen.logs.join(' | '));
     check(`${name}: nothing got out`, !nv.seen.logs.some(l => l.includes('ESCAPED')) && nv.seen.requests.length === 0 && nv.seen.popups === 0, [...nv.seen.logs, ...nv.seen.requests].join(' | '));

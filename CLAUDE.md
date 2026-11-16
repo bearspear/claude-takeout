@@ -23,7 +23,7 @@ For deeper dives, two companion docs live alongside this one:
 
 | File | Role | Notes |
 |---|---|---|
-| `manifest.json` | MV3 declaration. | Hosts: `claude.ai/*`; optional `https://*/*`, only for saving web-search images and Export Artifacts' card pictures (`requestWebImages`, asked during a click; `askForCardPictures` only when not already granted). Perms: `activeTab`, `scripting`, `storage`, `sidePanel`. Web-accessible: `injected.js`. |
+| `manifest.json` | MV3 declaration. | Hosts: `claude.ai/*`; optional `https://*/*`, only for saving web-search images and Export Artifacts' card pictures (`requestWebImages`, asked during a click; `askForCardPictures` in a ZIP export's click, only when not already granted; folder mode never asks). Perms: `activeTab`, `scripting`, `storage`, `sidePanel`. Web-accessible: `injected.js`. |
 | `injected.js` | Page-context org ID fallback (runs in the page's world). | Wraps `window.fetch`, reads the org ID from request URLs, relays it via `window.postMessage`. |
 | `content.js` | Isolated-world bridge (runs at `document_start`). | Injects `injected.js`, resolves the org ID, and exposes `getOrgId` / `fetchAllConversations` / `fetchConversation` / `listArtifacts` / `artifactThumbUrl` / `publishedPageInfo` / `publishedPageFile` to the popup via `chrome.runtime.onMessage`. The two published-page actions fetch a page's details and files from claude.ai's frame host; they keep the asset token to themselves and answer only with error codes, never URLs or messages. |
 | `background.js` | MV3 service worker. | Only manages side-panel "open on action click" preference. Listens to `chrome.storage.onChanged` for `useSidePanel` to re-apply behavior. |

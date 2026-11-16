@@ -1801,7 +1801,7 @@ test('web search images are saved in images/ when Chrome allows it, and shown in
 test('without the permission, web images are links and errors.txt says how to save them', async () => {
   const { written, chat } = await runFolder(exportPopup({ routes: imageRoutes }), webChat());
   assert.ok(!Object.keys(written).some((n) => n.startsWith('images/')));
-  assert.match(docText(written, 'errors.txt'), /3 images from web searches were not saved[\s\S]*Save images from web searches/);
+  assert.match(docText(written, 'errors.txt'), /3 images from web searches were not saved[\s\S]*Save web images and artifact card pictures/);
   assert.ok(docText(written, 'full_chat.md').includes('> 1. [Green screw](https://example.com/a) (example.com) · [image](https://img.example/a.jpg)'));
   assert.ok(chat.messages[0].blocks.find((b) => b.t === 'tool' && b.web).web.every((w) => w.href === null));
 });
@@ -3147,6 +3147,16 @@ test('card pictures are saved outside artifact folders', async () => {
   }
 });
 
+test('the Settings checkbox names web images and artifact card pictures', () => {
+  for (const page of ['popup.html', 'sidepanel.html']) {
+    const html = fs.readFileSync(path.join(__dirname, '..', page), 'utf8');
+    const label = /<label for="webImages" title="([^"]*)">([^<]*)<\/label>/.exec(html);
+    assert.ok(label, page);
+    assert.strictEqual(label[2], 'Save web images and artifact card pictures:');
+    assert.match(label[1], /card pictures/);
+  }
+});
+
 test('without the optional permission no picture is asked for or fetched', async () => {
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
   const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) };
@@ -3156,13 +3166,22 @@ test('without the optional permission no picture is asked for or fetched', async
   assert.deepStrictEqual(permissionRequests, [], 'the export itself never asks; the click does');
   assert.deepStrictEqual(views.map((v) => v.thumb), [null, null]);
   assert.ok(!Object.keys(files).some((n) => n.startsWith('viewer-files/thumbs/')));
-  assert.match(files['index.md'], /\*\*Card pictures:\*\* 0 of 2/);
+  const need = '0 of 2 (needs the web images permission: Settings, Save web images and artifact card pictures)';
+  assert.ok(files['index.md'].includes(`**Card pictures:** ${need}`), files['index.md']);
+  assert.ok(files['index.html'].includes(`Card pictures: ${need}`));
   assert.strictEqual(JSON.parse(files['export-manifest.json']).thumbs, 0);
   assert.ok(!files['errors.txt'], files['errors.txt']);
   assert.strictEqual(status.className, 'status ready');
+  assert.ok(status.textContent.endsWith(' Card pictures need the web images permission (Settings).'), status.textContent);
+  const disk = await runArtifacts({ frames, pages, granted: false, options: { directory: new FakeDir() } });
+  assert.ok(disk.status.textContent.endsWith(' Card pictures need the web images permission (Settings).'), disk.status.textContent);
+  assert.ok(disk.files['index.md'].includes(`**Card pictures:** ${need}`));
+  const ok = await runArtifacts({ frames, pages, thumbs: { [U(1)]: pic() } });
+  assert.ok(!ok.status.textContent.includes('permission'), ok.status.textContent);
+  assert.ok(!ok.files['index.md'].includes('permission') && !ok.files['index.html'].includes('needs the web images'));
 });
 
-test('Export Artifacts asks for the permission in the click, only when it is not granted', async () => {
+test('Export Artifacts asks for the permission in a ZIP export\'s click, only when it is not granted; never in folder mode', async () => {
   const tick = () => new Promise((r) => setTimeout(r, 5));
   for (const [granted, format] of [[false, 'zip'], [true, 'zip'], [false, 'folder'], [true, 'folder']]) {
     const order = [];
@@ -3182,15 +3201,16 @@ test('Export Artifacts asks for the permission in the click, only when it is not
     vm.runInContext('exportArtifacts = async (o) => { globalThis.__ran = o; }', sb);
     sb.window.showDirectoryPicker = async () => { order.push(['picker']); return new FakeDir(); };
     const clicked = sb.document.getElementById('exportArtifacts').handlers.click();
-    // Synchronously in the click: the picker (folder), then the request (when not granted).
-    const want = [...(format === 'folder' ? [['picker']] : []), ...(granted ? [] : [['request', 'https://*/*']])];
+    // Synchronously in the click: the request (ZIP, when not granted). Folder mode only opens the picker, which
+    // needs the click's activation.
+    const want = format === 'folder' ? [['picker']] : granted ? [] : [['request', 'https://*/*']];
     assert.deepStrictEqual(order, want, `${granted} ${format}`);
     if (release) release(true);
     await clicked;
     ran = sb.__ran;
     assert.ok(ran, 'export ran');
     assert.strictEqual(!!ran.directory, format === 'folder');
-    if (granted) assert.strictEqual(ran.ask, null);
+    if (granted || format === 'folder') assert.ok(!ran.ask, `${granted} ${format}`);
     else assert.strictEqual(await ran.ask, true);
     release = null;
   }

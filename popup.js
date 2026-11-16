@@ -102,7 +102,7 @@ class ExportErrorCollector {
         return 'A picture Claude looked at in the chat (a photo it opened, a page it rendered) could not be downloaded from claude.ai. Export again later; it is still shown in the chat on claude.ai.';
 
       case 'web_image':
-        return 'An image Claude found with image search could not be saved: the site refused it, it is gone, or Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to it. To save these images, turn on Settings > Save images from web searches (Chrome asks once), then export again.';
+        return 'An image Claude found with image search could not be saved: the site refused it, it is gone, or Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to it. To save these images, turn on Settings > Save web images and artifact card pictures (Chrome asks once), then export again.';
 
       case 'published_page':
         return 'A page Claude published on claude.ai (publish_files) could not be saved, or only in part, or its file names were changed to be safe on disk. The chat itself is exported. Open the page on claude.ai (link in the note) while signed in, and export again; a page that was unpublished or deleted can no longer be saved.';
@@ -3102,7 +3102,7 @@ async function saveWebImages(folder, data, errorCollector, onProgress = null) {
   if (!images.length) return saved;
   if (!(await webImagesAllowed())) {
     errorCollector.addWarning('web_image', 'images/', `${images.length} image${images.length === 1 ? '' : 's'} from web searches ${images.length === 1 ? 'was' : 'were'} not saved: Claude Takeout may not fetch images from other sites.`,
-      { note: 'Turn on Settings > Save images from web searches, then export again. The links in full_chat.md still work.' });
+      { note: 'Turn on Settings > Save web images and artifact card pictures, then export again. The links in full_chat.md still work.' });
     return saved;
   }
   const fetchImage = async (url) => {
@@ -5294,7 +5294,12 @@ const artifactLocal = (r) => {
 };
 
 // index.md: one table row per artifact, by title. opts: { listed, exportedAt, warnings, thumbs (card pictures saved) }.
-function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0 } = {}) {
+// "Card pictures: N of M", with the note when they were skipped for want of the optional permission.
+const ARTIFACT_THUMB_PERMISSION_STATUS = 'Card pictures need the web images permission (Settings).';
+function artifactThumbsLine(thumbs, listed, needPermission) {
+  return `${Number(thumbs) || 0} of ${Number(listed) || 0}${needPermission ? ' (needs the web images permission: Settings, Save web images and artifact card pictures)' : ''}`;
+}
+function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, thumbsNeedPermission = false } = {}) {
   const cell = (t) => mdLinkText(String(t || '')).replace(/[<>|*_`#]/g, '\\$&');
   const lines = [
     '# Claude Takeout - Artifacts',
@@ -5302,7 +5307,7 @@ function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().
     `**Exported:** ${formatTimestamp(exportedAt)}`,
     `**Listed by claude.ai:** ${listed}`,
     `**Saved with files:** ${rows.filter((r) => r.fileCount > 0).length}`,
-    `**Card pictures:** ${Number(thumbs) || 0} of ${Number(listed) || 0}`,
+    `**Card pictures:** ${artifactThumbsLine(thumbs, listed, thumbsNeedPermission)}`,
   ];
   if (warnings) lines.push(`**Issues:** ${artifactCount(warnings, 'warning')} (see errors.txt)`);
   lines.push('', '| # | Artifact | Kind | Source | Files | Notes |', '|---|----------|------|--------|-------|-------|');
@@ -5318,7 +5323,7 @@ function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().
 
 // index.html: a static page, no scripts; every value is escaped and the only links are each artifact's start
 // file in the export, its claude.ai page and, when it was built (opts.viewer), viewer.html. opts as artifactsIndexMd.
-function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, viewer = false } = {}) {
+function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, viewer = false, thumbsNeedPermission = false } = {}) {
   const esc = (t) => escapeHtmlText(String(t == null ? '' : t)).replace(/'/g, '&#39;');
   const body = sortArtifactRows(rows).map((r) => {
     const local = artifactLocal(r);
@@ -5354,7 +5359,7 @@ a.remote { font-size: 0.85em; margin-left: 6px; }
 <body>
 <main>
 <h1>Claude Artifacts</h1>
-<p class="meta">Exported ${esc(formatTimestamp(exportedAt))} · Listed by claude.ai: ${Number(listed) || 0} · Card pictures: ${Number(thumbs) || 0} of ${Number(listed) || 0}${warnings ? ` · ${artifactCount(warnings, 'warning')} (see errors.txt)` : ''}</p>
+<p class="meta">Exported ${esc(formatTimestamp(exportedAt))} · Listed by claude.ai: ${Number(listed) || 0} · Card pictures: ${esc(artifactThumbsLine(thumbs, listed, thumbsNeedPermission))}${warnings ? ` · ${artifactCount(warnings, 'warning')} (see errors.txt)` : ''}</p>
 ${viewer ? '<p class="viewer"><a href="viewer.html">Open the artifacts viewer</a></p>\n' : ''}<div class="wrap">
 <table>
 <thead><tr><th>Artifact</th><th>Kind</th><th>Source</th><th>Files</th><th>Notes</th></tr></thead>
@@ -5426,7 +5431,8 @@ async function exportArtifacts(options = {}) {
     const views = [];
     const writeFailures = [];
     let thumbs = 0;
-    // Card pictures only with the optional https permission (asked in the click: options.ask); without it, tiles.
+    // Card pictures only with the optional https permission (asked in a ZIP export's click: options.ask); without
+    // it, tiles, and the status line and indexes say the permission is needed.
     let picturesAllowed = false;
     try {
       if (options && options.ask) await options.ask;
@@ -5493,14 +5499,14 @@ async function exportArtifacts(options = {}) {
     }
 
     const warnings = collector.warnings.length + collector.errors.length;
-    const indexOpts = { listed, exportedAt: startedAt, warnings, thumbs, viewer: viewerBuilt };
+    const indexOpts = { listed, exportedAt: startedAt, warnings, thumbs, viewer: viewerBuilt, thumbsNeedPermission: !picturesAllowed };
     addFileWithBOM(root, 'index.md', artifactsIndexMd(rows, indexOpts));
     root.file('index.html', artifactsIndexHtml(rows, indexOpts));
     root.file('export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', exported_at: startedAt, listed, thumbs, artifacts: entries }, null, 2));
     if (collector.hasAny()) root.file('errors.txt', collector.generateErrorReport());
 
     const withoutFiles = rows.filter((r) => r.fileCount === 0).length;
-    const viewerNote = viewerBuilt ? '' : ' viewer.html could not be built.';
+    const viewerNote = (viewerBuilt ? '' : ' viewer.html could not be built.') + (picturesAllowed ? '' : ` ${ARTIFACT_THUMB_PERMISSION_STATUS}`);
     const done = (where) => `Exported ${artifactCount(total, 'artifact')} to ${where}.${withoutFiles ? ` ${withoutFiles} without files (see index.md).` : ''}${warnings ? ' See errors.txt.' : ''}`;
     if (run) {
       writeFailures.push(...await root.flush());
@@ -5673,8 +5679,9 @@ const IS_POPUP = typeof location !== 'undefined' && /popup\.html$/.test(location
 const FOLDER_BUTTON_LABELS = { exportAllZip: 'Export All (Folder)', exportArtifacts: 'Export Artifacts (Folder)' };
 // A label the popup stored with its note, read from the clicked button; anything else falls back to the above.
 const FOLDER_LABEL_RE = /^Export (?:All|Changes|Artifacts) \(Folder\)$/;
-// ask(): optional, called in the click (not from the popup's side-panel hand-off, where the panel's own click
-// asks) to start a permission request; its promise reaches run as options.ask.
+// ask(): optional, called in a ZIP export's click to start a permission request; its promise reaches run as
+// options.ask. Folder mode never asks: showDirectoryPicker needs the click's activation, and a request would
+// risk it (turn the permission on in Settings instead).
 function folderExport(buttonId, name, run, ask = null) {
   return async () => {
     if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return ask ? run({ ask: ask() }) : run();
@@ -5695,17 +5702,13 @@ function folderExport(buttonId, name, run, ask = null) {
       return;
     }
     let directory;
-    // The picker first, so the user activation it needs is there; the permission request follows in the same task.
-    let picking;
-    try { picking = window.showDirectoryPicker({ mode: 'readwrite', id: 'claude-takeout' }); } catch (e) { picking = Promise.reject(e); }
-    const asked = ask ? ask() : null;
     try {
-      directory = await picking;
+      directory = await window.showDirectoryPicker({ mode: 'readwrite', id: 'claude-takeout' });
     } catch (e) {
       if (e.name !== 'AbortError') { status.className = 'status error'; status.textContent = e.message; }
       return;
     }
-    return run(ask ? { directory, ask: asked } : { directory });
+    return run({ directory });
   };
 }
 onExport('exportAllZip', folderExport('exportAllZip', 'Export All', (options) => bulkExportZip(options)));
@@ -5810,7 +5813,7 @@ function applySettings() {
   });
 }
 
-// Save images from web searches: not a stored setting but Chrome's permission, shown as it stands.
+// Save web images and artifact card pictures: not a stored setting but Chrome's permission, shown as it stands.
 const webImagesBox = document.getElementById('webImages');
 if (webImagesBox) {
   webImagesAllowed().then((ok) => { webImagesBox.checked = ok; });
