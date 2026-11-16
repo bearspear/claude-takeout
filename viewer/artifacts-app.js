@@ -2,7 +2,10 @@
 // { exported, listed, artifacts: ArtifactView[] } (see artifactView in popup.js), and shows the home page:
 // a grid of cards like claude.ai/artifacts, with tabs (All / Yours / Shared with you) and a title search.
 // Every text from the data goes in through textContent or attributes, never as markup.
-// Clicking a card sets #a=<id>; the artifact page comes with the next step, until then the grid stays.
+// Clicking a card sets #a=<id>, which opens that artifact's page: a top bar (home, title, kind, badges, Open file,
+// Open on claude.ai) above the artifact. What fills it (pageFor): a Docs page, a poster for Design and other typed
+// artifacts, the preview (openPreview) for an HTML, SVG, Markdown or image start file, else a details page.
+// Any other hash, or an id not in the data, shows the grid.
 (function () {
   'use strict';
 
@@ -29,6 +32,7 @@
     design: [['rect', { x: 4, y: 4, width: 16, height: 16, rx: 3 }], ['path', { d: 'M8.5 15.5 14 10l1.5 1.5-5.5 5.5H8.5z' }], ['path', { d: 'M15 9l1-1 1 1-1 1' }]],
     // A browser window: any other page.
     page: [['rect', { x: 3.5, y: 5, width: 17, height: 14, rx: 2 }], ['path', { d: 'M3.5 9h17' }], ['path', { d: 'M6.5 7h.01M8.5 7h.01' }]],
+    house: [['path', { d: 'M2.5 7.2 8 2.5l5.5 4.7V13a.5.5 0 0 1-.5.5H10V10H6v3.5H3a.5.5 0 0 1-.5-.5z' }]],
     globe: [['circle', { cx: 8, cy: 8, r: 6.25 }], ['path', { d: 'M1.75 8h12.5M8 1.75c1.7 1.8 2.5 3.9 2.5 6.25S9.7 12.45 8 14.25C6.3 12.45 5.5 10.35 5.5 8S6.3 3.55 8 1.75z' }]],
   };
 
@@ -73,9 +77,12 @@
   // Only a picture the export saved, at viewer-files/thumbs/<id>.<ext>, relative to this page.
   const THUMB_PATH = /^viewer-files\/thumbs\/[A-Za-z0-9-]{1,64}\.(?:png|jpg|webp)$/;
 
-  function picture(v) {
-    const box = el('span', 'pic');
-    if (typeof v.thumb === 'string' && THUMB_PATH.test(v.thumb)) {
+  // false once viewer-check.gif fails to load: the page was opened from inside a ZIP, so no file beside it loads.
+  let unzipped = null;
+
+  function picture(v, cls = 'pic') {
+    const box = el('span', cls);
+    if (unzipped !== false && typeof v.thumb === 'string' && THUMB_PATH.test(v.thumb)) {
       const img = document.createElement('img');
       img.alt = '';
       img.loading = 'lazy';
@@ -176,9 +183,9 @@
     if (search.value) { search.value = ''; render(); } else search.blur();
   });
 
-  // / anywhere outside a text field puts the cursor in the search box.
+  // / anywhere outside a text field puts the cursor in the search box (on the grid only).
   document.addEventListener('keydown', e => {
-    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || home.hidden) return;
     const t = e.target;
     if (t && t.closest && t.closest('input, textarea, select, [contenteditable]')) return;
     e.preventDefault();
@@ -186,5 +193,230 @@
     search.select();
   });
 
+  // ---- The artifact page ----
+  const home = document.getElementById('home');
+  const page = document.getElementById('page');
+  const pageTitle = document.getElementById('page-title');
+  const pageKind = document.getElementById('page-kind');
+  const pageBadges = document.getElementById('page-badges');
+  const pageLinks = document.getElementById('page-links');
+  const pageBody = document.getElementById('page-body');
+  const homeTitle = document.title;
+  // The first view with an id wins; ids are claude.ai's short ids, so they don't repeat.
+  const byId = new Map();
+  for (const v of views) if (typeof v.id === 'string' && !byId.has(v.id)) byId.set(v.id, v);
+
+  const PREVIEW_KINDS = new Set(['html', 'svg', 'md', 'image']);
+  const UNZIP_TEXT = 'Unzip the export first, then open viewer.html again.';
+
+  // A saved file's link, relative to viewer.html: <folder>/<savedAs>, each segment percent-encoded; null for an
+  // empty path or one with . or .. segments (as takeout-viewer.js's relHref).
+  function relHref(...parts) {
+    const segs = [];
+    for (const part of parts) {
+      if (typeof part !== 'string') return null;
+      for (const s of part.split('/')) {
+        if (s === '') continue;
+        if (s === '.' || s === '..') return null;
+        segs.push(encodeURIComponent(s));
+      }
+    }
+    return segs.length ? segs.join('/') : null;
+  }
+
+  // Open file: any saved file of the owner's own artifacts; of a shared one, only what openableHref allows (never
+  // HTML or SVG, which would run someone else's code from disk, unsandboxed).
+  function openHref(v, savedAs) {
+    const href = relHref(v.folder, savedAs);
+    if (!href) return null;
+    return v.shared !== true || openableHref(href) ? href : null;
+  }
+
+  const claudeUrl = v => `https://claude.ai/artifact/${encodeURIComponent(v.id)}`;
+
+  function link(cls, text, href, external) {
+    const a = el('a', cls, text);
+    a.setAttribute('href', href);
+    a.setAttribute('target', '_blank');
+    a.setAttribute('rel', external ? 'noopener noreferrer' : 'noopener');
+    return a;
+  }
+
+  const isPoster = v => v.typed === true && !v.docs;
+  const files = v => (Array.isArray(v.files) ? v.files.filter(f => f && typeof f.path === 'string') : []);
+  const unverified = v => files(v).some(f => f.verified === false);
+
+  function fileList(v) {
+    const list = files(v);
+    const frag = document.createDocumentFragment();
+    if (!list.length) return frag;
+    frag.append(el('p', 'files-head', list.length === 1 ? 'Saved file' : `Saved files (${list.length})`));
+    const ul = el('ul', 'files');
+    for (const f of list) {
+      const li = el('li');
+      li.append(el('span', 'path', f.path));
+      if (f.verified === false) li.append(el('span', 'unchecked', 'not checked'));
+      const href = openHref(v, f.savedAs);
+      if (href) li.append(link('open-file', 'Open file', href, false));
+      ul.append(li);
+    }
+    frag.append(ul);
+    return frag;
+  }
+
+  function notes(v, sheet) {
+    if (v.missingCount > 0) sheet.append(el('p', 'note', `${v.missingCount === 1 ? '1 file' : `${v.missingCount} files`} listed by claude.ai ${v.missingCount === 1 ? 'was' : 'were'} not saved (see errors.txt).`));
+    if (v.note && !v.docs) sheet.append(el('p', 'note', String(v.note)));
+  }
+
+  function actions(v, ...extra) {
+    const row = el('p', 'actions');
+    row.append(...extra, link('btn', 'Open on claude.ai', claudeUrl(v), true));
+    return row;
+  }
+
+  function sheet(cls, heading, ...leads) {
+    const box = el('div', `sheet ${cls}`);
+    if (unzipped === false) box.append(el('p', 'unzip', UNZIP_TEXT));
+    box.append(el('h2', '', heading));
+    for (const text of leads) if (text) box.append(el('p', 'lead', text));
+    return box;
+  }
+
+  function docsPage(v) {
+    const box = sheet('docs-page', 'Claude Docs document', v.note || "Claude Docs text isn't available as a file; export the chat that made it to get the document.");
+    box.insertBefore(picture(v, 'big-pic'), box.querySelector('h2'));
+    box.append(actions(v));
+    return box;
+  }
+
+  function posterPage(v) {
+    const box = sheet('poster', `${v.kind || 'Typed'} artifact`, 'This artifact needs claude.ai to run; its saved files may not work on their own.');
+    box.insertBefore(picture(v, 'big-pic'), box.querySelector('h2'));
+    const extra = [];
+    if (unzipped !== false && PREVIEW_KINDS.has(v.startKind) && !v.tooLarge && !v.startMissing && !v.notExported) {
+      const show = el('button', 'btn', 'Show saved files anyway');
+      show.type = 'button';
+      show.addEventListener('click', () => openPreview(v));
+      extra.push(show);
+    }
+    box.append(actions(v, ...extra), fileList(v));
+    notes(v, box);
+    return box;
+  }
+
+  // Why there is nothing to show, for the details page.
+  function detailsWhy(v) {
+    if (v.notExported) return ['Not exported.', 'errors.txt says why. It can still be opened on claude.ai.'];
+    if (!v.start) return files(v).length ? ['No start file to show.'] : ['No files were saved for this artifact.', 'It can be opened on claude.ai.'];
+    if (PREVIEW_KINDS.has(v.startKind) && v.tooLarge) return [`${v.start} is too large to show here.`];
+    if (PREVIEW_KINDS.has(v.startKind) && v.startMissing) return [`${v.start} isn't in the viewer's files, so it can't be shown here.`];
+    if (unzipped === false) return [`${v.start} can't be shown from inside a ZIP.`];
+    if (v.startKind === 'react' || v.startKind === 'mermaid') return [`${v.start} is source code that needs claude.ai to run.`];
+    return [`${v.start} can't be shown here.`];
+  }
+
+  function detailsPage(v) {
+    const [heading, lead] = detailsWhy(v);
+    const box = sheet('details', heading, lead);
+    const extra = [];
+    if (v.notExported) extra.push(link('btn', 'Open errors.txt', 'errors.txt', false));
+    box.append(actions(v, ...extra), fileList(v));
+    notes(v, box);
+    return box;
+  }
+
+  // The sandboxed preview of the start file; the next step fills it in.
+  function openPreview(v) {
+    const box = el('div', 'preview', 'Preview');
+    box.dataset.id = String(v.id);
+    pageBody.replaceChildren(box);
+  }
+
+  function fillBody(v) {
+    if (v.docs) return pageBody.replaceChildren(docsPage(v));
+    if (isPoster(v)) return pageBody.replaceChildren(posterPage(v));
+    if (!v.notExported && v.start && PREVIEW_KINDS.has(v.startKind) && !v.tooLarge && !v.startMissing && unzipped !== false) return openPreview(v);
+    pageBody.replaceChildren(detailsPage(v));
+  }
+
+  function badge(text) { return el('span', 'badge', text); }
+
+  function showPage(v) {
+    const title = String(v.title || 'Untitled');
+    pageTitle.textContent = title;
+    pageTitle.title = title;
+    pageKind.textContent = String(v.kind || 'Page');
+    document.title = `${title} - Artifacts`;
+    const badges = [];
+    if (v.needsRuntime || isPoster(v)) badges.push(badge('needs claude.ai to run'));
+    if (unverified(v)) badges.push(badge("not checked against claude.ai's checksum"));
+    pageBadges.replaceChildren(...badges);
+    const links = [];
+    const startHref = v.notExported ? null : openHref(v, v.startSaved);
+    if (startHref) links.push(link('btn open-file', 'Open file', startHref, false));
+    links.push(link('btn open-claude', 'Open on claude.ai', claudeUrl(v), true));
+    pageLinks.replaceChildren(...links);
+    fillBody(v);
+    pageBody.scrollTop = 0;
+  }
+
+  let openId = null;
+  let homeScroll = 0;
+
+  function route() {
+    const id = parseArtifactHash(location.hash);
+    const v = id != null && byId.has(id) ? byId.get(id) : null;
+    if (v) {
+      if (openId === null) homeScroll = window.scrollY;
+      const changed = openId !== id;
+      openId = id;
+      home.hidden = true;
+      page.hidden = false;
+      showPage(v);
+      if (changed) pageTitle.focus({ preventScroll: true });
+      return;
+    }
+    const was = openId;
+    openId = null;
+    page.hidden = true;
+    home.hidden = false;
+    pageBody.replaceChildren();
+    document.title = homeTitle;
+    if (location.hash && location.hash !== '#') {
+      try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* the hash just stays */ }
+    }
+    if (was !== null) {
+      window.scrollTo(0, homeScroll);
+      const back = [...grid.children].find(c => c.dataset.id === was);
+      if (back) back.focus({ preventScroll: true });
+    }
+  }
+
+  // Back to the grid at once; the hashchange that follows finds it already shown.
+  document.getElementById('home-button').addEventListener('click', () => {
+    if (location.hash) location.hash = '';
+    route();
+  });
+  window.addEventListener('hashchange', route);
+
+  // A browser can open viewer.html from inside a ZIP, but not the files beside it (the chat viewer does the same).
+  // The name matches VIEWER_CHECK_FILE in takeout-viewer.js.
+  function checkUnzipped() {
+    const probe = new Image();
+    probe.onload = () => { unzipped = true; };
+    probe.onerror = () => {
+      unzipped = false;
+      for (const [v, c] of cards) {
+        const img = c.querySelector('.pic img');
+        if (img) img.replaceWith(tile(v));
+      }
+      if (openId !== null && byId.has(openId)) showPage(byId.get(openId));
+    };
+    probe.src = 'viewer-check.gif';
+  }
+
+  checkUnzipped();
   render();
+  route();
 })();

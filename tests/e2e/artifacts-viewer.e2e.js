@@ -1,7 +1,10 @@
 // An Export Artifacts viewer.html over file:// in Chromium: the claude.ai-style grid. Cards newest first, tabs and
 // search filter them, empty states, keyboard (Tab and Enter on a card, arrow keys on the tabs, / for search), a
 // hostile title stays text, a saved card picture shows and a broken one falls back to the tile, relative times with
-// an absolute date in their title, a globe on a public artifact. No requests outside file:, no page errors.
+// an absolute date in their title, a globe on a public artifact. Artifact pages: #a=<id> routing (unknown -> home),
+// the top bar (home, claude.ai link, Open file by the rule, badges), the Docs page, the Design poster, details pages
+// (not exported, no start file, too large, other kinds), and a run without viewer-check.gif (tiles, "unzip first").
+// No requests outside file:, no page errors.
 // Run: PW=<playwright-core> CHROME_EXE=<chrome> node tests/e2e/artifacts-viewer.e2e.js [screenshot-dir]
 const { chromium } = require(process.env.PW);
 const fs = require('fs'), os = require('os'), path = require('path'), zlib = require('zlib');
@@ -63,19 +66,19 @@ async function exportTo(frames, pages, thumbs) {
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
   const check = (n, ok, x = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n} ${ok ? '' : x}`); };
-  const open = async (folder, scheme = 'light') => {
+  const open = async (folder, scheme = 'light', hash = '') => {
     const page = await (await browser.newContext({ viewport: { width: 1300, height: 900 }, colorScheme: scheme })).newPage();
     const errors = [], requests = [];
     page.on('pageerror', e => errors.push(e.message));
     await page.route('**/*', r => { const u = r.request().url(); if (u.startsWith('file:')) return r.continue(); requests.push(u); return r.abort(); });
-    await page.goto('file://' + path.join(folder, 'viewer.html'));
-    await page.waitForSelector('#grid .card');
+    await page.goto('file://' + path.join(folder, 'viewer.html') + hash);
+    await page.waitForSelector(hash ? '#page' : '#grid .card');
     return { page, errors, requests };
   };
   const { page, errors, requests } = await open(dir);
   const titles = () => page.locator('#grid .card .title').allTextContents();
 
-  check('heading', (await page.locator('h1').textContent()).trim() === 'Artifacts');
+  check('heading', (await page.locator('#home h1').textContent()).trim() === 'Artifacts');
   check('cards newest first, undated last', JSON.stringify(await titles()) === JSON.stringify(['zebra game', HOSTILE_TITLE, 'Plan notes', 'Shared deck', 'Undated board']), JSON.stringify(await titles()));
   check('cards are buttons', await page.locator('#grid .card').evaluateAll(cs => cs.every(c => c.tagName === 'BUTTON')));
   check('hostile title is text, not markup', await page.evaluate(() => window.__hit) === undefined
@@ -114,7 +117,7 @@ async function exportTo(frames, pages, thumbs) {
   check('only the selected tab is in the Tab order', JSON.stringify(await tabs.evaluateAll(ts => ts.map(t => t.tabIndex))) === JSON.stringify([0, -1, -1]));
 
   // Search.
-  await page.locator('h1').click();
+  await page.locator('#home h1').click();
   await page.keyboard.press('/');
   check('/ focuses search', await page.evaluate(() => document.activeElement && document.activeElement.id === 'search'));
   check('/ is not typed into the box', await page.locator('#search').inputValue() === '');
@@ -163,6 +166,128 @@ async function exportTo(frames, pages, thumbs) {
   await lonely.page.locator('[role=tab]', { hasText: 'Shared with you' }).click();
   check('empty Shared tab says so', (await lonely.page.locator('#empty').textContent()).trim() === 'Nothing shared with you' && await lonely.page.locator('#grid .card').count() === 0);
   check('no requests or errors (second export)', lonely.requests.length === 0 && lonely.errors.length === 0, lonely.requests.join(' ') + lonely.errors.join(' '));
+
+  // ---- Artifact pages ----
+  const p = n => uuidToBase58(U(n));
+  const pagesDir = await exportTo([
+    art(U(11), 'Own page'),
+    art(U(12), 'Shared page', { rel: 'shared' }),
+    art(U(13), 'Plan doc', { typeSlug: DOCS_TYPE, typeTitle: 'Docs', live: '' }),
+    art(U(14), 'Board', { typeSlug: DESIGN_TYPE, typeTitle: 'Design' }),
+    art(U(15), 'Broken fetch'),
+    art(U(16), 'Never published', { live: '' }),
+    art(U(17), 'Huge page'),
+    art(U(18), 'Shared report', { rel: 'shared' }),
+    art(U(19), 'Data only'),
+  ], {
+    [U(11)]: live('Own page', { 'index.html': '<h1>Own</h1>', 'notes.txt': 'hello', 'app.js': { body: 'x()', type: 'text/javascript', unverified: true } }),
+    [U(12)]: live('Shared page', { 'index.html': '<h1>Shared</h1>', 'report.pdf': { body: '%PDF-1.4', type: 'application/pdf' } }),
+    [U(14)]: live('Board', { 'index.html': '<h1>Board</h1>' }),
+    [U(15)]: { error: { error: 'HTTP 500', status: 500 } },
+    [U(17)]: live('Huge page', { 'index.html': '<p>' + 'x'.repeat(2.1 * 1024 * 1024) + '</p>' }),
+    [U(18)]: live('Shared report', { 'report.pdf': { body: '%PDF-1.4', type: 'application/pdf' } }),
+    [U(19)]: live('Data only', { 'data.csv': { body: 'a,b', type: 'text/csv' } }),
+  }, { [U(13)]: GOOD, [U(14)]: GOOD });
+
+  const ap = await open(pagesDir, 'light', `#a=${p(13)}`);
+  const pg = ap.page;
+  const shown = async () => ({ home: await pg.locator('#home').isVisible(), page: await pg.locator('#page').isVisible() });
+  const go = async hash => { await pg.evaluate(h => { location.hash = h; }, hash); await pg.waitForTimeout(50); };
+  const body = () => pg.locator('#page-body');
+  const shots2 = process.argv[2];
+
+  // Deep link to a Docs artifact.
+  check('deep link opens the artifact page', JSON.stringify(await shown()) === JSON.stringify({ home: false, page: true }));
+  check('top bar title and kind', (await pg.locator('#page-title').textContent()) === 'Plan doc' && (await pg.locator('#page-kind').textContent()) === 'Docs');
+  const claude = pg.locator('#page-links a.open-claude');
+  check('Open on claude.ai link', await claude.getAttribute('href') === `https://claude.ai/artifact/${p(13)}` && await claude.getAttribute('rel') === 'noopener noreferrer'
+    && await claude.getAttribute('target') === '_blank' && (await claude.textContent()).trim() === 'Open on claude.ai');
+  check('Docs page note', /export the chat that made it/.test(await body().locator('.docs-page').textContent()), await body().textContent());
+  await pg.waitForFunction(() => { const i = document.querySelector('#page-body .big-pic img'); return i && i.complete && i.naturalWidth > 0; });
+  check('Docs page shows the picture large', await body().locator('.big-pic img').count() === 1);
+  check('Docs page has a claude.ai link', await body().locator(`a[href="https://claude.ai/artifact/${p(13)}"]`).count() === 1);
+  check('Docs page: no Open file', await pg.locator('#page-links a.open-file').count() === 0);
+  check('document title names the artifact', (await pg.title()).startsWith('Plan doc'));
+  if (shots2) await pg.screenshot({ path: path.join(shots2, 'page-docs.png') });
+
+  // Home button.
+  await pg.locator('#home-button').click();
+  check('home button returns to the grid', JSON.stringify(await shown()) === JSON.stringify({ home: true, page: false }) && await pg.evaluate(() => location.hash) === '');
+  check('grid is there', (await pg.locator('#grid .card').count()) === 9);
+
+  // A click on a card opens its page; browser Back goes home.
+  await pg.locator('#grid .card', { hasText: 'Board' }).click();
+  await pg.waitForSelector('#page .poster');
+  check('card click opens its page', await pg.evaluate(() => location.hash) === `#a=${p(14)}`);
+  // Design poster.
+  const poster = body().locator('.poster');
+  await pg.waitForFunction(() => { const i = document.querySelector('#page-body .poster .big-pic img'); return i && i.complete && i.naturalWidth > 0; });
+  check('poster: picture large', await poster.locator('.big-pic img').count() === 1);
+  check('poster: needs claude.ai to run (badge and note)', (await pg.locator('#page-badges').textContent()).includes('needs claude.ai to run') && (await poster.textContent()).includes('needs claude.ai to run'));
+  check('poster: file list', JSON.stringify(await poster.locator('.files .path').allTextContents()) === JSON.stringify(['index.html']), JSON.stringify(await poster.locator('.files .path').allTextContents()));
+  check('poster: claude.ai link', await poster.locator(`a[href="https://claude.ai/artifact/${p(14)}"]`).count() === 1);
+  check('poster: own artifact has Open file', await pg.locator('#page-links a.open-file').count() === 1);
+  if (shots2) await pg.screenshot({ path: path.join(shots2, 'page-poster.png') });
+  await poster.getByRole('button', { name: 'Show saved files anyway' }).click();
+  check('Show saved files anyway opens the preview', await body().locator('.preview').count() === 1 && await body().locator('.poster').count() === 0);
+  await pg.goBack();
+  await pg.waitForTimeout(50);
+  check('Back goes home', JSON.stringify(await shown()) === JSON.stringify({ home: true, page: false }));
+
+  // Own HTML page: preview, Open file on the start file, unverified badge.
+  await go(`#a=${p(11)}`);
+  check('HTML start opens the preview', await body().locator('.preview').count() === 1);
+  const own = pg.locator('#page-links a.open-file');
+  const ownFolder = JSON.parse(fs.readFileSync(path.join(pagesDir, 'export-manifest.json'), 'utf8')).artifacts.find(a => a.title === 'Own page').folder;
+  check('own artifact: Open file links the saved start file', await own.count() === 1 && await own.getAttribute('href') === `${encodeURIComponent(ownFolder)}/index.html` && await own.getAttribute('target') === '_blank', await own.getAttribute('href'));
+  check('unverified badge', (await pg.locator('#page-badges').textContent()).includes("not checked against claude.ai's checksum"));
+  check('no needs-claude.ai badge on a plain page', !(await pg.locator('#page-badges').textContent()).includes('needs claude.ai'));
+
+  // Shared HTML page: no Open file.
+  await go(`#a=${p(12)}`);
+  check('shared HTML artifact: no Open file', await pg.locator('#page-links a.open-file').count() === 0 && await pg.locator('#page-links a.open-claude').count() === 1);
+  // Shared PDF: openable, so Open file.
+  await go(`#a=${p(18)}`);
+  check('shared PDF start: details page with Open file', await body().locator('.details').count() === 1 && await pg.locator('#page-links a.open-file').count() === 1
+    && /report\.pdf$/.test(await pg.locator('#page-links a.open-file').getAttribute('href')));
+
+  // Details pages.
+  await go(`#a=${p(15)}`);
+  check('not exported: details page', await body().locator('.details').count() === 1 && /not exported/i.test(await body().textContent()));
+  check('not exported: points to errors.txt', await body().locator('a[href="errors.txt"]').count() === 1);
+  check('not exported: no Open file', await pg.locator('#page-links a.open-file').count() === 0);
+  await go(`#a=${p(16)}`);
+  check('no start file: details page', await body().locator('.details').count() === 1 && /no files were saved/i.test(await body().textContent()), await body().textContent());
+  await go(`#a=${p(17)}`);
+  check('too large: details page says so', await body().locator('.details').count() === 1 && /too large to show here/.test(await body().textContent()) && await body().locator('.preview').count() === 0);
+  await go(`#a=${p(19)}`);
+  check('other kind: details page with the file list', await body().locator('.details').count() === 1 && JSON.stringify(await body().locator('.files .path').allTextContents()) === JSON.stringify(['data.csv']));
+  check('own data file: Open file', await body().locator('.files a.open-file').count() === 1);
+  if (shots2) await pg.screenshot({ path: path.join(shots2, 'page-details.png') });
+
+  // Unknown hashes go home.
+  await go('#a=nope');
+  check('unknown id: home', JSON.stringify(await shown()) === JSON.stringify({ home: true, page: false }));
+  await go(`#a=${p(11)}`);
+  await go('#garbage');
+  check('malformed hash: home', JSON.stringify(await shown()) === JSON.stringify({ home: true, page: false }));
+  check('no requests outside file: (pages)', ap.requests.length === 0, ap.requests.join(' '));
+  check('no page errors (pages)', ap.errors.length === 0, ap.errors.join(' '));
+
+  // Not unzipped: no viewer-check.gif.
+  fs.unlinkSync(path.join(pagesDir, 'viewer-check.gif'));
+  const zipped = await open(pagesDir);
+  await zipped.page.waitForTimeout(200);
+  const docCard = zipped.page.locator('#grid .card', { hasText: 'Plan doc' });
+  check('not unzipped: pictures are tiles', await zipped.page.locator('#grid .card .pic img').count() === 0 && await docCard.locator('.tile').count() === 1);
+  await docCard.click();
+  await zipped.page.waitForSelector('#page');
+  check('not unzipped: opening says to unzip', (await zipped.page.locator('#page-body').textContent()).includes('Unzip the export first, then open viewer.html again.'));
+  await zipped.page.locator('#home-button').click();
+  await zipped.page.locator('#grid .card', { hasText: 'Own page' }).click();
+  await zipped.page.waitForSelector('#page-body .sheet');
+  check('not unzipped: no preview', (await zipped.page.locator('#page-body').textContent()).includes('Unzip the export first') && await zipped.page.locator('#page-body .preview').count() === 0, await zipped.page.locator('#page-body').textContent() + ' ' + await zipped.page.evaluate(() => location.hash));
+  check('no requests or errors (not unzipped)', zipped.requests.length === 0 && zipped.errors.length === 0, zipped.requests.join(' ') + zipped.errors.join(' '));
 
   await browser.close();
   process.exit(failed ? 1 : 0);

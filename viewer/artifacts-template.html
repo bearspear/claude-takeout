@@ -63,12 +63,52 @@ button { font: inherit; color: inherit; }
 .sub time:empty, .sub time:empty + .dot { display: none; }
 .globe { margin-left: auto; width: 13px; height: 13px; color: var(--mute); flex: none; }
 #empty { color: var(--mute); font-size: 14px; text-align: center; padding: 64px 0; margin: 0; }
+/* One artifact open: a thin top bar, then the artifact edge to edge. */
+#page { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+#page[hidden], #home[hidden] { display: none; }
+.topbar { display: flex; align-items: center; gap: 8px; min-height: 40px; padding: 4px 10px 4px 6px; background: var(--bg); border-bottom: 1px solid var(--line); flex: none; }
+.icon-btn { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border: 0; border-radius: 6px; background: none; color: var(--soft); cursor: pointer; flex: none; }
+.icon-btn:hover { background: var(--hover); color: var(--ink); }
+.icon-btn svg { width: 16px; height: 16px; }
+#page-title { font-size: 13px; font-weight: 500; line-height: 18px; margin: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; outline: none; }
+#page-kind { font-size: 12px; color: var(--mute); flex: none; }
+.topbar .spacer { flex: 1; }
+#page-badges, #page-links { display: flex; align-items: center; gap: 6px; flex: none; }
+.badge { font-size: 11px; line-height: 16px; padding: 2px 8px; border-radius: 999px; background: var(--pill); color: var(--soft); white-space: nowrap; }
+.btn { display: inline-flex; align-items: center; font-size: 12px; line-height: 16px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--ink); text-decoration: none; white-space: nowrap; cursor: pointer; }
+.btn:hover { border-color: var(--line-strong); background: var(--hover); }
+#page-body { flex: 1; min-height: 0; overflow: auto; }
+.sheet { max-width: 760px; margin: 0 auto; padding: 40px 20px 64px; }
+.sheet h2 { font: 400 24px/1.25 var(--serif); margin: 0 0 8px; }
+.sheet .lead { color: var(--soft); margin: 0 0 20px; }
+.sheet .lead + .lead { margin-top: -12px; }
+.sheet .note { color: var(--mute); font-size: 13px; margin: 16px 0 0; }
+.sheet .actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 0; }
+.unzip { margin: 0 0 20px; padding: 10px 14px; border-radius: 8px; background: var(--pill); color: var(--ink); font-size: 13px; }
+.big-pic { display: block; height: 360px; padding: 32px 40px 0; margin: 0 0 24px; background: var(--pic); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.big-pic img { display: block; width: 100%; min-height: 100%; object-fit: cover; object-position: top; background: #fff; border: 1px solid var(--page-line); border-bottom: 0; border-radius: 6px 6px 0 0; }
+.big-pic .tile svg { width: 48px; height: 48px; }
+.files { list-style: none; margin: 8px 0 0; padding: 0; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.files li { display: flex; align-items: center; gap: 10px; padding: 8px 12px; font-size: 13px; border-top: 1px solid var(--line); min-width: 0; }
+.files li:first-child { border-top: 0; }
+.files .path { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; min-width: 0; flex: 1; }
+.files .fkind, .files .unchecked { font-size: 11px; color: var(--mute); flex: none; }
+.files a.open-file { font-size: 12px; color: var(--acc); text-decoration: none; flex: none; }
+.files a.open-file:hover { text-decoration: underline; }
+.files-head { font-size: 12px; font-weight: 500; color: var(--mute); text-transform: uppercase; letter-spacing: .04em; margin: 24px 0 0; }
+.preview { display: flex; align-items: center; justify-content: center; height: 100%; min-height: 200px; color: var(--mute); }
 @media (max-width: 560px) {
   #home { padding-top: 28px; }
   .bar { flex-wrap: wrap; }
   .search { flex: 1 1 100%; width: auto; }
   #grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; }
   .pic { height: 104px; padding: 16px 16px 0; }
+  .topbar { flex-wrap: wrap; }
+  .topbar .spacer { display: none; }
+  #page-title { flex: 1; }
+  #page-badges:not(:empty) { order: 1; flex: 1 1 100%; flex-wrap: wrap; padding: 0 0 4px 38px; }
+  .sheet { padding: 24px 16px 48px; }
+  .big-pic { height: 220px; padding: 20px 20px 0; }
 }
 </style>
 </head>
@@ -86,6 +126,17 @@ button { font: inherit; color: inherit; }
   <div id="grid" role="tabpanel" aria-label="Artifacts"></div>
   <p id="empty" role="status" hidden></p>
 </main>
+<section id="page" hidden aria-labelledby="page-title">
+  <header class="topbar">
+    <button type="button" class="icon-btn" id="home-button" aria-label="All artifacts" title="All artifacts"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 7.2 8 2.5l5.5 4.7V13a.5.5 0 0 1-.5.5H10V10H6v3.5H3a.5.5 0 0 1-.5-.5z"/></svg></button>
+    <h1 id="page-title" tabindex="-1"></h1>
+    <span id="page-kind"></span>
+    <span class="spacer"></span>
+    <span id="page-badges"></span>
+    <span id="page-links"></span>
+  </header>
+  <div id="page-body"></div>
+</section>
 <script id="data" type="application/json">/*DATA_JSON*/</script>
 <script>/*MARKED_JS*/</script>
 <script>/*LOGIC_JS*/</script>
