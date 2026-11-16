@@ -79,7 +79,8 @@ For exporting your whole history:
 |---|---|
 | **Export All (Markdown)** | One `.md` file per conversation in your downloads folder. |
 | **Export All (Embedded)** | One `_embedded.md` per conversation, artifacts inlined. |
-| **Export All (Mega-Zip)** | A single `claude-takeout-<your name>-<YYYY-MM-DD>.zip` (your claude.ai display name; left out if claude.ai doesn't give one) containing one folder per conversation (full ZIP structure each), plus an `index.md` master table and an `export-manifest.json` listing every chat it holds, with each chat's `updated_at`, at the root. |
+| **Export All (Folder)** | Asks for a folder, then writes into a new folder inside it, `claude-takeout-<your name>-<YYYY-MM-DD>`, the same as the Mega-Zip below holds, chat by chat. It runs in the side panel; from the popup, the button opens the side panel, where you click it again. Files the folder refuses are listed in `write-errors.txt`. |
+| **Export All (Mega-Zip)** | With **Export All saves as: ZIP** in Settings: a single `claude-takeout-<your name>-<YYYY-MM-DD>.zip` (your claude.ai display name; left out if claude.ai doesn't give one) containing one folder per conversation (full ZIP structure each), plus an `index.md` master table and an `export-manifest.json` listing every chat it holds, with each chat's `updated_at`, at the root. |
 | **Export All (JSON)** | One `.json` per conversation. |
 
 **Only new or changed chats.** Set **Mega-Zip exports** in Settings to **Only new or changed**, and the Mega-Zip button becomes **Export Changes (Mega-Zip)**. It makes a `claude-takeout-<your name>-changes-<YYYY-MM-DD>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold. The default is **All chats**.
@@ -466,7 +467,8 @@ Click the gear icon in the popup to open the settings drawer.
 |---|---|
 | **Filename style** | `title`, `title_date`, or `date_title`. Applies to single-chat Markdown, Embedded Markdown and JSON downloads. ZIPs and bulk exports keep their own names. |
 | **Include thinking blocks** | Whether to include Claude's `<thinking>` content in the Markdown exports and in a ZIP's `full_chat.md` and `integrated_chat.md`. The `responses/*.full.md` files always include it. |
-| **Mega-Zip exports** | **All chats** (the default) or **Only new or changed**: what the Mega-Zip button exports. With **Only new or changed**, it takes only the chats that are new or changed since the last mega-ZIP from this browser, and the button reads **Export Changes (Mega-Zip)**. |
+| **Export All saves as** | **Folder** (the default) or **ZIP**: whether Export All writes into a folder you choose or downloads one Mega-Zip. |
+| **Export All exports** | **All chats** (the default) or **Only new or changed**: what Export All exports. With **Only new or changed**, it takes only the chats that are new or changed since the last mega-ZIP from this browser, and the button reads **Export Changes (Mega-Zip)**. |
 | **Show shortcuts** | Show keyboard shortcut hints next to buttons. |
 | **Open as sidebar by default** | Use Chrome's side panel instead of the popup, so the export UI stays open while you browse conversations. |
 

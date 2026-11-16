@@ -370,6 +370,11 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.12.0
+
+- **Export All saves to a folder** - Like Grok Takeout and Gemini Takeout, Export All now writes into a folder you choose instead of downloading one ZIP: it makes a new folder inside it, named like the ZIP would be (`claude-takeout-<your name>-<date>`), and writes each chat as it goes, so nothing waits for a huge download at the end. The folder holds what the ZIP holds, viewer included. The button reads **Export All (Folder)**. Set **Export All saves as: ZIP** in Settings for the old Mega-Zip. Chrome only lets the side panel ask for a folder, so from the popup the button opens the side panel, where you click it again. A file the folder refuses (a name your disk doesn't allow) is listed in `write-errors.txt`, and the rest is saved.
+- **Long prompts fold as on claude.ai** - In the viewer, a long prompt shows its first lines, fading out, with **Show more** (and **Show less**). Code in a prompt wraps instead of scrolling sideways. A search match inside a folded prompt opens it.
+
 ### v1.11.0
 
 - **Diagrams Claude draws in the chat are exported** - A diagram or chart Claude shows inline with claude.ai's visualize tool is now saved in `artefacts/` as `<title>.svg` (or `<title>.html` when it isn't an SVG), styled as claude.ai draws it, in light and dark. `full_chat.md` and the response files show the picture and link the file, and a diagram Claude redraws under the same title gets `_v1`, `_v2` versions. The viewer shows it inline where Claude drew it, as claude.ai does, with a … menu: Copy as image, Download as SVG, Download as PNG, and Open in sidebar. `extract_artifacts.py` writes the same files.
