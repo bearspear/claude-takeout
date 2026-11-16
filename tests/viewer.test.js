@@ -1531,3 +1531,113 @@ test('fileHit searches name and text together and cuts the snippet from the text
   assert.ok(fileHit(parseQuery('wombat plain'), 'wombat.md', 'plain text'), 'one word in the name, one in the text');
   assert.strictEqual(fileHit(parseQuery('wombat -plain'), 'wombat.md', 'plain text'), null);
 });
+
+// ---- Published pages: one card per publish (ctx.published, PublishedEntry from popup.js) ----
+const PUB_TOOL = 'mcp__claude-artifacts__publish_files';
+const PAGE_U = '0a1b2c3d-1111-4222-8333-444455556666';
+const PAGE_URL = 'https://claude.ai/artifact/Short1';
+const pubBlocks = (id, ver, files = [{ as: 'index.html', path: '/home/claude/guide.html' }]) => [
+  { type: 'tool_use', id, name: PUB_TOOL, input: { title: 'Guide', files } },
+  { type: 'tool_result', tool_use_id: id, name: PUB_TOOL, content: [{ type: 'text', text: JSON.stringify(ver === '' ? { url: PAGE_URL, title: 'Guide' } : { slug: PAGE_U, version: ver, url: PAGE_URL, title: 'Guide' }) }] },
+];
+// n assistant messages in a row, message i publishing ver<i>.
+const pubChain = (n, extra = {}) => ({
+  uuid: 'c', name: 'c', current_leaf_message_uuid: `m${n - 1}`,
+  chat_messages: Array.from({ length: n }, (_, i) => ({ uuid: `m${i}`, parent_message_uuid: i ? `m${i - 1}` : null, sender: 'assistant', content: pubBlocks(`p${i}`, `ver${i}`) })),
+  ...extra,
+});
+const pubVersion = (i, extra = {}) => ({
+  ver: `ver${i}`, folderName: `ver${i}`, label: `v${i + 1}`, order: i, start: 'index.html', startSaved: 'index.html', same: false, writtenAs: null,
+  incomplete: false, needsRuntime: false, text: `<p>${i}</p>`, publishes: [{ messageUuid: `m${i}`, toolUseId: `p${i}` }], ...extra,
+});
+const pageEntry = (versions, extra = {}) => ({ uuid: PAGE_U, shortId: 'Short1', title: 'Guide', url: PAGE_URL, current: false, dir: 'published/Guide_Short1', versions, ...extra });
+const pageCards = chat => chat.messages.map(m => m.blocks.filter(b => b.t === 'card'));
+
+test('a publish gets one published-page card, with versions in order', () => {
+  const data = pubChain(11);
+  const versions = Array.from({ length: 11 }, (_, i) => pubVersion(i)).reverse();
+  const chat = buildViewerChat(data, ctxFor(data, { published: [pageEntry(versions)] }));
+  const ids = Object.keys(chat.files);
+  assert.strictEqual(ids.length, 1);
+  const file = chat.files[ids[0]];
+  assert.strictEqual(file.name, 'Guide');
+  assert.strictEqual(file.kind, 'html');
+  assert.strictEqual(file.shared, true);
+  assert.deepStrictEqual(file.published, { url: PAGE_URL, current: false, needsRuntime: false });
+  assert.deepStrictEqual(file.versions.map(v => v.label), Array.from({ length: 11 }, (_, i) => `v${i + 1}`));
+  assert.deepStrictEqual(file.versions.map(v => v.href), Array.from({ length: 11 }, (_, i) => `published/Guide_Short1/ver${i}/index.html`));
+  assert.ok(file.versions.every((v, i) => v.text === `<p>${i}</p>` && v.same === false));
+  assert.deepStrictEqual(pageCards(chat), Array.from({ length: 11 }, (_, i) => [{ t: 'card', file: ids[0], version: i }]));
+  // The card carries the page; the tool block no longer draws its own "Published on claude.ai" line.
+  assert.ok(chat.messages.every(m => m.blocks.filter(b => b.t === 'tool').every(b => !b.published)));
+});
+
+test('a same version links the written file', () => {
+  const data = pubChain(1);
+  const chat = buildViewerChat(data, ctxFor(data, { published: [pageEntry([pubVersion(0, { same: true, writtenAs: 'guide_v1.html', text: 'G1' })])] }));
+  const [file] = Object.values(chat.files);
+  assert.deepStrictEqual(file.versions, [{ label: 'v1', text: 'G1', href: 'artefacts/guide_v1.html', same: true }]);
+});
+
+test('an Export All card links published/ at the export root', () => {
+  const data = pubChain(1);
+  const entry = pageEntry([pubVersion(0)], { dir: '../published/Guide_Short1' });
+  const chat = buildViewerChat(data, ctxFor(data, { folder: 'chatA', published: [entry] }));
+  assert.strictEqual(Object.values(chat.files)[0].versions[0].href, 'published/Guide_Short1/ver0/index.html');
+  // A dir that climbs out of the export links nothing.
+  const out = buildViewerChat(data, ctxFor(data, { folder: '', published: [{ ...entry }] }));
+  assert.strictEqual(Object.values(out.files)[0].versions[0].href, null);
+});
+
+test('a current version links current/', () => {
+  const data = { uuid: 'c', name: 'c', current_leaf_message_uuid: 'm0', chat_messages: [{ uuid: 'm0', parent_message_uuid: null, sender: 'assistant', content: pubBlocks('p0', '') }] };
+  const entry = pageEntry([pubVersion(0, { ver: 'live7', folderName: 'current', label: 'current', order: 3 })], { current: true });
+  const chat = buildViewerChat(data, ctxFor(data, { published: [entry] }));
+  const [file] = Object.values(chat.files);
+  assert.strictEqual(file.versions[0].href, 'published/Guide_Short1/current/index.html');
+  assert.strictEqual(file.versions[0].label, 'current');
+  assert.strictEqual(file.published.current, true);
+});
+
+test('a renamed start file links its saved name', () => {
+  const data = pubChain(1);
+  const chat = buildViewerChat(data, ctxFor(data, { published: [pageEntry([pubVersion(0, { start: 'Index.html', startSaved: 'sub dir/index_2.html' })])] }));
+  assert.strictEqual(Object.values(chat.files)[0].versions[0].href, 'published/Guide_Short1/ver0/sub%20dir/index_2.html');
+});
+
+test('an incomplete version has no link', () => {
+  const data = pubChain(2);
+  const entry = pageEntry([pubVersion(0, { incomplete: true, start: null, startSaved: null, text: null }), pubVersion(1, { needsRuntime: true })]);
+  const chat = buildViewerChat(data, ctxFor(data, { published: [entry] }));
+  const [file] = Object.values(chat.files);
+  assert.deepStrictEqual(file.versions[0], { label: 'v1', text: null, href: null, same: false });
+  assert.strictEqual(file.published.needsRuntime, true);
+  // A page with nothing in the export is a missing file.
+  const none = buildViewerChat(pubChain(1), ctxFor(pubChain(1), { published: [pageEntry([pubVersion(0, { incomplete: true, start: null, startSaved: null, text: null })])] }));
+  assert.strictEqual(Object.values(none.files)[0].kind, 'missing');
+});
+
+test('an off-branch publish shares the page card, and an attached copy of a version that differs stays listed', () => {
+  const data = pubChain(2);
+  // m1b: another answer to m0, off the active branch, publishing ver1 again.
+  data.chat_messages.push({ uuid: 'm1b', parent_message_uuid: 'm0', sender: 'assistant', content: pubBlocks('p1b', 'ver1'),
+    files_v2: [{ success: true, file_name: 'guide.html', file_uuid: 'att-b' }, { success: true, file_name: 'other.txt', file_uuid: 'att-o' }] });
+  data.chat_messages[1].files_v2 = [{ success: true, file_name: 'guide.html', file_uuid: 'att-1' }];
+  const entry = pageEntry([pubVersion(0), pubVersion(1, { publishes: [{ messageUuid: 'm1', toolUseId: 'p1' }, { messageUuid: 'm1b', toolUseId: 'p1b' }] })]);
+  const uploads = { 'att-1': { path: 'artefacts/guide.html', text: null }, 'att-b': { path: 'artefacts/guide_2.html', text: null }, 'att-o': { path: 'artefacts/other.txt', text: null } };
+  const chat = buildViewerChat(data, ctxFor(data, { published: [entry], uploads }));
+  assert.strictEqual(Object.keys(chat.files).length, 1);
+  const id = Object.keys(chat.files)[0];
+  assert.deepStrictEqual(pageCards(chat), [[{ t: 'card', file: id, version: 0 }], [{ t: 'card', file: id, version: 1 }], [{ t: 'card', file: id, version: 1 }]]);
+  // ver1 is not the same as the file Claude wrote, so claude.ai's attached copy is Claude's own file and stays.
+  assert.deepStrictEqual(chat.messages.map(m => m.uploads.map(u => u.name)), [[], ['guide.html'], ['guide.html', 'other.txt']]);
+});
+
+test('the attached copy of a same version is not listed again; an upload named like the published file is', () => {
+  const data = pubChain(1);
+  data.chat_messages[0].files_v2 = [{ success: true, file_name: 'guide.html', file_uuid: 'att-1' }, { success: true, file_name: 'index.html', file_uuid: 'att-i' }];
+  const uploads = { 'att-1': { path: 'artefacts/guide.html', text: null }, 'att-i': { path: 'artefacts/index.html', text: null } };
+  const entry = pageEntry([pubVersion(0, { same: true, writtenAs: 'guide.html', text: 'G' })]);
+  const chat = buildViewerChat(data, ctxFor(data, { published: [entry], uploads }));
+  assert.deepStrictEqual(chat.messages[0].uploads.map(u => u.name), ['index.html']);
+});

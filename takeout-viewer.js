@@ -39,6 +39,15 @@
 //                Claude's own message is { path: 'artefacts/<name>', text: null }
 //   ctx.project: { name, fileDir, fileNames, docs: [{ name, text }], instructions }, fileDir relative to the chat folder;
 //                instructions: the project's prompt template ('' when none), cut at TEXT_EMBED_LIMIT
+//   ctx.published: the pages the chat published (savePublishedPages in popup.js, chatFromDisk in tools/archive-lib.js),
+//                [{ uuid, title, url, current, dir, versions: [{ label, order, startSaved, same, writtenAs, incomplete,
+//                needsRuntime, text, folderName, publishes: [{ messageUuid, toolUseId }] }] }], dir relative to the chat
+//                folder. Each publish_files call gets a card for the version its toolUseId is in, one GenFile per page
+//                (key published:<uuid>, on or off the active branch) with published: { url, current, needsRuntime } and
+//                versions in `order`, each { label, text, href, same }: a same version links the file Claude wrote, any
+//                other its start file under dir, and one with nothing saved has no link. The card replaces the
+//                tool's "Published on claude.ai" line, and an upload claude.ai attached to that message under the
+//                name of one of the page's sources is dropped, so the page shows once.
 (function (root) {
   'use strict';
 
@@ -275,6 +284,12 @@
     return hasText ? 'code' : 'binary';
   }
 
+  // export-core.js's versionAsOf: a global where export-core.js is loaded first, else required (Node).
+  function coreVersionAsOf() {
+    if (typeof root.versionAsOf === 'function') return root.versionAsOf;
+    return require('./export-core.js').versionAsOf;
+  }
+
   const missingFile = name => ({ name, kind: 'missing', versions: [{ label: '', text: null, href: null }] });
 
   // Cards for the files each message made. Mutates the blocks of `messages` and returns the GenFile map.
@@ -311,11 +326,8 @@
       }
       return null;
     };
-    const versionAsOf = (entry, at) => {
-      let v = -1;
-      Array.from(entry.messages || []).forEach((id, i) => { if (pos.has(id) && (at == null || pos.get(id) <= at)) v = i; });
-      return v;
-    };
+    // versionAsOf from export-core.js: the version of entry as of a message on chain (null: the last).
+    const versionAsOf = coreVersionAsOf();
 
     // Same rule as failedToolUseIds in export-core.js.
     const failed = new Set();
@@ -351,14 +363,49 @@
     // /mnt/user-data/outputs, or made with the artifacts tool. The rest are working files.
     const sharedKeys = new Set();
     // Off-branch keys are 'x:<message>:<key>', and count by the key they wrap.
-    const isShared = key => /^(x:[^:]*:)?(artifact:|doc:|widget:|deliver:|name:|missing:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
+    const isShared = key => /^(x:[^:]*:)?(artifact:|doc:|widget:|deliver:|name:|missing:|published:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
     // Off the active branch: the last off-branch file at each path, for a present_files there.
     const offBranch = new Map(); // path -> { key, build }
 
+    // Published pages: each publish_files call, by its tool_use id, to its page and the version it made.
+    const pageOf = new Map(); // toolUseId -> { key, build, version }, version an index in the page's sorted versions
+    for (const entry of Array.isArray(c.published) ? c.published : []) {
+      if (!entry || typeof entry.uuid !== 'string') continue;
+      const versions = (Array.isArray(entry.versions) ? entry.versions : []).filter(Boolean)
+        .map((v, i) => ({ v, i })).sort((a, b) => (Number(a.v.order) || 0) - (Number(b.v.order) || 0) || a.i - b.i).map(x => x.v);
+      if (!versions.length) continue;
+      const pageDir = joinPath(folder, entry.dir);
+      const build = () => {
+        const out = versions.map(v => {
+          const text = typeof v.text === 'string' ? v.text : null;
+          let href = null;
+          if (v.same && v.writtenAs) href = hrefOf(v.writtenAs);
+          else if (v.startSaved && pageDir !== null) href = relHref(pageDir, v.folderName, v.startSaved);
+          return { label: String(v.label || ''), text, href, same: !!v.same };
+        });
+        const named = versions.map(v => v.startSaved || v.writtenAs).find(Boolean) || '';
+        const hasText = out.some(v => v.text !== null);
+        const kind = out.some(v => v.text !== null || v.href !== null) ? kindFor(String(named), null, hasText) : 'missing';
+        return {
+          name: String(entry.title || 'Published page'), kind,
+          published: { url: String(entry.url || ''), current: !!entry.current, needsRuntime: versions.some(v => !!v.needsRuntime) },
+          versions: out,
+        };
+      };
+      versions.forEach((v, i) => {
+        for (const p of Array.isArray(v.publishes) ? v.publishes : []) {
+          if (p && p.toolUseId != null) pageOf.set(p.toolUseId, { key: 'published:' + entry.uuid, build, version: i, same: !!v.same, writtenAs: v.writtenAs ? String(v.writtenAs) : '' });
+        }
+      });
+    }
+    // The names of the files Claude wrote that a publish published (their sandbox paths), from the call itself.
+    const sourceNames = input => (Array.isArray(input.files) ? input.files : []).filter(f => f && typeof f === 'object')
+      .map(f => baseName(f.path)).filter(n => typeof n === 'string' && n);
+
     source.forEach((m, mi) => {
       const message = messages[mi];
+      const pageSources = new Set();
       const active = pos.has(m.uuid);
-      const at = active ? pos.get(m.uuid) : null;
       const touches = new Map(); // fileKey -> { after, build, version }; the last block touching a file wins
       const touch = (after, fileKey, build, version) => { touches.delete(fileKey); touches.set(fileKey, { after, build, version }); };
       const offKey = (k, build) => { if (k.startsWith('x:')) offBranch.set(k.slice(k.indexOf(':', 2) + 1), { key: k, build }); };
@@ -378,6 +425,18 @@
         if (failed.has(b.id) && !bash) continue;
 
         // Keys in artifactIndex are extractArtifacts' state keys.
+        // A publish that savePublishedPages saw: its page's card, which carries the claude.ai link.
+        if (pageOf.has(b.id) && /(^|__|:)publish_files$/.test(String(b.name || ''))) {
+          const page = pageOf.get(b.id);
+          touch(after, page.key, page.build, page.version);
+          sharedKeys.add(page.key);
+          delete after.published;
+          // Only a version the same as the written file makes claude.ai's attached copy a duplicate; otherwise the
+          // attachment is Claude's own file, which differs from the page, and stays listed.
+          if (page.same) for (const n of [...sourceNames(input), page.writtenAs]) if (n) pageSources.add(n);
+          continue;
+        }
+
         let key = null, mime = null, name = null, text = null, edit = false;
         if (b.name === 'create_file') { key = input.path; text = input.file_text; }
         else if (b.name === 'Write') { key = input.file_path; text = input.content; }
@@ -395,7 +454,7 @@
         if (key && (edit || text)) {
           if (active) {
             const entry = hasOwn(index, key) ? index[key] : null;
-            const v = entry ? versionAsOf(entry, at) : -1;
+            const v = entry ? versionAsOf(entry, chain, m.uuid) : -1;
             if (entry && v >= 0) touch(after, key, () => entryFile(entry.filename, entry.versions, mime), v);
           } else if (edit) {
             missingKey(after, 'x:' + m.uuid + ':' + key, baseName(key));
@@ -406,7 +465,7 @@
           for (const { path: p, text: body } of heredocs(input.command)) {
             if (active) {
               const entry = hasOwn(index, p) ? index[p] : null;
-              const v = entry ? versionAsOf(entry, at) : -1;
+              const v = entry ? versionAsOf(entry, chain, m.uuid) : -1;
               if (entry && v >= 0) touch(after, p, () => entryFile(entry.filename, entry.versions, null), v);
             } else if (body) {
               contentKey(after, 'x:' + m.uuid + ':' + p, baseName(p), String(body), null);
@@ -415,6 +474,7 @@
         } else if (b.name === 'present_files') {
           const paths = Array.isArray(input.filepaths) ? input.filepaths : (Array.isArray(input.paths) ? input.paths : []);
           const where = effectivePos(m.uuid);
+          const whereId = where == null ? null : chain[where].uuid;
           for (const p of paths) {
             if (typeof p !== 'string' || !p) continue;
             const base = baseName(p);
@@ -428,7 +488,7 @@
             let entry = hasOwn(index, p) ? index[p] : null;
             if (!entry) entry = Object.values(index).find(e => e && e.filename === base) || null;
             if (entry) {
-              const v = Math.max(versionAsOf(entry, where), 0);
+              const v = Math.max(versionAsOf(entry, chain, whereId), 0);
               sharedKeys.add(entry.path);
               touch(after, entry.path, () => entryFile(entry.filename, entry.versions, null), v);
             } else if (hasOwn(arts, base)) {
@@ -451,7 +511,7 @@
             const written = hasOwn(index, d.path) ? index[d.path] : null;
             if (written) {
               sharedKeys.add(written.path);
-              touch(after, written.path, () => entryFile(written.filename, written.versions, null), Math.max(versionAsOf(written, at), 0));
+              touch(after, written.path, () => entryFile(written.filename, written.versions, null), Math.max(versionAsOf(written, chain, m.uuid), 0));
               continue;
             }
             const uuids = deliveredUuids.get(d.path) || [];
@@ -467,6 +527,8 @@
         }
       }
 
+      // The copy of a published page claude.ai attached to the message is the card's page: not listed again.
+      if (pageSources.size && Array.isArray(message.uploads)) message.uploads = message.uploads.filter(u => !pageSources.has(u.name));
       if (!touches.size) return;
       const out = [];
       for (const block of message.blocks) {

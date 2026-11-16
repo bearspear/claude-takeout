@@ -14,7 +14,7 @@ const KNOWN_ROOT_FILES = [
   'integrated_chat.txt', 'code_snippets.md', 'links_and_sources.md', 'errors.txt', 'original.json',
   'index.md', 'viewer.html', 'viewer-check.gif', 'export-manifest.json',
 ];
-const KNOWN_DIRS = ['responses', 'artefacts', 'attachments', 'uploads', 'images', 'project', 'projects', 'viewer-files'];
+const KNOWN_DIRS = ['responses', 'artefacts', 'attachments', 'uploads', 'images', 'project', 'projects', 'viewer-files', 'published'];
 const IGNORED_NAMES = ['.DS_Store', 'Thumbs.db', '__MACOSX', '.git', 'node_modules'];
 
 // What a killed build_viewer run can leave at an archive root. Not added files; the tool reports them.
@@ -289,6 +289,129 @@ const isAddedText = name => core.isTextFile(name) || /\.mmd$/i.test(name);
 
 const PROJECT_META_FILES = ['project.json', 'docs.json', 'files.json', 'prompt_template.md'];
 
+// ===================================================================
+// Published pages
+// ===================================================================
+
+const PAGE_URL = /^https:\/\/claude\.ai\/artifact\/[A-Za-z0-9_-]{1,64}$/;
+const SHORT_ID = /^[A-Za-z0-9_-]{1,64}$/;
+const needsRuntime = text => typeof text === 'string' && /artifact-type\/|\/_f\//.test(text);
+const plainSegments = rel => typeof rel === 'string' && rel !== '' && rel.split('/').every(s => s !== '' && s !== '.' && s !== '..' && !/[\\\0]/.test(s));
+
+// A file under dir by its saved '/'-separated name, only through real folders (no links), or null.
+function realFileUnder(dir, rel) {
+  if (!plainSegments(rel)) return null;
+  const segs = rel.split('/');
+  let at = dir;
+  for (let i = 0; i < segs.length - 1; i++) {
+    at = path.join(at, segs[i]);
+    if (!isRealDir(at)) return null;
+  }
+  at = path.join(at, segs[segs.length - 1]);
+  return isRealFile(at) ? at : null;
+}
+
+// Every published.json on disk, by page uuid: the chat's own published/ first, then, for a chat in an Export All,
+// the shared published/ at the archive root. Each: { json, dir (relative to the chat folder), abs }.
+function publishedOnDisk(archive, chat, warnings) {
+  const found = new Map();
+  const places = [[path.join(chat.dir, 'published'), 'published']];
+  if (archive.kind === 'mega' && chat.relDir !== '.' && !chat.relDir.includes('/')) places.push([path.join(archive.root, 'published'), '../published']);
+  for (const [base, rel] of places) {
+    const st = lstat(base);
+    if (st && st.isSymbolicLink()) { warnings.push(`${rel}/ is a link to another folder, so it was not read`); continue; }
+    if (!isRealDir(base)) continue;
+    let names = [];
+    try { names = subdirs(base); } catch (e) { warnings.push(`${rel}/: ${e.message}`); continue; }
+    for (const name of names) {
+      const file = path.join(base, name, 'published.json');
+      if (!isRealFile(file)) continue;
+      let json = null;
+      try { json = JSON.parse(readText(file)); } catch (e) { warnings.push(`${rel}/${name}/published.json: ${e.message}`); continue; }
+      if (!json || typeof json !== 'object' || typeof json.uuid !== 'string' || !json.versions || typeof json.versions !== 'object') continue;
+      const uuid = json.uuid.toLowerCase();
+      if (!found.has(uuid)) found.set(uuid, { json, dir: `${rel}/${name}`, abs: path.join(base, name) });
+    }
+  }
+  return found;
+}
+
+// The pages this chat published, as savePublishedPages in popup.js returns them (PublishedEntry), from the
+// published.json files it wrote. Only versions this chat published (publishedIn) are kept, and their publishes
+// come from the chat itself (publishedPagesOf). A page or version with no published.json (its info call failed)
+// still gets an entry, with nothing to link. artifacts: the chat's artefact text as on disk; diskName: the disk
+// spelling of an artefact name.
+function publishedFromDisk(archive, chat, data, artifacts, diskName, warnings) {
+  const found = core.publishedPagesOf(data);
+  if (!found.length) return [];
+  const byUuid = new Map();
+  for (const p of found) {
+    if (!byUuid.has(p.uuid)) byUuid.set(p.uuid, []);
+    byUuid.get(p.uuid).push(p);
+  }
+  const onDisk = publishedOnDisk(archive, chat, warnings);
+  const limit = CTViewer.TEXT_EMBED_LIMIT;
+  const entries = [];
+  for (const [uuid, group] of byUuid) {
+    const disk = onDisk.get(uuid) || null;
+    const json = disk ? disk.json : null;
+    const shortId = SHORT_ID.test(group[0].shortId || '') ? group[0].shortId : '';
+    const publishes = group.flatMap(p => p.publishes);
+    const covered = new Set();
+    const versions = [];
+    let lastOrder = 0;
+    for (const [folderName, v] of Object.entries(json ? json.versions : {})) {
+      if (!v || typeof v !== 'object') continue;
+      const mine = (Array.isArray(v.publishedIn) ? v.publishedIn : []).filter(p => p && p.chat === data.uuid);
+      const ids = new Set(mine.map(p => p.toolUseId));
+      const its = publishes.filter(p => ids.has(p.toolUseId) && !covered.has(p.toolUseId));
+      if (!its.length) continue;
+      for (const p of its) covered.add(p.toolUseId);
+      const own = mine.find(p => p.toolUseId === its[0].toolUseId);
+      const order = Number.isFinite(v.order) ? v.order : 0;
+      lastOrder = Math.max(lastOrder, order);
+      const startSaved = typeof v.startSaved === 'string' && v.startSaved ? v.startSaved : null;
+      const writtenAs = own.same && typeof own.writtenAs === 'string' && own.writtenAs ? diskName(own.writtenAs) : null;
+      const base = { ver: typeof v.ver === 'string' ? v.ver : '', folderName, label: String(v.label || ''), order, publishes: its.map(p => ({ ...p })) };
+      if (writtenAs) {
+        const text = Object.prototype.hasOwnProperty.call(artifacts, writtenAs) && typeof artifacts[writtenAs] === 'string' && artifacts[writtenAs] !== '' ? artifacts[writtenAs] : null;
+        versions.push({ ...base, start: typeof v.start === 'string' ? v.start : null, startSaved, same: true, writtenAs, incomplete: false,
+          needsRuntime: needsRuntime(text), text: text !== null && text.length <= limit ? text : null });
+        continue;
+      }
+      // Stored here, with its start file: the files were saved and the start file is on disk.
+      // The version folder itself must be a real folder: a link to somewhere else is never read.
+      const versionDir = plainSegments(folderName) && !folderName.includes('/') ? path.join(disk.abs, folderName) : null;
+      const startFile = v.saved === true && startSaved && versionDir && isRealDir(versionDir) ? realFileUnder(versionDir, startSaved) : null;
+      if (!startFile) {
+        versions.push({ ...base, start: null, startSaved: null, same: false, writtenAs: null, incomplete: true, needsRuntime: !!v.needsRuntime, text: null });
+        continue;
+      }
+      const listed = (Array.isArray(v.files) ? v.files : []).find(f => f && f.savedAs === startSaved) || {};
+      const isText = core.isTextFile(String(listed.path || startSaved)) || /^text\//i.test(String(listed.contentType || ''));
+      let text = null;
+      if (isText) {
+        try { if (fs.statSync(startFile).size <= limit * 4) text = readText(startFile); } catch (e) { text = null; }
+      }
+      versions.push({ ...base, start: typeof v.start === 'string' ? v.start : null, startSaved, same: false, writtenAs: null, incomplete: !!v.incomplete,
+        needsRuntime: !!v.needsRuntime, text: text !== null && text.length <= limit ? text : null });
+    }
+    // Versions whose info call failed: in no published.json. As the export lists them: named ones, then the current one.
+    for (const p of group) {
+      const its = p.publishes.filter(x => !covered.has(x.toolUseId));
+      if (!its.length) continue;
+      const order = (json ? lastOrder + 1 : 0) + (p.current ? 1 : 0);
+      versions.push({ ver: p.ver, folderName: p.ver ? core.publishedSegment(p.ver) : 'current', label: p.ver || 'current', order, start: null, startSaved: null,
+        same: false, writtenAs: null, incomplete: true, needsRuntime: false, text: null, publishes: its.map(x => ({ ...x })) });
+    }
+    versions.sort((a, b) => a.order - b.order);
+    const url = json && typeof json.url === 'string' && PAGE_URL.test(json.url) ? json.url : (shortId ? `https://claude.ai/artifact/${shortId}` : '');
+    const title = json && typeof json.title === 'string' ? json.title : String(group[0].title || '');
+    entries.push({ uuid, shortId, title, url, current: group.some(p => p.current), dir: disk ? disk.dir : '', versions });
+  }
+  return entries;
+}
+
 // Rebuilds one chat's viewer data from its folder, the same ctx populateConversationFolder builds.
 // Returns { viewerChat, missing, warnings }. Throws only when original.json can't be read or parsed.
 function chatFromDisk(archive, chat) {
@@ -492,6 +615,7 @@ function chatFromDisk(archive, chat) {
     widgetFile: core.widgetFile,
     widgetKey: core.widgetKey,
     project,
+    published: safe('published pages', [], () => publishedFromDisk(archive, chat, data, artifacts, diskName, warnings)),
     // An older export's viewer had no badges; its errors.txt still names the files that may not match.
     flags: core.viewerFlags(core.warningsFromReport(readText(path.join(chat.dir, 'errors.txt')))),
   });

@@ -355,6 +355,18 @@ function renderPublished(page) {
   return box;
 }
 
+// The claude.ai link under a published page's card: the one place the message links the page.
+const PAGE_URL = /^https:\/\/claude\.ai\/artifact\/[A-Za-z0-9_-]{1,64}$/;
+function pageLink(file) {
+  const url = file && file.published ? String(file.published.url || '') : '';
+  if (!PAGE_URL.test(url)) return null;
+  const box = el('div', 'page-link');
+  const link = el('a', '', 'Open on claude.ai');
+  link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+  box.append(icon('globe'), link);
+  return box;
+}
+
 // Small pictures at the end of a step line; more: how many aren't shown.
 function thumbs(srcs, more) {
   const box = el('span', 'thumbs');
@@ -998,7 +1010,14 @@ function renderCard(block, chat) {
   tile.append(icon('file'));
   const label = el('span', 'txt');
   const version = file.versions.length > 1 && file.versions[block.version];
-  label.append(el('b', '', file.name || 'Untitled'), el('small', '', [fileKindLabel(file), version && version.label].filter(Boolean).join(' · ')));
+  const shown = file.versions[block.version] || {};
+  // A published page: whether this version is the file Claude wrote, and whether it only runs on claude.ai.
+  const page = file.published ? [
+    shown.same ? 'Same as published' : '',
+    file.kind !== 'missing' && shown.text == null && shown.href == null ? 'Not in this export' : '',
+    file.published.needsRuntime ? 'Needs claude.ai to run' : '',
+  ] : [];
+  label.append(el('b', '', file.name || 'Untitled'), el('small', '', [fileKindLabel(file), version && version.label, ...page].filter(Boolean).join(' · ')));
   card.append(tile, label);
   card.title = file.name || '';
   if (file.flag) {
@@ -1160,6 +1179,8 @@ function renderPart(node, blocks, chat, sources, first) {
     else if (block.t === 'card') {
       const card = renderCard(block, chat);
       if (card) node.append(card);
+      const link = card && pageLink(chat.files[block.file]);
+      if (link) node.append(link);
     }
   }
 }
@@ -1543,7 +1564,8 @@ function fileDetails(file, version) {
   } else if (file.added && !file.tooLarge) {
     box.append(el('p', '', "This file can't open from the viewer. It's in this archive's folder."), el('small', 'file-path', file.path));
   } else if (!file.added) {
-    box.append(el('p', '', "This file can't open from the viewer. It's in the artefacts folder of this export."));
+    const where = file.published && !version.same ? 'the published folder' : 'the artefacts folder';
+    box.append(el('p', '', `This file can't open from the viewer. It's in ${where} of this export.`));
   }
   return box;
 }
@@ -1595,7 +1617,11 @@ function panelButton(className, text, pressed, onClick) {
 
 function renderPanelBody(chat, file, version, shape) {
   const body = document.getElementById('panel-body');
-  const flagged = () => { if (file.flag) body.prepend(el('div', 'file-note flag-note', flagNote(file))); };
+  const flagged = () => {
+    if (file.flag) body.prepend(el('div', 'file-note flag-note', flagNote(file)));
+    if (file.published && file.published.needsRuntime) body.prepend(el('div', 'file-note', 'This page uses claude.ai to run, so the preview here may not work. Open it on claude.ai.'));
+    if (file.published && version.same) body.prepend(el('div', 'file-note', 'Same as published: claude.ai published this file as Claude wrote it.'));
+  };
   if (shape.missing) body.replaceChildren(el('div', 'file-missing', 'This file is not in this export.'));
   else if (!shape.views.length) body.replaceChildren(fileDetails(file, version));
   else if (panelView === 'preview') body.replaceChildren(...previewNodes(chat, file, version));

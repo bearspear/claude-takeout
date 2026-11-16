@@ -294,6 +294,108 @@ function resultText(result) {
   return first ? String(first.text || '') : '';
 }
 
+// Pages Claude published with publish_files. Names may carry a connector prefix.
+const isPublishTool = (name) => /(^|__|:)publish_files$/.test(String(name || ''));
+
+const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+
+// A claude.ai/artifact short id (base58 of the 16 bytes of a UUID) as the UUID it stands for, or ''
+// unless it is 21-22 alphabet characters that decode to under 2^128 and encode back to the same text.
+function base58ToUuid(shortId) {
+  const id = String(shortId || '');
+  if (!/^[1-9A-HJ-NP-Za-km-z]{21,22}$/.test(id)) return '';
+  let n = 0n;
+  for (const c of id) n = n * 58n + BigInt(BASE58.indexOf(c));
+  if (n >= (1n << 128n)) return '';
+  const hex = n.toString(16).padStart(32, '0');
+  let again = '';
+  for (let v = n; v > 0n; v /= 58n) again = BASE58[Number(v % 58n)] + again;
+  if (again !== id) return '';
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const PUBLISH_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const PUBLISH_VER_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
+
+// The pages a chat published, one entry per uuid + version, in chat order over every message (also
+// branches that are no longer current). A result with no slug and version but an artifact url stands for
+// the live version: ver '' and current true.
+function publishedPagesOf(data) {
+  const pages = [];
+  const byKey = new Map();
+  const messages = (data && data.chat_messages) || [];
+  const results = new Map();
+  for (const msg of messages) {
+    for (const b of Array.isArray(msg.content) ? msg.content : []) if (b && b.type === 'tool_result') results.set(b.tool_use_id, b);
+  }
+  for (const msg of messages) {
+    const blocks = Array.isArray(msg.content) ? msg.content : [];
+    for (const b of blocks) {
+      if (!b || b.type !== 'tool_use' || !isPublishTool(b.name)) continue;
+      const r = results.get(b.id);
+      if (!r || r.is_error) continue;
+      const info = leadingJson(resultText(r));
+      if (!info || typeof info !== 'object' || Array.isArray(info)) continue;
+      let uuid = '', ver = '', current = false;
+      const url = typeof info.url === 'string' ? info.url : '';
+      if (info.slug != null || info.version != null) {
+        uuid = String(info.slug == null ? '' : info.slug).toLowerCase();
+        ver = String(info.version == null ? '' : info.version);
+        if (!PUBLISH_UUID_RE.test(uuid) || !PUBLISH_VER_RE.test(ver)) continue;
+      } else {
+        const m = /^https:\/\/claude\.ai\/artifact\/([^/?#]+)/.exec(url);
+        uuid = m ? base58ToUuid(m[1]) : '';
+        if (!uuid) continue;
+        current = true;
+      }
+      const shortId = (/\/artifact\/([^/?#]+)/.exec(url) || [])[1] || '';
+      const key = `${uuid} ${ver}`;
+      let page = byKey.get(key);
+      if (!page) {
+        const files = b.input && Array.isArray(b.input.files) ? b.input.files : [];
+        page = {
+          uuid, shortId, ver, title: String(info.title || (b.input && b.input.title) || ''), url, current,
+          publishes: [],
+          sources: files.filter((f) => f && typeof f.path === 'string').map((f) => ({ as: String(f.as || ''), path: f.path })),
+        };
+        byKey.set(key, page);
+        pages.push(page);
+      }
+      page.publishes.push({ messageUuid: msg.uuid, toolUseId: b.id });
+    }
+  }
+  return pages;
+}
+
+// The index in entry.versions (extractArtifacts' index entry) of the version an artifact had as of a message:
+// the last of entry.messages at or before it on chain. messageUuid null or undefined: the last version made on
+// chain. -1 when there is none yet, or when the message is not on chain.
+const chainPositions = new WeakMap();
+function versionAsOf(entry, chain, messageUuid) {
+  let pos = chainPositions.get(chain);
+  if (!pos) {
+    pos = new Map(Array.from(chain || [], (m, i) => [m && m.uuid, i]));
+    if (chain && typeof chain === 'object') chainPositions.set(chain, pos);
+  }
+  let at = null;
+  if (messageUuid != null) {
+    if (!pos.has(messageUuid)) return -1;
+    at = pos.get(messageUuid);
+  }
+  let v = -1;
+  Array.from((entry && entry.messages) || []).forEach((id, i) => { if (pos.has(id) && (at == null || pos.get(id) <= at)) v = i; });
+  return v;
+}
+
+// One segment of a published page's file path as a name that is safe on every system: zipSafeName, then
+// <>:"|?* as _, trailing dots and spaces trimmed, and a Windows device name (CON, PRN, AUX, NUL, COM1-9,
+// LPT1-9, any case, with or without an extension) prefixed with _. Never empty.
+function publishedSegment(name) {
+  let safe = zipSafeName(name).replace(/[<>:"|?*]/g, '_').replace(/[. ]+$/, '');
+  if (/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i.test(safe)) safe = '_' + safe;
+  return safe || '_';
+}
+
 function docPayload(payload) {
   if (payload && typeof payload === 'object') return payload;
   try { return JSON.parse(payload); } catch (e) { return null; }
@@ -1118,7 +1220,7 @@ function extractDeliveredFiles(data, takenNames = []) {
 // Files claude.ai attached to Claude's own messages, such as a page Claude published. They are Claude's
 // output, so they go to artefacts/, not uploads/. One whose name a replayed artifact already has is that
 // file (existing: true) and isn't saved again. takenNames: names already in artefacts/. Returns
-// [{ filename, uuid, path, existing }].
+// [{ filename, uuid, path, existing, messageUuid }], messageUuid the message the file is on.
 function extractAttachedFiles(data, takenNames = []) {
   const taken = new Set(takenNames);
   const seen = new Set();
@@ -1134,7 +1236,7 @@ function extractAttachedFiles(data, takenNames = []) {
       seen.add(file.file_uuid);
       const name = zipSafeName(raw).normalize('NFC');
       if (taken.has(name)) {
-        files.push({ filename: name, uuid: file.file_uuid, path: file.path || '', existing: true });
+        files.push({ filename: name, uuid: file.file_uuid, path: file.path || '', existing: true, messageUuid: msg.uuid });
         continue;
       }
       const dot = name.lastIndexOf('.');
@@ -1143,7 +1245,7 @@ function extractAttachedFiles(data, takenNames = []) {
       let out = name;
       for (let n = 2; taken.has(out); n++) out = `${base}_${n}${ext}`;
       taken.add(out);
-      files.push({ filename: out, uuid: file.file_uuid, path: file.path || '', existing: false });
+      files.push({ filename: out, uuid: file.file_uuid, path: file.path || '', existing: false, messageUuid: msg.uuid });
     }
   }
   return files;
@@ -1303,7 +1405,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, base58ToUuid, publishedPagesOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
   };

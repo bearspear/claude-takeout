@@ -126,6 +126,9 @@ Unzip and you'll see something like this:
 ├── viewer.html                     Offline viewer — see "Reading an export in the viewer" below
 ├── viewer-check.gif                1x1 image the viewer uses to tell if you unzipped
 │
+├── published/                      Pages Claude published on claude.ai (only if the chat published some)
+│   └── <Title>_<id>/published.json, <version>/<files>
+│
 ├── responses/
 │   ├── 001_response-title_response.md          Pure text
 │   └── 001_response-title_response.full.md     With thinking blocks and embedded artifacts
@@ -222,11 +225,21 @@ Each entry includes:
 | `web_image` | An image Claude found with image search was not saved: Claude Takeout may not fetch images from other sites, or the site refused it. | Turn on Settings > Save images from web searches (Chrome asks once), then export again. The links in `full_chat.md` still point to the images. |
 | `doc_diagram` | A Claude Docs document has diagrams, which claude.ai draws only on the document's page, and the chat has no self-contained HTML copy of the document. | Ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again; the copy is saved in `artefacts/` and linked from the document. Or open the live document from the link in the note. |
 | `claude_doc_unreplayed` | Claude edited a Claude Docs document in a way the export can't rebuild from the chat. | The exported `.md` and `.html` hold what could be rebuilt. Open the live document from the link in the note for the current version. |
+| `published_page` | A page Claude published on claude.ai could not be saved, or only partly: no claude.ai tab open, signed out (one warning per export), the page no longer there, a file too large (over 32 MB, or 50 MB for one version), a checksum that didn't match, or a path renamed to be safe. | Open claude.ai in a tab, sign in, and export again. The page is still on claude.ai: the entry links it. |
 | `viewer` | A chat couldn't be added to `viewer.html`. (If the whole viewer fails, only the status line says so.) | Nothing is lost: the chat data is all in the export and only the viewer is missing or incomplete. Use the Markdown files, or re-export. |
 | `artifact_opaque_mutation` | A `bash_tool` command mutated an artifact in a way the extension can't reconstruct (Python heredoc, sed, awk, multi-step pipeline, etc.). | **Run `replay_bash.py`** — see next section. |
 | `export_health` | claude.ai's data for the chat looks incomplete: no messages although the chat was used, messages with no content, no current branch, content the exporter doesn't show yet, or several uploads that all failed. Usually a sign that claude.ai's API changed. | Check the chat on claude.ai. `original.json` has everything that came back. If it repeats, report it so the exporter can be updated. |
 
 In `viewer.html`, a file with an `artifact_opaque_mutation`, `str_replace_failed` or `claude_doc_unreplayed` warning carries a **May not match** badge on its card and in the Files list, and the file panel explains why. Older exports get the badges when their viewer is rebuilt with `node tools/build_viewer.js <folder> --force`, which reads them from `errors.txt`.
+
+### Published pages
+
+A page Claude published on claude.ai is saved in `published/<Title>_<id>/`, one folder per version, with `published.json` listing the files. A version identical to a file in `artefacts/` is not copied again (`published.json` says `same`). The export needs a claude.ai tab open and signed in to fetch them, and an export made earlier has no `published/` folder until you export again. Limits to know:
+
+- "Current" is the live version fetched when an older chat has no recorded version. It is not necessarily what was published at that time.
+- The viewer previews a page's start file. A multi-file page's own scripts and styles may not load in the sandboxed preview, and the side panel shows only the start file.
+- A page built on claude.ai's own page code shows its source and "Needs claude.ai to run"; it won't run offline.
+- Export All may name a page's folder after a newer chat, and merging archives keeps the newest folder name, so a README link in an older chat folder can point at a renamed folder. The viewer still finds it, because it matches pages by id.
 
 The Troubleshooting Guide at the bottom of `errors.txt` includes a copy-paste-ready `python3 replay_bash.py` command pointing at the export folder.
 

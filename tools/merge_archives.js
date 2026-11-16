@@ -68,6 +68,90 @@ function copyTree(from, to, { skipTop = null } = {}) {
 }
 
 // ===================================================================
+// Published pages
+// ===================================================================
+
+const plainName = n => typeof n === 'string' && n !== '' && n !== '.' && n !== '..' && !/[\\/\0]/.test(n);
+const PAGE_UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+
+// The shared published/ folders of mega archives, one folder per page uuid, newest source first. A page keeps
+// the folder name its newest copy has; its version folders are united, a stored copy winning over a version only
+// listed (nothing saved), and published.json's versions and publishedIn are merged: nothing is overwritten.
+// A folder without a readable published.json is copied as it is when its name is free.
+function mergePublished(sources, archivesOf, building, report) {
+  const pages = new Map(); // uuid -> { want, json, from: Map(version folder -> source folder) }
+  const loose = [];
+  for (const s of [...sources].sort((a, b) => b.order - a.order)) {
+    for (const archive of archivesOf.get(s.order) || []) {
+      const root = path.join(archive.root, 'published');
+      const st = lstat(root);
+      if (archive.kind !== 'mega' || !st || !st.isDirectory()) continue;
+      for (const dir of fs.readdirSync(root).sort()) {
+        const from = path.join(root, dir);
+        const fst = lstat(from);
+        if (SKIP_NAMES.has(dir) || !fst || !fst.isDirectory()) continue;
+        const jst = lstat(path.join(from, 'published.json'));
+        const json = jst && jst.isFile() ? readJson(path.join(from, 'published.json')) : null;
+        if (!json || typeof json !== 'object' || typeof json.uuid !== 'string' || !PAGE_UUID.test(json.uuid) || !json.versions || typeof json.versions !== 'object') {
+          loose.push({ dir, from });
+          continue;
+        }
+        const uuid = json.uuid.toLowerCase();
+        if (!pages.has(uuid)) pages.set(uuid, { want: dir, json: { ...json, versions: {} }, from: new Map() });
+        const page = pages.get(uuid);
+        for (const [folder, v] of Object.entries(json.versions)) {
+          if (!v || typeof v !== 'object' || !plainName(folder)) continue;
+          const vst = lstat(path.join(from, folder));
+          const stored = v.saved === true && !!vst && vst.isDirectory();
+          const publishedIn = Array.isArray(v.publishedIn) ? v.publishedIn.filter(p => p && typeof p === 'object') : [];
+          // The same folder name for another ver (a 'current' that was another version then) gets a free name.
+          let key = folder;
+          for (let n = 2; page.json.versions[key] && page.json.versions[key].ver !== v.ver; n++) key = `${folder}_${n}`;
+          const had = page.json.versions[key];
+          if (!had) {
+            page.json.versions[key] = { ...v, saved: stored, publishedIn: publishedIn.slice() };
+            if (stored) page.from.set(key, path.join(from, folder));
+            continue;
+          }
+          const seen = new Set(had.publishedIn.map(p => `${p.chat}\n${p.toolUseId}`));
+          for (const p of publishedIn) if (!seen.has(`${p.chat}\n${p.toolUseId}`)) had.publishedIn.push(p);
+          if (!had.saved && stored) {
+            for (const f of ['files', 'start', 'startSaved', 'incomplete', 'needsRuntime', 'missing']) had[f] = v[f];
+            had.saved = true;
+            page.from.set(key, path.join(from, folder));
+          }
+        }
+      }
+    }
+  }
+  if (!pages.size && !loose.length) return;
+  const base = path.join(building, 'published');
+  fs.mkdirSync(base);
+  const used = new Set();
+  const add = (copied) => { report.files += copied.files; report.bytes += copied.bytes; };
+  for (const page of pages.values()) {
+    const dir = freeName(page.want, used);
+    fs.mkdirSync(path.join(base, dir));
+    const versions = Object.entries(page.json.versions).sort((a, b) => (Number(a[1].order) || 0) - (Number(b[1].order) || 0));
+    for (const [key] of versions) {
+      if (!page.from.has(key)) continue;
+      const copied = copyTree(page.from.get(key), path.join(base, dir, key));
+      add(copied);
+      for (const l of copied.skipped) report.warnings.push(`${page.from.get(key)}: ${l} is a link, so it was not copied`);
+    }
+    fs.writeFileSync(path.join(base, dir, 'published.json'), JSON.stringify({ ...page.json, versions: Object.fromEntries(versions) }, null, 2), { flag: 'wx' });
+  }
+  for (const { dir, from } of loose) {
+    if (used.has(dir.normalize('NFC').toLowerCase())) {
+      report.warnings.push(`${from}: no readable published.json, and the name is taken, so it was not copied`);
+      continue;
+    }
+    freeName(dir, used);
+    add(copyTree(from, path.join(base, dir)));
+  }
+}
+
+// ===================================================================
 // Reading the sources
 // ===================================================================
 
@@ -226,7 +310,7 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
 
     // Built under a hidden name, then renamed: a merged archive is there complete or not at all.
     fs.mkdirSync(building);
-    const used = new Set(['projects', 'index.md', 'export-manifest.json', 'viewer.html', 'viewer-check.gif', 'viewer-files'].map(n => n.toLowerCase()));
+    const used = new Set(['projects', 'published', 'index.md', 'export-manifest.json', 'viewer.html', 'viewer-check.gif', 'viewer-files'].map(n => n.toLowerCase()));
     for (const c of chosen) {
       c.out = freeName(c.folder, used);
       const copied = copyTree(c.dir, path.join(building, c.out), { skipTop: c.single ? VIEWER_NAMES : null });
@@ -253,6 +337,8 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
         }
       }
     }
+    // Published pages of mega archives, once per page.
+    mergePublished(sources, archivesOf, building, report);
     const at = now.toISOString();
     fs.writeFileSync(path.join(building, 'index.md'), indexMd(chosen, sources, at), { flag: 'wx' });
     fs.writeFileSync(path.join(building, 'export-manifest.json'), JSON.stringify({
