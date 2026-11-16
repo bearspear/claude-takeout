@@ -229,7 +229,7 @@
         const { done, value } = await reader.read();
         if (done) break;
         total += value.byteLength;
-        if (total > PUBLISHED_MAX_FILE) { try { reader.cancel(); } catch (e) {} return null; }
+        if (total > PUBLISHED_MAX_FILE) { try { reader.cancel().catch(() => {}); } catch (e) {} return null; }
         chunks.push(value);
       }
     } catch (e) { throw new PublishedError('network'); }

@@ -3365,8 +3365,11 @@ async function savePublishedPages(folder, data, ctx = {}) {
     });
   }
 
+  const noted = new Set();
+  let signedOutHere = false;
   const markSignedOut = () => {
     if (state.publishedSignedOut) return;
+    signedOutHere = true;
     state.publishedSignedOut = true;
     warn('published pages', 'Published pages not fetched: claude.ai answered HTTP 401, as if you were signed out. Pages after this one in the export were skipped.',
       'Sign in to claude.ai in this tab and export again.');
@@ -3478,6 +3481,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
     v.needsRuntime = publishedNeedsRuntime(startText);
     v.text = startText !== null && startText.length <= limit ? startText : null;
     if (problems.length) {
+      noted.add(rec.uuid);
       warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): ${problems.length} file${problems.length === 1 ? '' : 's'} could not be saved: ${problems.join(', ')}.`, openNote(rec));
     }
   };
@@ -3491,7 +3495,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
     const mine = new Map();
     for (const p of [...group.filter((g) => !g.current), ...group.filter((g) => g.current)]) {
       const info = await getInfo(rec, p.ver);
-      const key = p.current ? (!info.error && mine.has(info.ver) ? info.ver : '') : p.ver;
+      const key = p.current ? (!info.error && (mine.has(info.ver) || rec.versions.has(info.ver)) ? info.ver : '') : p.ver;
       if (!mine.has(key)) mine.set(key, { key, info, publishes: [], sources: p.sources });
       mine.get(key).publishes.push(...p.publishes);
     }
@@ -3500,6 +3504,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
     for (const m of mine.values()) {
       const { info } = m;
       if (info.error) {
+        if (!info.skipped || signedOutHere) noted.add(rec.uuid);
         if (!info.skipped && !warned.has(`${uuid} ${info.error}`)) {
           warned.add(`${uuid} ${info.error}`);
           warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}"${m.key ? ` (${m.key})` : ''} could not be fetched: ${info.error}.`, openNote(rec));
@@ -3523,6 +3528,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
           const parts = [];
           if (renames.length) parts.push(`saved ${renames.join(', ')}`);
           if (info.rejected.length) parts.push(`not fetched, unsafe: ${info.rejected.join(', ')}`);
+          noted.add(rec.uuid);
           warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): file names changed to stay inside its folder: ${parts.join('; ')}.`, openNote(rec));
         }
       }
@@ -3549,7 +3555,10 @@ async function savePublishedPages(folder, data, ctx = {}) {
       });
     }
     versions.sort((a, b) => a.order - b.order);
-    entries.push({ uuid: rec.uuid, shortId: rec.shortId, title: rec.title, url: rec.url, current: group.some((p) => p.current), dir: dirOf(rec), versions });
+    const entry = { uuid: rec.uuid, shortId: rec.shortId, title: rec.title, url: rec.url, current: group.some((p) => p.current), dir: dirOf(rec), versions };
+    // Whether this chat's errors.txt has something about the page; not part of the entry's data.
+    Object.defineProperty(entry, 'noted', { value: noted.has(rec.uuid) });
+    entries.push(entry);
   }
 
   if (!exportAll) {
@@ -3584,7 +3593,7 @@ function publishedReadmeLines(entries) {
     for (const v of e.versions) {
       if (v.same && v.writtenAs) lines.push(`  - ${v.label}: same as [${escapeMarkdown(v.writtenAs)}](artefacts/${encodePath(v.writtenAs)})`);
       else if (v.startSaved) lines.push(`  - ${v.label}: [${escapeMarkdown(v.startSaved)}](${encodePath(e.dir)}/${encodePath(v.folderName)}/${encodePath(v.startSaved)})${v.incomplete ? ' *(incomplete, see errors.txt)*' : ''}`);
-      else lines.push(`  - ${v.label}: not saved (see errors.txt)`);
+      else lines.push(`  - ${v.label}: not saved${e.noted ? ' (see errors.txt)' : ''}`);
     }
   }
   return lines;

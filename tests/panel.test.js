@@ -100,12 +100,13 @@ function resp(status, { json, bytes, stream, headers = {} } = {}) {
     status, ok: status >= 200 && status < 300,
     headers: { get: (k) => headers[k] ?? null },
     json: async () => json,
-    body: stream ? { getReader: () => { let i = 0; return { read: async () => (i < stream.length ? { done: false, value: stream[i++] } : { done: true }), cancel() { resp.cancelled = true; } }; } } : undefined,
+    body: stream ? { getReader: () => { let i = 0; return { read: async () => (i < stream.length ? { done: false, value: stream[i++] } : { done: true }), cancel() { resp.cancelled = true; return stream.cancelRejects ? Promise.reject(new Error('cancel failed')) : Promise.resolve(); } }; } } : undefined,
     arrayBuffer: async () => (bytes || new Uint8Array()).buffer.slice(bytes ? bytes.byteOffset : 0, bytes ? bytes.byteOffset + bytes.byteLength : 0),
   };
 }
 function publishedHarness({ src, srcThrow, files, expiresIn = 3600 } = {}) {
-  const reqs = [], delays = [];
+  const reqs = [], delays = [], logs = [];
+  const record = (...a) => { logs.push(a.map(String).join(' ')); };
   const listing = files || {
     'index.html': { sha256: 'h1', size: 3, contentType: 'text/html' },
     'data.json': { sha256: 'h2', size: 2, contentType: 'application/json' },
@@ -114,7 +115,7 @@ function publishedHarness({ src, srcThrow, files, expiresIn = 3600 } = {}) {
   };
   let onMessage;
   const sandbox = {
-    window: { addEventListener() {}, location: {} }, console: { log() {} },
+    window: { addEventListener() {}, location: {} }, console: { log: record, warn: record, error: record },
     setTimeout: (f, ms) => { delays.push(ms); f(); },
     crypto: require('crypto').webcrypto, btoa, atob, TextEncoder, URL, Uint8Array, String, Math, Number, Date, Map, Error,
     document: { createElement: () => ({}), head: { appendChild() {} }, cookie: 'lastActiveOrg=11111111-0000-4000-8000-000000000001' },
@@ -135,10 +136,20 @@ function publishedHarness({ src, srcThrow, files, expiresIn = 3600 } = {}) {
   };
   vm.runInNewContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), sandbox);
   return {
-    reqs, delays,
+    reqs, delays, logs,
     frameCalls: () => reqs.filter((r) => r.url.includes('/api/frame/')),
     call: (msg) => new Promise((r) => onMessage(msg, {}, (x) => r(JSON.parse(JSON.stringify(x))))),
   };
+}
+
+
+// Every request carrying the token goes to the page's own frame host; the token is never in an /api/frame URL or a log.
+function assertTokenStaysHome(h) {
+  const withToken = h.reqs.filter((r) => r.url.includes('__frame_t'));
+  assert.ok(withToken.length > 0, 'a file request carried the token');
+  for (const r of withToken) assert.ok(r.url.startsWith(`https://${PUB}.frame.claudeusercontent.com/`), r.url);
+  assert.ok(!h.reqs.some((r) => r.url.includes('/api/frame') && r.url.includes('__frame_t')));
+  assert.ok(!h.logs.some((l) => /__frame_t|a\.b\.c/.test(l)), 'no log call holds the token');
 }
 
 const tests = {
@@ -441,6 +452,8 @@ const tests = {
     assert.strictEqual(src.opts.credentials, 'omit');
     assert.strictEqual(src.opts.redirect, 'error');
     assert.strictEqual(src.opts.referrerPolicy, 'no-referrer');
+    await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 3 });
+    assertTokenStaysHome(h);
   },
 
   'publishedPageFile retries once on 403 and encodes in chunks': async () => {
@@ -451,6 +464,7 @@ const tests = {
     assert.ok(Buffer.from(res.base64, 'base64').equals(Buffer.from(bytes)));
     assert.strictEqual(h.frameCalls().length, 2, 'one token request, one more after the 403');
     assert.strictEqual(res.size, bytes.length);
+    assertTokenStaysHome(h);
   },
 
   'an expired or missing token is fetched again before the file': async () => {
@@ -507,6 +521,25 @@ const tests = {
     const r = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 1024 });
     assert.deepStrictEqual(r, { error: 'too large' });
     assert.ok(resp.cancelled, 'reader cancelled');
+  },
+
+  'a cancel that rejects still gives too large, with no unhandled rejection': async () => {
+    const chunk = new Uint8Array(8 * 1024 * 1024);
+    const stream = [chunk, chunk, chunk, chunk, chunk];
+    stream.cancelRejects = true;
+    const h = publishedHarness({
+      files: { 'index.html': { sha256: 'x', size: 1024, contentType: 'text/html' } },
+      src: () => resp(200, { stream }),
+    });
+    const seen = [];
+    const on = (e) => seen.push(e);
+    process.on('unhandledRejection', on);
+    try {
+      const r = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 1024 });
+      await new Promise((ok) => setTimeout(ok, 20));
+      assert.deepStrictEqual(r, { error: 'too large' });
+    } finally { process.off('unhandledRejection', on); }
+    assert.deepStrictEqual(seen, []);
   },
 
   '429 waits once for Retry-After': async () => {

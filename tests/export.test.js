@@ -2278,3 +2278,36 @@ test('Export All stores a page published from two chats once and lists both', as
   const readmeB = await zip.file('Chat_b/README.md').async('string');
   assert.ok(readmeB.includes('(../published/Guide_Short1/v2/index.html)'));
 });
+
+test('Export All: a url-only publish joins a version another chat stored, with no second copy', async () => {
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v3', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  let n = BigInt('0x' + PUB_U.replace(/-/g, '')), short = '';
+  const b58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+  for (; n > 0n; n /= 58n) short = b58[Number(n % 58n)] + short;
+  assert.strictEqual(core.base58ToUuid(short), PUB_U);
+  const urlOnly = [use('q1', PUB, { files: [], title: 'Guide' }), { ...pubResult('q1', { url: `https://claude.ai/artifact/${short}`, title: 'Guide' }), name: PUB }];
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, urlOnly)]), { uuid: 'b', name: 'Chat b' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v3', history: ['v1', 'v2', 'v3'], versions: { v3: { files: { 'index.html': 'three' } } } } });
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const { zip } = await runBulkZip({ list, chats: { a: chatA, b: chatB }, setup: bulkWithPages(fetcher, { calls: 0 }) });
+  const names = Object.keys(zip.files).filter((n) => !zip.files[n].dir && /^published\//.test(n)).sort();
+  assert.deepStrictEqual(names, ['published/Guide_Short1/published.json', 'published/Guide_Short1/v3/index.html']);
+  assert.strictEqual(fetcher.count('publishedPageFile'), 1);
+  assert.ok(fetcher.count('publishedPageInfo') <= 2);
+  const json = JSON.parse(await zip.file('published/Guide_Short1/published.json').async('string'));
+  assert.deepStrictEqual(json.versions.v3.publishedIn.map((p) => p.chat), ['a', 'b']);
+});
+
+test('Export All: a page skipped after a 401 is "not saved" without an errors.txt pointer in a chat with none', async () => {
+  const signedOut = { error: 'HTTP 401', status: 401 };
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs, 'Out1', 'Out'))]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U2, 'v1', guideAs, 'Out2', 'Out too'))]), { uuid: 'b', name: 'Chat b' });
+  const fetcher = publishedFetcher({ [PUB_U]: { error: signedOut }, [PUB_U2]: { error: signedOut } });
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const { zip } = await runBulkZip({ list, chats: { a: chatA, b: chatB }, setup: bulkWithPages(fetcher, { calls: 0 }) });
+  const readmeA = await zip.file('Chat_a/README.md').async('string');
+  const readmeB = await zip.file('Chat_b/README.md').async('string');
+  assert.ok(/not saved \(see errors\.txt\)/.test(readmeA), readmeA);
+  assert.ok(/not saved/.test(readmeB) && !/see errors\.txt/.test(readmeB), readmeB);
+  assert.ok(!zip.file('Chat_b/errors.txt'));
+});
