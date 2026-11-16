@@ -244,7 +244,7 @@ Upload text over `UPLOAD_INLINE_LIMIT` (64 KB of UTF-8) is not in `viewer.html` 
 
 Mega-ZIP only:
 ```
-claude-takeout-[<display name>-][changes-]<YYYY-MM-DD>.zip   (megaZipName; display name from /api/account)
+claude-takeout-[<display name>-][changes-]<YYYY-MM-DD>_<HHMM>.zip   (megaZipName, lowercase; exportStamp, local time; display name from /api/account; the folder export: same name, no .zip)
 ├── index.md                   # Master table w/ per-conversation issue counts
 ├── export-manifest.json       # { format, exported_at, kind: full|changes, since, listed, chats: [{ uuid, name, updated_at, folder }] }
 ├── projects/<project>/        # files/ and files.json, stored once and linked from each chat's README
