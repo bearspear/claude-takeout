@@ -376,6 +376,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 - **Questions Claude asked** - claude.ai's multiple-choice questions aren't shown in the viewer once answered, as on claude.ai; your answers are the next prompt. `full_chat.md` lists the questions and their options.
 - **Citations as pills** - A citation shows as a small pill with the site's name ("SoundGuys"), as on claude.ai, where the chat names the site; otherwise it keeps its number.
 - **Searches show their query** - "Searched the web" is followed by what was searched, in grey.
+- **Web images a site refused stay out of the mosaic** - As on claude.ai, the mosaic of web-search pictures uses the ones that were saved; one a site refused to send only gets a "Not in this export" tile when none was saved. The gallery still lists it, and `errors.txt` still says why.
 
 ### v1.12.2
 

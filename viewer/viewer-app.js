@@ -463,7 +463,10 @@ function messageWebImages(m) {
 function renderWebMosaic(items) {
   if (!items.length) return null;
   const box = el('div', 'web-results');
-  const shown = items.slice(0, MOSAIC_TILES);
+  // As claude.ai: tiles for the pictures that are there; one the export didn't save only fills a tile
+  // when none was saved. The gallery still steps through them all.
+  const saved = items.filter(savedImage);
+  const shown = (saved.length ? saved : items).slice(0, MOSAIC_TILES);
   const grid = el('div', `web-mosaic n${shown.length}`);
   shown.forEach((item, i) => {
     const tile = el('button', 'tile');
@@ -483,7 +486,7 @@ function renderWebMosaic(items) {
     if (site) tile.append(el('span', 'tile-site', site));
     const more = items.length - shown.length;
     if (i === shown.length - 1 && more > 0) tile.append(el('span', 'tile-more', `+${more}`));
-    tile.addEventListener('click', () => openGallery(items, i, tile));
+    tile.addEventListener('click', () => openGallery(items, items.indexOf(item), tile));
     grid.append(tile);
   });
   box.append(grid, el('div', 'web-caption', 'Results from the web'));
