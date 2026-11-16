@@ -17,7 +17,9 @@ function element(id) {
   };
 }
 
-function loadPopup({ fetch = async () => ({ ok: false, status: 404 }) } = {}) {
+// location: the page's URL path, such as '/popup.html' (IS_POPUP); session: an object standing in for
+// chrome.storage.session, read and written in place; before(sandbox): runs before the scripts load.
+function loadPopup({ fetch = async () => ({ ok: false, status: 404 }), location = null, session = null, before = null } = {}) {
   const elements = {};
   const event = () => ({ addListener() {} });
   const sandbox = {
@@ -38,6 +40,15 @@ function loadPopup({ fetch = async () => ({ ok: false, status: 404 }) } = {}) {
     FileReader: class { readAsDataURL() { this.result = 'data:x;base64,'; if (this.onload) this.onload(); } },
     fetch,
   };
+  if (location) sandbox.location = { pathname: location };
+  if (session) {
+    sandbox.chrome.storage.session = {
+      get: async (key) => (key in session ? { [key]: session[key] } : {}),
+      set: async (o) => { Object.assign(session, o); },
+      remove: async (key) => { delete session[key]; },
+    };
+  }
+  if (before) before(sandbox);
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(path.join(REPO, 'export-core.js'), 'utf8'), sandbox);
   vm.runInContext(fs.readFileSync(path.join(REPO, 'takeout-viewer.js'), 'utf8'), sandbox);
@@ -163,6 +174,7 @@ function publishedFetcher(pages) {
     if (msg.action === 'publishedPageInfo') {
       return {
         ver, title: page.title, history: page.history || Object.keys(page.versions), rejected: v.rejected || [],
+        ...(page.runtimeSkipped !== undefined ? { runtimeSkipped: page.runtimeSkipped } : {}),
         files: Object.entries(v.files).map(([path, raw]) => {
           const f = fileOf(raw);
           const body = Buffer.from(f.body);
@@ -182,4 +194,49 @@ function publishedFetcher(pages) {
   return { fetch, calls, count: (action, uuid) => calls.filter((c) => c.action === action && (!uuid || c.uuid === uuid)).length };
 }
 
-module.exports = { DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };
+// Runs exportArtifacts in the sandbox: content.js's listArtifacts answers { frames, accountName } (or list,
+// when given, as the whole reply), publishedPageInfo and publishedPageFile come from publishedFetcher(pages),
+// with a real JSZip and storage kept in memory. options go to exportArtifacts ({ directory } for a folder).
+// Returns { store, saved (the download), zip, files (path -> text, from the ZIP or the run folder), status,
+// fetcher, listCalls, popup }.
+async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}, accountName = 'Mika', list = null, setup = null } = {}) {
+  const JSZip = require('../jszip.min.js');
+  const popup = exportPopup();
+  const sb = popup.sandbox;
+  const store = JSON.parse(JSON.stringify(stored));
+  const fetcher = publishedFetcher(pages);
+  const listCalls = [];
+  sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
+  sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+  sb.chrome.tabs.query = async () => [{ id: 1, url: 'https://claude.ai/artifacts' }];
+  sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+    if (msg.action === 'listArtifacts') {
+      listCalls.push(JSON.parse(JSON.stringify(msg)));
+      cb(list || { frames: JSON.parse(JSON.stringify(frames)), accountName: msg.withAccountName ? accountName : null, orgId: 'org-1' });
+    } else if (msg.action === 'publishedPageInfo' || msg.action === 'publishedPageFile') {
+      fetcher.fetch(msg).then(cb);
+    } else cb({});
+  };
+  sb.JSZip = JSZip;
+  sb.Uint8Array = Uint8Array;
+  let saved = null;
+  sb.download = (blob, name) => { saved = { blob, name }; };
+  sb.setTimeout = (f) => setTimeout(f, 0);
+  vm.runInContext('orgId = "org-1"', sb);
+  if (setup) setup(sb);
+  sb.__opts = options;
+  await vm.runInContext('exportArtifacts(__opts)', sb);
+  const zip = saved ? await JSZip.loadAsync(await saved.blob.arrayBuffer()) : null;
+  const files = {};
+  const text = (d) => (typeof d === 'string' ? d : Buffer.from(d).toString('utf8'));
+  if (zip) {
+    for (const n of Object.keys(zip.files)) if (!zip.files[n].dir) files[n] = await zip.file(n).async('string');
+  } else if (options.directory && typeof options.directory.flat === 'function') {
+    const runs = [...options.directory.entries.values()];
+    const run = runs[runs.length - 1];
+    if (run && typeof run.flat === 'function') for (const [n, d] of Object.entries(run.flat())) files[n] = text(d);
+  }
+  return { store, saved, zip, files, status: sb.document.getElementById('status'), fetcher, listCalls, popup };
+}
+
+module.exports = { runArtifacts, DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };
