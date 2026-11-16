@@ -2232,6 +2232,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
           if (name) fullContent.push(...widgetLines(input, name, '../'));
         } else if (isImageSearchTool(toolName)) {
           fullContent.push('```plaintext', `Image search: ${input.query || ''}`, '```', '');
+        } else if (isDisplayTool(toolName)) {
+          const result = (msg.content || []).find((r) => r && r.type === 'tool_result' && r.tool_use_id === block.id);
+          fullContent.push(...displayLines(toolName, input, result, webImages, '../'));
         } else if (toolName === 'artifacts' && ['create', 'update', 'rewrite'].includes(input.command)) {
           const title = input.title || input.id || 'Untitled';
           const action = input.command === 'update' ? 'Updating' : input.command === 'rewrite' ? 'Rewriting' : 'Creating';
@@ -3104,6 +3107,44 @@ async function saveWebImages(folder, data, errorCollector, onProgress = null) {
   return saved;
 }
 
+// claude.ai's display tools: product cards (carousel, featured), a comparison table, and multiple-choice
+// questions, as Markdown. result: the call's tool_result, whose images (product_<n>_<m>) the export may have
+// saved (webImages: URL -> path). up: '../' from responses/.
+const isDisplayTool = (name) => /(^|__|:)(\w+_display_v\d+|ask_user_input_v\d+)$/.test(String(name || ''));
+function displayLines(name, input, result, webImages = {}, up = '') {
+  const i = input && typeof input === 'object' ? input : {};
+  const cell = (v) => String(v == null ? '' : v).replace(/\|/g, '\\|').replace(/\s*\n\s*/g, ' ');
+  const lines = [];
+  if (/ask_user_input/.test(name)) {
+    for (const q of Array.isArray(i.questions) ? i.questions : []) {
+      if (!q || typeof q !== 'object') continue;
+      lines.push(`**${String(q.question || '').trim()}**`, '');
+      for (const o of Array.isArray(q.options) ? q.options : []) lines.push(`- ${o}`);
+      lines.push('');
+    }
+    return lines;
+  }
+  const products = (Array.isArray(i.products) ? i.products : []).filter((p) => p && typeof p === 'object');
+  if (/comparison_card/.test(name)) {
+    const rows = Math.max(0, ...products.map((p) => (Array.isArray(p.attributes) ? p.attributes.length : 0)));
+    lines.push(`| | ${products.map((p) => `**${cell(p.name)}**${p.price ? ` (${cell(p.price)})` : ''}`).join(' | ')} |`, `|---|${products.map(() => '---').join('|')}|`);
+    for (let r = 0; r < rows; r++) {
+      const label = (products.map((p) => (p.attributes || [])[r]).find((a) => a && a.label) || {}).label || '';
+      lines.push(`| ${cell(label)} | ${products.map((p) => cell(((p.attributes || [])[r] || {}).value)).join(' | ')} |`);
+    }
+    return [...lines, ''];
+  }
+  const images = (Array.isArray(result && result.content) ? result.content : []).flatMap((c) => (c && Array.isArray(c.images) ? c.images : []));
+  products.forEach((p, n) => {
+    lines.push(`#### ${String(p.name || '').trim()}${p.price ? ` (${p.price})` : ''}`, '');
+    if (p.blurb) lines.push(String(p.blurb), '');
+    const pics = images.filter((img) => img && new RegExp(`^product_${n}_`).test(String(img.id || '')))
+      .map((img) => Object.prototype.hasOwnProperty.call(webImages, img.url) ? webImages[img.url] : null).filter(Boolean);
+    if (pics.length) lines.push(pics.map((f) => `![${mdLinkText(p.name || 'Product')}](${up}${f.split('/').map(encodeURIComponent).join('/')})`).join(' '), '');
+  });
+  return lines;
+}
+
 // The page a publish_files call put on claude.ai, as a quoted link, or [] when its reply has no URL.
 function publishedLines(block) {
   const reply = leadingJson(resultText(block)) || {};
@@ -3439,6 +3480,10 @@ function convertToMarkdown(data, options = {}) {
               lines.push('```plaintext', `Diagram: ${input.title || 'untitled'} (drawn in the chat on claude.ai)`, '```', '');
             }
 
+          } else if (isDisplayTool(toolName)) {
+            // Product cards, a comparison or questions, as claude.ai shows them; their results are left out.
+            lines.push(...displayLines(toolName, input, resultsById.get(block.id), webImages));
+
           } else if (isGuidanceTool(toolName)) {
             // Instructions a tool gives Claude; its result is left out.
             lines.push('```plaintext', `Loading tool guidance: ${toolName}`, '```', '');
@@ -3492,7 +3537,7 @@ function convertToMarkdown(data, options = {}) {
 
           if (claudeDocsAction(toolName)) {
             // Claude Docs results are acknowledgements for Claude, not part of the conversation.
-          } else if (isWidgetTool(toolName) || isGuidanceTool(toolName)) {
+          } else if (isWidgetTool(toolName) || isGuidanceTool(toolName) || isDisplayTool(toolName)) {
             // A diagram's acknowledgement, or a tool's instructions for Claude: nothing for the reader.
           } else if (toolImageLines(block, toolImages).length) {
             // Pictures Claude looked at, saved in images/, instead of their claude.ai links.

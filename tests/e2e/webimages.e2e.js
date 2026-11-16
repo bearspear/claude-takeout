@@ -50,11 +50,15 @@ const chat = {
   const tiles = page.locator('.web-mosaic .tile');
   check('four tiles', await tiles.count() === 4);
   check('the last tile says +1', (await tiles.nth(3).locator('.tile-more').textContent()) === '+1');
-  check('an unsaved image is a card', (await tiles.nth(3).getAttribute('class')).includes('not-saved') && (await tiles.nth(3).textContent()).includes('Picture 4'));
+  check('an unsaved image takes no tile while saved ones fill them, as on claude.ai', await page.locator('.web-mosaic .tile.not-saved').count() === 0
+    && (await tiles.nth(3).getAttribute('aria-label')) === 'View image: Picture 5');
   check('saved images load from images/', await page.evaluate(() => [...document.querySelectorAll('.web-mosaic img')].every(i => i.complete && i.naturalWidth === 1 && /\/images\/k\d_Picture\.png$/.test(i.src))));
   check('site on each tile', (await tiles.nth(0).locator('.tile-site').textContent()) === 'example.com');
   check('caption', (await page.locator('.web-caption').textContent()) === 'Results from the web');
 
+  await tiles.nth(3).click();
+  check('a tile opens the gallery at its own picture', (await page.locator('.gallery-nav .pos').textContent()) === '5 of 5');
+  await page.keyboard.press('Escape');
   await tiles.nth(1).click();
   const pos = page.locator('.gallery-nav .pos');
   check('gallery opens at the tile', (await pos.textContent()) === '2 of 5');

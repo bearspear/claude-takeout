@@ -303,6 +303,7 @@ function renderTool(block, gallery = null) {
   const target = block.target && label.endsWith(block.target) ? block.target : '';
   const parts = [el('span', 'label', target ? label.slice(0, label.length - target.length) : label)];
   if (target) parts[0].append(el('span', 'target', target));
+  if (block.detail) parts.push(el('span', 'gist', block.detail));
   if (typeof block.link === 'string' && /^https?:\/\//i.test(block.link)) {
     const a = el('a', 'step-link', block.link);
     a.href = block.link; a.target = '_blank'; a.rel = 'noopener noreferrer';
@@ -397,7 +398,7 @@ function stepsSummary(tools) {
 
 // Everything Claude did before its answer, folded into one line as claude.ai does: thinking, tool calls and
 // the text between them, as rows in a box. Thinking alone shows as its own line, labelled by its summary.
-const OUTPUT_TOOL = /(^|__|:)(show_widget|image_search|publish_files)$/;
+const OUTPUT_TOOL = /(^|__|:)(show_widget|image_search|publish_files|\w+_display_v\d+|ask_user_input_v\d+)$/;
 function renderSteps(blocks, sources, first = true) {
   blocks = blocks.filter(b => !(b.t === 'tool' && OUTPUT_TOOL.test(String(b.name))));
   // Thinking with nothing to show (no text, no summary) only adds to the time, as on claude.ai.
@@ -462,7 +463,10 @@ function messageWebImages(m) {
 function renderWebMosaic(items) {
   if (!items.length) return null;
   const box = el('div', 'web-results');
-  const shown = items.slice(0, MOSAIC_TILES);
+  // As claude.ai: tiles for the pictures that are there; one the export didn't save only fills a tile
+  // when none was saved. The gallery still steps through them all.
+  const saved = items.filter(savedImage);
+  const shown = (saved.length ? saved : items).slice(0, MOSAIC_TILES);
   const grid = el('div', `web-mosaic n${shown.length}`);
   shown.forEach((item, i) => {
     const tile = el('button', 'tile');
@@ -482,7 +486,7 @@ function renderWebMosaic(items) {
     if (site) tile.append(el('span', 'tile-site', site));
     const more = items.length - shown.length;
     if (i === shown.length - 1 && more > 0) tile.append(el('span', 'tile-more', `+${more}`));
-    tile.addEventListener('click', () => openGallery(items, i, tile));
+    tile.addEventListener('click', () => openGallery(items, items.indexOf(item), tile));
     grid.append(tile);
   });
   box.append(grid, el('div', 'web-caption', 'Results from the web'));
@@ -1103,8 +1107,9 @@ function setupFilesMenu() {
   });
 }
 
-// The visualize tool's guide, which claude.ai doesn't show as a step.
-const HIDDEN_TOOL = /(^|__)visualize__read_me$/;
+// The visualize tool's guide, which claude.ai doesn't show as a step, and its multiple-choice
+// questions, which it doesn't show once answered (the answers are the next prompt).
+const HIDDEN_TOOL = /(^|__)visualize__read_me$|(^|__|:)ask_user_input_v\d+$/;
 const inlineDiagram = (block, chat) => {
   const file = block.t === 'card' && chat.files ? chat.files[block.file] : null;
   return !!(file && file.widget && /\.svg$/i.test(file.name || ''));
@@ -1120,6 +1125,13 @@ function renderAssistant(m, chat) {
   const flush = () => { renderPart(node, part, chat, sources, first); if (part.length) first = false; part = []; };
   for (const block of m.blocks) {
     if (block.t === 'tool' && HIDDEN_TOOL.test(String(block.name))) continue;
+    if (block.t === 'tool' && block.display) {
+      // Product cards show where Claude placed them, as on claude.ai.
+      flush();
+      const cards = renderDisplay(block.display);
+      if (cards) node.append(cards);
+      continue;
+    }
     if (inlineDiagram(block, chat)) {
       flush();
       const diagram = renderDiagram(block, chat);
@@ -1150,6 +1162,100 @@ function renderPart(node, blocks, chat, sources, first) {
       if (card) node.append(card);
     }
   }
+}
+
+// claude.ai's product cards: a carousel of cards, one featured card, or a comparison table.
+function renderDisplay(display) {
+  const products = (display && display.products) || [];
+  if (!products.length) return null;
+  const box = el('div', `products ${display.kind}`);
+  if (display.kind === 'comparison') {
+    const table = el('div', 'compare');
+    const head = el('div', 'compare-row compare-head');
+    for (const p of products) {
+      const cell = el('div');
+      cell.append(el('div', 'product-name', p.name || ''));
+      if (p.price) cell.append(el('div', 'product-price', p.price));
+      head.append(cell);
+    }
+    table.append(head);
+    const rows = Math.max(0, ...products.map(p => p.attributes.length));
+    for (let r = 0; r < rows; r++) {
+      const row = el('div', 'compare-row');
+      for (const p of products) {
+        const a = p.attributes[r] || { label: '', value: '' };
+        const cell = el('div');
+        cell.append(el('span', 'compare-label', a.label), el('span', 'compare-value', a.value));
+        row.append(cell);
+      }
+      table.append(row);
+    }
+    box.append(table);
+    return box;
+  }
+  const card = p => {
+    const node = el('div', `product${display.kind === 'featured' ? ' featured' : ''}`);
+    const pics = p.images.slice(0, 3);
+    if (pics.length) {
+      const grid = el('div', `product-pics n${pics.length}`);
+      const items = p.images.map(img => ({ href: img.href, title: img.title || p.name, source: img.source, page: '' }));
+      pics.forEach((img, i) => {
+        const ok = savedImage({ href: img.href });
+        const pic = el(ok ? 'button' : 'div', ok ? 'pic' : 'pic missing');
+        if (ok) {
+          pic.type = 'button';
+          pic.setAttribute('aria-label', `View image: ${p.name || 'Product'}`);
+          const im = el('img');
+          im.src = img.href; im.alt = img.title || p.name || ''; im.loading = 'lazy';
+          pic.append(im);
+          pic.addEventListener('click', () => openGallery(items, i, pic));
+        } else pic.textContent = 'Image unavailable';
+        if (img.source && ok) pic.append(el('span', 'tile-site', img.source));
+        grid.append(pic);
+      });
+      node.append(grid);
+    }
+    const body = el('div', 'product-body');
+    body.append(el('div', 'product-name', p.name || ''));
+    if (p.blurb) body.append(el('div', 'product-blurb', p.blurb));
+    if (p.price) body.append(el('div', 'product-price', p.price));
+    node.append(body);
+    return node;
+  };
+  if (display.kind !== 'carousel' || products.length === 1) {
+    box.append(...products.map(card));
+    return box;
+  }
+  const track = el('div', 'carousel-track');
+  track.append(...products.map(card));
+  const nav = el('div', 'carousel-nav');
+  const step = (dir, label) => {
+    const b = el('button', dir < 0 ? 'prev' : 'next');
+    b.type = 'button';
+    b.setAttribute('aria-label', label);
+    b.append(icon('chevron'));
+    b.addEventListener('click', () => {
+      const first = track.firstElementChild;
+      track.scrollBy({ left: dir * (first ? first.getBoundingClientRect().width + 12 : 300), behavior: 'smooth' });
+    });
+    return b;
+  };
+  const prev = step(-1, 'Previous'), next = step(1, 'Next');
+  const dots = el('div', 'carousel-dots');
+  products.forEach(() => dots.append(el('span')));
+  const update = () => {
+    const max = track.scrollWidth - track.clientWidth;
+    prev.disabled = track.scrollLeft <= 2;
+    next.disabled = track.scrollLeft >= max - 2;
+    const w = track.firstElementChild ? track.firstElementChild.getBoundingClientRect().width + 12 : 1;
+    const at = Math.min(products.length - 1, Math.round(track.scrollLeft / w));
+    [...dots.children].forEach((d, i) => d.classList.toggle('on', i === at));
+  };
+  track.addEventListener('scroll', update, { passive: true });
+  requestAnimationFrame(update);
+  nav.append(prev, dots, next);
+  box.append(track, nav);
+  return box;
 }
 
 // A diagram inline, drawn from its SVG, with claude.ai's menu: copy it, download it as SVG or PNG, and

@@ -182,9 +182,43 @@ mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; 
 .prose img { max-width: 100%; height: auto; border-radius: 8px; }
 .prose :not(pre) > code { font: .84em/1.3 var(--mono); color: var(--tick); background: var(--tick-bg); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; overflow-wrap: anywhere; }
 .no-image { font: 13px var(--sans); color: var(--mute); font-style: italic; }
-sup.cite { line-height: 0; font-size: 1em; vertical-align: baseline; margin-left: 2px; }
-sup.cite a { display: inline-block; min-width: 18px; padding: 0 5px; font: 500 11px/17px var(--sans); text-align: center; text-decoration: none; color: var(--mute); background: var(--bub); border-radius: 9px; position: relative; top: -2px; }
-sup.cite a:hover { color: var(--ink); background: var(--active); }
+.cite { line-height: 0; font-size: 1em; vertical-align: baseline; margin-left: 4px; white-space: nowrap; }
+.cite a { display: inline-block; min-width: 18px; max-width: 160px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; padding: 0 7px; font: 500 11.5px/19px var(--sans); text-align: center; text-decoration: none; color: var(--mute); background: var(--card); border: 1px solid var(--line); border-radius: 7px; position: relative; top: -2px; }
+.cite a:hover { color: var(--ink); background: var(--active); }
+/* claude.ai's product cards: a carousel, a featured card, a comparison */
+.products { margin: 12px 0 16px; }
+.carousel-track { display: flex; gap: 12px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; padding-bottom: 2px; }
+.carousel-track::-webkit-scrollbar { display: none; }
+.carousel-track > .product { flex: 0 0 min(330px, 85%); scroll-snap-align: start; }
+.carousel-nav { display: flex; align-items: center; justify-content: space-between; margin-top: 8px; }
+.carousel-nav button { width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 50%; background: var(--card); color: var(--soft); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.carousel-nav button:disabled { opacity: .35; cursor: default; }
+.carousel-nav .prev svg { transform: rotate(180deg); }
+.carousel-nav svg { width: 14px; height: 14px; }
+.carousel-dots { display: flex; gap: 6px; }
+.carousel-dots span { width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); }
+.carousel-dots span.on { background: var(--mute); }
+.product { border: 1px solid var(--line); border-radius: 12px; background: var(--card); padding: 6px; display: flex; flex-direction: column; font-family: var(--sans); }
+.product-pics { display: grid; grid-template-columns: 1.6fr 1fr; grid-template-rows: 1fr 1fr; gap: 3px; height: 200px; border-radius: 8px; overflow: hidden; }
+.product.featured .product-pics { height: 200px; grid-template-columns: 1.5fr 1fr; }
+.product-pics > :first-child { grid-row: span 2; }
+.product-pics.n1 { grid-template-columns: 1fr; }
+.product-pics .pic { position: relative; padding: 0; border: 0; background: var(--bub); cursor: zoom-in; overflow: hidden; display: flex; align-items: center; justify-content: center; color: var(--mute); font: 12px var(--sans); }
+.product-pics .pic img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.product-pics .pic.missing { cursor: default; }
+.product-pics .pic .tile-site { position: absolute; right: 6px; bottom: 4px; font-size: 11px; color: #fff; text-shadow: 0 1px 3px rgba(0, 0, 0, .7); }
+.product-body { padding: 10px 8px 4px; display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.product-name { font-size: 15px; font-weight: 500; color: var(--ink); }
+.product-blurb { font-size: 13px; line-height: 1.5; color: var(--soft); flex: 1; }
+.product-price { font-size: 12.5px; color: var(--mute); margin-top: 4px; }
+.compare { border: 1px solid var(--line); border-radius: 12px; background: var(--card); font-family: var(--sans); overflow-x: auto; }
+.compare-row { display: grid; grid-auto-columns: minmax(160px, 1fr); grid-auto-flow: column; }
+.compare-row + .compare-row { border-top: 1px solid var(--line); }
+.compare-row > div { padding: 10px 14px; }
+.compare-head .product-name { font-size: 15.5px; }
+.compare-head .product-price { margin-top: 2px; }
+.compare-label { display: block; font-size: 12.5px; color: var(--mute); margin-bottom: 3px; }
+.compare-value { font-size: 14px; color: var(--ink); }
 
 .table { overflow-x: auto; margin: 0 0 15px; }
 .prose table { border-collapse: collapse; font-size: .92em; line-height: 1.45; min-width: 60%; }

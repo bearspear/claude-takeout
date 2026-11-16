@@ -83,7 +83,7 @@ test('ctx.model overrides and ctx.fixText applies to attachments', () => {
 test('thinking, citations and tool results become blocks', () => {
   const m02 = buildViewerChat(fixture, {}).messages.find(x => x.id === 'm02');
   assert.deepStrictEqual(m02.blocks[0], { t: 'thinking', text: 'Plan the report first.\nThen write it.', summaries: ['Planning the report'], summary: 'Planning the report', seconds: null });
-  assert.deepStrictEqual(m02.blocks[1], { t: 'text', text: 'Creating it.', cites: [{ end: 8, url: 'https://example.com/a', title: 'Example A' }] });
+  assert.deepStrictEqual(m02.blocks[1], { t: 'text', text: 'Creating it.', cites: [{ end: 8, url: 'https://example.com/a', title: 'Example A', site: '' }] });
   const tools = m02.blocks.filter(b => b.t === 'tool');
   assert.strictEqual(tools.length, 3);
   assert.strictEqual(tools[0].name, 'create_file');
@@ -109,7 +109,8 @@ test('is_error sets error; results join their tool_use across messages; orphans 
   assert.strictEqual(a.blocks.length, 1);
   assert.strictEqual(a.blocks[0].error, true);
   assert.strictEqual(a.blocks[0].result, 'boom');
-  assert.strictEqual(a.blocks[0].label, 'Searched the web: cats');
+  assert.strictEqual(a.blocks[0].label, 'Searched the web');
+  assert.strictEqual(a.blocks[0].detail, 'cats');
   assert.deepStrictEqual(b.blocks, []);
 });
 
@@ -131,7 +132,7 @@ test('long tool results are cut and say so; only safe images and http(s) citatio
   assert.match(tool.result, /truncated/i);
   assert.deepStrictEqual(tool.images, ['data:image/png;base64,AAAA']);
   assert.strictEqual(tool.label, 'Ran a command');
-  assert.deepStrictEqual(text.cites, [{ end: 2, url: 'http://ok.example/', title: 'ok' }]);
+  assert.deepStrictEqual(text.cites, [{ end: 2, url: 'http://ok.example/', title: 'ok', site: '' }]);
 });
 
 test('tool blocks count result images that are not in the export', () => {
