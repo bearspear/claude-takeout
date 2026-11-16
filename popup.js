@@ -3238,9 +3238,10 @@ async function sha256Hex(bytes) {
 }
 
 // Saved names for a version's file paths, in listing order: each segment through publishedSegment, and a
-// name that a file or folder already has, whatever the case, gets _2, _3, ... Returns { names: Map, renames }.
-function publishedSavedNames(paths) {
-  const used = new Set();
+// name that a file or folder already has, whatever the case, gets _2, _3, ... reserved: names at the top level
+// that are taken already (artifact.json in Export Artifacts). Returns { names: Map, renames }.
+function publishedSavedNames(paths, reserved = []) {
+  const used = new Set(reserved.map((r) => String(r).toLowerCase()));
   const folders = new Map();
   const names = new Map();
   const renames = [];
@@ -3304,6 +3305,51 @@ function writeSharedPublished(shared) {
   for (const rec of shared.published.values()) {
     if ([...rec.versions.values()].some((v) => v.ver)) shared.root.file(`published/${rec.dir}/published.json`, JSON.stringify(publishedJson(rec), null, 2));
   }
+}
+
+const publishedSignedOutReply = (r) => !!(r && (r.status === 401 || r.error === 'HTTP 401'));
+
+// Fetch one page version's files (from cleanPublishedInfo) through content.js and write each to
+// target at prefix + its saved name (names: path -> saved name). Each file is checked against the listing:
+// size caps (PUBLISHED_MAX_FILE each, PUBLISHED_MAX_BYTES in all) and SHA-256. A 401 sets
+// state.publishedSignedOut, calls onSignedOut once, and every later file is skipped. Returns { saved,
+// missing: [path], problems: ['path (why)'], incomplete, start, startSaved, startText, needsRuntime }.
+async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished }) {
+  const start = publishedStart(files);
+  const missing = [];
+  const problems = [];
+  let total = 0;
+  let written = 0;
+  let startText = null;
+  for (const f of files) {
+    const fail = (why) => { missing.push(f.path); if (why) problems.push(`${f.path} (${why})`); };
+    if (state.publishedSignedOut) { fail(null); continue; }
+    if (f.size == null || !f.sha256) { fail('bad listing'); continue; }
+    if (f.size > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
+    if (total + f.size > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
+    total += f.size;
+    const reply = await fetchPublished({ action: 'publishedPageFile', uuid, ver, path: f.path, size: f.size });
+    if (publishedSignedOutReply(reply)) {
+      if (!state.publishedSignedOut && typeof onSignedOut === 'function') onSignedOut();
+      state.publishedSignedOut = true;
+      fail(null);
+      continue;
+    }
+    if (!reply || reply.error || reply.connectionError || typeof reply.base64 !== 'string') { fail(publishedCode(reply)); continue; }
+    let bytes;
+    try { bytes = base64ToBytes(reply.base64); } catch (e) { fail('bad response'); continue; }
+    if (bytes.length > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
+    if (await sha256Hex(bytes) !== f.sha256) { fail('checksum does not match'); continue; }
+    target.file(`${prefix}${names.get(f.path)}`, bytes);
+    written++;
+    if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
+  }
+  const startOk = !!start && !missing.includes(start.path);
+  return {
+    saved: written > 0, missing, problems, incomplete: missing.length > 0,
+    start: startOk ? start.path : null, startSaved: startOk ? names.get(start.path) : null,
+    startText, needsRuntime: publishedNeedsRuntime(startText),
+  };
 }
 
 // Save the pages a chat published. ctx: { errorCollector, artifacts (the text as on disk, inlined), artifactIndex,
@@ -3374,13 +3420,12 @@ async function savePublishedPages(folder, data, ctx = {}) {
     warn('published pages', 'Published pages not fetched: claude.ai answered HTTP 401, as if you were signed out. Pages after this one in the export were skipped.',
       'Sign in to claude.ai in this tab and export again.');
   };
-  const signedOutReply = (r) => r && (r.status === 401 || r.error === 'HTTP 401');
 
   const getInfo = async (rec, ver) => {
     if (rec.infos.has(ver)) return rec.infos.get(ver);
     if (state.publishedSignedOut) return { error: 'signed out', skipped: true };
     const reply = await fetchPublished({ action: 'publishedPageInfo', uuid: rec.uuid, ver });
-    if (signedOutReply(reply)) { markSignedOut(); return { error: 'signed out', skipped: true }; }
+    if (publishedSignedOutReply(reply)) { markSignedOut(); return { error: 'signed out', skipped: true }; }
     const info = cleanPublishedInfo(reply);
     rec.infos.set(ver, info);
     if (!info.error) {
@@ -3448,41 +3493,20 @@ async function savePublishedPages(folder, data, ctx = {}) {
 
   const fetchVersion = async (rec, v) => {
     v.attempted = true;
-    const start = publishedStart(v.files);
-    const missing = [];
-    const problems = [];
-    let total = 0;
-    let written = 0;
-    let startText = null;
-    for (const f of v.files) {
-      const fail = (why) => { missing.push(f.path); if (why) problems.push(`${f.path} (${why})`); };
-      if (state.publishedSignedOut) { fail(null); continue; }
-      if (f.size == null || !f.sha256) { fail('bad listing'); continue; }
-      if (f.size > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
-      if (total + f.size > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
-      total += f.size;
-      const reply = await fetchPublished({ action: 'publishedPageFile', uuid: rec.uuid, ver: v.ver, path: f.path, size: f.size });
-      if (signedOutReply(reply)) { markSignedOut(); fail(null); continue; }
-      if (!reply || reply.error || reply.connectionError || typeof reply.base64 !== 'string') { fail(publishedCode(reply)); continue; }
-      let bytes;
-      try { bytes = base64ToBytes(reply.base64); } catch (e) { fail('bad response'); continue; }
-      if (bytes.length > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
-      if (await sha256Hex(bytes) !== f.sha256) { fail('checksum does not match'); continue; }
-      target.file(`published/${rec.dir}/${v.folderName}/${v.names.get(f.path)}`, bytes);
-      written++;
-      if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
-    }
-    v.saved = written > 0;
-    v.missing = missing;
-    v.incomplete = missing.length > 0;
-    const startOk = start && !missing.includes(start.path);
-    v.start = startOk ? start.path : null;
-    v.startSaved = startOk ? v.names.get(start.path) : null;
-    v.needsRuntime = publishedNeedsRuntime(startText);
-    v.text = startText !== null && startText.length <= limit ? startText : null;
-    if (problems.length) {
+    const got = await fetchPublishedFiles({
+      target, prefix: `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
+      state, onSignedOut: markSignedOut, fetchPublished,
+    });
+    v.saved = got.saved;
+    v.missing = got.missing;
+    v.incomplete = got.incomplete;
+    v.start = got.start;
+    v.startSaved = got.startSaved;
+    v.needsRuntime = got.needsRuntime;
+    v.text = got.startText !== null && got.startText.length <= limit ? got.startText : null;
+    if (got.problems.length) {
       noted.add(rec.uuid);
-      warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): ${problems.length} file${problems.length === 1 ? '' : 's'} could not be saved: ${problems.join(', ')}.`, openNote(rec));
+      warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): ${got.problems.length} file${got.problems.length === 1 ? '' : 's'} could not be saved: ${got.problems.join(', ')}.`, openNote(rec));
     }
   };
 
