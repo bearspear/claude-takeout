@@ -46,6 +46,7 @@ For deeper dives, two companion docs live alongside this one:
 | `tests/e2e/files.e2e.js` | Browser test of the Files list in a chat's top bar. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/search.e2e.js` | Browser test of sidebar search: grouping and ranking, bold matches, operators, the clear button, `/` and arrow keys. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/navigation.e2e.js` | Browser test of keyboard version switching, search highlights, Sources on plain-text responses, the phone panel header and the color queue. | Optional; needs `playwright-core` and Chromium. |
+| `tests/e2e/prompts.e2e.js` | Browser test of long prompts: collapsed with a fade and Show more, short ones whole, a search hit expands one. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/steps.e2e.js` | Browser test of the step groups: the summary line, rows and their labels, viewed images in their row, thinking alone. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/webimages.e2e.js` | Browser test of web-search images: one mosaic per response, `+N`, unsaved cards, the gallery's keys and closing. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/parts.e2e.js` | Browser test of upload and generated-file text loaded from `viewer-files/`. | Optional; needs `playwright-core` and Chromium. |
@@ -79,9 +80,9 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 | `convertToMarkdown` | The single-MD / embedded-MD renderer. Walks `getMessageChain`, formats prompts and responses, renders thinking blocks, tool uses (`create_file`, `present_files`, `web_search`, `bash_tool`, `str_replace`, `view`, etc.), citations, and references. Honors `embedArtifacts`, `seamlessMd`, `includeThinking`. |
 | `extractTextContent`, `download`, `safeFilename` | Small utilities. |
 | `updateUI`, `showProgress`, `hideProgress`, `requestData` | DOM glue. |
-| `bulkExport`, `bulkExportZip` | Multi-conversation paths. `bulkExport` downloads one file per conversation (MD/embedded/JSON). `bulkExportZip` builds a single mega-zip with `index.md` + one folder per conversation reusing `populateConversationFolder`. |
+| `bulkExport`, `bulkExportZip` | Multi-conversation paths. `bulkExportZip({ directory })` writes into a folder instead (`createDiskFolder`, `makeRunFolder`; the default, `settings.megaFormat`). `bulkExport` downloads one file per conversation (MD/embedded/JSON). `bulkExportZip` builds a single mega-zip with `index.md` + one folder per conversation reusing `populateConversationFolder`. |
 | Click handlers + `refresh` | Button → action mapping. Each per-conversation handler calls `ensureProjectName` before generating the filename or starting the ZIP. |
-| Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, megaZipScope, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
+| Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, megaZipScope, megaFormat, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
 | Keyboard shortcuts | `Alt+M / E / Z / J / A / R`. |
 | `exclusiveExport`, `onExport` | One export at a time: the export buttons are disabled while one runs, and a second click or shortcut does nothing. |
 | `generateFilename` | `[<Project>-project]_` prefix + filenameStyle, with an optional suffix such as `_embedded` added after the title is cut to length. |
@@ -283,7 +284,8 @@ If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a
   "exporterSettings": {
     "filenameStyle": "title" | "title_date" | "date_title",
     "includeThinking": true,
-    "megaZipScope": "all" | "changes",  // what Export All (Mega-Zip) exports; "changes" relabels it Export Changes
+    "megaZipScope": "all" | "changes",  // what Export All exports; "changes" relabels it Export Changes
+    "megaFormat": "folder" | "zip",     // Export All into a folder (showDirectoryPicker, createDiskFolder) or one Mega-Zip download
     "showShortcuts": true,
     "useSidePanel": false
   },

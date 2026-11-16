@@ -235,7 +235,14 @@
       <input type="checkbox" id="includeThinking" checked>
     </div>
     <div class="setting-row">
-      <label for="megaZipScope">Mega-Zip exports:</label>
+      <label for="megaFormat">Export All saves as:</label>
+      <select id="megaFormat" title="Folder: a new folder inside one you choose, written as it goes. ZIP: one download at the end.">
+        <option value="folder">Folder</option>
+        <option value="zip">ZIP</option>
+      </select>
+    </div>
+    <div class="setting-row">
+      <label for="megaZipScope">Export All exports:</label>
       <select id="megaZipScope" title="Only new or changed: chats that are new or changed since the last mega-ZIP from this browser">
         <option value="all">All chats</option>
         <option value="changes">Only new or changed</option>
@@ -287,7 +294,7 @@
     <span class="shortcut"></span>
   </button>
   <button id="exportAllZip" class="primary">
-    <span>Export All (Mega-Zip)</span>
+    <span>Export All (Folder)</span>
     <span class="shortcut"></span>
   </button>
   <button id="exportAllJson" class="secondary">

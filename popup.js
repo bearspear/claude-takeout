@@ -3707,6 +3707,9 @@ async function sendToTab(tabId, message) {
 // Load the conversation for the active tab. The tab URL decides which chat is
 // selected, and the REST API supplies its data. claude.ai loads chats over its
 // StreamTimeline RPC, which the extension can't read.
+// The tab the popup or panel was opened over, so the popup can open the side panel on it.
+let currentTabId = null;
+
 async function requestData({ preserveStatus = false } = {}) {
   const refreshId = ++latestRefreshId;
   const isStale = () => refreshId !== latestRefreshId;
@@ -3720,6 +3723,7 @@ async function requestData({ preserveStatus = false } = {}) {
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    currentTabId = tab ? tab.id : null;
     if (isStale()) return;
 
     // tab.url is undefined for sites outside the extension's host permissions.
@@ -3944,6 +3948,74 @@ async function saveExportRecord(org, at, exportedChats) {
 
 // claude-takeout-[<display name>-][changes-]<date>.zip. The name keeps letters and digits from any
 // script; anything else becomes _, and it is left out when claude.ai didn't give one.
+// ============================================================================
+// Export All into a folder: the JSZip calls the export makes, written to disk
+// ============================================================================
+
+// A folder chosen with showDirectoryPicker, taking the calls the export makes on a JSZip folder:
+// file(path, content, { base64 }) and folder(name). Writes run in the background, in order per path
+// (a later write of a path wins, as in a ZIP); flush() waits for them and returns the paths that
+// failed, with why, since the last flush. A failed file never stops the rest.
+function createDiskFolder(root) {
+  const shared = { dirs: new Map(), chains: new Map(), pending: new Set(), failed: [] };
+  shared.dirs.set('', Promise.resolve(root));
+  const dirFor = (parts) => {
+    const key = parts.join('/');
+    if (!shared.dirs.has(key)) {
+      shared.dirs.set(key, dirFor(parts.slice(0, -1)).then((parent) => parent.getDirectoryHandle(parts[parts.length - 1], { create: true })));
+    }
+    return shared.dirs.get(key);
+  };
+  const bytes = (content, options) => {
+    if (options && options.base64) return Uint8Array.from(atob(String(content)), (c) => c.charCodeAt(0));
+    return content;
+  };
+  const write = async (path, content, options) => {
+    const parts = path.split('/').filter(Boolean);
+    const dir = await dirFor(parts.slice(0, -1));
+    const handle = await dir.getFileHandle(parts[parts.length - 1], { create: true });
+    // createWritable writes a temporary file, so a failure leaves nothing half written.
+    const writable = await handle.createWritable();
+    try {
+      await writable.write(bytes(content, options));
+      await writable.close();
+    } catch (err) {
+      await writable.abort().catch(() => {});
+      throw err;
+    }
+  };
+  const view = (prefix) => ({
+    file(path, content, options) {
+      const full = [prefix, path].filter(Boolean).join('/');
+      const job = (shared.chains.get(full) || Promise.resolve())
+        .then(() => write(full, content, options))
+        .catch((err) => { shared.failed.push({ path: full, error: (err && err.message) || String(err) }); });
+      shared.chains.set(full, job);
+      shared.pending.add(job);
+      job.then(() => shared.pending.delete(job));
+      return this;
+    },
+    folder(name) { return view([prefix, name].filter(Boolean).join('/')); },
+    async flush() {
+      while (shared.pending.size) await Promise.all([...shared.pending]);
+      shared.chains.clear();
+      return shared.failed.splice(0);
+    },
+  });
+  return view('');
+}
+
+// A new folder inside the picked one for this export, named like the ZIP would be, never an existing one.
+async function makeRunFolder(directory, zipName) {
+  const base = zipName.replace(/\.zip$/, '');
+  const taken = async (name) => {
+    try { await directory.getDirectoryHandle(name); return true; } catch (e) { return false; }
+  };
+  let name = base;
+  for (let n = 2; await taken(name); n++) name = `${base}_${n}`;
+  return { name, handle: await directory.getDirectoryHandle(name, { create: true }) };
+}
+
 function megaZipName(accountName, kind, dateStr) {
   const name = typeof accountName === 'string'
     ? Array.from(accountName.normalize('NFC').replace(/[^\p{L}\p{N}\p{M}]+/gu, '_').replace(/^_+|_+$/g, '')).slice(0, 40).join('')
@@ -3954,8 +4026,11 @@ function megaZipName(accountName, kind, dateStr) {
 // Bulk export all conversations as a single mega-zip.
 // options.changesOnly: only chats new or updated since the last mega-ZIP from this browser. Without it,
 // the "Mega-Zip exports" setting decides (settings.megaZipScope: 'all', the default, or 'changes').
+// options.directory: a folder from showDirectoryPicker; the export goes into a new folder inside it
+// instead of a ZIP download.
 async function bulkExportZip(options = {}) {
   const changesOnly = options && typeof options.changesOnly === 'boolean' ? options.changesOnly : settings.megaZipScope === 'changes';
+  const directory = options && options.directory ? options.directory : null;
   const status = document.getElementById('status');
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
@@ -3996,10 +4071,24 @@ async function bulkExportZip(options = {}) {
     }
     const total = conversations.length;
 
-    status.textContent = `Found ${total} conversations${since ? ' changed since the last export' : ''}. Creating mega-zip...`;
+    const dateStr = new Date().toISOString().slice(0, 10);
+    let run = null;
+    if (directory) {
+      try {
+        run = await makeRunFolder(directory, megaZipName(response.accountName, kind, dateStr));
+      } catch (e) {
+        status.className = 'status error';
+        status.textContent = `Could not make a folder there: ${e.message}`;
+        return;
+      }
+    }
+    const where = run ? `the folder ${run.name}` : 'mega-zip';
+    status.textContent = `Found ${total} conversations${since ? ' changed since the last export' : ''}. Exporting to ${where}...`;
     showProgress(0, total, `0 / ${total}`);
 
-    const megaZip = new JSZip();
+    // A ZIP, or a folder on disk taking the same calls.
+    const megaZip = run ? createDiskFolder(run.handle) : new JSZip();
+    const writeFailures = [];  // folder export: files that couldn't be written
     const indexEntries = [];
     let exported = 0;
     let errors = [];  // Conversation-level errors (failed to fetch/process entire conversation)
@@ -4067,6 +4156,8 @@ async function bulkExportZip(options = {}) {
       } catch (e) {
         errors.push(`${conv.name || conv.uuid}: ${e.message}`);
       }
+      // On disk, each chat is written before the next, which keeps memory down.
+      if (run) writeFailures.push(...await megaZip.flush());
 
       showProgress(exported + errors.length, total, `${exported} / ${total}`);
 
@@ -4127,6 +4218,22 @@ async function bulkExportZip(options = {}) {
     viewerChats.length = 0;  // viewer.html holds them now, and compressing needs the memory
     const viewerNote = viewerBuilt ? '' : ' viewer.html could not be built.';
 
+    if (run) {
+      writeFailures.push(...await megaZip.flush());
+      if (writeFailures.length) {
+        megaZip.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
+        await megaZip.flush();
+      }
+      if (org && exportedChats.length) await saveExportRecord(org, startedAt, exportedChats);
+      hideProgress();
+      const failedNote = errors.length ? ` ${errors.length} conversation${errors.length > 1 ? 's' : ''} failed.` : '';
+      const writeNote = writeFailures.length ? ` ${writeFailures.length} file${writeFailures.length > 1 ? 's' : ''} could not be written (see write-errors.txt).` : '';
+      const issueNote = totalFileErrors || totalFileWarnings ? ' Some chats have errors.txt.' : '';
+      status.className = errors.length ? 'status error' : (writeFailures.length || issueNote || !viewerBuilt) ? 'status warning' : 'status ready';
+      status.textContent = `Exported ${exported}${errors.length ? `/${total}` : ''} ${since ? 'changed ' : ''}conversations to ${run.name}.${failedNote}${writeNote}${issueNote}${viewerNote}${firstNote}`;
+      return;
+    }
+
     // Generate and download
     status.textContent = 'Compressing archive...';
     showProgress(95, 100, 'Compressing...');
@@ -4138,7 +4245,6 @@ async function bulkExportZip(options = {}) {
         compressionOptions: { level: 6 }
       });
 
-      const dateStr = new Date().toISOString().slice(0, 10);
       download(zipBlob, megaZipName(response.accountName, kind, dateStr), 'application/zip');
       // Only chats really in the archive are recorded, so one that failed is tried again next time.
       if (org && exportedChats.length) await saveExportRecord(org, startedAt, exportedChats);
@@ -4314,7 +4420,44 @@ onExport('exportJson', async () => {
 
 onExport('exportAllMd', () => bulkExport('markdown'));
 onExport('exportAllEmbed', () => bulkExport('embedded'));
-onExport('exportAllZip', () => bulkExportZip());
+// Export All goes to a folder unless Settings say ZIP. The folder picker must open straight from the
+// click. The popup closes when it opens, so from the popup the side panel opens instead, to click there.
+const IS_POPUP = typeof location !== 'undefined' && /popup\.html$/.test(location.pathname);
+onExport('exportAllZip', async () => {
+  if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return bulkExportZip();
+  const status = document.getElementById('status');
+  if (IS_POPUP) {
+    if (chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
+      chrome.sidePanel.open({ tabId: currentTabId }).then(() => {
+        chrome.storage.session && chrome.storage.session.set({ folderExportNote: Date.now() }).catch(() => {});
+        window.close();
+      }).catch((e) => { status.className = 'status error'; status.textContent = `Could not open the side panel: ${e.message}`; });
+    } else {
+      status.className = 'status error';
+      status.textContent = 'Export All to a folder runs in the side panel. Open it, or choose ZIP in Settings.';
+    }
+    return;
+  }
+  let directory;
+  try {
+    directory = await window.showDirectoryPicker({ mode: 'readwrite', id: 'claude-takeout' });
+  } catch (e) {
+    if (e.name !== 'AbortError') { status.className = 'status error'; status.textContent = e.message; }
+    return;
+  }
+  return bulkExportZip({ directory });
+});
+
+// Opened from the popup's Export All: say what to do next.
+if (!IS_POPUP && chrome.storage && chrome.storage.session) {
+  chrome.storage.session.get('folderExportNote').then((got) => {
+    if (!got || !got.folderExportNote || Date.now() - got.folderExportNote > 60000) return;
+    chrome.storage.session.remove('folderExportNote').catch(() => {});
+    const status = document.getElementById('status');
+    status.className = 'status waiting';
+    status.textContent = 'Click Export All (Folder) here to choose where to save it.';
+  }).catch(() => {});
+}
 onExport('exportAllJson', () => bulkExport('json'));
 
 document.getElementById('refresh').addEventListener('click', () => scheduleRefresh());
@@ -4326,7 +4469,8 @@ document.getElementById('refresh').addEventListener('click', () => scheduleRefre
 const defaultSettings = {
   filenameStyle: 'title',
   includeThinking: true,
-  megaZipScope: 'all',  // 'all' | 'changes': what Export All (Mega-Zip) exports
+  megaZipScope: 'all',  // 'all' | 'changes': what Export All exports
+  megaFormat: 'folder',  // 'folder' | 'zip': where Export All goes
   showShortcuts: true,
   useSidePanel: false
 };
@@ -4369,10 +4513,15 @@ function applySettings() {
   document.getElementById('includeThinking').checked = settings.includeThinking;
   const changes = settings.megaZipScope === 'changes';
   document.getElementById('megaZipScope').value = changes ? 'changes' : 'all';
+  const toZip = settings.megaFormat === 'zip';
+  const formatSelect = document.getElementById('megaFormat');
+  if (formatSelect) formatSelect.value = toZip ? 'zip' : 'folder';
   const megaZip = document.getElementById('exportAllZip');
   const megaLabel = megaZip && megaZip.querySelector('span');
-  if (megaLabel) megaLabel.textContent = changes ? 'Export Changes (Mega-Zip)' : 'Export All (Mega-Zip)';
-  if (megaZip) megaZip.title = changes ? 'A mega-ZIP of only the chats that are new or changed since the last mega-ZIP from this browser (see Settings)' : '';
+  const target = toZip ? 'Mega-Zip' : 'Folder';
+  if (megaLabel) megaLabel.textContent = changes ? `Export Changes (${target})` : `Export All (${target})`;
+  if (megaZip) megaZip.title = (toZip ? 'Every chat in one ZIP download' : 'Every chat into a new folder in a folder you choose')
+    + (changes ? ', only the chats that are new or changed since the last Export All from this browser (see Settings)' : '');
   document.getElementById('showShortcuts').checked = settings.showShortcuts;
 
   // Side panel checkbox (may not exist in all views)
@@ -4419,6 +4568,13 @@ document.getElementById('filenameStyle').addEventListener('change', (e) => {
 document.getElementById('includeThinking').addEventListener('change', (e) => {
   settings.includeThinking = e.target.checked;
   saveSettings();
+});
+
+const megaFormatSelect = document.getElementById('megaFormat');
+if (megaFormatSelect) megaFormatSelect.addEventListener('change', (e) => {
+  settings.megaFormat = e.target.value === 'zip' ? 'zip' : 'folder';
+  saveSettings();
+  applySettings();
 });
 
 document.getElementById('megaZipScope').addEventListener('change', (e) => {

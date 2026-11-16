@@ -63,6 +63,8 @@ let projectDownloads=0;
   check('single ZIP: each delivered version links its own file',sm&&sm.versions.map(v=>v.href).join()==='artefacts/Minutes_v1.odt,artefacts/Minutes_v2.odt',JSON.stringify(sm));
   check('single ZIP: upload links its file',sv.data.chats[0].messages[0].uploads[0].href==='uploads/p01_Uploaded.odt');
   check('single ZIP: status is clean',(await panel.$eval('#status',s=>s.className)).includes('ready'),await panel.textContent('#status'));
+  // Export All saves to a folder by default; this checks the Mega-Zip.
+  await panel.evaluate(()=>{const s=document.getElementById('megaFormat');s.value='zip';s.dispatchEvent(new Event('change'));});
   [dl]=await Promise.all([panel.waitForEvent('download',{timeout:30000}),panel.click('#exportAllZip')]);
   const g=await zipFiles(await dl.path());const dirs=new Set(Object.keys(g).filter(k=>k.includes('/')).map(k=>k.split('/')[0]).filter(k=>k!=='projects'));
   const shared=Object.keys(g).filter(k=>k.endsWith('Paper.pdf'));

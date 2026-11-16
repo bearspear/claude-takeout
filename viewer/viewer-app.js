@@ -592,6 +592,34 @@ function fileNote(name, text, known) {
   return [ext && ext.toUpperCase(), lines ? `${lines} line${lines === 1 ? '' : 's'}` : ''].filter(Boolean).join(' · ');
 }
 
+// About 200px of prompt: more than nine lines, counting a long line as the lines it wraps to.
+const PROMPT_LINES = 9;
+const PROMPT_LINE_CHARS = 70;
+function longPrompt(text) {
+  let lines = 0;
+  for (const line of String(text).split('\n')) {
+    lines += Math.max(1, Math.ceil(line.length / PROMPT_LINE_CHARS));
+    if (lines > PROMPT_LINES) return true;
+  }
+  return false;
+}
+
+function setCollapsed(bubble, collapsed) {
+  bubble.classList.toggle('collapsed', collapsed);
+  const toggle = bubble.querySelector(':scope > .more-toggle');
+  if (toggle) {
+    toggle.textContent = collapsed ? 'Show more' : 'Show less';
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+  }
+}
+
+// What a search hit needs to be seen: its folds open and its prompt expanded.
+function reveal(mark) {
+  for (let fold = mark && mark.closest('details'); fold; fold = fold.parentElement.closest('details')) fold.open = true;
+  const bubble = mark && mark.closest('.bubble.collapsed');
+  if (bubble) setCollapsed(bubble, false);
+}
+
 function renderHuman(m) {
   const node = el('section', 'msg human');
   const pasted = attachmentNames(m.attachments);
@@ -612,15 +640,26 @@ function renderHuman(m) {
   if (text) {
     // Code fences show as code blocks. The rest stays exactly as typed.
     const bubble = el('div', 'bubble');
+    const body = el('div', 'bubble-body');
     for (const part of splitFences(text)) {
-      if (part.t === 'text') { bubble.append(el('div', 'typed', part.text)); continue; }
+      if (part.t === 'text') { body.append(el('div', 'typed', part.text)); continue; }
       const pre = document.createElement('pre');
       const code = el('code', '', part.text);
       pre.append(code);
       const block = codeBlock(part.lang);
       block.append(pre);
       colorWhenSeen(code, part.lang);
-      bubble.append(block);
+      body.append(block);
+    }
+    bubble.append(body);
+    // A long prompt shows its first lines, faded, with Show more, as claude.ai shows it.
+    if (longPrompt(text)) {
+      bubble.classList.add('long', 'collapsed');
+      const toggle = el('button', 'more-toggle', 'Show more');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.addEventListener('click', () => setCollapsed(bubble, !bubble.classList.contains('collapsed')));
+      bubble.append(toggle);
     }
     node.append(bubble);
   }
@@ -1663,11 +1702,12 @@ function tryFind() {
   }
   if (nth !== undefined) {
     const { mark, count } = markNth(node, terms, nth);
-    for (let fold = mark && mark.closest('details'); fold; fold = fold.parentElement.closest('details')) fold.open = true;
+    reveal(mark);
     stepLanded(mark, count);
     return;
   }
   const mark = highlightIn(node, terms);
+  reveal(mark);
   (mark || node).scrollIntoView({ block: 'center' });
 }
 

@@ -1835,3 +1835,91 @@ test('images Claude viewed are downloaded from claude.ai into images/ and shown 
   const tools = chat.messages[0].blocks.filter((b) => b.t === 'tool');
   assert.deepStrictEqual(plain(tools.map((t) => [t.label, t.target, t.images, t.missingImages])), [['Read IMG_1.jpg', 'IMG_1.jpg', ['images/9eefb337_IMG_1.jpg'], 0], ['Read IMG_2.jpg', 'IMG_2.jpg', [], 1]]);
 });
+
+// ---- Export All into a folder ----
+// An in-memory stand-in for the File System Access handles showDirectoryPicker gives.
+class FakeDir {
+  constructor(name = 'picked', refuse = () => false) { this.name = name; this.entries = new Map(); this.refuse = refuse; }
+  async getDirectoryHandle(name, { create = false } = {}) {
+    let e = this.entries.get(name);
+    if (!e) {
+      if (!create) { const err = new Error('not found'); err.name = 'NotFoundError'; throw err; }
+      e = new FakeDir(name, this.refuse);
+      this.entries.set(name, e);
+    }
+    if (!(e instanceof FakeDir)) { const err = new Error('a file'); err.name = 'TypeMismatchError'; throw err; }
+    return e;
+  }
+  async getFileHandle(name, { create = false } = {}) {
+    if (this.refuse(name)) throw new TypeError(`Name is not allowed: ${name}`);
+    let e = this.entries.get(name);
+    if (!e) {
+      if (!create) { const err = new Error('not found'); err.name = 'NotFoundError'; throw err; }
+      e = { kind: 'file', data: undefined, createWritable: async () => { let next; return { write: async (d) => { next = d; }, close: async () => { e.data = next; }, abort: async () => {} }; } };
+      this.entries.set(name, e);
+    }
+    return e;
+  }
+  // path -> data, for every file below.
+  flat(prefix = '') {
+    const out = {};
+    for (const [name, e] of this.entries) {
+      const p = prefix ? `${prefix}/${name}` : name;
+      if (e instanceof FakeDir) Object.assign(out, e.flat(p)); else out[p] = e.data;
+    }
+    return out;
+  }
+}
+
+test('the disk folder writes what the export writes, in order per path, and reports names it refuses', async () => {
+  const popup = exportPopup();
+  const root = new FakeDir('run', (name) => name.includes(':'));
+  popup.sandbox.__root = root;
+  const failed = await vm.runInContext(`(async () => {
+    const f = createDiskFolder(__root);
+    f.file('a.txt', 'one');
+    f.folder('chat').file('artefacts/x.md', 'first');
+    f.folder('chat').file('artefacts/x.md', 'second');
+    f.file('gif', 'R0lGOA==', { base64: true });
+    f.file('bad:name.txt', 'no');
+    return f.flush();
+  })()`, popup.sandbox);
+  const files = root.flat();
+  assert.strictEqual(files['a.txt'], 'one');
+  assert.strictEqual(files['chat/artefacts/x.md'], 'second');
+  assert.deepStrictEqual(Array.from(files.gif), [0x52, 0x30, 0x6c, 0x47, 0x4f, 0x41].slice(0, 0).concat(Array.from(Buffer.from('R0lGOA==', 'base64'))));
+  assert.deepStrictEqual(plain(failed.map((f) => f.path)), ['bad:name.txt']);
+});
+
+test('Export All into a folder writes the same files as the mega-ZIP, in a new folder named like it', async () => {
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-02T00:00:00Z') };
+  const zipped = await runBulkZip({ list, chats, accountName: 'Mika' });
+  const picked = new FakeDir();
+  await picked.getDirectoryHandle('claude-takeout-Mika-' + new Date().toISOString().slice(0, 10), { create: true });  // an earlier run that day
+  const disk = await runBulkZip({ list, chats, accountName: 'Mika', options: { directory: picked } });
+  assert.strictEqual(disk.saved, null, 'no download');
+  const runName = 'claude-takeout-Mika-' + new Date().toISOString().slice(0, 10) + '_2';
+  assert.ok(picked.entries.has(runName), [...picked.entries.keys()].join());
+  const onDisk = Object.keys(picked.entries.get(runName).flat()).sort();
+  const inZip = Object.keys(zipped.zip.files).filter((n) => !zipped.zip.files[n].dir).sort();
+  assert.deepStrictEqual(onDisk, inZip);
+  assert.match(disk.status.textContent, new RegExp(`Exported 2 conversations to ${runName}\\.`));
+  assert.deepStrictEqual(Object.keys(disk.store.exportRecord['org-1'].chats).sort(), ['a', 'b']);
+});
+
+test('a file the folder refuses is listed in write-errors.txt; the rest of the chat is saved', async () => {
+  const list = [listed('a', '2026-01-01T00:00:00Z')];
+  const chat = chatFor('a', '2026-01-01T00:00:00Z');
+  chat.chat_messages.push({ uuid: 'm2', parent_message_uuid: chat.chat_messages[0].uuid, sender: 'assistant', content: [
+    { type: 'tool_use', id: 't1', name: 'create_file', input: { path: '/home/claude/re:port.md', file_text: '# r' } }, { type: 'text', text: 'ok' }] });
+  chat.current_leaf_message_uuid = 'm2';
+  const picked = new FakeDir('picked', (name) => name.includes(':'));
+  const disk = await runBulkZip({ list, chats: { a: chat }, options: { directory: picked } });
+  const run = [...picked.entries.values()][0];
+  const files = run.flat();
+  assert.match(files['write-errors.txt'], /\/artefacts\/re:port\.md: Name is not allowed/);
+  assert.ok(Object.keys(files).some((n) => /\/full_chat\.md$/.test(n)) && files['index.md'], Object.keys(files).join());
+  assert.strictEqual(disk.status.className, 'status warning');
+  assert.match(disk.status.textContent, /1 file could not be written \(see write-errors\.txt\)/);
+});
