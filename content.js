@@ -88,8 +88,8 @@
   const PUBLISHED_MAX_FILE = 32 * 1024 * 1024;
   const PUBLISHED_UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
   const PUBLISHED_VER = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
-  const publishedTokens = new Map(); // 'uuid:ver' -> { token, expires (ms), ver (resolved) }
-  const publishedFileLists = new Map(); // 'uuid:resolved ver' -> { path: { sha256, size, contentType } }
+  const publishedTokens = new Map(); // 'uuid:ver' -> { token ('' for a public page), expires (ms), ver (resolved), files }
+  const publishedFileLists = new Map(); // 'uuid:resolved ver' -> { path: { sha256, size, contentType, fromInfo } }
 
   // Waits go through setTimeout here so tests can stub it.
   function publishedDelay(ms) {
@@ -118,8 +118,9 @@
     return getActiveOrgId() || orgId || stored.orgId || request.orgId || null;
   }
 
-  // Ask claude.ai for the page's asset token (and the title and history). Caches the token under the
-  // requested version and, for the live page (''), under the resolved one too.
+  // Ask claude.ai for the page's asset token (and the title, history and file list). Caches the token under
+  // the requested version and, for the live page (''), under the resolved one too. A page shared with the
+  // account (public) comes with no token: its entry has token '' and its files are fetched without one.
   async function publishedFrameInfo(uuid, ver, org) {
     const url = 'https://claude.ai/api/frame/' + uuid + '?org=' + encodeURIComponent(org) +
       (ver ? '&ver=' + encodeURIComponent(ver) : '');
@@ -131,10 +132,15 @@
     let body;
     try { body = await res.json(); } catch (e) { throw new PublishedError('bad response'); }
     const resolved = body && typeof body.ver === 'string' ? body.ver : '';
-    if (!body || typeof body.assetToken !== 'string' || !body.assetToken || !PUBLISHED_VER.test(resolved)) {
+    if (!body || !PUBLISHED_VER.test(resolved) || (body.assetToken !== undefined && typeof body.assetToken !== 'string')) {
       throw new PublishedError('bad response');
     }
-    const entry = { token: body.assetToken, expires: publishedExpiry(body.assetToken, Date.now()), ver: resolved };
+    const token = body.assetToken || '';
+    // Only each file's path and type are kept; paths are checked where the list is used.
+    const files = (Array.isArray(body.files) ? body.files : [])
+      .filter((f) => f && typeof f.path === 'string' && f.path)
+      .map((f) => ({ path: f.path, contentType: typeof f.contentType === 'string' ? f.contentType : '' }));
+    const entry = { token, expires: publishedExpiry(token, Date.now()), ver: resolved, files };
     publishedTokens.set(uuid + ':' + resolved, entry);
     publishedTokens.set(uuid + ':' + ver, entry);
     return { entry, title: body.title, history: body.history };
@@ -146,21 +152,21 @@
     return (await publishedFrameInfo(uuid, ver, org)).entry;
   }
 
-  // GET one file from the frame host. 403 gets a new token once, 429 waits once (Retry-After up to
-  // 10 s), 5xx waits 1 s once.
+  // GET one file from the frame host. 403 gets a new token once (not for a page without a token),
+  // 429 waits once (Retry-After up to 10 s), 5xx waits 1 s once.
   async function publishedFrameGet(uuid, ver, org, part) {
     let entry = await publishedToken(uuid, ver, org, false);
     let again403 = true, again429 = true, again5xx = true;
     for (;;) {
       const url = 'https://' + uuid + '.frame.claudeusercontent.com/_f/' + entry.ver + '/' + part +
-        '?__frame_t=' + encodeURIComponent(entry.token);
+        (entry.token ? '?__frame_t=' + encodeURIComponent(entry.token) : '');
       let res;
       try {
         res = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error' });
       } catch (e) { throw new PublishedError('network'); }
       if (res.ok) return res;
       const s = res.status;
-      if (s === 403 && again403) { again403 = false; entry = await publishedToken(uuid, ver, org, true); continue; }
+      if (s === 403 && again403 && entry.token) { again403 = false; entry = await publishedToken(uuid, ver, org, true); continue; }
       if (s === 429 && again429) {
         const wait = parseFloat(res.headers && res.headers.get ? res.headers.get('Retry-After') : '');
         if (Number.isFinite(wait) && wait >= 0 && wait <= 10) { again429 = false; await publishedDelay(wait * 1000); continue; }
@@ -175,14 +181,26 @@
     return p.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
   }
 
+  // The version's files from _files.json. Pages made outside chats (Cowork, Claude Code) have none (404),
+  // and a page without a token may not read it (403): those use the frame info's list, which has no
+  // size or checksum.
   async function publishedFileList(uuid, ver, org) {
-    const entry = await publishedToken(uuid, ver, org, false);
-    const key = uuid + ':' + entry.ver;
-    const res = await publishedFrameGet(uuid, ver, org, '_files.json');
-    let body;
-    try { body = await res.json(); } catch (e) { throw new PublishedError('bad response'); }
-    const files = body && body.files && typeof body.files === 'object' ? body.files : {};
-    publishedFileLists.set(key, files);
+    let entry = await publishedToken(uuid, ver, org, false);
+    let files;
+    try {
+      const res = await publishedFrameGet(uuid, ver, org, '_files.json');
+      let body;
+      try { body = await res.json(); } catch (e) { throw new PublishedError('bad response'); }
+      files = body && body.files && typeof body.files === 'object' ? body.files : {};
+    } catch (e) {
+      entry = publishedTokens.get(uuid + ':' + ver) || entry;
+      if (!(e instanceof PublishedError) || e.status !== (entry.token ? 404 : 403)) throw e;
+      files = {};
+      for (const f of entry.files || []) {
+        files[f.path] = { contentType: f.contentType, size: null, sha256: null, fromInfo: true };
+      }
+    }
+    publishedFileLists.set(uuid + ':' + entry.ver, files);
     return files;
   }
 
@@ -278,9 +296,20 @@
     if (!listing) listing = await publishedFileList(uuid, ver, org);
     const meta = listing[p];
     if (!meta) return { error: 'not found' };
-    if (!Number.isFinite(meta.size) || meta.size < 0) return { error: 'bad response' };
-    if (meta.size > PUBLISHED_MAX_FILE) return { error: 'too large' };
-    const res = await publishedFrameGet(uuid, ver, org, '_src/' + p.split('/').map(encodeURIComponent).join('/'));
+    if (!meta.fromInfo) {
+      if (!Number.isFinite(meta.size) || meta.size < 0) return { error: 'bad response' };
+      if (meta.size > PUBLISHED_MAX_FILE) return { error: 'too large' };
+    }
+    const encoded = p.split('/').map(encodeURIComponent).join('/');
+    let res;
+    try {
+      res = await publishedFrameGet(uuid, ver, org, '_src/' + encoded);
+    } catch (e) {
+      // A file from the frame info's list may be served only at its own path.
+      const entry = publishedTokens.get(uuid + ':' + ver);
+      if (!meta.fromInfo || !(e instanceof PublishedError) || !(e.status === 404 || (e.status === 403 && entry && !entry.token))) throw e;
+      res = await publishedFrameGet(uuid, ver, org, encoded);
+    }
     const buf = await publishedReadBody(res);
     if (!buf) return { error: 'too large' };
     return { base64: publishedBase64(buf), contentType: meta.contentType, size: buf.length };

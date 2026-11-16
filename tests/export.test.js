@@ -2127,6 +2127,26 @@ test('a published page is saved in published/ with published.json, and no frame 
   }
 });
 
+test('a published file with no checksum from claude.ai is saved and marked unverified', async () => {
+  const data = pubChat([pubMsg('a', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G' }), result('w'),
+    ...publish('p1', PUB_U, 'v1', [...guideAs, { as: 'data.json', path: '/home/claude/data.json' }]),
+  ])]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: {
+    'index.html': { body: 'G', unverified: true }, 'data.json': '{"a":1}',
+  } } } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  const dir = 'published/Guide_Short1';
+  assert.strictEqual(fileText(written, `${dir}/v1/index.html`), 'G');
+  const json = JSON.parse(fileText(written, `${dir}/published.json`));
+  assert.deepStrictEqual(json.versions.v1.files, [
+    { path: 'index.html', savedAs: 'index.html', size: null, contentType: 'text/html', sha256: sha('G'), verified: false },
+    { path: 'data.json', savedAs: 'data.json', size: 7, contentType: 'text/html', sha256: sha('{"a":1}') },
+  ]);
+  assert.strictEqual(json.versions.v1.incomplete, false);
+  assert.deepStrictEqual(plain(pubWarnings(output)), []);
+});
+
 test('a version identical to the text Claude wrote is not copied; one edited later is', async () => {
   const data = pubChat([
     pubMsg('m1', null, [use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G1' }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs)]),
@@ -2861,4 +2881,44 @@ test('the popup stores the side-panel note before opening the panel, and names t
   const panel2 = loadPopup({ location: '/sidepanel.html', session: odd, before: (s) => { s.chrome.tabs.query = () => new Promise(() => {}); } });
   await tick();
   assert.strictEqual(panel2.sandbox.document.getElementById('status').textContent, 'Click Export All (Folder) here to choose where to save it.');
+});
+
+test('Cowork and Code artifacts listed without checksums are saved unverified', async () => {
+  const frames = [art(U(1), 'Cowork Page', { sourceSurface: 'cowork' }), art(U(2), 'Shared', { rel: 'shared' }), art(U(3), 'Checked')];
+  const pages = {
+    [U(1)]: livePage('Cowork Page', { 'index.html': { body: '<p>cowork</p>', unverified: true } }),
+    [U(2)]: livePage('Shared', { 'index.html': { body: '<p>s</p>', unverified: true }, 'gone.css': { body: '', unverified: true, error: { error: 'HTTP 404', status: 404 } } }),
+    [U(3)]: livePage('Checked', { 'index.html': 'ok' }),
+  };
+  const { files, fetcher } = await runArtifacts({ frames, pages });
+  const meta = (name, n) => JSON.parse(files[`${artFolder(name, U(n))}/artifact.json`]);
+  assert.strictEqual(files[`${artFolder('Cowork_Page', U(1))}/index.html`], '<p>cowork</p>');
+  const cowork = meta('Cowork_Page', 1);
+  assert.deepStrictEqual(cowork.files, [{ path: 'index.html', savedAs: 'index.html', size: null, contentType: 'text/html', sha256: sha('<p>cowork</p>'), verified: false }]);
+  assert.strictEqual(cowork.incomplete, false);
+  assert.strictEqual(cowork.note, "files not checked against claude.ai's checksum");
+  const shared = meta('Shared', 2);
+  assert.deepStrictEqual(shared.files.map((f) => [f.path, f.sha256, f.verified]), [['index.html', sha('<p>s</p>'), false], ['gone.css', null, false]]);
+  assert.deepStrictEqual(shared.missing, ['gone.css']);
+  assert.match(shared.note, /^shared with you; .*files not checked against claude\.ai's checksum/);
+  const checked = meta('Checked', 3);
+  assert.ok(!('verified' in checked.files[0]));
+  assert.strictEqual(checked.note, '');
+  const call = fetcher.calls.find((c) => c.action === 'publishedPageFile' && c.uuid === U(1));
+  assert.ok(call.size == null, 'no size is claimed for an unlisted size');
+  assert.match(files['index.md'].split('\n').find((l) => l.includes('Cowork Page')), /files not checked against claude\.ai's checksum/);
+  for (const [k, t] of Object.entries(files)) assert.ok(!/__frame_t|frame\.claudeusercontent/.test(t), k);
+});
+
+test('files of unknown size count their real bytes against the 50 MB page total', async () => {
+  const big = 'a'.repeat(26 * 1024 * 1024);
+  const frames = [art(U(1), 'Big')];
+  const pages = { [U(1)]: livePage('Big', { 'index.html': { body: big, unverified: true }, 'more.html': { body: big, unverified: true } }) };
+  const { files } = await runArtifacts({ frames, pages });
+  const folder = artFolder('Big', U(1));
+  assert.strictEqual(files[`${folder}/index.html`].length, big.length);
+  assert.strictEqual(files[`${folder}/more.html`], undefined);
+  const meta = JSON.parse(files[`${folder}/artifact.json`]);
+  assert.deepStrictEqual(meta.missing, ['more.html']);
+  assert.match(files['errors.txt'], /more\.html \(page over 50 MB\)/);
 });

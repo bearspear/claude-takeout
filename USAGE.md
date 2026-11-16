@@ -108,6 +108,7 @@ Limits to know:
 - **Shared with you** artifacts are marked so, in both indexes and in `artifact.json`. They were written by someone else: HTML opened from disk runs with whatever that page contains, so open it only if you trust the sender.
 - claude.ai gives no way to ask for more than it returns in one list. If the count is 60 or more and a multiple of 10 (or 1000), `errors.txt` warns that the list may be cut short; compare "Listed by claude.ai" with claude.ai/artifacts.
 - Only the current version is saved, not older ones.
+- Artifacts from **Cowork** and **Claude Code**, and those shared with you, come without claude.ai's checksums. Their files are saved unchecked: `artifact.json` marks them `verified: false` and the note says "files not checked against claude.ai's checksum". The same goes for a page a chat published, in its `published.json`.
 - Folder names are long. On Windows, a deep folder plus a long title can pass the path length limit and the file is listed in `write-errors.txt`; pick a short folder such as `C:\takeout`.
 - The old-archive tool (`build_viewer.js`) and `merge_archives.js` ignore an artifacts export: it holds no chats.
 

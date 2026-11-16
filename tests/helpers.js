@@ -158,7 +158,8 @@ function docTools(prefix = 'mcp__Claude_Docs__', { node = 'node-1', title = 'Lor
 
 // Answers content.js's publishedPageInfo and publishedPageFile from a table, and records every call.
 // pages: { <uuid>: { title, history, live: <ver of ''>, error: <info response>, versions: { <ver>: { rejected,
-// files: { <path>: text | { body, sha256, type, error } } } } } }. A file's sha256 defaults to that of its body.
+// files: { <path>: text | { body, sha256, type, error, unverified } } } } } }. A file's sha256 defaults to that of its
+// body; an unverified one (listed from the frame info, as Cowork pages are) has no size and no sha256.
 function publishedFetcher(pages) {
   const crypto = require('crypto');
   const calls = [];
@@ -178,6 +179,7 @@ function publishedFetcher(pages) {
         files: Object.entries(v.files).map(([path, raw]) => {
           const f = fileOf(raw);
           const body = Buffer.from(f.body);
+          if (f.unverified) return { path, size: null, contentType: f.type === undefined ? 'text/html' : f.type, sha256: null };
           return { path, size: body.length, contentType: f.type === undefined ? 'text/html' : f.type, sha256: f.sha256 || crypto.createHash('sha256').update(body).digest('hex') };
         }),
       };

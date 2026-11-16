@@ -3322,9 +3322,11 @@ const publishedSignedOutReply = (r) => !!(r && (r.status === 401 || r.error === 
 
 // Fetch one page version's files (from cleanPublishedInfo) through content.js and write each to
 // target at prefix + its saved name (names: path -> saved name). Each file is checked against the listing:
-// size caps (PUBLISHED_MAX_FILE each, PUBLISHED_MAX_BYTES in all) and SHA-256. A 401 sets
+// size caps (PUBLISHED_MAX_FILE each, PUBLISHED_MAX_BYTES in all) and SHA-256. A file listed with no SHA-256
+// (claude.ai's frame info, as for Cowork and Claude Code pages) is saved unchecked, its real size counted against
+// the total, and noted in unverified (path -> SHA-256 of the saved bytes, null when not saved). A 401 sets
 // state.publishedSignedOut, calls onSignedOut once, and every later file is skipped. Returns { saved,
-// missing: [path], problems: ['path (why)'], incomplete, start, startSaved, startText, needsRuntime }.
+// missing: [path], problems: ['path (why)'], incomplete, start, startSaved, startText, needsRuntime, unverified }.
 async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished }) {
   const start = publishedStart(files);
   const missing = [];
@@ -3332,13 +3334,18 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   let total = 0;
   let written = 0;
   let startText = null;
+  const unverified = new Map();
   for (const f of files) {
     const fail = (why) => { missing.push(f.path); if (why) problems.push(`${f.path} (${why})`); };
+    const checked = !!f.sha256;
+    if (!checked) unverified.set(f.path, null);
     if (state.publishedSignedOut) { fail(null); continue; }
-    if (f.size == null || !f.sha256) { fail('bad listing'); continue; }
-    if (f.size > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
-    if (total + f.size > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
-    total += f.size;
+    if (checked && f.size == null) { fail('bad listing'); continue; }
+    if (f.size != null) {
+      if (f.size > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
+      if (total + f.size > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
+      total += f.size;
+    }
     const reply = await fetchPublished({ action: 'publishedPageFile', uuid, ver, path: f.path, size: f.size });
     if (publishedSignedOutReply(reply)) {
       if (!state.publishedSignedOut && typeof onSignedOut === 'function') onSignedOut();
@@ -3350,7 +3357,15 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
     let bytes;
     try { bytes = base64ToBytes(reply.base64); } catch (e) { fail('bad response'); continue; }
     if (bytes.length > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
-    if (await sha256Hex(bytes) !== f.sha256) { fail('checksum does not match'); continue; }
+    if (checked) {
+      if (await sha256Hex(bytes) !== f.sha256) { fail('checksum does not match'); continue; }
+    } else {
+      if (f.size == null) {
+        if (total + bytes.length > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
+        total += bytes.length;
+      }
+      unverified.set(f.path, await sha256Hex(bytes));
+    }
     target.file(`${prefix}${names.get(f.path)}`, bytes);
     written++;
     if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
@@ -3359,8 +3374,16 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   return {
     saved: written > 0, missing, problems, incomplete: missing.length > 0,
     start: startOk ? start.path : null, startSaved: startOk ? names.get(start.path) : null,
-    startText, needsRuntime: publishedNeedsRuntime(startText),
+    startText, needsRuntime: publishedNeedsRuntime(startText), unverified,
   };
+}
+
+// File entries (for published.json or artifact.json) of files saved unchecked: sha256 of the saved bytes and
+// verified: false.
+function markUnverified(files, unverified) {
+  for (const f of files) {
+    if (unverified.has(f.path)) Object.assign(f, { sha256: unverified.get(f.path), verified: false });
+  }
 }
 
 // Save the pages a chat published. ctx: { errorCollector, artifacts (the text as on disk, inlined), artifactIndex,
@@ -3509,6 +3532,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
       state, onSignedOut: markSignedOut, fetchPublished,
     });
     v.saved = got.saved;
+    markUnverified(v.files, got.unverified);
     v.missing = got.missing;
     v.incomplete = got.incomplete;
     v.start = got.start;
@@ -4953,6 +4977,7 @@ async function saveArtifact(root, a, ctx) {
       const got = await fetchPublishedFiles({ target: root, prefix: `${folder}/`, uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished });
       meta.missing = got.missing;
       meta.incomplete = got.incomplete;
+      markUnverified(files, got.unverified);
       startSaved = got.startSaved;
       meta.needsRuntime = info.runtimeSkipped > 0 || typeSlug !== '' || got.needsRuntime;
       if (!files.length) notes.push(typeSlug || info.runtimeSkipped > 0 ? 'open on claude.ai' : 'no files; open on claude.ai');
@@ -4960,6 +4985,7 @@ async function saveArtifact(root, a, ctx) {
         warn(name, `Artifact "${name}" (${info.ver}): ${artifactCount(got.problems.length, 'file')} could not be saved: ${got.problems.join(', ')}.`, openNote);
       }
       if (got.missing.length) notes.push(`${artifactCount(got.missing.length, 'file')} not saved (see errors.txt)`);
+      if ([...got.unverified.values()].some(Boolean)) notes.push("files not checked against claude.ai's checksum");
     }
   } catch (e) {
     // Not a refusal from claude.ai (those are replies, not throws): the artifact is listed as not exported.
