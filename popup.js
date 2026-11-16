@@ -96,6 +96,12 @@ class ExportErrorCollector {
       case 'claude_doc_unreplayed':
         return 'Claude edited this Claude Docs document in a way the export can\'t rebuild from the chat. The exported .md and .html hold what could be rebuilt; open the live document on claude.ai (link in the note) for the current version.';
 
+      case 'tool_image':
+        return 'A picture Claude looked at in the chat (a photo it opened, a page it rendered) could not be downloaded from claude.ai. Export again later; it is still shown in the chat on claude.ai.';
+
+      case 'web_image':
+        return 'An image Claude found with image search could not be saved: the site refused it, it is gone, or Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to it. To save these images, turn on Settings > Save images from web searches (Chrome asks once), then export again.';
+
       case 'doc_diagram':
         return 'claude.ai draws a Claude Docs document\'s diagrams only on the document\'s own page, so the export shows each by its caption. To keep them, ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again: that copy is saved in artefacts/ and linked from the document. Or open the live document (link in the note).';
 
@@ -2141,6 +2147,10 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   const urls = extractUrls(allText);
 
+  // Images from web searches, before the response files that show them.
+  const webImages = await saveWebImages(folder, data, errorCollector, onProgress);
+  const toolImages = await saveToolImages(folder, data, errorCollector);
+
   // Generate response files
   const responseFiles = [];
   let responseNum = 0;
@@ -2217,6 +2227,11 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
             fullContent.push(fence);
             fullContent.push('');
           }
+        } else if (isWidgetTool(toolName)) {
+          const name = widgetFileName(input, block, msg, artifactIndex);
+          if (name) fullContent.push(...widgetLines(input, name, '../'));
+        } else if (isImageSearchTool(toolName)) {
+          fullContent.push('```plaintext', `Image search: ${input.query || ''}`, '```', '');
         } else if (toolName === 'artifacts' && ['create', 'update', 'rewrite'].includes(input.command)) {
           const title = input.title || input.id || 'Untitled';
           const action = input.command === 'update' ? 'Updating' : input.command === 'rewrite' ? 'Rewriting' : 'Creating';
@@ -2235,6 +2250,12 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
             fullContent.push('');
           }
         }
+      } else if (block.type === 'tool_result' && toolImageLines(block, toolImages).length) {
+        fullContent.push(...toolImageLines(block, toolImages, '../'));
+      } else if (block.type === 'tool_result' && isImageSearchTool(block.name)) {
+        fullContent.push(...imageSearchLines(block, webImages, '../'));
+      } else if (block.type === 'tool_result' && isPublishTool(block.name)) {
+        fullContent.push(...publishedLines(block));
       } else if (block.type === 'tool_result' && block.name === 'web_search') {
         if (Array.isArray(block.content)) {
           for (const result of block.content) {
@@ -2390,7 +2411,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   for (const f of savedDeliveries) pathNames[f.path] = f.filename;  // the final copy comes last
   Object.assign(pathNames, presentedNames);
   for (const [key, entry] of Object.entries(artifactIndex)) {
-    if (entry && !key.startsWith('doc:') && !key.startsWith('artifact:')) pathNames[key] = entry.filename;
+    if (entry && !key.startsWith('doc:') && !key.startsWith('artifact:') && !key.startsWith('widget:')) pathNames[key] = entry.filename;
   }
   const companions = docCompanions(data, artifacts, artifactIndex, pathNames);
   for (const [key, entry] of Object.entries(artifactIndex)) {
@@ -2591,6 +2612,22 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   if (uploadedFiles.length > 1 && downloadedFiles.length === 0) {
     addHealth(`none of the ${uploadedFiles.length} uploads could be downloaded.`, 'uploads');
   }
+  // Files claude.ai attached to Claude's own messages (a page it published) are its output: saved in
+  // artefacts/, unless a replayed artifact there already has the name, and shown on that message in the viewer.
+  for (const file of extractAttachedFiles(data, Object.keys(artifacts))) {
+    if (!file.existing) {
+      try {
+        await addArtefactBlob(folder, artifacts, file.filename, await fetchUploadedFile(null, file.uuid, organizationId, data.uuid, null));
+      } catch (err) {
+        console.error(`Failed to download attached file ${file.filename}:`, err);
+        errorCollector.addError('delivered_file', file.filename, err.message, {
+          uuid: file.uuid, path: file.path, urlsTried: err.urlsTried || [], httpStatus: err.httpStatus || null
+        });
+        continue;
+      }
+    }
+    viewerUploads[file.uuid] = { path: `artefacts/${file.filename}`, text: null };
+  }
   // Self-contained HTML pass: rewrite sandbox-path references (e.g.
   // /mnt/user-data/uploads/foo.png) in text-based artifacts as base64 data
   // URIs, then re-write those entries into the zip. We deliberately keep the
@@ -2643,7 +2680,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   }
 
   // The Markdown links to what this export really saved.
-  const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames };
+  const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames, webImages, toolImages };
   addFileWithBOM(folder, 'full_chat.md', convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking, ...saved }));
   const integratedChatMd = convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking, ...saved });
   addFileWithBOM(folder, 'integrated_chat.md', integratedChatMd);
@@ -2809,9 +2846,13 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       artifacts: { ...artifacts, ...viewerArtifacts },
       artifactIndex,
       uploads: viewerUploads,
+      webImages,
+      toolImages,
       deliveries: buildViewerDeliveries(savedDeliveries),
       heredocs: heredocFiles,
       docKey: claudeDocKey,
+      widgetFile,
+      widgetKey,
       flags: viewerFlags(errorCollector.warnings),
       project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions, CTViewer.TEXT_EMBED_LIMIT)
     });
@@ -2907,9 +2948,168 @@ function formatTimestamp(isoString) {
 // options.artifacts, attachmentFiles, uploadNames and presentedNames come from
 // populateConversationFolder in a ZIP: what was really saved, so the Markdown links
 // to those files. A single Markdown file has none of them and embeds pasted text.
+// Tools convertToMarkdown shows in a line of their own. Names may carry a connector prefix (mcp__visualize__...).
+const isGuidanceTool = (name) => /(__|:)(read_me|guide|list_types)$/.test(String(name || ''));
+const isImageSearchTool = (name) => /(^|__|:)image_search$/.test(String(name || ''));
+const isPublishTool = (name) => /(^|__|:)publish_files$/.test(String(name || ''));
+const imagesOf = (result) => (Array.isArray(result && result.content) ? result.content : []).flatMap((c) => (c && Array.isArray(c.images) ? c.images.filter(Boolean) : []));
+// Text inside [...] of a Markdown link, and a URL for (...): brackets, parentheses and spaces escaped.
+const mdLinkText = (text) => String(text).replace(/[\\[\]]/g, '\\$&').replace(/\s+/g, ' ');
+const mdUrl = (url) => String(url).replace(/[()<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`).replace(/\s/g, (ch) => encodeURIComponent(ch));
+
+// The file one show_widget call made in artefacts/ (the version it made, when there are several), or null.
+function widgetFileName(input, block, msg, artifactIndex) {
+  const entry = artifactIndex[widgetKey(input, block.id)];
+  if (!entry) return null;
+  const at = entry.versions.length > 1 ? entry.messages.indexOf(msg.uuid) : -1;
+  return at >= 0 ? entry.versions[at] : entry.filename;
+}
+
+// Markdown for a diagram saved in artefacts/: a link, and the picture itself when it is an SVG.
+// up: '../' from responses/, '' from the folder root.
+function widgetLines(input, name, up = '') {
+  const label = mdLinkText(input.title || 'Diagram');
+  const href = `${up}artefacts/${encodeURIComponent(name)}`;
+  const lines = [`\n**Diagram: ${label}** - [artefacts/${mdLinkText(name)}](${href})\n`];
+  if (name.endsWith('.svg')) lines.push(`![${label}](${href})`, '');
+  return lines;
+}
+
+// An image_search result as a numbered quote of links, each with the picture when the export saved it.
+// saved: image URL -> 'images/<name>' (saveWebImages); up: '../' from responses/, '' from the folder root.
+function imageSearchLines(block, saved = {}, up = '') {
+  const lines = [];
+  imagesOf(block).forEach((img, i) => {
+    const title = mdLinkText(img.title || 'Image');
+    const page = img.page_url ? `[${title}](${mdUrl(img.page_url)})` : title;
+    const source = img.source ? ` (${mdLinkText(img.source)})` : '';
+    lines.push(`> ${i + 1}. ${page}${source}${img.url ? ` · [image](${mdUrl(img.url)})` : ''}`);
+    const file = img.url && Object.prototype.hasOwnProperty.call(saved, img.url) ? saved[img.url] : null;
+    if (file) lines.push('>', `>    ![${title}](${up}${file.split('/').map(encodeURIComponent).join('/')})`, '>');
+  });
+  if (!lines.length) return lines;
+  if (lines[lines.length - 1] === '>') lines.pop();
+  // The result's own first line names the search ("Found and displayed 4 images for '...':"), so
+  // results of searches run together can be told apart.
+  const heading = resultText(block).split('\n')[0].trim();
+  return [...(heading ? [`> ${heading.replace(/[\\`*_[\]<>]/g, '\\$&')}`, '>'] : []), ...lines, ''];
+}
+
+// Images from web searches: saved in images/ only when Chrome lets the extension fetch from other sites
+// (the optional https permission). requestWebImages asks for it; call it straight from a click, before
+// any await, because Chrome only asks during one.
+const WEB_IMAGE_ORIGINS = { origins: ['https://*/*'] };
+function requestWebImages() {
+  try {
+    return chrome.permissions && chrome.permissions.request ? chrome.permissions.request(WEB_IMAGE_ORIGINS).catch(() => false) : Promise.resolve(false);
+  } catch (e) {
+    return Promise.resolve(false);
+  }
+}
+async function webImagesAllowed() {
+  try {
+    return !!(chrome.permissions && chrome.permissions.contains && await chrome.permissions.contains(WEB_IMAGE_ORIGINS));
+  } catch (e) {
+    return false;
+  }
+}
+
+// Images Claude looked at (a photo it opened with Read), which claude.ai keeps and only links: downloaded
+// from claude.ai into images/. Returns file uuid -> 'images/<name>'. A failure is a tool_image warning.
+async function saveToolImages(folder, data, errorCollector) {
+  const saved = {};
+  for (const img of toolImagesOf(data)) {
+    try {
+      const res = await fetch(`https://claude.ai${img.url}`, { credentials: 'include', headers: { Accept: 'image/*' } });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const type = String((res.headers && res.headers.get && res.headers.get('content-type')) || '').split(';')[0].trim().toLowerCase();
+      const blob = await res.blob();
+      const ext = WEB_IMAGE_TYPES[type] || WEB_IMAGE_TYPES[String(blob.type || '').toLowerCase()];
+      if (!ext) throw new Error(`not a PNG, JPEG, GIF or WebP image (${type || blob.type || 'no type'})`);
+      const name = toolImageName(img, ext);
+      folder.file(`images/${name}`, blob);
+      saved[img.uuid] = `images/${name}`;
+    } catch (err) {
+      errorCollector.addWarning('tool_image', img.base || img.uuid, `Image Claude viewed not saved: ${err.message}`, { uuid: img.uuid, path: img.url });
+    }
+  }
+  return saved;
+}
+
+// A tool result's images the export saved, as Markdown pictures. up: '../' from responses/.
+function toolImageLines(block, saved = {}, up = '') {
+  const out = [];
+  for (const item of (Array.isArray(block && block.content) ? block.content : [])) {
+    const file = item && item.type === 'image' && typeof item.file_uuid === 'string' && Object.prototype.hasOwnProperty.call(saved, item.file_uuid) ? saved[item.file_uuid] : null;
+    if (file) out.push(`![${mdLinkText(file.split('/').pop())}](${up}${file.split('/').map(encodeURIComponent).join('/')})`, '');
+  }
+  return out;
+}
+
+const WEB_IMAGE_MAX_BYTES = 15 * 1024 * 1024;
+const WEB_IMAGE_TIMEOUT = 20000;
+
+// Downloads the chat's web images into images/, a few at a time. Returns image URL -> 'images/<name>' for
+// the saved ones. Not allowed: one web_image warning. A failed image: a web_image warning naming it.
+async function saveWebImages(folder, data, errorCollector, onProgress = null) {
+  const images = webImagesOf(data);
+  const saved = {};
+  if (!images.length) return saved;
+  if (!(await webImagesAllowed())) {
+    errorCollector.addWarning('web_image', 'images/', `${images.length} image${images.length === 1 ? '' : 's'} from web searches ${images.length === 1 ? 'was' : 'were'} not saved: Claude Takeout may not fetch images from other sites.`,
+      { note: 'Turn on Settings > Save images from web searches, then export again. The links in full_chat.md still work.' });
+    return saved;
+  }
+  const fetchImage = async (url) => {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), WEB_IMAGE_TIMEOUT) : null;
+    try {
+      const res = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', signal: controller ? controller.signal : undefined });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const type = String((res.headers && res.headers.get && res.headers.get('content-type')) || '').split(';')[0].trim().toLowerCase();
+      const blob = await res.blob();
+      const ext = WEB_IMAGE_TYPES[type] || WEB_IMAGE_TYPES[String(blob.type || '').toLowerCase()];
+      if (!ext) throw new Error(`not a PNG, JPEG, GIF or WebP image (${type || blob.type || 'no type'})`);
+      if (blob.size > WEB_IMAGE_MAX_BYTES) throw new Error(`larger than ${WEB_IMAGE_MAX_BYTES / 1024 / 1024} MB`);
+      return { blob, ext };
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
+  let next = 0;
+  let done = 0;
+  const worker = async () => {
+    while (next < images.length) {
+      const img = images[next++];
+      let got = null;
+      let error = null;
+      for (const url of [img.url, img.thumb].filter((u, i, all) => u && all.indexOf(u) === i)) {
+        try { got = await fetchImage(url); break; } catch (e) { error = e; }
+      }
+      if (got) {
+        const name = webImageName(img, got.ext);
+        folder.file(`images/${name}`, got.blob);
+        saved[img.url] = `images/${name}`;
+      } else {
+        errorCollector.addWarning('web_image', img.title || img.url, `Image not saved: ${error && error.name === 'AbortError' ? 'the site took too long' : (error ? error.message : 'unknown error')}`, { path: img.url, note: img.page ? `Found on ${img.page}` : '' });
+      }
+      done++;
+      if (onProgress) onProgress(10 + Math.floor((done / images.length) * 5), 100, `Saving web images: ${done} of ${images.length}`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, images.length) }, worker));
+  return saved;
+}
+
+// The page a publish_files call put on claude.ai, as a quoted link, or [] when its reply has no URL.
+function publishedLines(block) {
+  const reply = leadingJson(resultText(block)) || {};
+  return reply.url ? [`> **Published on claude.ai:** [${mdLinkText(reply.title || reply.url)}](${mdUrl(reply.url)})`, ''] : [];
+}
+
 function convertToMarkdown(data, options = {}) {
   const { embedArtifacts = false, seamlessMd = false, includeThinking = true,
-    attachmentFiles = null, uploadNames = null, presentedNames = {} } = options;
+    attachmentFiles = null, uploadNames = null, presentedNames = {}, webImages = {}, toolImages = {} } = options;
   const lines = [];
   const title = data.name || 'Claude Conversation';
 
@@ -3162,7 +3362,7 @@ function convertToMarkdown(data, options = {}) {
             lines.push('```');
             lines.push('');
 
-          } else if (toolName === 'view' || toolName === 'read_file') {
+          } else if (toolName === 'view' || toolName === 'read_file' || toolName === 'Read') {
             // View/read file
             const path = input.path || input.file_path || '';
             const filename = path.split('/').pop();
@@ -3223,6 +3423,30 @@ function convertToMarkdown(data, options = {}) {
               }
             }
 
+          } else if (isWidgetTool(toolName)) {
+            // A diagram claude.ai drew in the chat. A ZIP saves it in artefacts/ (extractArtifacts).
+            const file = widgetFile(input);
+            const name = inZip ? widgetFileName(input, block, msg, artifactIndex) : null;
+            if (file && name) {
+              lines.push(...widgetLines(input, name));
+            } else if (file && embedArtifacts) {
+              const fence = getCodeFence(input.widget_code);
+              lines.push(`\n**Diagram: ${mdLinkText(input.title || 'Diagram')}**\n`, `${fence}${file.name.endsWith('.svg') ? 'svg' : 'html'}`, input.widget_code, fence, '');
+            } else {
+              lines.push('```plaintext', `Diagram: ${input.title || 'untitled'} (drawn in the chat on claude.ai)`, '```', '');
+            }
+
+          } else if (isGuidanceTool(toolName)) {
+            // Instructions a tool gives Claude; its result is left out.
+            lines.push('```plaintext', `Loading tool guidance: ${toolName}`, '```', '');
+
+          } else if (isImageSearchTool(toolName)) {
+            lines.push('```plaintext', `Image search: ${input.query || ''}`, '```', '');
+
+          } else if (isPublishTool(toolName)) {
+            const sent = (Array.isArray(input.files) ? input.files : []).map((f) => (f && f.path ? f.path.split('/').pop() : '')).filter(Boolean);
+            lines.push('```plaintext', `Publishing on claude.ai: ${input.title || 'page'}${sent.length ? ` (${sent.join(', ')})` : ''}`, '```', '');
+
           } else if (claudeDocsAction(toolName)) {
             // Claude Docs: the document itself, not its tool calls.
             const action = claudeDocsAction(toolName);
@@ -3265,6 +3489,15 @@ function convertToMarkdown(data, options = {}) {
 
           if (claudeDocsAction(toolName)) {
             // Claude Docs results are acknowledgements for Claude, not part of the conversation.
+          } else if (isWidgetTool(toolName) || isGuidanceTool(toolName)) {
+            // A diagram's acknowledgement, or a tool's instructions for Claude: nothing for the reader.
+          } else if (toolImageLines(block, toolImages).length) {
+            // Pictures Claude looked at, saved in images/, instead of their claude.ai links.
+            lines.push(...toolImageLines(block, toolImages));
+          } else if (isImageSearchTool(toolName) && imagesOf(block).length) {
+            lines.push(...imageSearchLines(block, webImages));
+          } else if (isPublishTool(toolName) && publishedLines(block).length) {
+            lines.push(...publishedLines(block));
           } else if (toolName === 'web_search' && Array.isArray(block.content)) {
             // Format web search results nicely
             for (const result of block.content) {
@@ -4016,7 +4249,10 @@ onExport('exportMdEmbed', async () => {
 
 onExport('exportZip', async () => {
   if (!conversationData) return;
+  // Chrome asks for the web-image permission only during a click, so before anything is awaited.
+  const webAsk = webImagesOf(conversationData).length ? requestWebImages() : null;
   const status = document.getElementById('status');
+  if (webAsk) await webAsk;
 
   // Show progress
   showProgress(0, 100, 'Initializing...');
@@ -4149,6 +4385,19 @@ function applySettings() {
   const shortcuts = document.querySelectorAll('.shortcut');
   shortcuts.forEach(el => {
     el.style.display = settings.showShortcuts ? 'inline' : 'none';
+  });
+}
+
+// Save images from web searches: not a stored setting but Chrome's permission, shown as it stands.
+const webImagesBox = document.getElementById('webImages');
+if (webImagesBox) {
+  webImagesAllowed().then((ok) => { webImagesBox.checked = ok; });
+  webImagesBox.addEventListener('change', () => {
+    if (webImagesBox.checked) {
+      requestWebImages().then((ok) => { webImagesBox.checked = !!ok; });
+    } else if (chrome.permissions && chrome.permissions.remove) {
+      chrome.permissions.remove(WEB_IMAGE_ORIGINS).catch(() => {});
+    }
   });
 }
 

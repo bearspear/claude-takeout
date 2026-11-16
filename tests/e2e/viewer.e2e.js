@@ -352,7 +352,7 @@ async function unzipMegaZip(out) {
     const box = await page.$eval('.bubble', b => { const r = b.getBoundingClientRect(), c = document.getElementById('chat').getBoundingClientRect(); return { right: c.right - r.right, left: r.left - c.left }; });
     check('user bubble sits on the right', box.right < box.left && box.right < 40, JSON.stringify(box));
     check('user text is literal', (await page.textContent('.bubble')).includes('one-page summary?\n\nKeep'));
-    check('assistant text is serif', /Charter/.test(await page.$eval('.prose', p => getComputedStyle(p).fontFamily)));
+    check('assistant text is serif', /Charter/.test(await page.$eval('.msg.assistant > .prose', p => getComputedStyle(p).fontFamily)));
     check('chips render', (await page.textContent('.chip')).normalize('NFC').includes('Gödel.md'.normalize('NFC')));
     check('timestamps render', await page.$$eval('time.when', t => t.length > 0 && t.every(x => x.dateTime)));
     check('dark tokens exist', await page.evaluate(() => [...document.styleSheets].some(s => [...s.cssRules].some(r => r.media && /prefers-color-scheme: dark/.test(r.media.mediaText)))));
@@ -371,11 +371,14 @@ async function unzipMegaZip(out) {
 
     check('thinking and tools start collapsed', await page.$$eval('details.line', d => d.length > 8 && d.every(x => !x.open)));
     check('missing image line hidden while collapsed', await page.$$eval('details.tool', d => { const x = d.filter(t => t.querySelector('.missing-image')); return x.length === 1 && !x[0].open && !x[0].querySelector('.missing-image').checkVisibility({ contentVisibilityAuto: true, visibilityProperty: true }); }));
-    check('thinking line is labelled', (await page.textContent('details.thinking summary')).includes('Thought process'));
+    // Steps fold into one line per response, as on claude.ai: "Read a file, ran a command", or the summary.
+    check('steps fold into a group line', await page.$$eval('details.steps', d => d.length > 0 && d.every(x => !x.open && /\S/.test(x.querySelector(':scope > summary').textContent))));
+    await page.$$eval('details.steps', d => d.forEach(x => { x.open = true; }));
+    check('thinking line is labelled by its summary', (await page.textContent('details.thinking summary')).includes('Planning the report'));
     await page.click('details.thinking summary');
     check('thinking expands on click', await page.$eval('details.thinking', d => d.open && d.textContent.includes('Then write it.') && d.querySelector('.line-text').offsetHeight > 0));
     await page.click('details.tool summary');
-    check('tool expands to input and result', await page.$eval('details.tool', d => d.open && d.textContent.includes('Input') && d.textContent.includes('report.html') && d.textContent.includes('Result')));
+    check('tool expands to request and response', await page.$eval('details.tool', d => d.open && d.textContent.includes('Request') && d.textContent.includes('report.html') && d.textContent.includes('Response')));
     await page.focus('details.tool:nth-of-type(3) summary');
     await page.keyboard.press('Enter');
     check('tool expands from the keyboard', await page.$eval('details.tool:nth-of-type(3)', d => d.open));
@@ -384,7 +387,9 @@ async function unzipMegaZip(out) {
     const missing = 'details.tool:has(.missing-image)';
     await page.click(missing + ' summary');
     check('missing image line shows after expanding', await page.$eval(missing, d => d.open && d.querySelector('.missing-image').textContent === 'Image not in this export' && d.querySelector('.missing-image').checkVisibility({ contentVisibilityAuto: true, visibilityProperty: true })));
-    check('tool images show outside the fold', await page.$$eval('.tool-images img', i => i.length === 1 && !i[0].closest('details') && i[0].naturalWidth > 0));
+    await page.$$eval('details.tool', d => d.forEach(x => { x.open = true; }));
+    check('tool images show in their step, with a thumbnail on its line', await page.$$eval('.tool-images img', i => i.length === 1 && !!i[0].closest('details.tool .line-body') && i[0].naturalWidth > 0)
+      && await page.$$eval('details.tool > summary .thumbs img', i => i.length === 1));
     check('off-branch messages stay out', !(await page.textContent('#chat')).includes('abandoned'));
 
     // Review Focus 5: a later render cancels what is still pending.
@@ -1036,13 +1041,13 @@ async function unzipMegaZip(out) {
         { type: 'text', text: 'Done.' }], attachments: [], files: [], files_v2: [] }] }], '2026-11-05T12:00:00Z'));
       const hp = await open({}, 'file://' + hidden);
       const lines = hp.page.locator('details.thinking');
+      await hp.page.$$eval('details.steps', d => d.forEach(x => { x.open = true; }));
       await lines.nth(0).locator('summary').click();
       await lines.nth(1).locator('summary').click();
-      await lines.nth(2).locator('summary').click();
+      check('thinking: one with nothing to show is left out, as on claude.ai', await lines.count() === 2);
       check('thinking: every summary shows, as text', (await lines.nth(0).locator('.line-step').allTextContents()).join('|') === 'Step <b>one</b>.|Step two.');
       check('thinking: says the full text is missing', (await lines.nth(0).locator('.line-note').textContent()).includes('only these summaries'));
-      check('thinking: no summaries still says so', (await lines.nth(1).locator('.line-note').textContent()) === "Claude's thinking isn't in this export.");
-      check('thinking: real text shows with no note', (await lines.nth(2).locator('.line-text').textContent()) === 'Real thinking text.' && (await lines.nth(2).locator('.line-note').count()) === 0);
+      check('thinking: real text shows with no note', (await lines.nth(1).locator('.line-text').textContent()) === 'Real thinking text.' && (await lines.nth(1).locator('.line-note').count()) === 0);
       await hp.page.close();
     }
     const footOrder = id => cp.page.$eval(`.msg[data-id="${id}"] .foot`, f => [...f.children].map(c => c.matches('.copy-msg') ? 'copy' : c.matches('time.when') ? 'time' : 'other').join());

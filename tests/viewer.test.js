@@ -82,7 +82,7 @@ test('ctx.model overrides and ctx.fixText applies to attachments', () => {
 
 test('thinking, citations and tool results become blocks', () => {
   const m02 = buildViewerChat(fixture, {}).messages.find(x => x.id === 'm02');
-  assert.deepStrictEqual(m02.blocks[0], { t: 'thinking', text: 'Plan the report first.\nThen write it.', summaries: ['Planning the report'], summary: 'Planning the report' });
+  assert.deepStrictEqual(m02.blocks[0], { t: 'thinking', text: 'Plan the report first.\nThen write it.', summaries: ['Planning the report'], summary: 'Planning the report', seconds: null });
   assert.deepStrictEqual(m02.blocks[1], { t: 'text', text: 'Creating it.', cites: [{ end: 8, url: 'https://example.com/a', title: 'Example A' }] });
   const tools = m02.blocks.filter(b => b.t === 'tool');
   assert.strictEqual(tools.length, 3);

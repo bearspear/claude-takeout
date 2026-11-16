@@ -2,7 +2,8 @@
 // Classic script. Exposes globalThis.CTViewer (and module.exports for tests):
 //   buildViewerChat(data, ctx)         one conversation as the viewer's compact Chat (see the data contract).
 //                                      ctx: { folder, model, fixText, artifacts, artifactIndex, uploads,
-//                                      deliveries, heredocs, docKey, project, flags }, all optional. data is never mutated.
+//                                      deliveries, heredocs, docKey, widgetFile, widgetKey, project, flags }, all optional.
+//                                      data is never mutated. widgetFile, widgetKey: export-core.js's, for show_widget cards.
 //                                      flags: file name to 'script' | 'edit' | 'doc' (viewerFlags in export-core.js);
 //                                      a file with that name gets flag, for the viewer's "may not match" badge.
 //                                      artifacts: filename to text ('' for binaries). artifactIndex: extractArtifacts' index
@@ -30,7 +31,12 @@
 //   TOOL_TEXT_LIMIT                    longest tool result text kept
 //   TEXT_EMBED_LIMIT                   longest upload or project text a caller should pass in ctx
 //   VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64  a 1x1 GIF beside viewer.html: if it won't load, the ZIP wasn't unzipped
-//   ctx.uploads: file uuid (or file name when there is none) to { path: 'uploads/<name>', text: string|null }
+//   ctx.toolImages: file uuid to 'images/<name>', images in tool results the export saved (Claude's Read of a
+//                picture links it on claude.ai); a tool block's images then holds their relative paths
+//   ctx.webImages: image URL to 'images/<name>', the web images the export saved (saveWebImages in popup.js);
+//                a tool block of an image_search gets web: [{ title, page, source, href }], href null when not saved
+//   ctx.uploads: file uuid (or file name when there is none) to { path: 'uploads/<name>', text: string|null }; a file on
+//                Claude's own message is { path: 'artefacts/<name>', text: null }
 //   ctx.project: { name, fileDir, fileNames, docs: [{ name, text }], instructions }, fileDir relative to the chat folder;
 //                instructions: the project's prompt template ('' when none), cut at TEXT_EMBED_LIMIT
 (function (root) {
@@ -70,13 +76,34 @@
     switch (name) {
       case 'web_search': return i.query ? `Searched the web: ${i.query}` : 'Searched the web';
       case 'web_fetch': return i.url ? `Fetched ${i.url}` : 'Fetched a page';
-      case 'bash_tool': case 'Bash': return 'Ran a command';
-      case 'create_file': case 'Write': return p ? `Created ${p}` : 'Created a file';
-      case 'str_replace': case 'Edit': case 'str_replace_based_edit_tool': return p ? `Edited ${p}` : 'Edited a file';
-      case 'view': case 'read_file': case 'Read': return p ? `Viewed ${p}` : 'Viewed a file';
+      // As claude.ai labels its steps: a command by the description Claude gave it, a file by its name.
+      case 'bash_tool': case 'Bash': return typeof i.description === 'string' && i.description.trim() ? i.description.trim() : 'Ran a command';
+      case 'create_file': case 'Write': return p ? `Created ${baseName(p)}` : 'Created a file';
+      case 'str_replace': case 'Edit': case 'str_replace_based_edit_tool': return p ? `Edited ${baseName(p)}` : 'Edited a file';
+      case 'view': case 'read_file': case 'Read': return p ? `Read ${baseName(p)}` : 'Read a file';
+      case 'ToolSearch': {
+        const server = /mcp__([^_]+(?:_[^_]+)*?)__/.exec(String(i.query || ''));
+        return server ? `Loaded ${server[1]}` : 'Loaded tools';
+      }
       case 'present_files': return 'Presented files';
       case 'artifacts': return i.title ? `Artifact: ${i.title}` : 'Artifact';
+      case 'image_search': return i.query ? `Searched for images: ${i.query}` : 'Searched for images';
       default: {
+        // Tools under a connector prefix (mcp__visualize__show_widget) or with one: the visualize and
+        // claude-artifacts tools by what they did.
+        const tail = String(name || '').split(/__|:/).pop();
+        if (tail !== name || /^(show_widget|publish_files|read_me)$/.test(tail)) {
+          if (tail === 'show_widget') return i.title ? `Drew a diagram: ${i.title}` : 'Drew a diagram';
+          if (tail === 'publish_files') return i.title ? `Published a page: ${i.title}` : 'Published a page';
+          if (tail === 'image_search') return i.query ? `Searched for images: ${i.query}` : 'Searched for images';
+          if (tail === 'read_me' && /visualize/i.test(String(name))) return 'Read the diagram guide';
+          const server = /^mcp__(.+?)__/.exec(String(name || ''));
+          if (server && /artifacts/i.test(server[1])) {
+            if (tail === 'list_types') return 'Listed artifact types';
+            if (tail === 'guide') return 'Used artifacts';
+          }
+          if (server && !/Claude_Docs/.test(server[1])) return `Used ${server[1]}`;
+        }
         // Claude Docs tools come under a connector prefix, such as mcp__Claude_Docs__update.
         const doc = /Claude_Docs__(\w+)$/.exec(String(name || ''));
         // A batch creates a document only when it carries container.create; otherwise it edits one.
@@ -87,8 +114,54 @@
     }
   }
 
-  function resultParts(content) {
+  // How long Claude thought, in whole seconds (at least 1), from the block's timestamps, or null.
+  function thinkingSeconds(b) {
+    const start = Date.parse(b.start_timestamp), stop = Date.parse(b.stop_timestamp);
+    return Number.isFinite(start) && Number.isFinite(stop) && stop >= start ? Math.max(1, Math.round((stop - start) / 1000)) : null;
+  }
+
+  // The page a publish_files call put on claude.ai, from its reply's JSON: { title, url }, or null.
+  function publishedPage(content) {
+    const text = (Array.isArray(content) ? content : []).filter(p => p && p.type === 'text').map(p => String(p.text || '')).join('\n').trim();
+    if (!text.startsWith('{')) return null;
+    for (let end = text.indexOf('}'); end > 0; end = text.indexOf('}', end + 1)) {
+      try {
+        const reply = JSON.parse(text.slice(0, end + 1));
+        return reply && /^https:\/\/claude\.ai\//.test(String(reply.url || '')) ? { title: String(reply.title || ''), url: String(reply.url) } : null;
+      } catch (e) { /* not the end of the object yet */ }
+    }
+    return null;
+  }
+
+  // The file name a step's label ends with, which claude.ai shows darker, or ''.
+  function toolTarget(name, input) {
+    const i = input && typeof input === 'object' ? input : {};
+    const p = i.path || i.file_path || '';
+    return p && /^(create_file|Write|str_replace|Edit|str_replace_based_edit_tool|view|read_file|Read)$/.test(String(name)) ? baseName(p) : '';
+  }
+
+  // The images an image_search result showed: { title, page, source, href }, href the saved copy under
+  // images/ (ctx.webImages: image URL -> 'images/<name>') or null. page is an https link or ''.
+  function webImages(content, c) {
+    const saved = c.webImages && typeof c.webImages === 'object' ? c.webImages : {};
+    const https = u => (typeof u === 'string' && /^https:\/\//i.test(u) ? u : '');
+    const out = [];
+    for (const part of Array.isArray(content) ? content : []) {
+      for (const img of (part && Array.isArray(part.images) ? part.images : [])) {
+        if (!img || typeof img !== 'object') continue;
+        const url = https(img.url);
+        const file = url && Object.prototype.hasOwnProperty.call(saved, url) ? saved[url] : null;
+        out.push({ title: String(img.title || ''), page: https(img.page_url), source: String(img.source || ''), href: file ? relHref(c.folder || '', file) : null });
+      }
+    }
+    return out;
+  }
+
+  // A result's text, and its images: inline base64 ones as data URIs, and ones claude.ai only links
+  // (file_uuid, preview_url) as their saved copy under images/ (ctx.toolImages: file uuid -> path).
+  function resultParts(content, c = {}) {
     const items = Array.isArray(content) ? content : (typeof content === 'string' ? [{ type: 'text', text: content }] : []);
+    const savedImages = c.toolImages && typeof c.toolImages === 'object' ? c.toolImages : {};
     const texts = [];
     const images = [];
     let imageItems = 0;
@@ -99,6 +172,9 @@
       else if (it.type === 'image' && it.source && it.source.type === 'base64' &&
                SAFE_IMAGE.test(String(it.source.media_type)) && /^[A-Za-z0-9+/=\s]*$/.test(String(it.source.data))) {
         images.push(`data:${it.source.media_type};base64,${it.source.data}`);
+      } else if (it.type === 'image' && typeof it.file_uuid === 'string' && Object.prototype.hasOwnProperty.call(savedImages, it.file_uuid)) {
+        const href = relHref(c.folder || '', savedImages[it.file_uuid]);
+        if (href) images.push(href);
       }
     }
     return { text: cut(texts.join('\n')), images, missingImages: imageItems - images.length };
@@ -199,6 +275,9 @@
     const heredocs = command => (typeof c.heredocs === 'function' ? c.heredocs(String(command || '')) : []) || [];
     // claudeDocKey from export-core.js: the 'doc:<node id>' a Claude Docs call writes to, or null.
     const docKeyOf = (block, result) => (typeof c.docKey === 'function' ? c.docKey(block, result) : null);
+    // widgetFile and widgetKey from export-core.js: the file a show_widget call draws, and its state key.
+    const widgetOf = block => (typeof c.widgetFile === 'function' && typeof c.widgetKey === 'function' && /(^|__|:)show_widget$/.test(String(block.name || ''))
+      ? c.widgetFile(block.input) : null);
 
     // Every delivered version of a path, in chain order, for the uuids the caller knows.
     const deliveredUuids = new Map();
@@ -217,7 +296,7 @@
     // /mnt/user-data/outputs, or made with the artifacts tool. The rest are working files.
     const sharedKeys = new Set();
     // Off-branch keys are 'x:<message>:<key>', and count by the key they wrap.
-    const isShared = key => /^(x:[^:]*:)?(artifact:|doc:|deliver:|name:|missing:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
+    const isShared = key => /^(x:[^:]*:)?(artifact:|doc:|widget:|deliver:|name:|missing:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
     // Off the active branch: the last off-branch file at each path, for a present_files there.
     const offBranch = new Map(); // path -> { key, build }
 
@@ -249,6 +328,7 @@
         else if (b.name === 'Write') { key = input.file_path; text = input.content; }
         else if (b.name === 'rewrite' || b.name === 'create_or_overwrite') { key = input.path; text = input.file_text || input.content; }
         else if (b.name === 'str_replace' || b.name === 'Edit') { key = b.name === 'Edit' ? input.file_path : input.path; edit = true; }
+        else if (widgetOf(b)) { const f = widgetOf(b); key = c.widgetKey(input, b.id); name = f.name; text = f.text; } // show_widget: a diagram file
         else if (docKeyOf(b, resultOf.get(b.id))) { key = docKeyOf(b, resultOf.get(b.id)); edit = true; } // rebuilt by extractArtifacts
         else if (b.name === 'artifacts' && ['create', 'update', 'rewrite'].includes(input.command) && (input.id || input.title)) {
           key = 'artifact:' + (input.id || input.title); mime = input.type || null; name = String(input.title || input.id);
@@ -342,6 +422,8 @@
             const id = 'a' + (++counter);
             ids.set(fileKey, id);
             files[id] = t.build();
+            // A diagram claude.ai drew in the chat (show_widget): the viewer shows it inline.
+            if (/^(x:[^:]*:)?widget:/.test(fileKey)) files[id].widget = true;
           }
           out.push({ t: 'card', file: ids.get(fileKey), version: t.version });
         }
@@ -400,10 +482,10 @@
       for (const b of Array.isArray(m.content) ? m.content : []) {
         if (!b) continue;
         if (b.type === 'text') blocks.push({ t: 'text', text: String(b.text || ''), cites: buildCites(b.citations) });
-        else if (b.type === 'thinking') blocks.push({ t: 'thinking', text: String(b.thinking || ''), summaries: thinkingSummaries(b), summary: thinkingSummary(b) });
+        else if (b.type === 'thinking') blocks.push({ t: 'thinking', text: String(b.thinking || ''), summaries: thinkingSummaries(b), summary: thinkingSummary(b), seconds: thinkingSeconds(b) });
         else if (b.type === 'tool_use') {
           const input = compactInput(b.input);
-          const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), input, result: '', error: false, images: [], missingImages: 0 };
+          const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), target: toolTarget(b.name, b.input), input, result: '', error: false, images: [], missingImages: 0 };
           blocks.push(tool);
           blockOf.set(b, tool);
           if (b.id != null) toolById.set(b.id, tool);
@@ -422,11 +504,13 @@
         if (!b || b.type !== 'tool_result') continue;
         const tool = toolById.get(b.tool_use_id);
         if (!tool) continue;
-        const { text, images, missingImages } = resultParts(b.content);
+        const { text, images, missingImages } = resultParts(b.content, c);
         tool.result = text;
         tool.images = images;
         tool.missingImages = missingImages;
         tool.error = !!b.is_error;
+        if (/(^|__|:)image_search$/.test(String(b.name || tool.name))) tool.web = webImages(b.content, c);
+        if (/(^|__|:)publish_files$/.test(String(b.name || tool.name))) tool.published = publishedPage(b.content);
       }
     }
 

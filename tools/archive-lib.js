@@ -14,7 +14,7 @@ const KNOWN_ROOT_FILES = [
   'integrated_chat.txt', 'code_snippets.md', 'links_and_sources.md', 'errors.txt', 'original.json',
   'index.md', 'viewer.html', 'viewer-check.gif', 'export-manifest.json',
 ];
-const KNOWN_DIRS = ['responses', 'artefacts', 'attachments', 'uploads', 'project', 'projects', 'viewer-files'];
+const KNOWN_DIRS = ['responses', 'artefacts', 'attachments', 'uploads', 'images', 'project', 'projects', 'viewer-files'];
 const IGNORED_NAMES = ['.DS_Store', 'Thumbs.db', '__MACOSX', '.git', 'node_modules'];
 
 // What a killed build_viewer run can leave at an archive root. Not added files; the tool reports them.
@@ -404,6 +404,32 @@ function chatFromDisk(archive, chat) {
     uploads[core.viewerUploadKey(file)] = { path: `uploads/${found}`, text: uploadText(path.join(chat.dir, 'uploads', found), found) };
   }
 
+  // Files on Claude's own messages: in artefacts/ since v1.11.0; an older export put them in uploads/ as p<NN>_<name>.
+  for (const file of safe('attached files', [], () => core.extractAttachedFiles(data, takenNames))) {
+    if (diskByNfc.has(nfc(file.filename))) {
+      uploads[file.uuid] = { path: `artefacts/${diskName(file.filename)}`, text: null };
+      continue;
+    }
+    const old = uploadNames.find(n => /^p\d+_/.test(n) && nfc(n.replace(/^p\d+_/, '')) === nfc(file.filename));
+    if (old) uploads[file.uuid] = { path: `uploads/${old}`, text: null };
+  }
+
+  // images/: web-search images the export saved, named by a hash of their URL (webImageName).
+  const imageNames = fileNames(path.join(chat.dir, 'images'));
+  const webImages = {};
+  for (const img of safe('web images', [], () => core.webImagesOf(data))) {
+    const hit = imageNames.find(n => n.startsWith(img.key) && /^[_.]/.test(n.slice(img.key.length)));
+    if (hit) webImages[img.url] = `images/${hit}`;
+  }
+
+  // Images Claude viewed, saved as images/<first 8 of the uuid>_<name><ext> (toolImageName).
+  const toolImages = {};
+  for (const img of safe('tool images', [], () => core.toolImagesOf(data))) {
+    const key = img.uuid.slice(0, 8);
+    const hit = imageNames.find(n => n.startsWith(key) && /^[_.]/.test(n.slice(key.length)));
+    if (hit) toolImages[img.uuid] = `images/${hit}`;
+  }
+
   // project: this chat's project/ folder, or the shared projects/<dir> its README links to.
   const projectDir = path.join(chat.dir, 'project');
   const hasProjectDir = isRealDir(projectDir);
@@ -458,9 +484,13 @@ function chatFromDisk(archive, chat) {
     artifacts,
     artifactIndex,
     uploads,
+    webImages,
+    toolImages,
     deliveries: core.buildViewerDeliveries(savedDeliveries),
     heredocs: core.heredocFiles,
     docKey: core.claudeDocKey,
+    widgetFile: core.widgetFile,
+    widgetKey: core.widgetKey,
     project,
     // An older export's viewer had no badges; its errors.txt still names the files that may not match.
     flags: core.viewerFlags(core.warningsFromReport(readText(path.join(chat.dir, 'errors.txt')))),
