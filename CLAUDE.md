@@ -51,6 +51,7 @@ For deeper dives, two companion docs live alongside this one:
 | `tests/e2e/steps.e2e.js` | Browser test of the step groups: the summary line, rows and their labels, viewed images in their row, thinking alone. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/webimages.e2e.js` | Browser test of web-search images: one mosaic per response, `+N`, unsaved cards, the gallery's keys and closing. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/parts.e2e.js` | Browser test of upload and generated-file text loaded from `viewer-files/`. | Optional; needs `playwright-core` and Chromium. |
+| `tests/e2e/published.e2e.js` | Browser test of published-page cards: one card per page, versions, "Same as published", "Needs claude.ai to run", the claude.ai link, Export All links. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/hostile.js` | Hostile-input fixtures for the viewer e2e tests. | Not a test by itself. |
 | `takeout-viewer.js` | Builds the offline viewer's data. | Classic script loaded by `popup.html` and `sidepanel.html`, exposing `CTViewer` (`buildViewerChat`, `buildViewerData`, `assembleViewer`, ...). Header comment documents the contract. |
 | `viewer/` | Viewer page sources. | `viewer-template.html`, `viewer-logic.js`, `viewer-app.js`, `marked.min.js`, `katex.min.js`, `katex-inline.css`, `highlight.min.js`, `THIRD-PARTY-NOTICES.txt`. `writeViewer` inlines them into one `viewer.html`. |
@@ -70,7 +71,7 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 | Section | What lives here |
 |---|---|
 | `export-core.js` (separate file) | Mojibake repair, `isTextFile`, `getMessageChain`, `extractArtifacts` (per-turn versioning + str_replace replay), `extractUploadedFiles`, `extractPresentedFiles`, `extractDeliveredFiles`, `getModelName`, `buildViewerDeliveries`, `viewerProject`, the heredoc helpers (`heredocMatches`, `heredocFiles`), `safeFileTitle`, and the Claude Docs rebuild (`claudeDocCreated`, `claudeDocKey`, `renderClaudeDoc`) live here, not in `popup.js`. Edit them there. |
-| `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `delivered_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`, `viewer`, `claude_doc_unreplayed`, `doc_diagram`, `web_image`, `tool_image`, `export_health`. |
+| `ExportErrorCollector` class | Structured errors + warnings per export, builds `errors.txt` with recovery hints, troubleshooting guide. **All warning types must have a case in `_getRecoveryHint`.** Existing types: `upload`, `presented_file`, `delivered_file`, `project_doc`, `project_metadata`, `str_replace_failed`, `artifact_basename_collision`, `artifact_opaque_mutation`, `viewer`, `claude_doc_unreplayed`, `doc_diagram`, `web_image`, `tool_image`, `published_page`, `export_health`. |
 | BOM helpers | `withBOM(text)`, `addFileWithBOM(folder, path, content)`. The mojibake map and `fixMojibake` are in `export-core.js`. |
 | Extractors and renderers | `extractTextAttachments`, `extractWebSources`, `extractBlobContent`, `extractProjectFiles`, `getLanguageFromFilename`, `processTextWithCitations`, `formatReferences`, `getLanguageFromType`, `getThinkingSummary`, `markdownToPlainText`. |
 | ZIP/section builders | `extractCodeBlocks`, `extractUrls`, `sanitizeForFilename`, `extractFirstHeading`, `escapeMarkdown`, `extractResponseTextOnly`, `generateMeta`, `generatePrompts`, `generateResponsesTextOnly`, `generateCodeSnippets`, `generateLinksAndSources`. |
@@ -159,6 +160,7 @@ The user can regenerate a response, producing a tree. `current_leaf_message_uuid
 | `present_files` | `filepaths[]` | `populateConversationFolder` downloads a presented file the replay didn't make, or one whose replay is known to be off (`str_replace_failed` or `artifact_opaque_mutation` for that name: the download then replaces the final file and its last `_vN`). Same-named files from different folders become `<base>_2<ext>`. In `convertToMarkdown`, looked up through `presentedNames` in the `artifacts` map for inline embedding; a binary one is linked. *Caveat:* with edited artifacts, lookup resolves to the FINAL versioned state, not the state at the moment of presentation. Acceptable trade-off; the per-turn versioned files exist on disk for cases where the precise moment matters. |
 | `Write` / `Edit` | `file_path`, `content` / `old_string`, `new_string`, `replace_all` | Same replay as `create_file` / `str_replace`. Newer conversations use these names. |
 | `Bash` | `command` | Same as `bash_tool`, in the extension and `replay_bash.py`. Uploads live at `/root/.claude/uploads/<session>/<uuid8>-<name>`. |
+| `publish_files` (claude-artifacts) | `files[]` (`path`, `as`), `title`; result JSON has `url` | `publishedPagesOf` groups them by page id (`base58ToUuid`). `savePublishedPages` fetches each page's versions through `content.js` (`publishedPageInfo`, `publishedPageFile`; the asset token never leaves `content.js`) into `published/<page>/<version>/` with `published.json`, unless a version is the same, file by file, as an artefact (SHA-256). Caps 32 MB per file, 50 MB per version. The viewer shows one `published:<uuid>` card. |
 | `SendUserFile` | `files[]`; result has `file_deliveries[]` with `file_uuid`, `path` | `extractDeliveredFiles` lists them and `populateConversationFolder` downloads each by UUID into `artefacts/`. |
 | `<connector>show_widget` (visualize) | `title`, `widget_code` | A diagram drawn inline. `extractArtifacts` saves it under key `widget:<title>` as `<title>.svg` (an SVG with `xmlns` and `WIDGET_CSS`, claude.ai's widget classes for light and dark) or `<title>.html` (`widgetFile`); same title = versions. `extract_artifacts.py` mirrors it byte for byte. Markdown links it and shows an SVG as an image; the viewer gives it a card. The tool's `read_me` result is left out of the Markdown (`isGuidanceTool`). |
 | `product_carousel_display_v0`, `featured_card_display_v0`, `comparison_card_display_v0`, `ask_user_input_v0` | `products[]` (`name`, `price`, `blurb`, `attributes[]`); `questions[]`; carousel/featured results carry `images[]` ids `product_<n>_<m>` | Product pictures are web images (`isImageResultTool`). Viewer: cards inline (`displayData`, `renderDisplay`), questions hidden. Markdown: headings, a table, lists (`displayLines`). |
@@ -233,6 +235,7 @@ This is the part most likely to break or need extending. As of v1.5.2:
 ├── project/project.json, prompt_template.md, docs.json, files.json, <doc> (text; .txt added when its name is not a text type), files/<name>
 ├── images/<key>_<title><ext>                 (images from web searches; only with the optional https permission)
 ├── images/<uuid8>_<name><ext>                (images Claude looked at, from claude.ai: toolImagesOf, saveToolImages)
+├── published/<Title>_<id>/published.json, <version>/<files>   (only when the chat used publish_files; a version the same as an artefact is not copied)
 └── uploads/p01_<filename>, p02_<filename>, ...
 ```
 
@@ -250,6 +253,7 @@ claude-takeout-[<display name>-][changes-]<YYYY-MM-DD>_<HHMM>.zip   (megaZipName
 ├── index.md                   # Master table w/ per-conversation issue counts
 ├── export-manifest.json       # { format, exported_at, kind: full|changes, since, listed, chats: [{ uuid, name, updated_at, folder }] }
 ├── projects/<project>/        # files/ and files.json, stored once and linked from each chat's README
+├── published/<Title>_<id>/    # published pages, stored once and linked from each chat's README; `published` is reserved as a chat folder name
 ├── <conversation-folder-1>/   # Same layout as above
 ├── <conversation-folder-2>/
 └── ...
@@ -270,6 +274,8 @@ All called with `credentials: 'include'` so the user's existing Claude session a
 | `GET /api/organizations/<orgId>/projects/<projectUuid>/docs` | `fetchProjectDocs` | List of project documents. Empty for uploaded knowledge files. |
 | `GET /api/organizations/<orgId>/projects/<projectUuid>/files` | `fetchProjectFileList` | Project knowledge files such as PDFs, downloaded through `/files/<uuid>/contents`. |
 | `GET /api/organizations/<orgId>/projects/<projectUuid>/docs/<docUuid>/content` | `fetchProjectDocs` | Full document content (falls back to `/docs/<docUuid>`). |
+| `GET /api/frame/<uuid>?org=<orgId>[&ver=<ver>]` (header `X-Frame-CP: go`) | `content.js` `publishedPageInfo` | A published page's versions, title and asset token. The token never leaves `content.js`. |
+| `GET https://<uuid>.frame.claudeusercontent.com/_f/<ver>/_files.json` and `/_src/<path>` (query `__frame_t`) | `content.js` `publishedPageInfo`, `publishedPageFile` | A published page's file list and files; no cookies, no referrer. |
 | `GET /api/organizations/<orgId>/files/<fileUuid>/...` (multiple URL patterns) | `fetchUploadedFile` | PDF/image/etc. blobs. Tries several path shapes including a sanitized-path fallback when the wiggle endpoint 404s. |
 
 If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a primary URL, fall back, surface failures via `ExportErrorCollector`, and capture every URL tried in the error report's `urlsTried[]`.
@@ -337,6 +343,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - `doc_diagram` — a Claude Docs document has diagrams (shown by caption) and the chat has no self-contained HTML copy of it.
 - `tool_image` — an image Claude looked at (tool result linking a claude.ai file, `toolImagesOf`) couldn't be downloaded into `images/`.
 - `web_image` — an image from a web search wasn't saved in `images/`: no permission (one warning for all) or the site refused it.
+- `published_page` — a page Claude published could not be saved, or only partly: no claude.ai tab, a failed request (one 401 warning per export), a file over the caps, a checksum mismatch, a renamed or rejected path. Messages carry codes only, never a URL or token.
 - `export_health` — claude.ai's data for the chat looks incomplete (`chatHealth` in export-core.js: no messages although the chat changed, messages with no content, an unknown current branch in a branched chat, content block types the export doesn't show; and in `populateConversationFolder`, none of several uploads downloaded). The status line turns amber; single Markdown and JSON exports run `chatHealth` too (`exportedStatus`). Keep the checks calibrated on real chats: a chat opened and never used has no messages and is healthy.
 - `viewer` — one chat could not be added to `viewer.html` (`buildViewerChat` threw). A failure of `writeViewer` as a whole is not recorded here: the status line says "viewer.html could not be built." The export itself is complete.
 

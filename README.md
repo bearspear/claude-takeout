@@ -87,6 +87,10 @@ Creates a comprehensive archive:
 │   ├── script.py
 │   ├── wiring_diagram.svg
 │   └── ...
+├── published/                   # Pages Claude published on claude.ai (only when the chat published some)
+│   └── Dining_room_guide_LkJG.../
+│       ├── published.json           # Versions, files and which are the same as an artefact
+│       └── v1/index.html            # A version's files, when they are not already in artefacts/
 ├── images/                      # Images Claude looked at, and from its web searches (with permission)
 ├── attachments/                 # Pasted text files (extracted content)
 │   ├── meeting_notes.txt
@@ -143,7 +147,7 @@ claude-takeout-2026-01-01.zip
 └── ...
 ```
 
-Each conversation folder has the identical structure to individual ZIP exports.
+Each conversation folder has the identical structure to individual ZIP exports, except that pages Claude published are saved once, in a shared `published/` folder at the root, and each chat's README links there.
 
 ## Keyboard Shortcuts
 
@@ -369,6 +373,11 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.14.0
+
+- **Pages Claude published are saved** - When Claude published a page on claude.ai, the export now saves its files in `published/<page>/`, one folder per version, with a `published.json` listing them. A version that is the same as a file already in `artefacts/` is not copied again; the README and `full_chat.md` link the one that is there. Export All keeps one copy of a page at the root, however many chats published it. A file too large (over 32 MB, or 50 MB for one version) or that fails its checksum is left out and listed in `errors.txt`. Needs a fresh export, with a claude.ai tab open and signed in.
+- **One card per published page** - The viewer shows a published page once, as a card on Claude's message, with its versions, a link to open it on claude.ai, and "Same as published" when the saved file matches it. A page built on claude.ai's own page code shows its source and "Needs claude.ai to run". The old-archive and merge tools understand `published/`.
 
 ### v1.13.0
 
