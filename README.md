@@ -370,6 +370,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.12.1
+
+- **Export All names carry the time, in lowercase** - The folder and the Mega-Zip are now named `claude-takeout-<your name>-<YYYY-MM-DD>_<HHMM>`, in your local time and all lowercase, as Grok Takeout and Gemini Takeout name theirs (for example `claude-takeout-michael-2026-11-15_2142`). Before, the date was in UTC, so an evening export could carry tomorrow's date, and a second export that day got `_2`.
+
 ### v1.12.0
 
 - **Export All saves to a folder** - Like Grok Takeout and Gemini Takeout, Export All now writes into a folder you choose instead of downloading one ZIP: it makes a new folder inside it, named like the ZIP would be (`claude-takeout-<your name>-<date>`), and writes each chat as it goes, so nothing waits for a huge download at the end. The folder holds what the ZIP holds, viewer included. The button reads **Export All (Folder)**. Set **Export All saves as: ZIP** in Settings for the old Mega-Zip. Chrome only lets the side panel ask for a folder, so from the popup the button opens the side panel, where you click it again. A file the folder refuses (a name your disk doesn't allow) is listed in `write-errors.txt`, and the rest is saved.

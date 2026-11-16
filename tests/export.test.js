@@ -1479,7 +1479,7 @@ test('a full mega-ZIP writes export-manifest.json and records what it exported',
   const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
   const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-02T00:00:00Z') };
   const { store, saved, zip } = await runBulkZip({ list, chats });
-  assert.match(saved.name, /^claude-takeout-\d{4}-\d{2}-\d{2}\.zip$/);
+  assert.match(saved.name, /^claude-takeout-\d{4}-\d{2}-\d{2}_\d{4}\.zip$/);
   const manifest = JSON.parse(await zip.file('export-manifest.json').async('string'));
   assert.strictEqual(manifest.kind, 'full');
   assert.strictEqual(manifest.listed, 2);
@@ -1493,7 +1493,7 @@ test('Export changes takes only new and updated chats, and says when nothing cha
   const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-09T00:00:00Z'), listed('c', '2026-01-08T00:00:00Z')];
   const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-09T00:00:00Z'), c: chatFor('c', '2026-01-08T00:00:00Z') };
   const { store, saved, zip } = await runBulkZip({ list, chats, stored, options: { changesOnly: true } });
-  assert.match(saved.name, /^claude-takeout-changes-\d{4}-\d{2}-\d{2}\.zip$/);
+  assert.match(saved.name, /^claude-takeout-changes-\d{4}-\d{2}-\d{2}_\d{4}\.zip$/);
   const manifest = JSON.parse(await zip.file('export-manifest.json').async('string'));
   assert.deepStrictEqual([manifest.kind, manifest.since, manifest.chats.map((c) => c.uuid)], ['changes', '2026-01-05T00:00:00Z', ['b', 'c']]);
   assert.ok(!zip.file('Chat_a/README.md') && zip.file('Chat_b/README.md') && zip.file('Chat_c/README.md'));
@@ -1533,16 +1533,18 @@ test('the Mega-Zip exports setting defaults to all chats, and "only new or chang
 
 test('the mega-ZIP name carries the account display name, cleaned for a file name', async () => {
   const megaZipName = vm.runInContext('megaZipName', exportPopup().sandbox);
-  assert.strictEqual(megaZipName('Mika', 'full', '2026-11-09'), 'claude-takeout-Mika-2026-11-09.zip');
-  assert.strictEqual(megaZipName('Mika Example', 'changes', '2026-11-09'), 'claude-takeout-Mika_Example-changes-2026-11-09.zip');
-  assert.strictEqual(megaZipName('../José/ <x>', 'full', '2026-11-09'), 'claude-takeout-José_x-2026-11-09.zip');
+  assert.strictEqual(megaZipName('Mika', 'full', '2026-11-09'), 'claude-takeout-mika-2026-11-09.zip');
+  assert.strictEqual(megaZipName('Mika Example', 'changes', '2026-11-09'), 'claude-takeout-mika_example-changes-2026-11-09.zip');
+  assert.strictEqual(megaZipName('../José/ <X>', 'full', '2026-11-09'), 'claude-takeout-josé_x-2026-11-09.zip');
+  const stamp = vm.runInContext('exportStamp', exportPopup().sandbox);
+  assert.strictEqual(stamp(new Date(2026, 10, 5, 9, 7)), '2026-11-05_0907');
   assert.strictEqual(megaZipName('', 'full', '2026-11-09'), 'claude-takeout-2026-11-09.zip');
   assert.strictEqual(megaZipName('***', 'full', '2026-11-09'), 'claude-takeout-2026-11-09.zip');
   assert.strictEqual(megaZipName(null, 'changes', '2026-11-09'), 'claude-takeout-changes-2026-11-09.zip');
   assert.strictEqual(megaZipName('x'.repeat(80), 'full', 'd').length, 'claude-takeout--d.zip'.length + 40);
   const list = [listed('a', '2026-01-01T00:00:00Z')];
   const { saved } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, accountName: 'Mika' });
-  assert.match(saved.name, /^claude-takeout-Mika-\d{4}-\d{2}-\d{2}\.zip$/);
+  assert.match(saved.name, /^claude-takeout-mika-\d{4}-\d{2}-\d{2}_\d{4}\.zip$/);
 });
 
 test('a chat that failed is not recorded, so the next Export changes tries it again', async () => {
@@ -1896,10 +1898,11 @@ test('Export All into a folder writes the same files as the mega-ZIP, in a new f
   const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-02T00:00:00Z') };
   const zipped = await runBulkZip({ list, chats, accountName: 'Mika' });
   const picked = new FakeDir();
-  await picked.getDirectoryHandle('claude-takeout-Mika-' + new Date().toISOString().slice(0, 10), { create: true });  // an earlier run that day
+  const stampNow = vm.runInContext('exportStamp()', exportPopup().sandbox);
+  await picked.getDirectoryHandle(`claude-takeout-mika-${stampNow}`, { create: true });  // an earlier run that minute
   const disk = await runBulkZip({ list, chats, accountName: 'Mika', options: { directory: picked } });
   assert.strictEqual(disk.saved, null, 'no download');
-  const runName = 'claude-takeout-Mika-' + new Date().toISOString().slice(0, 10) + '_2';
+  const runName = `claude-takeout-mika-${stampNow}_2`;
   assert.ok(picked.entries.has(runName), [...picked.entries.keys()].join());
   const onDisk = Object.keys(picked.entries.get(runName).flat()).sort();
   const inZip = Object.keys(zipped.zip.files).filter((n) => !zipped.zip.files[n].dir).sort();

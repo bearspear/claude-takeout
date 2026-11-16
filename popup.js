@@ -4016,9 +4016,16 @@ async function makeRunFolder(directory, zipName) {
   return { name, handle: await directory.getDirectoryHandle(name, { create: true }) };
 }
 
+// The local date and time an export started, as 2026-11-15_2142, as Grok and Gemini Takeout name theirs.
+function exportStamp(date = new Date()) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}`;
+}
+
+// claude-takeout-<display name>-[changes-]<stamp>.zip, all lowercase. The folder export uses it without .zip.
 function megaZipName(accountName, kind, dateStr) {
   const name = typeof accountName === 'string'
-    ? Array.from(accountName.normalize('NFC').replace(/[^\p{L}\p{N}\p{M}]+/gu, '_').replace(/^_+|_+$/g, '')).slice(0, 40).join('')
+    ? Array.from(accountName.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}\p{M}]+/gu, '_').replace(/^_+|_+$/g, '')).slice(0, 40).join('')
     : '';
   return `claude-takeout-${name ? `${name}-` : ''}${kind === 'changes' ? 'changes-' : ''}${dateStr}.zip`;
 }
@@ -4071,7 +4078,7 @@ async function bulkExportZip(options = {}) {
     }
     const total = conversations.length;
 
-    const dateStr = new Date().toISOString().slice(0, 10);
+    const dateStr = exportStamp();
     let run = null;
     if (directory) {
       try {
