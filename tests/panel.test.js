@@ -93,6 +93,53 @@ function makeEnv({ url = chatUrl(A), captured = conv(A, 'Chat A') } = {}) {
   return env;
 }
 
+// Real content.js with a recording fetch that serves the frame API, _files.json and _src.
+const PUB = '9fe94226-9819-4551-8836-a76d0c116102';
+function resp(status, { json, bytes, headers = {} } = {}) {
+  return {
+    status, ok: status >= 200 && status < 300,
+    headers: { get: (k) => headers[k] ?? null },
+    json: async () => json,
+    arrayBuffer: async () => (bytes || new Uint8Array()).buffer.slice(bytes ? bytes.byteOffset : 0, bytes ? bytes.byteOffset + bytes.byteLength : 0),
+  };
+}
+function publishedHarness({ src, srcThrow, files, expiresIn = 3600 } = {}) {
+  const reqs = [], delays = [];
+  const listing = files || {
+    'index.html': { sha256: 'h1', size: 3, contentType: 'text/html' },
+    'data.json': { sha256: 'h2', size: 2, contentType: 'application/json' },
+    'artifact-type/x.js': { sha256: 'h3', size: 1, contentType: 'text/javascript' },
+    '../evil': { sha256: 'h4', size: 1, contentType: 'text/plain' },
+  };
+  let onMessage;
+  const sandbox = {
+    window: { addEventListener() {}, location: {} }, console: { log() {} },
+    setTimeout: (f, ms) => { delays.push(ms); f(); },
+    crypto: require('crypto').webcrypto, btoa, atob, TextEncoder, URL, Uint8Array, String, Math, Number, Date, Map, Error,
+    document: { createElement: () => ({}), head: { appendChild() {} }, cookie: 'lastActiveOrg=11111111-0000-4000-8000-000000000001' },
+    fetch: async (url, opts) => {
+      reqs.push({ url, opts });
+      if (url.includes('/api/frame/')) {
+        const exp = Math.floor(Date.now() / 1000) + expiresIn;
+        return resp(200, { json: { ver: 'V', title: 'T', history: ['V'], files: [], assetToken: 'a.b.c.' + exp } });
+      }
+      if (url.includes('_files.json')) return resp(200, { json: { ver: 'V', files: listing } });
+      if (srcThrow) throw srcThrow;
+      return src ? src() : resp(200, { bytes: new Uint8Array([1, 2, 3]) });
+    },
+    chrome: {
+      runtime: { getURL: (p) => p, lastError: null, onMessage: { addListener: (f) => { onMessage = f; } }, sendMessage() {} },
+      storage: { local: { set() {}, remove() {}, get: (k, cb) => cb({}) } },
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), sandbox);
+  return {
+    reqs, delays,
+    frameCalls: () => reqs.filter((r) => r.url.includes('/api/frame/')),
+    call: (msg) => new Promise((r) => onMessage(msg, {}, (x) => r(JSON.parse(JSON.stringify(x))))),
+  };
+}
+
 const tests = {
   'startup shows the conversation in the URL': async () => {
     const e = makeEnv();
@@ -378,6 +425,84 @@ const tests = {
     account.display_name = '';
     const full = await new Promise((r) => onMessage({ action: 'fetchAllConversations', withAccountName: true }, {}, r));
     assert.strictEqual(full.accountName, 'Mika Example', 'full name when there is no display name');
+  },
+  'publishedPageInfo sends X-Frame-CP, drops the type runtime and bad paths, and returns no token': async () => {
+    const h = publishedHarness();
+    const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.strictEqual(h.frameCalls()[0].opts.headers['X-Frame-CP'], 'go');
+    assert.ok(!/[?&]ver=/.test(h.frameCalls()[0].url), 'live page sends no ver');
+    assert.deepStrictEqual(res.files.map((f) => f.path), ['index.html', 'data.json']);
+    assert.deepStrictEqual(res.rejected, ['../evil']);
+    assert.strictEqual(res.ver, 'V');
+    const text = JSON.stringify(res);
+    assert.ok(!text.includes('a.b.c') && !text.includes('__frame_t'));
+    const src = h.reqs.find((r) => r.url.includes('_files.json'));
+    assert.strictEqual(src.opts.credentials, 'omit');
+    assert.strictEqual(src.opts.redirect, 'error');
+    assert.strictEqual(src.opts.referrerPolicy, 'no-referrer');
+  },
+
+  'publishedPageFile retries once on 403 and encodes in chunks': async () => {
+    const bytes = new Uint8Array(3 * 1024 * 1024).map((_, i) => (i * 7) % 256);
+    let n = 0;
+    const h = publishedHarness({ src: () => (++n === 1 ? resp(403) : resp(200, { bytes })) });
+    const res = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: bytes.length });
+    assert.ok(Buffer.from(res.base64, 'base64').equals(Buffer.from(bytes)));
+    assert.strictEqual(h.frameCalls().length, 2, 'one token request, one more after the 403');
+    assert.strictEqual(res.size, bytes.length);
+  },
+
+  'an expired or missing token is fetched again before the file': async () => {
+    const h = publishedHarness({ expiresIn: 30 });
+    await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    const before = h.frameCalls().length;
+    await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 3 });
+    assert.strictEqual(h.frameCalls().length, before + 1, 'near expiry: one new token request');
+    const last = h.reqs.length - 1;
+    assert.ok(h.reqs[last].url.includes('_src/') && h.reqs[last - 1].url.includes('/api/frame/'), 'token first, then the file');
+    const fresh = publishedHarness();
+    await fresh.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 3 });
+    const frameIdx = fresh.reqs.findIndex((r) => r.url.includes('/api/frame/'));
+    const srcIdx = fresh.reqs.findIndex((r) => r.url.includes('_src/'));
+    assert.ok(frameIdx === 0 && srcIdx > frameIdx, 'no cache: token first');
+    assert.strictEqual(fresh.frameCalls().length, 1);
+  },
+
+  'errors carry no token': async () => {
+    const h = publishedHarness({ src: () => resp(500) });
+    const r1 = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 3 });
+    assert.deepStrictEqual(r1, { error: 'HTTP 500', status: 500 });
+    const h2 = publishedHarness({ srcThrow: new Error('https://x.frame.claudeusercontent.com/_f/V/_src/a?__frame_t=a.b.c.9') });
+    const r2 = await h2.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 3 });
+    assert.deepStrictEqual(r2, { error: 'network' });
+    for (const r of [r1, r2]) assert.ok(!/__frame_t|a\.b\.c/.test(JSON.stringify(r)));
+  },
+
+  'a file over the cap is refused before fetching': async () => {
+    const big = 40 * 1024 * 1024;
+    const h = publishedHarness({ files: { 'big.bin': { sha256: 'x', size: big, contentType: 'application/octet-stream' } } });
+    await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    const r1 = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'big.bin', size: big });
+    assert.deepStrictEqual(r1, { error: 'too large' });
+    const h2 = publishedHarness({ files: { 'big.bin': { sha256: 'x', size: big, contentType: 'application/octet-stream' } } });
+    const r2 = await h2.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'big.bin', size: 1 });
+    assert.deepStrictEqual(r2, { error: 'too large' });
+    for (const x of [h, h2]) assert.ok(!x.reqs.some((r) => r.url.includes('_src/')));
+  },
+
+  '429 waits once for Retry-After': async () => {
+    let n = 0;
+    const h = publishedHarness({ src: () => (++n === 1 ? resp(429, { headers: { 'Retry-After': '1' } }) : resp(200, { bytes: new Uint8Array([1, 2, 3]) })) });
+    const res = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 3 });
+    assert.strictEqual(res.base64, 'AQID');
+    assert.deepStrictEqual(h.delays, [1000]);
+  },
+
+  'published actions reject a bad uuid or version before any fetch': async () => {
+    const h = publishedHarness();
+    assert.deepStrictEqual(await h.call({ action: 'publishedPageInfo', uuid: 'nope', ver: '' }), { error: 'bad request' });
+    assert.deepStrictEqual(await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '../x' }), { error: 'bad request' });
+    assert.strictEqual(h.reqs.length, 0);
   },
 };
 

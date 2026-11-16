@@ -81,6 +81,166 @@
     }
   }
 
+
+  // ==== Published pages ====
+  // A page a chat published is served from <uuid>.frame.claudeusercontent.com behind a short-lived
+  // asset token. The token stays in this script: no response, error text or log holds it or a frame URL.
+  const PUBLISHED_MAX_FILE = 32 * 1024 * 1024;
+  const PUBLISHED_UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  const PUBLISHED_VER = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
+  const publishedTokens = new Map(); // 'uuid:ver' -> { token, expires (ms), ver (resolved) }
+  const publishedFileLists = new Map(); // 'uuid:resolved ver' -> { path: { sha256, size, contentType } }
+
+  // Waits go through setTimeout here so tests can stub it.
+  function publishedDelay(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  // Errors that may reach a response carry only a code and a status, never a message from fetch.
+  class PublishedError extends Error {
+    constructor(code, status) { super(code); this.code = code; this.status = status; }
+  }
+
+  function publishedFail(e) {
+    if (e instanceof PublishedError) return e.status ? { error: e.code, status: e.status } : { error: e.code };
+    return { error: 'network' };
+  }
+
+  function publishedExpiry(token, fetchedAt) {
+    const n = Number(String(token).split('.')[3]);
+    const now = Date.now();
+    if (Number.isFinite(n) && n * 1000 > now && n * 1000 <= now + 24 * 3600 * 1000) return n * 1000;
+    return fetchedAt + 50 * 60 * 1000;
+  }
+
+  async function getOrgForPublished(request) {
+    const stored = await new Promise((resolve) => chrome.storage.local.get(['orgId'], (r) => resolve(r || {})));
+    return getActiveOrgId() || orgId || stored.orgId || request.orgId || null;
+  }
+
+  // Ask claude.ai for the page's asset token (and the title and history). Caches the token under the
+  // requested version and, for the live page (''), under the resolved one too.
+  async function publishedFrameInfo(uuid, ver, org) {
+    const url = 'https://claude.ai/api/frame/' + uuid + '?org=' + encodeURIComponent(org) +
+      (ver ? '&ver=' + encodeURIComponent(ver) : '');
+    let res;
+    try {
+      res = await fetch(url, { credentials: 'same-origin', headers: { 'X-Frame-CP': 'go', 'Accept': 'application/json' } });
+    } catch (e) { throw new PublishedError('network'); }
+    if (!res.ok) throw new PublishedError('HTTP ' + res.status, res.status);
+    let body;
+    try { body = await res.json(); } catch (e) { throw new PublishedError('bad response'); }
+    const resolved = body && typeof body.ver === 'string' ? body.ver : '';
+    if (!body || typeof body.assetToken !== 'string' || !body.assetToken || !PUBLISHED_VER.test(resolved)) {
+      throw new PublishedError('bad response');
+    }
+    const entry = { token: body.assetToken, expires: publishedExpiry(body.assetToken, Date.now()), ver: resolved };
+    publishedTokens.set(uuid + ':' + resolved, entry);
+    publishedTokens.set(uuid + ':' + ver, entry);
+    return { entry, title: body.title, history: body.history };
+  }
+
+  async function publishedToken(uuid, ver, org, force) {
+    const cached = publishedTokens.get(uuid + ':' + ver);
+    if (!force && cached && cached.expires - Date.now() >= 60 * 1000) return cached;
+    return (await publishedFrameInfo(uuid, ver, org)).entry;
+  }
+
+  // GET one file from the frame host. 403 gets a new token once, 429 waits once (Retry-After up to
+  // 10 s), 5xx waits 1 s once.
+  async function publishedFrameGet(uuid, ver, org, part) {
+    let entry = await publishedToken(uuid, ver, org, false);
+    let again403 = true, again429 = true, again5xx = true;
+    for (;;) {
+      const url = 'https://' + uuid + '.frame.claudeusercontent.com/_f/' + entry.ver + '/' + part +
+        '?__frame_t=' + encodeURIComponent(entry.token);
+      let res;
+      try {
+        res = await fetch(url, { credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error' });
+      } catch (e) { throw new PublishedError('network'); }
+      if (res.ok) return res;
+      const s = res.status;
+      if (s === 403 && again403) { again403 = false; entry = await publishedToken(uuid, ver, org, true); continue; }
+      if (s === 429 && again429) {
+        const wait = parseFloat(res.headers && res.headers.get ? res.headers.get('Retry-After') : '');
+        if (Number.isFinite(wait) && wait >= 0 && wait <= 10) { again429 = false; await publishedDelay(wait * 1000); continue; }
+      }
+      if (s >= 500 && again5xx) { again5xx = false; await publishedDelay(1000); continue; }
+      throw new PublishedError('HTTP ' + s, s);
+    }
+  }
+
+  function publishedPathOk(p) {
+    if (typeof p !== 'string' || !p || p.charAt(0) === '/') return false;
+    return p.split('/').every((seg) => seg !== '' && seg !== '.' && seg !== '..');
+  }
+
+  async function publishedFileList(uuid, ver, org) {
+    const entry = await publishedToken(uuid, ver, org, false);
+    const key = uuid + ':' + entry.ver;
+    const res = await publishedFrameGet(uuid, ver, org, '_files.json');
+    let body;
+    try { body = await res.json(); } catch (e) { throw new PublishedError('bad response'); }
+    const files = body && body.files && typeof body.files === 'object' ? body.files : {};
+    publishedFileLists.set(key, files);
+    return files;
+  }
+
+  async function publishedPageInfo(request) {
+    const uuid = request.uuid, ver = request.ver == null ? '' : request.ver;
+    if (typeof uuid !== 'string' || !PUBLISHED_UUID.test(uuid) || typeof ver !== 'string' ||
+        (ver !== '' && !PUBLISHED_VER.test(ver))) return { error: 'bad request' };
+    const org = await getOrgForPublished(request);
+    if (!org) return { error: 'no org' };
+    const info = await publishedFrameInfo(uuid, ver, org);
+    const listing = await publishedFileList(uuid, ver, org);
+    const files = [], rejected = [];
+    for (const p of Object.keys(listing)) {
+      if (p.indexOf('artifact-type/') === 0) continue;
+      if (!publishedPathOk(p)) { rejected.push(p); continue; }
+      const f = listing[p] || {};
+      files.push({ path: p, size: f.size, contentType: f.contentType, sha256: f.sha256 });
+    }
+    return { ver: info.entry.ver, title: info.title, history: info.history, files, rejected };
+  }
+
+  function publishedBase64(bytes) {
+    const STEP = 3 * 8192; // a multiple of 3, so each piece encodes without padding
+    let out = '';
+    for (let i = 0; i < bytes.length; i += STEP) {
+      out += btoa(String.fromCharCode.apply(null, bytes.subarray(i, i + STEP)));
+    }
+    return out;
+  }
+
+  async function publishedPageFile(request) {
+    const uuid = request.uuid, ver = request.ver == null ? '' : request.ver, p = request.path;
+    if (typeof uuid !== 'string' || !PUBLISHED_UUID.test(uuid) || typeof ver !== 'string' ||
+        (ver !== '' && !PUBLISHED_VER.test(ver)) || !publishedPathOk(p) || p.indexOf('artifact-type/') === 0) {
+      return { error: 'bad request' };
+    }
+    if (Number(request.size) > PUBLISHED_MAX_FILE) return { error: 'too large' };
+    const org = await getOrgForPublished(request);
+    if (!org) return { error: 'no org' };
+    const cached = publishedTokens.get(uuid + ':' + ver);
+    let listing = cached && publishedFileLists.get(uuid + ':' + cached.ver);
+    if (!listing) listing = await publishedFileList(uuid, ver, org);
+    const meta = listing[p];
+    if (!meta) return { error: 'not found' };
+    if (Number(meta.size) > PUBLISHED_MAX_FILE) return { error: 'too large' };
+    const res = await publishedFrameGet(uuid, ver, org, '_src/' + p.split('/').map(encodeURIComponent).join('/'));
+    let buf;
+    try { buf = await res.arrayBuffer(); } catch (e) { throw new PublishedError('network'); }
+    if (buf.byteLength > PUBLISHED_MAX_FILE) return { error: 'too large' };
+    return { base64: publishedBase64(new Uint8Array(buf)), contentType: meta.contentType, size: buf.byteLength };
+  }
+
+  function runPublished(fn, request, sendResponse) {
+    (async () => {
+      try { sendResponse(await fn(request)); } catch (e) { sendResponse(publishedFail(e)); }
+    })();
+  }
+
   // Listen for messages from popup
   chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
 
@@ -123,6 +283,16 @@
           sendResponse({ error: e.message });
         }
       });
+      return true;
+    }
+
+    if (request.action === 'publishedPageInfo') {
+      runPublished(publishedPageInfo, request, sendResponse);
+      return true;
+    }
+
+    if (request.action === 'publishedPageFile') {
+      runPublished(publishedPageFile, request, sendResponse);
       return true;
     }
   });
