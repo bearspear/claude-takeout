@@ -1641,3 +1641,197 @@ test('a document without diagrams gets no warning, and a note only when it has a
   const copy = await runFolder(exportPopup(), Object.assign(turns(text, [use('w1', 'Write', { file_path: '/h/l.html', content: page('Lorber Notes', 'x') }), result('w1')]), { uuid: 'c', name: 'c' }));
   assert.match(docText(copy.written, 'artefacts/Lorber_Notes.md'), /^# Lorber Notes\n\n> \*\*Self-contained copy:\*\* .*\[l\.html\]\(l\.html\)/m);
 });
+
+// ---- claude.ai's visualize, image_search and claude-artifacts tools ----
+const WIDGET = 'mcp__visualize__show_widget';
+const svgWidget = (title, body = '<g class="c-teal"><rect x="1" y="1" width="9" height="9"/></g>') =>
+  ({ title, widget_code: `<svg width="100%" viewBox="0 0 10 10" role="img"><title>T</title>${body}</svg>` });
+const shown = (id) => ({ type: 'tool_result', tool_use_id: id, name: WIDGET, content: [{ type: 'text', text: 'Content rendered and shown to the user.' }] });
+
+test('a show_widget diagram is saved as a styled SVG file, versioned by title, like the Python port', () => {
+  const core = require('../export-core.js');
+  const data = twoMessages(
+    [use('w1', WIDGET, svgWidget('wiring_diagram')), shown('w1'), use('w2', WIDGET, { title: 'chart', widget_code: '<div class="x">hi</div><script>sendPrompt("a")</script>' }), shown('w2')],
+    [use('w3', WIDGET, svgWidget('wiring_diagram', '<text class="th">B</text>')), shown('w3'), use('w4', WIDGET, svgWidget('failed')), result('w4', true)]);
+  const index = {};
+  const out = artifacts(data, null, index);
+  assert.deepStrictEqual(plain(Object.keys(out).sort()), ['chart.html', 'wiring_diagram.svg', 'wiring_diagram_v1.svg', 'wiring_diagram_v2.svg']);
+  assert.ok(out['wiring_diagram_v1.svg'].startsWith(`<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 10 10" role="img"><style>${core.WIDGET_CSS}</style><title>T</title>`));
+  assert.ok(out['wiring_diagram.svg'].includes('<text class="th">B</text>'));
+  assert.match(core.WIDGET_CSS, /\.c-teal>rect[^{]*\{fill:#E1F5EE;stroke:#0F6E56\}/);
+  assert.match(core.WIDGET_CSS, /@media \(prefers-color-scheme:dark\)/);
+  assert.match(out['chart.html'], /^<!DOCTYPE html>\n[\s\S]*<title>chart<\/title>[\s\S]*function sendPrompt\(\) \{\}[\s\S]*<div class="x">hi<\/div>/);
+  assert.deepStrictEqual(plain(index['widget:wiring_diagram'].messages), ['a', 'b']);
+  assert.deepStrictEqual(pythonArtifacts(data), plain(out));
+  // Already has xmlns, no title, nothing drawn.
+  const own = artifacts(oneMessage([use('w5', WIDGET, { widget_code: '<svg xmlns="http://www.w3.org/2000/svg"><g/></svg>' }), use('w6', WIDGET, { title: 'empty', widget_code: '  ' })]));
+  assert.deepStrictEqual(plain(Object.keys(own)), ['diagram.svg']);
+  assert.ok(own['diagram.svg'].startsWith('<svg xmlns="http://www.w3.org/2000/svg"><style>'));
+});
+
+const publishChat = () => ({
+  uuid: 'c', name: 'Dimmer', current_leaf_message_uuid: 'b',
+  chat_messages: [
+    { uuid: 'h', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'help' }],
+      files_v2: [{ success: true, file_name: 'IMG_1.HEIC', file_uuid: 'up-1', file_kind: 'blob' }] },
+    { uuid: 'a', parent_message_uuid: 'h', sender: 'assistant', content: [
+      use('r1', 'mcp__visualize__read_me', { modules: ['diagram'] }),
+      { type: 'tool_result', tool_use_id: 'r1', name: 'mcp__visualize__read_me', content: [{ type: 'text', text: 'SECRET GUIDE TEXT' }] },
+      use('w1', WIDGET, svgWidget('wiring (main)')), shown('w1'),
+      use('i1', 'image_search', { query: 'green ground screw', max_results: 2 }),
+      { type: 'tool_result', tool_use_id: 'i1', name: 'image_search', content: [{ type: 'text', text: 'Found and displayed 2 images' },
+        { images: [{ id: 'img_1', url: 'https://img.example/a b.jpg', title: 'Screw [green]', source: 'example.com', page_url: 'https://example.com/p(1)' },
+          { id: 'img_2', url: 'https://img.example/c.jpg', title: 'Pigtail' }] }] },
+      { type: 'text', text: 'Here is the diagram.' },
+    ] },
+    { uuid: 'b', parent_message_uuid: 'a', sender: 'assistant', content: [
+      use('wr', 'Write', { file_path: '/home/claude/guide.html', content: '<html>guide</html>' }), result('wr'),
+      use('p1', 'mcp__claude-artifacts__publish_files', { files: [{ as: 'index.html', path: '/home/claude/guide.html' }], title: 'Dimmer swap' }),
+      { type: 'tool_result', tool_use_id: 'p1', name: 'mcp__claude-artifacts__publish_files', content: [{ type: 'text', text: JSON.stringify({ title: 'Dimmer swap', url: 'https://claude.ai/artifact/XYZ' }) }] },
+      { type: 'text', text: 'Published the guide.' },
+    ], files_v2: [
+      { success: true, file_name: 'guide.html', file_uuid: 'att-1', file_kind: 'blob' },
+      { success: true, file_name: 'extra.pdf', file_uuid: 'att-2', file_kind: 'blob' },
+    ] },
+  ],
+});
+
+test("files on Claude's own messages are its output, not uploads", () => {
+  const data = publishChat();
+  assert.deepStrictEqual(plain(fn('extractUploadedFiles')(data).map((f) => f.filename)), ['p01_IMG_1.HEIC']);
+  assert.deepStrictEqual(plain(fn('extractAttachedFiles')(data, ['guide.html', 'extra.pdf'])), [
+    { filename: 'guide.html', uuid: 'att-1', path: '', existing: true },
+    { filename: 'extra.pdf', uuid: 'att-2', path: '', existing: true },
+  ]);
+  assert.deepStrictEqual(plain(fn('extractAttachedFiles')(data, ['guide.html']).map((f) => [f.filename, f.existing])), [['guide.html', true], ['extra.pdf', false]]);
+});
+
+test('diagrams, image searches and published pages read well in the Markdown and the ZIP', async () => {
+  const md = fn('convertToMarkdown')(publishChat(), { embedArtifacts: false });
+  assert.ok(!md.includes('SECRET GUIDE TEXT'));
+  assert.ok(md.includes('Loading tool guidance: mcp__visualize__read_me'));
+  assert.ok(md.includes('Diagram: wiring (main) (drawn in the chat on claude.ai)'));
+  assert.ok(!md.includes('Content rendered and shown'));
+  assert.ok(md.includes('Image search: green ground screw'));
+  assert.ok(md.includes('> Found and displayed 2 images\n>\n> 1. [Screw \\[green\\]](https://example.com/p%281%29) (example.com) · [image](https://img.example/a%20b.jpg)'));
+  assert.ok(md.includes('> 2. Pigtail · [image](https://img.example/c.jpg)'));
+  assert.ok(md.includes('Publishing on claude.ai: Dimmer swap (guide.html)'));
+  assert.ok(md.includes('> **Published on claude.ai:** [Dimmer swap](https://claude.ai/artifact/XYZ)'));
+  assert.ok(!md.includes('"images"'));
+
+  const { written, chat } = await runFolder(exportPopup(), publishChat());
+  const text = (name) => { const v = written[name]; return typeof v === 'string' ? v.replace(/^﻿/, '') : v && v.content; };
+  assert.ok(String(text('artefacts/wiring_main.svg')).startsWith('<svg xmlns='));
+  const full = text('full_chat.md');
+  assert.ok(full.includes('**Diagram: wiring (main)** - [artefacts/wiring_main.svg](artefacts/wiring_main.svg)'));
+  assert.ok(full.includes('![wiring (main)](artefacts/wiring_main.svg)'));
+  const response = Object.keys(written).find((n) => /^responses\/001_.*\.full\.md$/.test(n));
+  assert.ok(text(response).includes('![wiring (main)](../artefacts/wiring_main.svg)'));
+  assert.ok(text(response).includes('> 1. [Screw'));
+  // The guide is the replayed artefact; only the PDF is downloaded, into artefacts/. Nothing of Claude's is in uploads/.
+  assert.deepStrictEqual(Object.keys(written).filter((n) => n.startsWith('uploads/')), ['uploads/p01_IMG_1.HEIC']);
+  assert.ok(written['artefacts/extra.pdf']);
+  assert.ok(!Object.keys(written).some((n) => /guide_2|extra_2/.test(n)));
+  const b = chat.messages.find((m) => m.id === 'b');
+  assert.deepStrictEqual(plain(b.uploads.map((u) => [u.name, u.href])), [['guide.html', 'artefacts/guide.html'], ['extra.pdf', 'artefacts/extra.pdf']]);
+  const a = chat.messages.find((m) => m.id === 'a');
+  assert.ok(a.blocks.some((blk) => blk.t === 'card' && chat.files[blk.file].name === 'wiring_main.svg'));
+});
+
+// ---- images from web searches ----
+const imgResult = (id, images) => ({ type: 'tool_result', tool_use_id: id, name: 'image_search', content: [{ type: 'text', text: `Found and displayed ${images.length} images` }, { images }] });
+const webChat = () => ({
+  uuid: 'c', name: 'Screws', current_leaf_message_uuid: 'a',
+  chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant', content: [
+    use('i1', 'image_search', { query: 'screw' }),
+    imgResult('i1', [
+      { url: 'https://img.example/a.jpg', thumbnail_url: 'https://img.example/a.jpg', title: 'Green screw', source: 'example.com', page_url: 'https://example.com/a' },
+      { url: 'https://img.example/gone.jpg', thumbnail_url: 'https://thumbs.example/gone.png', title: 'Pigtail' },
+      { url: 'https://img.example/refused.jpg', title: 'Refused' },
+      { url: 'http://img.example/plain.jpg', title: 'Plain http' },
+    ]),
+    use('i2', 'image_search', { query: 'screw again' }),
+    imgResult('i2', [{ url: 'https://img.example/a.jpg', title: 'Green screw' }]),
+    { type: 'text', text: 'Done.' },
+  ] }],
+});
+const imageRoutes = [
+  [/img\.example\/a\.jpg$/, () => ({ ok: true, status: 200, headers: { get: () => 'image/jpeg' }, blob: async () => ({ size: 3, type: 'image/jpeg', marker: 'jpg' }) })],
+  [/img\.example\/gone\.jpg$/, () => ({ ok: false, status: 404 })],
+  [/thumbs\.example\/gone\.png$/, () => ({ ok: true, status: 200, headers: { get: () => 'image/png; charset=binary' }, blob: async () => ({ size: 3, type: 'image/png', marker: 'png' }) })],
+  [/img\.example\/refused\.jpg$/, () => ({ ok: true, status: 200, headers: { get: () => 'text/html' }, blob: async () => ({ size: 3, type: 'text/html' }) })],
+];
+
+test('web search images: listed once per https URL, named by a hash of the URL', () => {
+  const core = require('../export-core.js');
+  const list = core.webImagesOf(webChat());
+  assert.deepStrictEqual(list.map((i) => i.url), ['https://img.example/a.jpg', 'https://img.example/gone.jpg', 'https://img.example/refused.jpg']);
+  assert.match(list[0].key, /^[0-9a-f]{8}$/);
+  assert.strictEqual(list[0].key, core.webImageKey('https://img.example/a.jpg'));
+  assert.strictEqual(core.webImageName(list[0], '.jpg'), `${list[0].key}_Green_screw.jpg`);
+  assert.strictEqual(core.webImageName({ key: 'k', title: '' }, '.png'), 'k.png');
+});
+
+test('web search images are saved in images/ when Chrome allows it, and shown in the Markdown and viewer', async () => {
+  const core = require('../export-core.js');
+  const [a, gone] = core.webImagesOf(webChat());
+  const popup = exportPopup({ routes: imageRoutes });
+  popup.sandbox.chrome.permissions = { contains: async () => true };
+  const { written, chat } = await runFolder(popup, webChat());
+  const aName = `images/${a.key}_Green_screw.jpg`;
+  const goneName = `images/${gone.key}_Pigtail.png`;
+  assert.deepStrictEqual(Object.keys(written).filter((n) => n.startsWith('images/')).sort(), [aName, goneName].sort());
+  const full = docText(written, 'full_chat.md');
+  assert.ok(full.includes(`>    ![Green screw](${aName})`), full);
+  assert.ok(full.includes(`>    ![Pigtail](${goneName})`));
+  assert.ok(!full.includes('![Refused]'));
+  const response = Object.keys(written).find((n) => /^responses\/001_.*\.full\.md$/.test(n));
+  assert.ok(docText(written, response).includes(`![Green screw](../${aName})`));
+  const errors = docText(written, 'errors.txt');
+  assert.match(errors, /Refused[\s\S]*not a PNG, JPEG, GIF or WebP image \(text\/html\)/);
+  assert.ok(!/Pigtail/.test(errors));
+  const tool = chat.messages[0].blocks.find((b) => b.t === 'tool' && b.web);
+  assert.deepStrictEqual(plain(tool.web.map((w) => [w.title, w.href])), [['Green screw', aName], ['Pigtail', goneName], ['Refused', null], ['Plain http', null]]);
+  assert.strictEqual(tool.web[0].page, 'https://example.com/a');
+});
+
+test('without the permission, web images are links and errors.txt says how to save them', async () => {
+  const { written, chat } = await runFolder(exportPopup({ routes: imageRoutes }), webChat());
+  assert.ok(!Object.keys(written).some((n) => n.startsWith('images/')));
+  assert.match(docText(written, 'errors.txt'), /3 images from web searches were not saved[\s\S]*Save images from web searches/);
+  assert.ok(docText(written, 'full_chat.md').includes('> 1. [Green screw](https://example.com/a) (example.com) · [image](https://img.example/a.jpg)'));
+  assert.ok(chat.messages[0].blocks.find((b) => b.t === 'tool' && b.web).web.every((w) => w.href === null));
+});
+
+// ---- images Claude viewed (tool results that only link a claude.ai file) ----
+const readChat = () => ({
+  uuid: 'c', name: 'Photos', current_leaf_message_uuid: 'a',
+  chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant', content: [
+    use('r1', 'Read', { file_path: '/home/claude/imgs/IMG_1.jpg' }),
+    { type: 'tool_result', tool_use_id: 'r1', name: 'Read', content: [{ type: 'image', file_uuid: '9eefb337-7e86-5109-9c68-3e6995e5294f', preview_url: '/api/org/files/9eefb337-7e86-5109-9c68-3e6995e5294f/preview' }] },
+    use('r2', 'Read', { file_path: '/home/claude/imgs/IMG_2.jpg' }),
+    { type: 'tool_result', tool_use_id: 'r2', name: 'Read', content: [{ type: 'image', file_uuid: 'aaaabbbb-0000-4000-8000-000000000000', preview_url: '/api/org/files/aaaabbbb-0000-4000-8000-000000000000/preview' }] },
+    { type: 'tool_result', tool_use_id: 'x', name: 'Read', content: [{ type: 'image', file_uuid: 'cccc', preview_url: 'https://evil.example/x' }] },
+    { type: 'text', text: 'Nice photos.' },
+  ] }],
+});
+
+test('images Claude viewed are listed once each, from claude.ai preview paths only', () => {
+  const core = require('../export-core.js');
+  const list = core.toolImagesOf(readChat());
+  assert.deepStrictEqual(list.map((i) => [i.uuid.slice(0, 8), i.base]), [['9eefb337', 'IMG_1'], ['aaaabbbb', 'IMG_2']]);
+  assert.strictEqual(core.toolImageName(list[0], '.jpg'), '9eefb337_IMG_1.jpg');
+});
+
+test('images Claude viewed are downloaded from claude.ai into images/ and shown in the Markdown and viewer', async () => {
+  const popup = exportPopup({ routes: [
+    [/9eefb337-[\w-]+\/preview$/, () => ({ ok: true, status: 200, headers: { get: () => 'image/jpeg' }, blob: async () => ({ size: 3, type: 'image/jpeg', marker: 'jpg' }) })],
+    [/aaaabbbb-[\w-]+\/preview$/, () => ({ ok: false, status: 404 })],
+  ] });
+  const { written, chat } = await runFolder(popup, readChat());
+  assert.deepStrictEqual(Object.keys(written).filter((n) => n.startsWith('images/')), ['images/9eefb337_IMG_1.jpg']);
+  assert.ok(docText(written, 'full_chat.md').includes('![9eefb337_IMG_1.jpg](images/9eefb337_IMG_1.jpg)'));
+  assert.match(docText(written, 'errors.txt'), /IMG_2[\s\S]*Image Claude viewed not saved: HTTP 404/);
+  const tools = chat.messages[0].blocks.filter((b) => b.t === 'tool');
+  assert.deepStrictEqual(plain(tools.map((t) => [t.label, t.target, t.images, t.missingImages])), [['Read IMG_1.jpg', 'IMG_1.jpg', ['images/9eefb337_IMG_1.jpg'], 0], ['Read IMG_2.jpg', 'IMG_2.jpg', [], 1]]);
+});

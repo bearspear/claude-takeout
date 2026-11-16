@@ -1952,3 +1952,41 @@ test('a mega-ZIP\'s export-manifest.json is part of the export, not an added fil
   put(m, 'chat one/original.json', CHAT);
   assert.deepStrictEqual(scanAdded(find(tmp).archives[0]).files.map(f => f.path), ['mine.md']);
 });
+
+test("parity: diagrams and files on Claude's own messages, also as an older export saved them", async () => {
+  const dir = tmpRoot();
+  const data = withUploads();
+  const answer = data.chat_messages.find(m => m.sender === 'assistant');
+  answer.content.push({ type: 'tool_use', id: 'wd1', name: 'mcp__visualize__show_widget', input: { title: 'flow', widget_code: '<svg viewBox="0 0 4 4"><g class="c-teal"><rect width="4" height="4"/></g></svg>' } });
+  answer.files_v2 = [{ success: true, file_name: 'handout.pdf', file_uuid: 'att-9', file_kind: 'blob' }];
+  const { written, chat: expected } = await runFolder(exportPopup(), data);
+  writeFolder(dir, written);
+  const archive = singleOf(dir);
+  const got = chatFromDisk(archive, archive.chats[0]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(got.viewerChat)), JSON.parse(JSON.stringify(expected)));
+  assert.ok(Object.values(got.viewerChat.files).some(f => f.name === 'flow.svg'));
+  const onAnswer = m => got.viewerChat.messages.find(x => x.id === answer.uuid).uploads.find(u => u.name === 'handout.pdf');
+  assert.strictEqual(onAnswer().href, 'artefacts/handout.pdf');
+  // Before v1.11.0 the export put it in uploads/ with the prompt number.
+  fs.renameSync(`${dir}/artefacts/handout.pdf`, `${dir}/uploads/p01_handout.pdf`);
+  const old = chatFromDisk(archive, archive.chats[0]);
+  assert.strictEqual(old.viewerChat.messages.find(x => x.id === answer.uuid).uploads.find(u => u.name === 'handout.pdf').href, 'uploads/p01_handout.pdf');
+});
+
+test('parity: web search images saved in images/ are found again, and images/ holds no added files', async () => {
+  const dir = tmpRoot();
+  const data = oneMessage([
+    { type: 'tool_use', id: 'i1', name: 'image_search', input: { query: 'q' } },
+    { type: 'tool_result', tool_use_id: 'i1', name: 'image_search', content: [{ type: 'text', text: 'Found 1' }, { images: [{ url: 'https://img.example/a.jpg', title: 'Screw' }] }] },
+  ]);
+  Object.assign(data, { uuid: 'c', name: 'c' });
+  const popup = exportPopup({ routes: [[/img\.example/, () => ({ ok: true, status: 200, headers: { get: () => 'image/jpeg' }, blob: async () => ({ size: 3, type: 'image/jpeg', marker: 'jpg' }) })]] });
+  popup.sandbox.chrome.permissions = { contains: async () => true };
+  const { written, chat: expected } = await runFolder(popup, data);
+  writeFolder(dir, written);
+  const archive = singleOf(dir);
+  const got = chatFromDisk(archive, archive.chats[0]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(got.viewerChat)), JSON.parse(JSON.stringify(expected)));
+  assert.match(got.viewerChat.messages[0].blocks.find(b => b.web).web[0].href, /^images\/[0-9a-f]{8}_Screw\.jpg$/);
+  assert.ok(!scanAdded(archive).files.some(f => f.path.startsWith('images/')));
+});

@@ -419,6 +419,41 @@ def safe_file_title(label) -> str:
     return re.sub(f"[{JS_SPACE}]+", "_", kept)[:60]
 
 
+# show_widget (claude.ai's visualize tool): widgetFile in export-core.js, with the same stylesheet byte for byte.
+WIDGET_CSS = ':root{--text-primary:#1F1E1D;--text-secondary:#5F5E5A;--text-muted:#888780;--text-accent:#185FA5;--text-danger:#A32D2D;--text-success:#3B6D11;--text-warning:#854F0B;--surface-0:#FAF9F5;--surface-1:#F5F4EF;--surface-2:#FFFFFF;--bg-accent:#E6F1FB;--bg-danger:#FCEBEB;--bg-success:#EAF3DE;--bg-warning:#FAEEDA;--border:rgba(31,30,29,0.15);--border-strong:rgba(31,30,29,0.3);--border-stronger:rgba(31,30,29,0.45);--border-accent:#378ADD;--border-danger:#E24B4A;--border-success:#639922;--border-warning:#BA7517;}:root{--p:var(--text-primary);--s:var(--text-secondary);--t:var(--text-muted);--bg2:var(--surface-1);--b:var(--border);--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;--font-voice:Georgia,"Times New Roman",serif;--font-mono:ui-monospace,Menlo,Consolas,monospace;--radius:8px;--pad-sm:8px;--pad-md:12px;--pad-lg:16px;--pad-xl:24px;--gap-xs:4px;--gap-sm:8px;--gap-md:12px;--gap-lg:16px;--gap-xl:24px;background:var(--surface-0);color:var(--text-primary)}.t,.ts,.th{font-family:var(--font-sans);fill:var(--text-primary)}.t{font-size:14px}.th{font-size:14px;font-weight:500}.ts{font-size:12px;fill:var(--text-secondary)}.box{fill:var(--surface-1);stroke:var(--border-strong)}.arr{fill:none;stroke:var(--text-secondary);stroke-width:1.5}.leader{fill:none;stroke:var(--text-muted);stroke-width:0.5;stroke-dasharray:4 3}.node{cursor:pointer}.c-purple>rect,.c-purple>circle,.c-purple>ellipse,rect.c-purple,circle.c-purple,ellipse.c-purple{fill:#EEEDFE;stroke:#534AB7}.c-purple>.t,.c-purple>.th{fill:#3C3489}.c-purple>.ts{fill:#534AB7}.c-teal>rect,.c-teal>circle,.c-teal>ellipse,rect.c-teal,circle.c-teal,ellipse.c-teal{fill:#E1F5EE;stroke:#0F6E56}.c-teal>.t,.c-teal>.th{fill:#085041}.c-teal>.ts{fill:#0F6E56}.c-coral>rect,.c-coral>circle,.c-coral>ellipse,rect.c-coral,circle.c-coral,ellipse.c-coral{fill:#FAECE7;stroke:#993C1D}.c-coral>.t,.c-coral>.th{fill:#712B13}.c-coral>.ts{fill:#993C1D}.c-pink>rect,.c-pink>circle,.c-pink>ellipse,rect.c-pink,circle.c-pink,ellipse.c-pink{fill:#FBEAF0;stroke:#993556}.c-pink>.t,.c-pink>.th{fill:#72243E}.c-pink>.ts{fill:#993556}.c-gray>rect,.c-gray>circle,.c-gray>ellipse,rect.c-gray,circle.c-gray,ellipse.c-gray{fill:#F1EFE8;stroke:#5F5E5A}.c-gray>.t,.c-gray>.th{fill:#444441}.c-gray>.ts{fill:#5F5E5A}.c-blue>rect,.c-blue>circle,.c-blue>ellipse,rect.c-blue,circle.c-blue,ellipse.c-blue{fill:#E6F1FB;stroke:#185FA5}.c-blue>.t,.c-blue>.th{fill:#0C447C}.c-blue>.ts{fill:#185FA5}.c-green>rect,.c-green>circle,.c-green>ellipse,rect.c-green,circle.c-green,ellipse.c-green{fill:#EAF3DE;stroke:#3B6D11}.c-green>.t,.c-green>.th{fill:#27500A}.c-green>.ts{fill:#3B6D11}.c-amber>rect,.c-amber>circle,.c-amber>ellipse,rect.c-amber,circle.c-amber,ellipse.c-amber{fill:#FAEEDA;stroke:#854F0B}.c-amber>.t,.c-amber>.th{fill:#633806}.c-amber>.ts{fill:#854F0B}.c-red>rect,.c-red>circle,.c-red>ellipse,rect.c-red,circle.c-red,ellipse.c-red{fill:#FCEBEB;stroke:#A32D2D}.c-red>.t,.c-red>.th{fill:#791F1F}.c-red>.ts{fill:#A32D2D}@media (prefers-color-scheme:dark){:root{--text-primary:#F5F4EF;--text-secondary:#B4B2A9;--text-muted:#888780;--text-accent:#85B7EB;--text-danger:#F09595;--text-success:#97C459;--text-warning:#EF9F27;--surface-0:#262624;--surface-1:#30302E;--surface-2:#3A3A37;--bg-accent:#0C447C;--bg-danger:#791F1F;--bg-success:#27500A;--bg-warning:#633806;--border:rgba(245,244,239,0.15);--border-strong:rgba(245,244,239,0.3);--border-stronger:rgba(245,244,239,0.45);}.c-purple>rect,.c-purple>circle,.c-purple>ellipse,rect.c-purple,circle.c-purple,ellipse.c-purple{fill:#3C3489;stroke:#AFA9EC}.c-purple>.t,.c-purple>.th{fill:#CECBF6}.c-purple>.ts{fill:#AFA9EC}.c-teal>rect,.c-teal>circle,.c-teal>ellipse,rect.c-teal,circle.c-teal,ellipse.c-teal{fill:#085041;stroke:#5DCAA5}.c-teal>.t,.c-teal>.th{fill:#9FE1CB}.c-teal>.ts{fill:#5DCAA5}.c-coral>rect,.c-coral>circle,.c-coral>ellipse,rect.c-coral,circle.c-coral,ellipse.c-coral{fill:#712B13;stroke:#F0997B}.c-coral>.t,.c-coral>.th{fill:#F5C4B3}.c-coral>.ts{fill:#F0997B}.c-pink>rect,.c-pink>circle,.c-pink>ellipse,rect.c-pink,circle.c-pink,ellipse.c-pink{fill:#72243E;stroke:#ED93B1}.c-pink>.t,.c-pink>.th{fill:#F4C0D1}.c-pink>.ts{fill:#ED93B1}.c-gray>rect,.c-gray>circle,.c-gray>ellipse,rect.c-gray,circle.c-gray,ellipse.c-gray{fill:#444441;stroke:#B4B2A9}.c-gray>.t,.c-gray>.th{fill:#D3D1C7}.c-gray>.ts{fill:#B4B2A9}.c-blue>rect,.c-blue>circle,.c-blue>ellipse,rect.c-blue,circle.c-blue,ellipse.c-blue{fill:#0C447C;stroke:#85B7EB}.c-blue>.t,.c-blue>.th{fill:#B5D4F4}.c-blue>.ts{fill:#85B7EB}.c-green>rect,.c-green>circle,.c-green>ellipse,rect.c-green,circle.c-green,ellipse.c-green{fill:#27500A;stroke:#97C459}.c-green>.t,.c-green>.th{fill:#C0DD97}.c-green>.ts{fill:#97C459}.c-amber>rect,.c-amber>circle,.c-amber>ellipse,rect.c-amber,circle.c-amber,ellipse.c-amber{fill:#633806;stroke:#EF9F27}.c-amber>.t,.c-amber>.th{fill:#FAC775}.c-amber>.ts{fill:#EF9F27}.c-red>rect,.c-red>circle,.c-red>ellipse,rect.c-red,circle.c-red,ellipse.c-red{fill:#791F1F;stroke:#F09595}.c-red>.t,.c-red>.th{fill:#F7C1C1}.c-red>.ts{fill:#F09595}}'
+
+
+def is_widget_tool(name) -> bool:
+    return bool(re.search(r"(^|__|:)show_widget$", str(name or "")))
+
+
+def widget_key(inp, tool_use_id: str = "") -> str:
+    title = inp.get("title") if isinstance(inp, dict) and isinstance(inp.get("title"), str) else ""
+    return "widget:" + (title or tool_use_id or "")
+
+
+def widget_file(inp) -> Optional[tuple]:
+    """(name, text) for one show_widget call, or None when it drew nothing."""
+    code = inp.get("widget_code") if isinstance(inp, dict) else None
+    if not isinstance(code, str) or not re.sub(f"[{JS_SPACE}]", "", code):
+        return None
+    title = inp.get("title") if isinstance(inp.get("title"), str) else ""
+    base = safe_file_title(title) or "diagram"
+    svg = re.match(f"[{JS_SPACE}]*<svg\\b[^>]*>", code, re.IGNORECASE)
+    if svg:
+        opening = svg.group(0)
+        if not re.search(f"[{JS_SPACE}]xmlns[{JS_SPACE}]*=", opening):
+            opening = re.sub(f"^([{JS_SPACE}]*<svg)", lambda m: m.group(1) + ' xmlns="http://www.w3.org/2000/svg"', opening, count=1, flags=re.IGNORECASE)
+        return base + ".svg", opening + "<style>" + WIDGET_CSS + "</style>" + code[len(svg.group(0)):]
+    head = title.replace("&", "&amp;").replace("<", "&lt;")
+    return base + ".html", (
+        '<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8">\n'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">\n'
+        f"<title>{head}</title>\n<style>{WIDGET_CSS}body{{margin:0;padding:16px;font:16px/1.7 var(--font-sans)}}</style>\n"
+        "<script>function sendPrompt() {}</script>\n</head>\n<body>\n" + code + "\n</body>\n</html>\n"
+    )
+
+
 def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict] = None) -> dict[str, str]:
     """Return {filename: content} including all per-turn versions.
 
@@ -590,6 +625,11 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
                             set_content(key, render_claude_doc(d), d["filename"])
                         if unreplayed:
                             warn_doc(d, key, "An edit to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.")
+
+            elif is_widget_tool(name):
+                made = widget_file(inp)
+                if made:
+                    set_content(widget_key(inp, block.get("id") or ""), made[1], made[0])
 
             elif name in ("bash_tool", "Bash"):
                 command = inp.get("command") or ""

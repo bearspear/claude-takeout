@@ -131,6 +131,9 @@ Tools the exporter understands:
 | `bash_tool` / `Bash` | `command` | A `cat > path << DELIM` or `cat << DELIM > path` heredoc counts as a file write (`heredocMatches`). Other changes are flagged; see [bash mutations](#bash-mutations-and-replay_bashpy). |
 | `present_files` | `filepaths[]`; result has `local_resource` items | Files Claude showed the user; downloaded when replay didn't make them. |
 | `SendUserFile` | `files[]`; result has `file_deliveries[]` | Files Claude sent; downloaded by UUID. |
+| `…show_widget` (visualize) | `title`, `widget_code` (an SVG or HTML fragment) | A diagram Claude drew in the chat, saved as `artefacts/<title>.svg` or `.html` (`widgetFile`), versioned under `widget:<title>`. |
+| `image_search` | `query`; result has `images[]` (`title`, `url`, `thumbnail_url`, `page_url`, `source`) | Saved in `images/` with permission and shown under the search; listed as links otherwise. |
+| `…publish_files` (claude-artifacts) | `files[]`, `title`; result's JSON has `url` | A page Claude published on claude.ai; the Markdown links it. |
 | `…Claude_Docs__batch`, `__update`, `__create` | the document's Markdown with placeholders; section replacements; comments | A Claude Docs document, rebuilt into `artefacts/<title>.md` and `<title>.html`. |
 | `view` / `read_file` | `path` | Its result may hold the text of an upload or project file. |
 | `web_search`, `web_fetch` | `query`, `url` | Sources and citations. |
@@ -195,6 +198,26 @@ An artifact that refers to an upload by its sandbox path (`<img src="/mnt/user-d
 ### Files Claude made (`present_files`, `SendUserFile`)
 
 `extractPresentedFiles` lists the files in `present_files` results (`local_resource` items). One the replay already rebuilt is kept as is, unless that file has a `str_replace_failed` or `artifact_opaque_mutation` warning: then the presented copy is downloaded and replaces the final file and its last `_vN`. Any other, such as a file a Python script wrote, is downloaded through `fetchUploadedFile` by its sandbox path into `artefacts/`. Two presented files with one name from different folders become `<base>_2<ext>` with an `artifact_basename_collision` warning. A download is the file's final state, so it clears that file's `str_replace_failed` warnings. `extractDeliveredFiles` lists `SendUserFile` deliveries, which are downloaded by UUID into `artefacts/`, with a `delivered_file` error on failure.
+
+### Diagrams drawn in the chat (`show_widget`)
+
+claude.ai's visualize tool shows an SVG or HTML fragment inline, styled by claude.ai's own widget stylesheet: color classes such as `c-teal` and text classes `t`, `ts`, `th` that its guide documents. `extractArtifacts` saves each call as a file that stands alone (`widgetFile`): an SVG gets `xmlns` and `WIDGET_CSS`, which defines those classes and the CSS variables for light and dark, right after its opening tag, and is saved as `<title>.svg`; any other fragment is put in a page with the same stylesheet and a do-nothing `sendPrompt`, as `<title>.html`. Calls with the same title are versions of one file (`widgetKey`). `extract_artifacts.py` has the same stylesheet, byte for byte. `full_chat.md` and the response files link the file and show an SVG as an image; the viewer gives it a card. The tool's own guidance (`read_me`) and its acknowledgement are left out of the Markdown, as are the results of the claude-artifacts `guide` and `list_types` tools.
+
+### Images from web searches
+
+`webImagesOf` lists the images `image_search` results showed, once per https URL. They live on their own sites, so `saveWebImages` fetches them (`credentials: 'omit'`, no referrer, 20 seconds and 15 MB each, four at a time), the thumbnail when the image itself fails, and keeps PNG, JPEG, GIF and WebP by the type the site sends. Each is saved as `images/<key>_<title><ext>` (`webImageName`), the key being a hash of the URL, so the old-archive tool finds it again on disk. Fetching needs the optional `https://*/*` host permission: Chrome only grants it during a click, so Export ZIP asks for it before anything else when the chat has web images (`requestWebImages`), and the Settings checkbox "Save images from web searches" shows and changes it. Without it, one `web_image` warning says how many were left out; an image that fails gets its own. The Markdown shows each saved image under its link (`imageSearchLines`), and the viewer shows them as claude.ai does: one mosaic per response holding every search's images (`messageWebImages`, `renderWebMosaic` in viewer-app.js), the first four as tiles with the site on each and `+N` on the last, and a gallery that steps through all of them with the title and a link to the page (`openGallery`). It loads the saved copies from `images/` beside `viewer.html` (`ctx.webImages`, a tool block's `web`); an image not saved is a card with its title.
+
+### Images Claude looked at
+
+A tool result can hold an image claude.ai only links (`file_uuid`, `preview_url`), such as a photo Claude opened with `Read`. `toolImagesOf` lists them once per file, accepting only claude.ai preview paths, and `saveToolImages` downloads each from `https://claude.ai<preview_url>` with the session into `images/<first 8 of the uuid>_<name><ext>` (`toolImageName`; the name is the file the tool read). A failure is a `tool_image` warning. `full_chat.md` and the response files show each under its step; the viewer gets them through `ctx.toolImages` as the tool block's `images`, and the old-archive tool finds them on disk by that prefix.
+
+### Steps in the viewer
+
+The viewer folds what Claude did before its answer into one line per response, as claude.ai does (`renderSteps` in viewer-app.js): everything up to the last thinking or tool block. The line sums up the tools (`stepsSummary`: created, edited, read, ran, searched, fetched, in that order, the first two kinds and "and N more steps"), shows thumbnails of images Claude viewed, or, with no tools, the thinking's summary or "Thought for Ns" (from the block's timestamps). Opened, it is a box of rows: thinking, text between steps, and tools labelled as claude.ai labels them (`toolLabel`, `toolTarget`: a command by its `description`, a file by its name). Diagrams, web images and published pages are not steps. A response is split at each diagram (`renderAssistant`, `renderPart`): it shows inline where Claude drew it (`renderDiagram`, from the SVG text as a data URI image, a file the viewer data marks `widget`), with a menu to copy it, download it as SVG or as a PNG drawn on a canvas at twice its size (`diagramPng`), or open it in the side panel; the steps before and after it fold separately. Web images and published pages show after their group. Thinking with no text or summary is not a row, only time on the line, and the visualize tool's guide (`read_me`) is not shown.
+
+### Files on Claude's messages
+
+claude.ai can attach a file to Claude's own message, such as a page Claude published with `publish_files`. `extractUploadedFiles` lists only files on your messages; `extractAttachedFiles` lists these. One whose name a replayed or downloaded artifact already has is that file and is not saved again; any other is downloaded by UUID into `artefacts/` (a failure is a `delivered_file` error). The viewer shows them on Claude's message, linked to `artefacts/`. Exports before v1.11.0 saved them in `uploads/` as `p<NN>_<name>`, and the old-archive tool links them there.
 
 ### Claude Docs documents
 
@@ -283,6 +306,8 @@ Encoding rules:
 | `artifact_basename_collision` | Two paths had the same filename; one was renamed. |
 | `artifact_opaque_mutation` | A bash command changed a file in a way replay can't follow. |
 | `doc_diagram` | A Claude Docs document's diagrams show only by caption, and the chat has no self-contained HTML copy of it; the note links the live document. |
+| `tool_image` | An image Claude looked at (a tool result that links a claude.ai file) could not be downloaded. |
+| `web_image` | An image from a web search was not saved: no permission to fetch from other sites (one warning for all), or the site refused it. |
 | `claude_doc_unreplayed` | A Claude Docs edit could not be rebuilt from the chat; the note links the live document. |
 | `export_health` | The chat's data looks incomplete, the likely sign of a change in claude.ai's API (`chatHealth`): no messages although the chat changed, messages with no content, no current branch in a branched chat, unknown content block types, or none of several uploads downloaded. A mega-ZIP's `index.md` counts these chats, and the chats claude.ai listed. |
 | `viewer` | One chat could not be added to `viewer.html`. |

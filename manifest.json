@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Claude Takeout",
-  "version": "1.10.1",
+  "version": "1.11.0",
   "description": "Export Claude conversations to Markdown",
   "icons": {
     "16": "icon16.png",
@@ -16,6 +16,9 @@
   ],
   "host_permissions": [
     "https://claude.ai/*"
+  ],
+  "optional_host_permissions": [
+    "https://*/*"
   ],
   "action": {
     "default_popup": "popup.html",

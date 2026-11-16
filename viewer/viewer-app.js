@@ -269,12 +269,13 @@ function foldLine(kind, summaryParts, body) {
   return line;
 }
 
+// "Thought for 23s" when the block's timestamps say, else "Thought process".
+const thoughtFor = block => (Number.isFinite(block.seconds) ? `Thought for ${block.seconds}s` : 'Thought process');
+
+// Thinking as one line. claude.ai labels it by its summary; with none, how long it took.
 function renderThinking(block) {
-  const label = el('span', 'label', 'Thought process');
-  if (block.summary) {
-    label.append(' ');
-    label.append(el('span', 'gist', block.summary));
-  }
+  const label = el('span', 'label', block.summary ? '' : thoughtFor(block));
+  if (block.summary) label.append(el('span', 'gist', block.summary));
   const body = el('div', 'line-body');
   const steps = block.summaries || [];
   if (block.text.trim()) body.append(el('div', 'line-text', block.text));
@@ -292,28 +293,264 @@ function toolPart(title, text, bad) {
   return part;
 }
 
-function renderTool(block) {
-  const parts = [icon(TOOL_ICONS[block.name] || 'wrench'), el('span', 'label', block.label)];
+// A tool call as one of claude.ai's step rows: "Read IMG_3508.jpg", the file name darker, "Failed" in red,
+// a thumbnail when the result has an image. Open, it shows the request and the response, and the images.
+const toolImageOk = src => typeof src === 'string' && (SAFE_IMAGE_URI.test(src) || (SAVED_WEB_IMAGE.test(src) && !/(^|\/)\.\.?(\/|$)/.test(src)));
+// gallery: the images of the step group this row is in, [{ href, title }], so a picture opens there.
+const READ_TOOL = /^(Read|view|read_file)$/;
+function renderTool(block, gallery = null) {
+  const label = String(block.label || '');
+  const target = block.target && label.endsWith(block.target) ? block.target : '';
+  const parts = [el('span', 'label', target ? label.slice(0, label.length - target.length) : label)];
+  if (target) parts[0].append(el('span', 'target', target));
   if (block.error) parts.push(el('span', 'fail', 'Failed'));
   const body = el('div', 'line-body');
-  const input = toolInputText(block.input);
-  if (input) body.append(toolPart('Input', input));
-  if (block.result) body.append(toolPart('Result', block.result, block.error));
+  const images = (block.images || []).filter(toolImageOk);
+  // A file Claude read that was a picture opens to the picture alone, as on claude.ai.
+  const pictureOnly = images.length && READ_TOOL.test(String(block.name)) && !block.error;
+  const input = pictureOnly ? '' : toolInputText(block.input);
+  if (input) body.append(toolPart('Request', input));
+  if (block.result && !pictureOnly) body.append(toolPart('Response', block.result, block.error));
+  if (images.length) {
+    const row = el('div', 'tool-images');
+    for (const src of images) {
+      const button = el('button', 'tool-image');
+      button.type = 'button';
+      button.setAttribute('aria-label', `View image: ${block.label || 'Image'}`);
+      const img = el('img');
+      img.src = src;
+      img.alt = block.label || 'Image from a tool result';
+      img.loading = 'lazy';
+      button.append(img);
+      const items = gallery && gallery.length ? gallery : images.map(href => ({ href, title: block.label || '' }));
+      const start = Math.max(0, items.findIndex(item => item.href === src));
+      button.addEventListener('click', () => openGallery(items, start, button));
+      row.append(button);
+    }
+    body.prepend(row);
+  }
   const missing = block.missingImages || 0;
   if (missing > 0) body.append(el('div', 'tool-part missing-image', missing === 1 ? 'Image not in this export' : `${missing} images not in this export`));
-  if (!input && !block.result && !missing) body.append(el('div', 'line-text', 'No details in this export'));
+  if (!input && !block.result && !missing && !images.length) body.append(el('div', 'line-text', 'No details in this export'));
   const line = foldLine('tool', parts, body);
-  const images = (block.images || []).filter(src => SAFE_IMAGE_URI.test(src));
-  if (!images.length) return [line];
-  const row = el('div', 'tool-images');
-  for (const src of images) {
+  if (images.length) line.querySelector('summary').append(thumbs(images.slice(0, 1), 0));
+  return [line];
+}
+
+// A page Claude published on claude.ai: a link to it, as claude.ai shows the artifact after the steps.
+function renderPublished(page) {
+  const box = el('div', 'published');
+  box.append(icon('globe'), el('span', 'label', 'Published on claude.ai: '));
+  const link = el('a', '', page.title || page.url);
+  link.href = page.url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+  box.append(link);
+  return box;
+}
+
+// Small pictures at the end of a step line; more: how many aren't shown.
+function thumbs(srcs, more) {
+  const box = el('span', 'thumbs');
+  if (more > 0) box.append(el('span', 'more', `+${more}`));
+  for (const src of srcs) {
     const img = el('img');
     img.src = src;
-    img.alt = 'Image from a tool result';
+    img.alt = '';
     img.loading = 'lazy';
-    row.append(img);
+    box.append(img);
   }
-  return [line, row];
+  return box;
+}
+
+// What a group of steps did, as claude.ai sums it up: "Read 9 files, ran 2 commands", or the first two
+// kinds and "and 4 more steps". Kinds in this order; other tools count only as steps.
+const STEP_KINDS = [
+  [/^(create_file|Write)$/, 'created a file', n => `created ${n} files`],
+  [/^(str_replace|Edit|str_replace_based_edit_tool)$/, 'edited a file', n => `edited ${n} files`],
+  [/^(Read|view|read_file)$/, 'read a file', n => `read ${n} files`],
+  [/^(Bash|bash_tool)$/, 'ran a command', n => `ran ${n} commands`],
+  [/(^|__|:)(web_search|image_search)$/, 'searched the web', n => `ran ${n} searches`],
+  [/^web_fetch$/, 'fetched a page', n => `fetched ${n} pages`],
+];
+function stepsSummary(tools) {
+  const counts = STEP_KINDS.map(([re]) => tools.filter(t => re.test(t.name)).length);
+  const phrases = [];
+  let counted = 0;
+  STEP_KINDS.forEach(([, one, many], i) => {
+    if (!counts[i] || phrases.length === 2) return;
+    phrases.push(counts[i] === 1 ? one : many(counts[i]));
+    counted += counts[i];
+  });
+  const rest = tools.length - counted;
+  let text;
+  if (!phrases.length) text = tools.length === 1 ? String(tools[0].label || 'used a tool') : `took ${tools.length} steps`;
+  else if (!rest) text = phrases.join(', ');
+  else text = `${phrases.join(', ')}${phrases.length > 1 ? ',' : ''} and ${rest} more step${rest === 1 ? '' : 's'}`;
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+// Everything Claude did before its answer, folded into one line as claude.ai does: thinking, tool calls and
+// the text between them, as rows in a box. Thinking alone shows as its own line, labelled by its summary.
+const OUTPUT_TOOL = /(^|__|:)(show_widget|image_search|publish_files)$/;
+function renderSteps(blocks, sources, first = true) {
+  blocks = blocks.filter(b => !(b.t === 'tool' && OUTPUT_TOOL.test(String(b.name))));
+  // Thinking with nothing to show (no text, no summary) only adds to the time, as on claude.ai.
+  const seconds = blocks.reduce((n, b) => n + (b.t === 'thinking' && Number.isFinite(b.seconds) ? b.seconds : 0), 0);
+  const all = blocks;
+  blocks = blocks.filter(b => !(b.t === 'thinking' && !String(b.text || '').trim() && !b.summary && !(b.summaries || []).length));
+  if (!blocks.length) {
+    const thought = all.find(b => b.t === 'thinking');
+    return first && thought ? renderThinking({ ...thought, seconds: seconds || thought.seconds }) : null;
+  }
+  const tools = blocks.filter(b => b.t === 'tool');
+  const thinking = blocks.filter(b => b.t === 'thinking');
+  if (!tools.length && blocks.length === 1 && thinking.length === 1) return renderThinking(blocks[0]);
+  const box = el('div', 'steps-box');
+  const gallery = tools.flatMap(t => (t.images || []).filter(toolImageOk).map(href => ({ href, title: t.label || '' })));
+  for (const block of blocks) {
+    if (block.t === 'thinking') box.append(renderThinking(block, true));
+    else if (block.t === 'tool') box.append(...renderTool(block, gallery));
+    else if (block.t === 'text' && block.text) {
+      const row = el('div', 'step-text');
+      row.append(renderText(block, sources));
+      box.append(row);
+    }
+  }
+  const last = thinking.length ? thinking[thinking.length - 1] : null;
+  const label = tools.length ? stepsSummary(tools) : ((last && last.summary) || thoughtFor({ seconds: seconds || (last && last.seconds) }));
+  const line = foldLine('steps', [el('span', 'label', label)], box);
+  const images = tools.flatMap(t => (t.images || []).filter(toolImageOk));
+  if (images.length) line.querySelector('summary').append(thumbs(images.slice(0, 3), images.length - 3));
+  return line;
+}
+
+// Images from web searches, as claude.ai shows them: one mosaic per response holding every search's
+// images, the first four as tiles (three: a tall one and two stacked), the site on each, and a gallery
+// that steps through them all. A saved copy is a relative path under images/ beside the viewer; one the
+// export didn't save is a card with its title.
+const SAVED_WEB_IMAGE = /^(?:[A-Za-z0-9%._~-]+\/)*images\/[A-Za-z0-9%._~-]+$/;
+const MOSAIC_TILES = 4;
+const savedImage = item => toolImageOk(item.href);
+const httpsPage = item => (typeof item.page === 'string' && /^https:\/\//i.test(item.page) ? item.page : '');
+const siteOf = item => item.source || (httpsPage(item) ? httpsPage(item).replace(/^https:\/\/(www\.)?/i, '').split('/')[0] : '');
+
+// Every web image of a message, once each, in order.
+function messageWebImages(m) {
+  const seen = new Set();
+  const out = [];
+  for (const block of m.blocks) {
+    if (block.t !== 'tool' || !Array.isArray(block.web)) continue;
+    for (const item of block.web) {
+      if (!item) continue;
+      const key = savedImage(item) ? item.href : `${item.title}\n${item.page}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(item);
+    }
+  }
+  return out;
+}
+
+function renderWebMosaic(items) {
+  if (!items.length) return null;
+  const box = el('div', 'web-results');
+  const shown = items.slice(0, MOSAIC_TILES);
+  const grid = el('div', `web-mosaic n${shown.length}`);
+  shown.forEach((item, i) => {
+    const tile = el('button', 'tile');
+    tile.type = 'button';
+    tile.setAttribute('aria-label', `View image: ${item.title || 'Image'}`);
+    if (savedImage(item)) {
+      const img = el('img');
+      img.src = item.href;
+      img.alt = item.title || 'Image from a web search';
+      img.loading = 'lazy';
+      tile.append(img);
+    } else {
+      tile.classList.add('not-saved');
+      tile.append(el('span', 'tile-title', item.title || 'Image'), el('span', 'tile-note', 'Not in this export'));
+    }
+    const site = siteOf(item);
+    if (site) tile.append(el('span', 'tile-site', site));
+    const more = items.length - shown.length;
+    if (i === shown.length - 1 && more > 0) tile.append(el('span', 'tile-more', `+${more}`));
+    tile.addEventListener('click', () => openGallery(items, i, tile));
+    grid.append(tile);
+  });
+  box.append(grid, el('div', 'web-caption', 'Results from the web'));
+  return box;
+}
+
+function openGallery(items, start, trigger) {
+  closePopup();
+  let at = start;
+  const veil = el('div', 'veil gallery');
+  const pop = el('div', 'gallery-pop');
+  pop.setAttribute('role', 'dialog');
+  pop.setAttribute('aria-modal', 'true');
+  pop.setAttribute('aria-label', 'Image preview');
+  pop.tabIndex = -1;
+  const close = el('button', 'close');
+  close.type = 'button';
+  close.setAttribute('aria-label', 'Close');
+  close.append(icon('close'));
+  close.addEventListener('click', closePopup);
+  const stage = el('div', 'gallery-stage');
+  const info = el('div', 'gallery-info');
+  const pos = el('span', 'pos');
+  const step = (dir, label) => {
+    const button = el('button', dir < 0 ? 'prev' : 'next');
+    button.type = 'button';
+    button.setAttribute('aria-label', label);
+    button.append(icon('chevron'));
+    button.addEventListener('click', () => show(at + dir));
+    return button;
+  };
+  const prev = step(-1, 'Previous image');
+  const next = step(1, 'Next image');
+  const nav = el('div', 'gallery-nav');
+  nav.append(prev, pos, next);
+  const foot = el('div', 'gallery-foot');
+  foot.append(info, nav);
+  function show(i) {
+    at = Math.max(0, Math.min(items.length - 1, i));
+    const item = items[at];
+    if (savedImage(item)) {
+      const img = el('img');
+      img.src = item.href;
+      img.alt = item.title || 'Image from a web search';
+      stage.replaceChildren(img);
+    } else {
+      stage.replaceChildren(el('div', 'file-missing', 'This image is not in this export.'));
+    }
+    const site = siteOf(item);
+    const parts = [];
+    if (site) parts.push(el('span', 'site', site));
+    parts.push(el('span', 'title', item.title || 'Image'));
+    const page = httpsPage(item);
+    if (page) {
+      const link = el('a', 'open', 'Open page');
+      link.href = page; link.target = '_blank'; link.rel = 'noopener noreferrer';
+      parts.push(link);
+    }
+    info.replaceChildren(...parts);
+    pos.textContent = `${at + 1} of ${items.length}`;
+    prev.disabled = at === 0;
+    next.disabled = at === items.length - 1;
+    nav.hidden = items.length < 2;
+  }
+  pop.append(close, stage, foot);
+  veil.append(pop);
+  veil.addEventListener('click', e => { if (e.target === veil || e.target === stage) closePopup(); });
+  veil.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft') { e.preventDefault(); show(at - 1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); show(at + 1); }
+    else popupKeys(e);
+  });
+  show(start);
+  document.body.append(veil);
+  document.getElementById('app').inert = true;
+  popup = { veil, trigger };
+  pop.focus({ preventScroll: true });
 }
 
 function renderSources(sources) {
@@ -794,21 +1031,125 @@ function setupFilesMenu() {
   });
 }
 
+// The visualize tool's guide, which claude.ai doesn't show as a step.
+const HIDDEN_TOOL = /(^|__)visualize__read_me$/;
+const inlineDiagram = (block, chat) => {
+  const file = block.t === 'card' && chat.files ? chat.files[block.file] : null;
+  return !!(file && file.widget && /\.svg$/i.test(file.name || ''));
+};
+
+// A response as claude.ai shows it: split at each diagram Claude drew, which shows inline where it was
+// drawn; in each part, the steps fold into a line and the text after them is the answer.
 function renderAssistant(m, chat) {
   const node = el('section', 'msg assistant');
   const sources = [];
+  let part = [];
+  let first = true;
+  const flush = () => { renderPart(node, part, chat, sources, first); if (part.length) first = false; part = []; };
   for (const block of m.blocks) {
+    if (block.t === 'tool' && HIDDEN_TOOL.test(String(block.name))) continue;
+    if (inlineDiagram(block, chat)) {
+      flush();
+      const diagram = renderDiagram(block, chat);
+      if (diagram) node.append(diagram);
+    } else part.push(block);
+  }
+  flush();
+  if (!node.hasChildNodes()) return null;
+  if (sources.length) node.append(renderSources(sources));
+  return node;
+}
+
+function renderPart(node, blocks, chat, sources, first) {
+  // The steps run up to the last thinking or tool block that isn't an output; the rest is the answer.
+  let last = -1;
+  blocks.forEach((block, i) => { if (block.t === 'thinking' || (block.t === 'tool' && !OUTPUT_TOOL.test(String(block.name)))) last = i; });
+  const steps = blocks.slice(0, last + 1).filter(b => b.t !== 'card');
+  const after = [...blocks.slice(0, last + 1).filter(b => b.t === 'card'), ...blocks.slice(last + 1)];
+  const line = steps.length ? renderSteps(steps, sources, first) : null;
+  if (line) node.append(line);
+  const web = messageWebImages({ blocks });
+  if (web.length) node.append(renderWebMosaic(web));
+  for (const block of blocks) if (block.t === 'tool' && block.published) node.append(renderPublished(block.published));
+  for (const block of after) {
     if (block.t === 'text') { if (block.text) node.append(renderText(block, sources)); }
-    else if (block.t === 'thinking') node.append(renderThinking(block));
-    else if (block.t === 'tool') node.append(...renderTool(block));
     else if (block.t === 'card') {
       const card = renderCard(block, chat);
       if (card) node.append(card);
     }
   }
-  if (!node.hasChildNodes()) return null;
-  if (sources.length) node.append(renderSources(sources));
-  return node;
+}
+
+// A diagram inline, drawn from its SVG, with claude.ai's menu: copy it, download it as SVG or PNG, and
+// open it in the side panel.
+function renderDiagram(block, chat) {
+  const file = chat.files[block.file];
+  const version = file && file.versions[block.version];
+  const svg = version && typeof version.text === 'string' ? version.text : '';
+  if (!/^\s*<svg[\s>]/i.test(svg)) return renderCard(block, chat);
+  const src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+  const box = el('figure', 'diagram');
+  const img = el('img');
+  img.src = src;
+  img.alt = file.name || 'Diagram';
+  box.append(img);
+  const base = String(file.name || 'diagram').replace(/\.svg$/i, '');
+  const more = el('button', 'diagram-more');
+  more.type = 'button';
+  more.setAttribute('aria-label', 'Diagram options');
+  more.setAttribute('aria-haspopup', 'menu');
+  more.textContent = '…';
+  const menu = el('div', 'diagram-menu');
+  menu.setAttribute('role', 'menu');
+  menu.hidden = true;
+  const note = el('span', 'diagram-note');
+  const item = (label, run) => {
+    const b = el('button', '', label);
+    b.type = 'button';
+    b.setAttribute('role', 'menuitem');
+    b.addEventListener('click', async () => { close(); try { await run(); } catch (e) { flash("That didn't work here."); } });
+    return b;
+  };
+  const flash = text => { note.textContent = text; clearTimeout(note.timer); note.timer = setTimeout(() => { note.textContent = ''; }, 2500); };
+  const close = () => { menu.hidden = true; more.setAttribute('aria-expanded', 'false'); };
+  const save = (href, name) => { const a = el('a'); a.href = href; a.download = name; document.body.append(a); a.click(); a.remove(); };
+  menu.append(
+    item('Copy as image', async () => {
+      const png = await diagramPng(img);
+      await navigator.clipboard.write([new ClipboardItem({ 'image/png': png })]);
+      flash('Copied');
+    }),
+    item('Download as SVG', () => save(src, `${base}.svg`)),
+    item('Download as PNG', async () => {
+      const url = URL.createObjectURL(await diagramPng(img));
+      save(url, `${base}.png`);
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    }),
+    item('Open in sidebar', () => navigate({ ...parseHash(location.hash), file: block.file, version: block.version })),
+  );
+  more.addEventListener('click', () => {
+    const open = menu.hidden;
+    menu.hidden = !open;
+    more.setAttribute('aria-expanded', String(open));
+    if (open) menu.querySelector('button').focus();
+  });
+  box.addEventListener('keydown', e => { if (e.key === 'Escape' && !menu.hidden) { e.preventDefault(); close(); more.focus(); } });
+  box.addEventListener('focusout', e => { if (!box.contains(e.relatedTarget)) close(); });
+  box.append(more, menu, note);
+  return box;
+}
+
+// The diagram as a PNG at twice its size, drawn from the SVG image already on the page.
+async function diagramPng(img) {
+  if (!img.complete) await new Promise((ok, bad) => { img.onload = ok; img.onerror = bad; });
+  const w = img.naturalWidth || img.width || 680, h = img.naturalHeight || img.height || 400;
+  const canvas = document.createElement('canvas');
+  canvas.width = w * 2;
+  canvas.height = h * 2;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(2, 2);
+  ctx.drawImage(img, 0, 0, w, h);
+  return new Promise((ok, bad) => canvas.toBlob(b => (b ? ok(b) : bad(new Error('no image'))), 'image/png'));
 }
 
 // The ‹ 1 / 2 › control under a message with other versions. Buttons carry data-dir, -1 or 1.
@@ -1322,6 +1663,7 @@ function tryFind() {
   }
   if (nth !== undefined) {
     const { mark, count } = markNth(node, terms, nth);
+    for (let fold = mark && mark.closest('details'); fold; fold = fold.parentElement.closest('details')) fold.open = true;
     stepLanded(mark, count);
     return;
   }
@@ -1487,7 +1829,7 @@ function markNth(node, terms, nth) {
   const wanted = (terms || []).filter(Boolean).slice().sort((a, b) => b.length - a.length);
   const found = [];
   for (const region of node.querySelectorAll('.prose, .bubble')) {
-    if (region.closest('.line')) continue;
+    if (region.closest('.line') && !region.closest('.step-text')) continue;
     const walker = document.createTreeWalker(region, NodeFilter.SHOW_TEXT);
     for (let text = walker.nextNode(); text; text = walker.nextNode()) {
       if (text.parentElement.closest('button, time, .branch, .code-head, .plain-note, .katex, script, style')) continue;

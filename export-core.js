@@ -433,6 +433,41 @@ function docCompanionNote(markdown, names = []) {
   return { markdown: `${md.slice(0, end)}\n\n${note}${md.slice(end)}`, captions };
 }
 
+// claude.ai's visualize tool (show_widget) draws an SVG or HTML fragment in the chat, styled by claude.ai's
+// own widget stylesheet. widgetFile makes it a file that stands alone: an SVG gets xmlns and WIDGET_CSS
+// (the classes and colors the tool's guide documents, light and dark), and HTML gets a page around it.
+// extract_artifacts.py has the same stylesheet, byte for byte.
+const WIDGET_CSS = ':root{--text-primary:#1F1E1D;--text-secondary:#5F5E5A;--text-muted:#888780;--text-accent:#185FA5;--text-danger:#A32D2D;--text-success:#3B6D11;--text-warning:#854F0B;--surface-0:#FAF9F5;--surface-1:#F5F4EF;--surface-2:#FFFFFF;--bg-accent:#E6F1FB;--bg-danger:#FCEBEB;--bg-success:#EAF3DE;--bg-warning:#FAEEDA;--border:rgba(31,30,29,0.15);--border-strong:rgba(31,30,29,0.3);--border-stronger:rgba(31,30,29,0.45);--border-accent:#378ADD;--border-danger:#E24B4A;--border-success:#639922;--border-warning:#BA7517;}:root{--p:var(--text-primary);--s:var(--text-secondary);--t:var(--text-muted);--bg2:var(--surface-1);--b:var(--border);--font-sans:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;--font-voice:Georgia,"Times New Roman",serif;--font-mono:ui-monospace,Menlo,Consolas,monospace;--radius:8px;--pad-sm:8px;--pad-md:12px;--pad-lg:16px;--pad-xl:24px;--gap-xs:4px;--gap-sm:8px;--gap-md:12px;--gap-lg:16px;--gap-xl:24px;background:var(--surface-0);color:var(--text-primary)}.t,.ts,.th{font-family:var(--font-sans);fill:var(--text-primary)}.t{font-size:14px}.th{font-size:14px;font-weight:500}.ts{font-size:12px;fill:var(--text-secondary)}.box{fill:var(--surface-1);stroke:var(--border-strong)}.arr{fill:none;stroke:var(--text-secondary);stroke-width:1.5}.leader{fill:none;stroke:var(--text-muted);stroke-width:0.5;stroke-dasharray:4 3}.node{cursor:pointer}.c-purple>rect,.c-purple>circle,.c-purple>ellipse,rect.c-purple,circle.c-purple,ellipse.c-purple{fill:#EEEDFE;stroke:#534AB7}.c-purple>.t,.c-purple>.th{fill:#3C3489}.c-purple>.ts{fill:#534AB7}.c-teal>rect,.c-teal>circle,.c-teal>ellipse,rect.c-teal,circle.c-teal,ellipse.c-teal{fill:#E1F5EE;stroke:#0F6E56}.c-teal>.t,.c-teal>.th{fill:#085041}.c-teal>.ts{fill:#0F6E56}.c-coral>rect,.c-coral>circle,.c-coral>ellipse,rect.c-coral,circle.c-coral,ellipse.c-coral{fill:#FAECE7;stroke:#993C1D}.c-coral>.t,.c-coral>.th{fill:#712B13}.c-coral>.ts{fill:#993C1D}.c-pink>rect,.c-pink>circle,.c-pink>ellipse,rect.c-pink,circle.c-pink,ellipse.c-pink{fill:#FBEAF0;stroke:#993556}.c-pink>.t,.c-pink>.th{fill:#72243E}.c-pink>.ts{fill:#993556}.c-gray>rect,.c-gray>circle,.c-gray>ellipse,rect.c-gray,circle.c-gray,ellipse.c-gray{fill:#F1EFE8;stroke:#5F5E5A}.c-gray>.t,.c-gray>.th{fill:#444441}.c-gray>.ts{fill:#5F5E5A}.c-blue>rect,.c-blue>circle,.c-blue>ellipse,rect.c-blue,circle.c-blue,ellipse.c-blue{fill:#E6F1FB;stroke:#185FA5}.c-blue>.t,.c-blue>.th{fill:#0C447C}.c-blue>.ts{fill:#185FA5}.c-green>rect,.c-green>circle,.c-green>ellipse,rect.c-green,circle.c-green,ellipse.c-green{fill:#EAF3DE;stroke:#3B6D11}.c-green>.t,.c-green>.th{fill:#27500A}.c-green>.ts{fill:#3B6D11}.c-amber>rect,.c-amber>circle,.c-amber>ellipse,rect.c-amber,circle.c-amber,ellipse.c-amber{fill:#FAEEDA;stroke:#854F0B}.c-amber>.t,.c-amber>.th{fill:#633806}.c-amber>.ts{fill:#854F0B}.c-red>rect,.c-red>circle,.c-red>ellipse,rect.c-red,circle.c-red,ellipse.c-red{fill:#FCEBEB;stroke:#A32D2D}.c-red>.t,.c-red>.th{fill:#791F1F}.c-red>.ts{fill:#A32D2D}@media (prefers-color-scheme:dark){:root{--text-primary:#F5F4EF;--text-secondary:#B4B2A9;--text-muted:#888780;--text-accent:#85B7EB;--text-danger:#F09595;--text-success:#97C459;--text-warning:#EF9F27;--surface-0:#262624;--surface-1:#30302E;--surface-2:#3A3A37;--bg-accent:#0C447C;--bg-danger:#791F1F;--bg-success:#27500A;--bg-warning:#633806;--border:rgba(245,244,239,0.15);--border-strong:rgba(245,244,239,0.3);--border-stronger:rgba(245,244,239,0.45);}.c-purple>rect,.c-purple>circle,.c-purple>ellipse,rect.c-purple,circle.c-purple,ellipse.c-purple{fill:#3C3489;stroke:#AFA9EC}.c-purple>.t,.c-purple>.th{fill:#CECBF6}.c-purple>.ts{fill:#AFA9EC}.c-teal>rect,.c-teal>circle,.c-teal>ellipse,rect.c-teal,circle.c-teal,ellipse.c-teal{fill:#085041;stroke:#5DCAA5}.c-teal>.t,.c-teal>.th{fill:#9FE1CB}.c-teal>.ts{fill:#5DCAA5}.c-coral>rect,.c-coral>circle,.c-coral>ellipse,rect.c-coral,circle.c-coral,ellipse.c-coral{fill:#712B13;stroke:#F0997B}.c-coral>.t,.c-coral>.th{fill:#F5C4B3}.c-coral>.ts{fill:#F0997B}.c-pink>rect,.c-pink>circle,.c-pink>ellipse,rect.c-pink,circle.c-pink,ellipse.c-pink{fill:#72243E;stroke:#ED93B1}.c-pink>.t,.c-pink>.th{fill:#F4C0D1}.c-pink>.ts{fill:#ED93B1}.c-gray>rect,.c-gray>circle,.c-gray>ellipse,rect.c-gray,circle.c-gray,ellipse.c-gray{fill:#444441;stroke:#B4B2A9}.c-gray>.t,.c-gray>.th{fill:#D3D1C7}.c-gray>.ts{fill:#B4B2A9}.c-blue>rect,.c-blue>circle,.c-blue>ellipse,rect.c-blue,circle.c-blue,ellipse.c-blue{fill:#0C447C;stroke:#85B7EB}.c-blue>.t,.c-blue>.th{fill:#B5D4F4}.c-blue>.ts{fill:#85B7EB}.c-green>rect,.c-green>circle,.c-green>ellipse,rect.c-green,circle.c-green,ellipse.c-green{fill:#27500A;stroke:#97C459}.c-green>.t,.c-green>.th{fill:#C0DD97}.c-green>.ts{fill:#97C459}.c-amber>rect,.c-amber>circle,.c-amber>ellipse,rect.c-amber,circle.c-amber,ellipse.c-amber{fill:#633806;stroke:#EF9F27}.c-amber>.t,.c-amber>.th{fill:#FAC775}.c-amber>.ts{fill:#EF9F27}.c-red>rect,.c-red>circle,.c-red>ellipse,rect.c-red,circle.c-red,ellipse.c-red{fill:#791F1F;stroke:#F09595}.c-red>.t,.c-red>.th{fill:#F7C1C1}.c-red>.ts{fill:#F09595}}';
+
+function isWidgetTool(name) {
+  return /(^|__|:)show_widget$/.test(String(name || ''));
+}
+
+// The state key a show_widget call writes to: one file per title, versioned like any artifact.
+function widgetKey(input, toolUseId = '') {
+  const title = input && typeof input.title === 'string' ? input.title : '';
+  return `widget:${title || toolUseId}`;
+}
+
+// { name, text } for one show_widget call, or null when it drew nothing.
+function widgetFile(input) {
+  const code = input && typeof input.widget_code === 'string' ? input.widget_code : '';
+  if (!code.trim()) return null;
+  const title = typeof input.title === 'string' ? input.title : '';
+  const base = safeFileTitle(title) || 'diagram';
+  const svg = /^\s*<svg\b[^>]*>/i.exec(code);
+  if (svg) {
+    let open = svg[0];
+    if (!/\sxmlns\s*=/.test(open)) open = open.replace(/^(\s*<svg)/i, '$1 xmlns="http://www.w3.org/2000/svg"');
+    return { name: `${base}.svg`, text: `${open}<style>${WIDGET_CSS}</style>${code.slice(svg[0].length)}` };
+  }
+  const head = title.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  return {
+    name: `${base}.html`,
+    text: `<!DOCTYPE html>\n<html>\n<head>\n<meta charset="utf-8">\n<meta name="viewport" content="width=device-width, initial-scale=1">\n<title>${head}</title>\n<style>${WIDGET_CSS}body{margin:0;padding:16px;font:16px/1.7 var(--font-sans)}</style>\n<script>function sendPrompt() {}</script>\n</head>\n<body>\n${code}\n</body>\n</html>\n`,
+  };
+}
+
 // The key a Docs call writes to, for the viewer's cards: 'doc:<node id>' (or 'doc:pending:<call id>'
 // for a document whose batch result is missing), or null.
 function claudeDocKey(block, result) {
@@ -788,6 +823,9 @@ function extractArtifacts(data, errorCollector = null, index = null) {
             if (unreplayed) warnDoc(d, key, 'An edit to this Claude Docs document could not be rebuilt from the chat; the exported copy may differ from the document on claude.ai.');
           }
         }
+      } else if (isWidgetTool(block.name)) {
+        const file = widgetFile(input);
+        if (file) setContent(widgetKey(input, block.id), file.text, file.name);
       } else if (isBashTool(block.name)) {
         const command = input.command || '';
         for (const match of heredocMatches(command)) {
@@ -906,6 +944,8 @@ function extractUploadedFiles(data, organizationId = null) {
     if (msg.sender === 'human') {
       promptNum++;
     }
+    // A file on Claude's own message is its output, not an upload (extractAttachedFiles).
+    if (msg.sender === 'assistant') continue;
 
     // Process files_v2 array (newer format)
     for (const file of (msg.files_v2 || [])) {
@@ -1075,6 +1115,116 @@ function extractDeliveredFiles(data, takenNames = []) {
   return files;
 }
 
+// Files claude.ai attached to Claude's own messages, such as a page Claude published. They are Claude's
+// output, so they go to artefacts/, not uploads/. One whose name a replayed artifact already has is that
+// file (existing: true) and isn't saved again. takenNames: names already in artefacts/. Returns
+// [{ filename, uuid, path, existing }].
+function extractAttachedFiles(data, takenNames = []) {
+  const taken = new Set(takenNames);
+  const seen = new Set();
+  const files = [];
+  for (const msg of getMessageChain(data)) {
+    if (msg.sender !== 'assistant') continue;
+    const list = [
+      ...(msg.files_v2 || []).map((f) => [f, f && f.file_name]),
+      ...(msg.files || []).map((f) => [f, f && (f.path ? f.path.split('/').pop() : f.file_name)]),
+    ];
+    for (const [file, raw] of list) {
+      if (!file || !file.success || !raw || !file.file_uuid || seen.has(file.file_uuid)) continue;
+      seen.add(file.file_uuid);
+      const name = zipSafeName(raw).normalize('NFC');
+      if (taken.has(name)) {
+        files.push({ filename: name, uuid: file.file_uuid, path: file.path || '', existing: true });
+        continue;
+      }
+      const dot = name.lastIndexOf('.');
+      const base = dot > 0 ? name.substring(0, dot) : name;
+      const ext = dot > 0 ? name.substring(dot) : '';
+      let out = name;
+      for (let n = 2; taken.has(out); n++) out = `${base}_${n}${ext}`;
+      taken.add(out);
+      files.push({ filename: out, uuid: file.file_uuid, path: file.path || '', existing: false });
+    }
+  }
+  return files;
+}
+
+// Images claude.ai's image_search showed, from every message, once per URL, https only (they are fetched
+// from their own sites). Each: { url, thumb, title, page, source, key }, key a short hash of the URL that
+// names the saved file, so the old-archive tool finds it again (webImageName).
+function webImagesOf(data) {
+  const seen = new Set();
+  const out = [];
+  const https = (u) => (typeof u === 'string' && /^https:\/\//i.test(u) ? u : '');
+  for (const msg of (data.chat_messages || [])) {
+    for (const block of (msg && msg.content) || []) {
+      if (!block || block.type !== 'tool_result' || !/(^|__|:)image_search$/.test(String(block.name || ''))) continue;
+      for (const part of Array.isArray(block.content) ? block.content : []) {
+        for (const img of (part && Array.isArray(part.images) ? part.images : [])) {
+          const url = https(img && img.url);
+          if (!url || seen.has(url)) continue;
+          seen.add(url);
+          out.push({ url, thumb: https(img.thumbnail_url), title: String(img.title || ''), page: https(img.page_url), source: String(img.source || ''), key: webImageKey(url) });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+// Images in tool results that claude.ai only links (file_uuid and preview_url), such as a photo Claude
+// opened with Read: from every message, once per file. Each: { uuid, url, base }, url claude.ai's preview
+// path, base the name of the file the tool read (its sandbox path's last part, without extension) or ''.
+function toolImagesOf(data) {
+  const pathOf = new Map();
+  for (const msg of (data.chat_messages || [])) {
+    for (const b of (msg && msg.content) || []) {
+      if (b && b.type === 'tool_use' && b.id && b.input && typeof b.input === 'object') pathOf.set(b.id, String(b.input.file_path || b.input.path || ''));
+    }
+  }
+  const seen = new Set();
+  const out = [];
+  for (const msg of (data.chat_messages || [])) {
+    for (const b of (msg && msg.content) || []) {
+      if (!b || b.type !== 'tool_result' || !Array.isArray(b.content)) continue;
+      for (const item of b.content) {
+        if (!item || item.type !== 'image' || typeof item.file_uuid !== 'string' || seen.has(item.file_uuid)) continue;
+        const url = String(item.preview_url || '');
+        if (!/^\/api\/[\w-]+\/files\/[\w-]+\/preview$/.test(url) || !/^[0-9a-f-]{8,}$/i.test(item.file_uuid)) continue;
+        seen.add(item.file_uuid);
+        const name = (pathOf.get(b.tool_use_id) || '').split('/').pop();
+        out.push({ uuid: item.file_uuid, url, base: name.replace(/\.[^.]*$/, '') });
+      }
+    }
+  }
+  return out;
+}
+
+// images/<first 8 of the uuid>_<name><ext>, found again by that prefix.
+function toolImageName(img, ext) {
+  const base = safeFileTitle(img.base).slice(0, 40);
+  return `${img.uuid.slice(0, 8)}${base ? `_${base}` : ''}${ext}`;
+}
+
+// FNV-1a over the URL's UTF-16 code units, as 8 hex digits.
+function webImageKey(url) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < url.length; i++) {
+    h ^= url.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16).padStart(8, '0');
+}
+
+// The image types saved, by the Content-Type the site sends, and the extension each gets.
+const WEB_IMAGE_TYPES = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/gif': '.gif', 'image/webp': '.webp' };
+
+// images/<key>_<title><ext>: the key first, so a file is found by it whatever its title.
+function webImageName(img, ext) {
+  const title = safeFileTitle(img.title).slice(0, 40);
+  return `${img.key}${title ? `_${title}` : ''}${ext}`;
+}
+
 // Get model name from conversation data
 function getModelName(data) {
   // Direct model field (newer conversations)
@@ -1148,6 +1298,7 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
-    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
+    WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
+    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
   };
 }

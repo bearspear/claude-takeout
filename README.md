@@ -82,10 +82,12 @@ Creates a comprehensive archive:
 │   ├── 001_title_response.md       # Pure text response
 │   ├── 001_title_response.full.md  # Response with thinking/tools/embedded artifacts
 │   └── ...
-├── artefacts/
+├── artefacts/                   # Files Claude made, diagrams it drew, files on its messages
 │   ├── document.md
 │   ├── script.py
+│   ├── wiring_diagram.svg
 │   └── ...
+├── images/                      # Images Claude looked at, and from its web searches (with permission)
 ├── attachments/                 # Pasted text files (extracted content)
 │   ├── meeting_notes.txt
 │   └── ...
@@ -367,6 +369,16 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.11.0
+
+- **Diagrams Claude draws in the chat are exported** - A diagram or chart Claude shows inline with claude.ai's visualize tool is now saved in `artefacts/` as `<title>.svg` (or `<title>.html` when it isn't an SVG), styled as claude.ai draws it, in light and dark. `full_chat.md` and the response files show the picture and link the file, and a diagram Claude redraws under the same title gets `_v1`, `_v2` versions. The viewer shows it inline where Claude drew it, as claude.ai does, with a … menu: Copy as image, Download as SVG, Download as PNG, and Open in sidebar. `extract_artifacts.py` writes the same files.
+- **Images from web searches are saved** - The images Claude found with image search are saved in `images/` and shown in `full_chat.md` and the response files, each with a link to the page it came from, instead of raw JSON. The viewer shows them as claude.ai does: a mosaic in the response, and a full-screen gallery with the title, site and page link of each. Saving them needs Chrome's permission to fetch images from other sites: Export ZIP asks for it the first time a chat has such images, or turn on Settings > Save images from web searches beforehand (Export All can't ask midway). Without it, or when a site refuses, the images are listed as links and `errors.txt` says so (`web_image`).
+- **Published pages are linked** - When Claude publishes a page on claude.ai, `full_chat.md` says "Published on claude.ai" with the page's link.
+- **Tool guidance is left out of the Markdown** - The instructions a tool hands Claude (the visualize and artifact tools' guides, which can run to 60 KB) show as one line instead of in full.
+- **Steps fold as on claude.ai** - In the viewer, everything Claude did before its answer folds into one line, as claude.ai shows it: "Read 9 files, ran 2 commands", or "Created a file, read a file, and 4 more steps", with small pictures of what it looked at. Opened, the steps are rows: thinking by its summary (or "Thought for 23s"), Claude's text between steps, each command by the description Claude gave it, each file by its name, and "Failed" where a step failed. A row opens to its request and response. Diagrams show inline where Claude drew them, and web images and published pages after the steps, as their own output. Thinking with nothing to show only adds to the time, and the diagram tool's guide isn't a step.
+- **Images Claude looked at are saved** - A photo Claude opened with Read, or a page it rendered and checked, is downloaded from claude.ai into `images/`, shown in its step in the viewer and under the step in `full_chat.md`. An image that can't be downloaded is listed in `errors.txt` (`tool_image`).
+- **Claude's own files are not uploads** - A file claude.ai attaches to Claude's message, such as a page it published, was saved in `uploads/` numbered like one of your uploads, and twice when Claude had written it. It now goes in `artefacts/`, once, and the viewer shows it on Claude's message. The old-archive tool also finds it where older exports put it. Needs a fresh export.
 
 ### v1.10.1
 
