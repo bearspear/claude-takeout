@@ -3,13 +3,17 @@
 // hostile title stays text, a saved card picture shows and a broken one falls back to the tile, relative times with
 // an absolute date in their title, a globe on a public artifact. Artifact pages: #a=<id> routing (unknown -> home),
 // the top bar (home, claude.ai link, Open file by the rule, badges), the Docs page, the Design poster, details pages
-// (not exported, no start file, too large, other kinds), and a run without viewer-check.gif (tiles, "unzip first").
+// (not exported, no start file, too large, other kinds), and a run without viewer-check.gif (tiles, "unzip first", no Open file).
+// Previews: a nested page with its CSS, JS, image and a renamed file; a hostile shared page and self-navigations get
+// nothing out; white frame in dark mode; forms and alerts; Markdown like the chat viewer; image, SVG, the remote note;
+// Show saved files anyway; a shared poster's HTML and SVG rows have no Open file; a missing part says so.
 // No requests outside file:, no page errors.
 // Run: PW=<playwright-core> CHROME_EXE=<chrome> node tests/e2e/artifacts-viewer.e2e.js [screenshot-dir]
 const { chromium } = require(process.env.PW);
 const fs = require('fs'), os = require('os'), path = require('path'), zlib = require('zlib');
 const { runArtifacts } = require('../helpers');
-const { HIT } = require('./hostile');
+const { HIT, ATTACKS, ATTACK_ENDS, hostileHtml, navArtifact } = require('./hostile');
+const { REMOTE_NOTE } = require('../../viewer/viewer-logic.js');
 const { uuidToBase58 } = require('../../export-core.js');
 
 const DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
@@ -288,6 +292,223 @@ async function exportTo(frames, pages, thumbs) {
   await zipped.page.waitForSelector('#page-body .sheet');
   check('not unzipped: no preview', (await zipped.page.locator('#page-body').textContent()).includes('Unzip the export first') && await zipped.page.locator('#page-body .preview').count() === 0, await zipped.page.locator('#page-body').textContent() + ' ' + await zipped.page.evaluate(() => location.hash));
   check('no requests or errors (not unzipped)', zipped.requests.length === 0 && zipped.errors.length === 0, zipped.requests.join(' ') + zipped.errors.join(' '));
+  check('not unzipped: no Open file anywhere', await zipped.page.locator('a.open-file').count() === 0);
+  await zipped.page.locator('#home-button').click();
+  await zipped.page.locator('#grid .card', { hasText: 'Data only' }).click();
+  await zipped.page.waitForSelector('#page-body .sheet');
+  check('not unzipped: no Open file in a file list', await zipped.page.locator('#page-body .files li').count() === 1 && await zipped.page.locator('a.open-file').count() === 0);
+
+  // ---- Previews ----
+  const SITE = '<!doctype html><html><head><link rel="stylesheet" href="./app.css"></head><body><h1 id="t">before</h1><img id="pic" src="img/a.png">'
+    + '<script src="app.js"></script><script src="js/Util.js"></script><script src="js/util.js"></script><script src="../../escape.js"></script></body></html>';
+  const FORMS = '<form id="f"><input name="q" value="1"><button id="b">Go</button></form><p id="out"></p><button id="al" type="button">Alert</button>'
+    + "<script>document.getElementById('f').addEventListener('submit', e => { e.preventDefault(); document.getElementById('out').textContent = 'submitted'; });"
+    + "document.getElementById('al').onclick = () => alert('x');</script>";
+  // With the storage shim, storage works inside the frame and stays there.
+  const attacks = { ...ATTACKS, storage: "(localStorage.setItem('k', 'v'), sessionStorage.setItem('s', 'w'), localStorage.getItem('k') + sessionStorage.getItem('s'))" };
+  const attackEnds = { ...ATTACK_ENDS, storage: 'gave vw' };
+  const navs = [
+    ['navhttps', "location.href = 'https://remote.test/nav';"],
+    ['navhttp', "location.href = 'http://remote.test/nav';"],
+    ['navlocal', `location.href = 'navlocal_${p(42)}/index.html';`],
+    ['navfile', `location.href = new URL('navfile_${p(43)}/index.html', document.baseURI).href;`],
+    ['navdata', "location.href = 'data:text/html,<script>console.log(%22ESCAPED%22)<\\/script>';"],
+    ['navblob', "location.href = URL.createObjectURL(new Blob(['<script>console.log(\"ESCAPED\")<\\/script>'], { type: 'text/html' }));"],
+    ['navrefresh', '', '<meta http-equiv="refresh" content="0;url=https://remote.test/refresh">'],
+    ['navform', "const f = document.createElement('form'); f.action = 'https://remote.test/form'; f.method = 'post'; document.body.append(f); f.submit();"],
+    ['navlink', "const a = document.createElement('a'); a.href = 'https://remote.test/link'; document.body.append(a); a.click();"],
+    ['navtoplink', "const a = document.createElement('a'); a.href = 'https://remote.test/top-link'; a.target = '_top'; document.body.append(a); a.click();"],
+  ];
+  const navUuid = i => U(40 + i);
+  const prevFrames = [
+    art(U(31), 'Nested site'),
+    art(U(32), 'Hostile', { rel: 'shared' }),
+    art(U(33), 'Forms'),
+    art(U(34), 'Notes md'),
+    art(U(35), 'Board two', { typeSlug: DESIGN_TYPE, typeTitle: 'Design' }),
+    art(U(36), 'Picture'),
+    art(U(37), 'Diagram'),
+    art(U(38), 'Remote script'),
+    art(U(39), 'Shared board', { rel: 'shared', typeSlug: DESIGN_TYPE, typeTitle: 'Design' }),
+    ...navs.map(([name], i) => art(navUuid(i), name, { rel: 'shared' })),
+  ];
+  const prevPages = {
+    [U(31)]: live('Nested site', {
+      'site/index.html': SITE, 'site/app.css': 'h1#t { color: rgb(1, 2, 3); }', 'site/app.js': "document.getElementById('t').textContent = 'changed by script';",
+      'site/img/a.png': { body: png(40, 30), type: 'image/png' }, 'site/js/Util.js': "document.body.dataset.first = '1';", 'site/js/util.js': "document.body.dataset.second = '1';",
+      'escape.js': "document.body.dataset.escaped = '1';",
+    }),
+    [U(32)]: live('Hostile', { 'index.html': hostileHtml(attacks) }),
+    [U(33)]: live('Forms', { 'index.html': FORMS }),
+    [U(34)]: live('Notes md', { 'notes.md': '# Notes\n\nraw <b>x</b> here\n\n<script>window.__hit = 1</script>\n\n**bold**\n' }),
+    [U(35)]: live('Board two', { 'index.html': '<h1 id="t">Board page</h1>' }),
+    [U(36)]: live('Picture', { 'pic.png': { body: png(40, 30), type: 'image/png' } }),
+    [U(37)]: live('Diagram', { 'd.svg': { body: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect id="r" width="100" height="50" fill="red"/></svg>', type: 'image/svg+xml' } }),
+    [U(38)]: live('Remote script', { 'index.html': '<script src="https://cdn.remote.test/x.js"></script><p id="t">remote</p>' }),
+    [U(39)]: live('Shared board', { 'index.html': '<h1>Shared board</h1>', 'art.svg': { body: '<svg xmlns="http://www.w3.org/2000/svg"/>', type: 'image/svg+xml' }, 'notes.pdf': { body: '%PDF-1.4', type: 'application/pdf' } }),
+  };
+  navs.forEach(([name, attempt, head], i) => { prevPages[navUuid(i)] = live(name, { 'index.html': navArtifact(name, attempt, head).versions[0] }); });
+  const { raw: prevRaw, views: prevViews } = await runArtifacts({ frames: prevFrames, pages: prevPages, thumbs: {} });
+  const prevDir = fs.mkdtempSync(path.join(os.tmpdir(), 'artifacts-preview-'));
+  for (const [n, bytes] of Object.entries(prevRaw)) { const fp = path.join(prevDir, n); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, bytes); }
+  const nested = prevViews.find(v => v.title === 'Nested site');
+  check('fixture: a file was saved as _2', nested.files.some(f => f.path === 'site/js/util.js' && /_2\.js$/.test(f.savedAs)), JSON.stringify(nested.files));
+  check('fixture: the nav folders are where the pages point', prevViews.find(v => v.title === 'navlocal').folder === `navlocal_${p(42)}`, prevViews.find(v => v.title === 'navlocal').folder);
+
+  const openPrev = async (hash, scheme = 'light') => {
+    const context = await browser.newContext({ viewport: { width: 1300, height: 900 }, colorScheme: scheme });
+    const page = await context.newPage();
+    const seen = { errors: [], requests: [], events: [], logs: [], frames: [], dialogs: [], popups: 0 };
+    page.on('pageerror', e => seen.errors.push(e.message));
+    page.on('console', m => seen.logs.push(m.text()));
+    page.on('request', r => { if (!r.url().startsWith('file:')) seen.events.push(r.url()); });
+    page.on('framenavigated', f => { if (f !== page.mainFrame()) seen.frames.push(f.url()); });
+    page.on('dialog', d => { seen.dialogs.push(d.message()); d.dismiss().catch(() => {}); });
+    context.on('page', () => { seen.popups++; });
+    await context.route('**/*', r => { const u = r.request().url(); if (u.startsWith('file:')) return r.continue(); seen.requests.push(u); return r.abort(); });
+    const url = 'file://' + path.join(prevDir, 'viewer.html');
+    await page.goto(url + hash);
+    await page.waitForSelector('#page');
+    return { page, seen, context, url };
+  };
+  const frameOf = async pv => {
+    const handle = await pv.page.waitForSelector('#page-body .preview iframe', { timeout: 3000 });
+    return handle.contentFrame();
+  };
+  const waitLog = async (pv, text, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { if (pv.seen.logs.some(l => l.includes(text))) return true; await pv.page.waitForTimeout(25); } return false; };
+  const noFileFrames = seen => seen.frames.every(u => !/^(file|https?|data|blob):/i.test(u));
+
+  // A nested start file with its CSS, JS, image and a file saved as _2.
+  const ns = await openPrev(`#a=${p(31)}`);
+  const nf = await frameOf(ns);
+  await nf.waitForFunction(() => document.getElementById('t').textContent === 'changed by script', null, { timeout: 3000 }).catch(() => {});
+  const nsState = await nf.evaluate(() => ({
+    color: getComputedStyle(document.getElementById('t')).color, text: document.getElementById('t').textContent,
+    img: document.getElementById('pic').naturalWidth, first: document.body.dataset.first, second: document.body.dataset.second, escaped: document.body.dataset.escaped,
+  }));
+  check('preview: CSS from ./app.css applies', nsState.color === 'rgb(1, 2, 3)', JSON.stringify(nsState));
+  check('preview: a script changes the page', nsState.text === 'changed by script', JSON.stringify(nsState));
+  check('preview: img/a.png shows', nsState.img > 0, JSON.stringify(nsState));
+  check('preview: a file saved as _2 loads by its original path', nsState.first === '1' && nsState.second === '1', JSON.stringify(nsState));
+  check('preview: ../../escape.js does not run', nsState.escaped === undefined, JSON.stringify(nsState));
+  const frameAttrs = await ns.page.$eval('#page-body .preview iframe', f => ({ sandbox: f.getAttribute('sandbox'), src: f.getAttribute('src'), srcdoc: f.hasAttribute('srcdoc') }));
+  check('preview: sandboxed srcdoc frame', frameAttrs.sandbox === 'allow-scripts allow-forms allow-modals' && frameAttrs.src === null && frameAttrs.srcdoc, JSON.stringify(frameAttrs));
+  check('preview: the frame has no origin', await nf.evaluate(() => self.origin) === 'null');
+  check('preview: no remote note on a page without remote scripts', await ns.page.locator('#page-note').isHidden());
+  check('preview: no requests, no frame on a file:, no errors', ns.seen.requests.length === 0 && noFileFrames(ns.seen) && ns.seen.errors.length === 0, JSON.stringify(ns.seen));
+  const shotPath = process.argv[2] ? path.join(process.argv[2], 'page-preview.png') : path.join(os.tmpdir(), 'page-preview.png');
+  await ns.page.screenshot({ path: shotPath });
+  // Back home and in again: the preview is rebuilt.
+  await ns.page.locator('#home-button').click();
+  check('home clears the preview', await ns.page.locator('#page-body iframe').count() === 0);
+  await ns.context.close();
+
+  // A hostile shared artifact.
+  const hv = await openPrev(`#a=${p(32)}`);
+  const hf = await frameOf(hv);
+  await hf.waitForSelector('h1');
+  check('hostile: the script ran to the end', await waitLog(hv, 'ATTACK finished yes'), hv.seen.logs.filter(l => l.startsWith('ATTACK')).join(' | '));
+  check('hostile: the frame has no origin', hv.seen.logs.includes('ATTACK origin null'));
+  for (const [name, end] of Object.entries(attackEnds)) {
+    const said = hv.seen.logs.filter(l => l.startsWith(`ATTACK ${name} `)).map(l => l.slice(`ATTACK ${name} `.length));
+    check(`hostile: ${name} attempted and ended ${end}`, said[0] === 'ran' && said[1] === end, said.join());
+  }
+  await hv.page.waitForTimeout(400);
+  // Chrome can announce a request it then blocks by policy; none reaches the network (the route), and each
+  // announced one has its violation.
+  const violations = hv.seen.logs.filter(l => l.startsWith('VIOLATION'));
+  check('hostile: no request left the page', hv.seen.requests.length === 0, hv.seen.requests.join(' '));
+  check('hostile: every request Chrome started was stopped by the policy', hv.seen.events.every(u => violations.some(v => v.endsWith(' ' + u))), hv.seen.events.join(' ') + ' || ' + violations.join(' | '));
+  for (const u of ['https://remote.test/fetch', 'https://remote.test/img.png', 'https://remote.test/tag.png', 'https://remote.test/s.css']) {
+    check(`hostile: the policy stopped ${u}`, violations.some(v => v.endsWith(' ' + u)), violations.join(' | '));
+  }
+  check('hostile: no window opened', hv.seen.popups === 0);
+  check('hostile: no frame on a file: or remote URL', noFileFrames(hv.seen), hv.seen.frames.join(' '));
+  check('hostile: viewer URL and title unchanged', hv.page.url() === hv.url + `#a=${p(32)}` && (await hv.page.title()) === 'Hostile - Artifacts', hv.page.url() + ' ' + await hv.page.title());
+  check("hostile: nothing reached the viewer's storage", await hv.page.evaluate(() => localStorage.length + sessionStorage.length) === 0);
+  check('hostile: nothing ran in the viewer', !(await hv.page.evaluate(() => !!window.__hit)));
+  check('hostile: no viewer page errors', hv.seen.errors.length === 0, hv.seen.errors.join(' '));
+  await hv.context.close();
+
+  // Each navigation in its own artifact.
+  for (const [i, [name]] of navs.entries()) {
+    const nv = await openPrev(`#a=${p(40 + i)}`);
+    await frameOf(nv).catch(() => null);
+    const refused = () => nv.seen.logs.some(l => /Refused to (frame|navigate)/.test(l) || l.includes('Blocked'));
+    const ran = await waitLog(nv, `NAV ran ${name}`) || (name === 'navrefresh' && refused());
+    await nv.page.waitForTimeout(500);
+    check(`${name}: the attempt ran`, ran, nv.seen.logs.join(' | '));
+    check(`${name}: nothing got out`, !nv.seen.logs.some(l => l.includes('ESCAPED')) && nv.seen.requests.length === 0 && nv.seen.popups === 0, [...nv.seen.logs, ...nv.seen.requests].join(' | '));
+    check(`${name}: no frame on a file: or remote URL`, noFileFrames(nv.seen), nv.seen.frames.join(' '));
+    check(`${name}: the viewer stays`, nv.page.url() === nv.url + `#a=${p(40 + i)}` && (await nv.page.title()) === `${name} - Artifacts` && nv.seen.errors.length === 0, nv.page.url() + ' ' + nv.seen.errors.join(' '));
+    await nv.context.close();
+  }
+
+  // Dark mode: the frame stays white with color-scheme normal.
+  const dk = await openPrev(`#a=${p(31)}`, 'dark');
+  await frameOf(dk);
+  const dkStyle = await dk.page.$eval('#page-body .preview iframe', f => { const s = getComputedStyle(f); return { bg: s.backgroundColor, scheme: s.colorScheme }; });
+  check('dark: the preview frame is white with color-scheme normal', dkStyle.bg === 'rgb(255, 255, 255)' && dkStyle.scheme === 'normal', JSON.stringify(dkStyle));
+  const dkBody = await dk.page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  check('dark: the viewer itself is dark', dkBody !== 'rgb(255, 255, 255)', dkBody);
+  await dk.context.close();
+
+  // Forms and alerts.
+  const fm = await openPrev(`#a=${p(33)}`);
+  const ff = await frameOf(fm);
+  await ff.click('#b');
+  await ff.waitForFunction(() => document.getElementById('out').textContent === 'submitted', null, { timeout: 2000 }).catch(() => {});
+  check('forms: a submit handler runs', await ff.evaluate(() => document.getElementById('out').textContent) === 'submitted');
+  await ff.click('#al');
+  await fm.page.waitForTimeout(200);
+  check('alerts: alert() shows a dialog', JSON.stringify(fm.seen.dialogs) === JSON.stringify(['x']), JSON.stringify(fm.seen.dialogs));
+  check('forms: no requests, no errors', fm.seen.requests.length === 0 && fm.seen.errors.length === 0, JSON.stringify(fm.seen));
+  await fm.context.close();
+
+  // Markdown, image, SVG, remote note.
+  const md = await openPrev(`#a=${p(34)}`);
+  await md.page.waitForSelector('#page-body .preview .prose h1', { timeout: 3000 }).catch(() => {});
+  const mdState = await md.page.evaluate(() => {
+    const prose = document.querySelector('#page-body .preview .prose');
+    return prose && { h1: prose.querySelector('h1') && prose.querySelector('h1').textContent, text: prose.textContent, b: prose.querySelectorAll('b').length, strong: prose.querySelectorAll('strong').length, scripts: prose.querySelectorAll('script').length, hit: !!window.__hit };
+  });
+  check('markdown: renders', !!mdState && mdState.h1 === 'Notes' && mdState.strong === 1, JSON.stringify(mdState));
+  check('markdown: raw <b>x</b> shows as text', !!mdState && mdState.text.includes('<b>x</b>') && mdState.b === 0, JSON.stringify(mdState));
+  check("markdown: a <script> doesn't run", !!mdState && !mdState.hit && mdState.scripts === 0, JSON.stringify(mdState));
+  await md.page.goto(md.url + `#a=${p(36)}`);
+  await md.page.waitForFunction(() => { const i = document.querySelector('#page-body .preview img'); return i && i.complete && i.naturalWidth > 0; }, null, { timeout: 3000 }).catch(() => {});
+  const imgSrc = await md.page.$eval('#page-body .preview img', i => i.getAttribute('src')).catch(() => null);
+  check('image: shown from the part', !!imgSrc && imgSrc.startsWith('data:image/png;base64,'), String(imgSrc).slice(0, 40));
+  await md.page.goto(md.url + `#a=${p(37)}`);
+  const sf = await frameOf(md);
+  check('svg: shown in the sandboxed frame', await sf.waitForSelector('#r', { timeout: 3000 }).then(() => true).catch(() => false));
+  await md.page.goto(md.url + `#a=${p(38)}`);
+  await frameOf(md);
+  check('remote script: the note shows', await md.page.locator('#page-note').isVisible() && (await md.page.locator('#page-note').textContent()) === REMOTE_NOTE, await md.page.locator('#page-note').textContent());
+  check('markdown/image/svg: no requests, no errors', md.seen.requests.length === 0 && md.seen.errors.length === 0, JSON.stringify(md.seen));
+
+  // Show saved files anyway on a Design poster.
+  await md.page.goto(md.url + `#a=${p(35)}`);
+  await md.page.getByRole('button', { name: 'Show saved files anyway' }).click();
+  const bf = await frameOf(md);
+  check('Show saved files anyway opens the Design preview', await bf.waitForSelector('#t', { timeout: 3000 }).then(h => h.textContent()).catch(() => null) === 'Board page');
+
+  // A shared Design poster: no Open file on its HTML or SVG rows.
+  await md.page.goto(md.url + `#a=${p(39)}`);
+  await md.page.waitForSelector('#page-body .poster');
+  const rows = await md.page.$$eval('#page-body .files li', lis => lis.map(li => [li.querySelector('.path').textContent, !!li.querySelector('a.open-file')]));
+  check('shared poster: no Open file on .html and .svg rows', JSON.stringify(rows) === JSON.stringify([['index.html', false], ['art.svg', false], ['notes.pdf', true]]), JSON.stringify(rows));
+  check('shared poster: no top-bar Open file', await md.page.locator('#page-links a.open-file').count() === 0);
+  await md.context.close();
+
+  // A missing part says so.
+  for (const n of fs.readdirSync(path.join(prevDir, 'viewer-files'))) if (/^part-\d+\.js$/.test(n)) fs.unlinkSync(path.join(prevDir, 'viewer-files', n));
+  const mp = await openPrev(`#a=${p(31)}`);
+  await mp.page.waitForFunction(() => /couldn't load/.test(document.getElementById('page-body').textContent), null, { timeout: 3000 }).catch(() => {});
+  check('a missing part says so', (await mp.page.locator('#page-body').textContent()).includes("The artifact couldn't load, because viewer-files/ is missing or blocked.") && await mp.page.locator('#page-body iframe').count() === 0,
+    await mp.page.locator('#page-body').textContent());
+  check('a missing part: no page errors', mp.seen.errors.length === 0, mp.seen.errors.join(' '));
+  await mp.context.close();
 
   await browser.close();
   process.exit(failed ? 1 : 0);

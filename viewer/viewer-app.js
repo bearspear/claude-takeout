@@ -62,26 +62,8 @@ function timeStamp(at) {
   return node;
 }
 
-// Raw HTML in a chat displays as the text it is, as on claude.ai. marked would stop escaping the text
-// after a tag like <code>, and stop linking after <a>, so its state is reset after every tag.
-const markdown = new marked.Marked({
-  gfm: true,
-  renderer: {
-    html(raw, block) {
-      return block ? `<p class="raw-html">${escHtml(raw.trimEnd())}</p>` : escHtml(raw);
-    },
-  },
-  tokenizer: {
-    tag(src) {
-      const token = marked.Tokenizer.prototype.tag.call(this, src);
-      if (token) { this.lexer.state.inLink = false; this.lexer.state.inRawBlock = false; }
-      return token;
-    },
-    url(src, ...rest) {
-      return marked.Tokenizer.prototype.url.call(this, beforeCitation(src), ...rest);
-    },
-  },
-});
+// Raw HTML in a chat displays as the text it is (markdownParser, viewer-logic.js).
+const markdown = markdownParser(marked);
 
 function renderMath(src, displayMode) {
   return katex.renderToString(src, { displayMode, throwOnError: false });

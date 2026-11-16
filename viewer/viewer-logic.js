@@ -194,6 +194,30 @@ function beforeCitation(src) {
   return at < 0 ? src : src.slice(0, at);
 }
 
+// The Markdown parser both viewer pages use (marked is the library, passed in). Raw HTML displays as the text it is,
+// as on claude.ai. marked would stop escaping the text after a tag like <code>, and stop linking after <a>, so its
+// state is reset after every tag. Its output still goes through sanitizeHtml.
+function markdownParser(marked) {
+  return new marked.Marked({
+    gfm: true,
+    renderer: {
+      html(raw, block) {
+        return block ? `<p class="raw-html">${escHtml(raw.trimEnd())}</p>` : escHtml(raw);
+      },
+    },
+    tokenizer: {
+      tag(src) {
+        const token = marked.Tokenizer.prototype.tag.call(this, src);
+        if (token) { this.lexer.state.inLink = false; this.lexer.state.inRawBlock = false; }
+        return token;
+      },
+      url(src, ...rest) {
+        return marked.Tokenizer.prototype.url.call(this, beforeCitation(src), ...rest);
+      },
+    },
+  });
+}
+
 // A citation as claude.ai shows it: a small pill with the site's name ("SoundGuys"), the number when there is none.
 function citeNode(doc, source) {
   const sup = doc.createElement('sup');
@@ -261,7 +285,7 @@ function fillPlaceholders(root, { mark, math, sources, render }) {
 // Sanitizer, ported from the NotebookLM viewer. Differences: nothing that loads keeps a URL except a
 // non-SVG data:image, so a chat can't reach remote or local files. svg and math go too, since their
 // foreign content is the usual way past a sanitizer, and KaTeX output is added after this step.
-// This is the backstop: raw HTML in a chat already arrives escaped, as marked is set up in viewer-app.js.
+// This is the backstop: raw HTML in a chat already arrives escaped, as markdownParser sets marked up.
 const DANGEROUS_TAGS = 'script,style,iframe,object,embed,link,meta,form,base,frame,frameset,applet,noscript,template,svg,math,noembed,noframes,xmp,plaintext,listing,textarea,title,select,video,audio,source,track';
 const URL_ATTRS = /^(href|src|xlink:href|action|formaction|srcdoc|poster|data)$/i;
 const BAD_URL = /^[\s\u0000-\u001f]*(javascript|vbscript|data\s*:\s*text\/html)/i;
@@ -1148,5 +1172,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, artifactTabs, relativeTime, parseArtifactHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, artifactTabs, relativeTime, parseArtifactHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
 }

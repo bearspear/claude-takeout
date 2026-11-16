@@ -224,12 +224,13 @@
     return segs.length ? segs.join('/') : null;
   }
 
-  // Open file: any saved file of the owner's own artifacts; of a shared one, only what openableHref allows (never
-  // HTML or SVG, which would run someone else's code from disk, unsandboxed).
+  // Open file: any saved file of the owner's own artifacts; of any other, only what openableHref allows (never
+  // HTML or SVG, which would run someone else's code from disk, unsandboxed). None inside a ZIP, where it can't open.
   function openHref(v, savedAs) {
+    if (unzipped === false) return null;
     const href = relHref(v.folder, savedAs);
     if (!href) return null;
-    return v.shared !== true || openableHref(href) ? href : null;
+    return v.shared === false || openableHref(href) ? href : null;
   }
 
   const claudeUrl = v => `https://claude.ai/artifact/${encodeURIComponent(v.id)}`;
@@ -326,17 +327,170 @@
     return box;
   }
 
-  // The sandboxed preview of the start file; the next step fills it in.
-  function openPreview(v) {
-    const box = el('div', 'preview', 'Preview');
-    box.dataset.id = String(v.id);
-    pageBody.replaceChildren(box);
+  // ---- Parts: an artifact's texts and images, in viewer-files/part-NNNN.js, which call window.__archivePart ----
+  // (as the chat viewer's). Page code can't read files, so a part arrives as a script, and only a number from the
+  // data ever becomes its src.
+  const partsListed = new Set();
+  for (const v of views) if (Number.isSafeInteger(v.part) && v.part > 0) partsListed.add(v.part);
+  const partsLoaded = new Map(); // n -> Promise<object|null>, the most recently used last
+  const PARTS_KEPT = 2; // a part is about 4 MB; older ones are dropped and load again if needed
+  const partsWaiting = new Map(); // n -> resolve, only while its script is loading
+  if (partsListed.size) {
+    Object.defineProperty(window, '__archivePart', {
+      value(n, part) {
+        const done = partsWaiting.get(n);
+        if (!done || part === null || typeof part !== 'object') return;
+        partsWaiting.delete(n);
+        done(part);
+      },
+    });
   }
+
+  function loadPart(n) {
+    if (!partsListed.has(n)) return Promise.resolve(null);
+    if (partsLoaded.has(n)) {
+      const cached = partsLoaded.get(n);
+      partsLoaded.delete(n);
+      partsLoaded.set(n, cached);
+      return cached;
+    }
+    const loading = new Promise(resolve => {
+      partsWaiting.set(n, resolve);
+      const script = document.createElement('script');
+      const finish = () => {
+        script.remove();
+        const done = partsWaiting.get(n);
+        if (!done) return; // the part called in, and this was its load event
+        partsWaiting.delete(n);
+        partsLoaded.delete(n); // so opening the artifact later tries again
+        done(null);
+      };
+      script.addEventListener('load', finish);
+      script.addEventListener('error', finish);
+      script.src = `viewer-files/part-${String(n).padStart(4, '0')}.js`;
+      document.head.append(script);
+    });
+    partsLoaded.set(n, loading);
+    while (partsLoaded.size > PARTS_KEPT) partsLoaded.delete(partsLoaded.keys().next().value);
+    return loading;
+  }
+
+  // The artifact's payload { texts: [[path, text]], images: [[path, dataUri]] }, or null when its part can't load.
+  const PAYLOAD_KEY = /^a(0|[1-9]\d*)$/;
+  async function payloadOf(v) {
+    if (!partsListed.has(v.part) || typeof v.key !== 'string' || !PAYLOAD_KEY.test(v.key)) return null;
+    const part = await loadPart(v.part);
+    if (!part || !Object.prototype.hasOwnProperty.call(part, v.key)) return null;
+    const payload = part[v.key];
+    return payload && typeof payload === 'object' ? payload : null;
+  }
+
+  // Looked up by string path only, so a path like __proto__ is just data.
+  function pathMap(pairs, ok) {
+    const map = new Map();
+    if (Array.isArray(pairs)) for (const p of pairs) if (Array.isArray(p) && typeof p[0] === 'string' && ok(p[1])) map.set(p[0], p[1]);
+    return map;
+  }
+  const SAFE_IMAGE_URI = /^data:image\/(?!svg)[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]*$/i;
+
+  // ---- The preview ----
+  const pageNote = document.getElementById('page-note');
+  const PART_FAILED = "The artifact couldn't load, because viewer-files/ is missing or blocked.";
+  let mdParser = null;
+
+  function markdownPage(text) {
+    if ((text.match(/[*_]/g) || []).length > EMPHASIS_LIMIT) {
+      const plain = el('div', 'prose plain');
+      plain.append(el('p', 'plain-note', "This file was too complex to format, so it's shown as plain text."), document.createTextNode(text));
+      return plain;
+    }
+    if (!mdParser) mdParser = markdownParser(marked);
+    const mark = placeholderMark(text);
+    const safe = protectMath(text, mark);
+    const box = el('div', 'prose');
+    box.innerHTML = sanitizeHtml(mdParser.parse(safe.text), new DOMParser());
+    // No KaTeX here: math shows as its source.
+    fillPlaceholders(box, { mark, math: safe.math, sources: [], render: (src, display) => `<code class="math">${escHtml(display ? `$$${src}$$` : `$${src}$`)}</code>` });
+    for (const a of box.querySelectorAll('a[href]')) {
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener noreferrer');
+    }
+    return box;
+  }
+
+  function codePage(text) {
+    const box = el('div', 'code-page');
+    const pre = el('pre');
+    pre.append(el('code', '', text));
+    box.append(el('p', 'note', OFFLINE_NOTE), pre);
+    return box;
+  }
+
+  // The order matters: sandbox goes on before the document does, and the frame only then joins the page.
+  // Never allow-same-origin, allow-popups or allow-top-navigation; the page's frame-src 'none' keeps the frame from
+  // navigating anywhere.
+  function previewFrame(v, srcdoc) {
+    const frame = document.createElement('iframe');
+    frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-modals');
+    frame.setAttribute('title', String(v.title || 'Artifact'));
+    frame.setAttribute('srcdoc', srcdoc);
+    return frame;
+  }
+
+  function failedPage(v) {
+    const box = sheet('details', PART_FAILED);
+    box.append(actions(v), fileList(v));
+    return box;
+  }
+
+  function fillPreview(v, box, payload) {
+    const texts = pathMap(payload && payload.texts, t => typeof t === 'string');
+    const images = pathMap(payload && payload.images, u => typeof u === 'string' && SAFE_IMAGE_URI.test(u));
+    const text = texts.has(v.start) ? texts.get(v.start) : null;
+    if (v.startKind === 'html' || v.startKind === 'svg') {
+      if (text === null) return box.replaceChildren(failedPage(v));
+      const doc = artifactPreviewDoc(text, v.start, payload);
+      if (doc.remote) { pageNote.textContent = REMOTE_NOTE; pageNote.hidden = false; }
+      return box.replaceChildren(previewFrame(v, doc.srcdoc));
+    }
+    if (v.startKind === 'md') return box.replaceChildren(text === null ? failedPage(v) : markdownPage(text));
+    if (CODE_KINDS.has(v.startKind)) return box.replaceChildren(text === null ? detailsPage(v) : codePage(text));
+    if (v.startKind === 'image') {
+      // The owner's own image can also come from its saved file.
+      const src = images.has(v.start) ? images.get(v.start) : v.shared === false ? openHref(v, v.startSaved) : null;
+      if (!src) return box.replaceChildren(failedPage(v));
+      const frame = el('div', 'image');
+      const img = document.createElement('img');
+      img.alt = String(v.title || '');
+      img.src = src;
+      frame.append(img);
+      return box.replaceChildren(frame);
+    }
+    box.replaceChildren(detailsPage(v));
+  }
+
+  // The start file, shown in place: an HTML or SVG page in a sandboxed frame, Markdown rendered as the chat viewer
+  // does, an image, or React and Mermaid source as code. Its texts and images come from its part, loaded now.
+  function openPreview(v) {
+    const box = el('div', 'preview');
+    box.dataset.id = String(v.id);
+    box.append(el('p', 'loading', 'Loading…'));
+    pageBody.replaceChildren(box);
+    pageNote.hidden = true;
+    payloadOf(v).then(payload => {
+      // Another page, or the same one rebuilt, took its place meanwhile.
+      if (box.isConnected) fillPreview(v, box, payload);
+    });
+  }
+
+  const CODE_KINDS = new Set(['react', 'mermaid']);
 
   function fillBody(v) {
     if (v.docs) return pageBody.replaceChildren(docsPage(v));
     if (isPoster(v)) return pageBody.replaceChildren(posterPage(v));
-    if (!v.notExported && v.start && PREVIEW_KINDS.has(v.startKind) && !v.tooLarge && !v.startMissing && unzipped !== false) return openPreview(v);
+    const shown = !v.notExported && v.start && !v.tooLarge && unzipped !== false;
+    if (shown && PREVIEW_KINDS.has(v.startKind) && !v.startMissing) return openPreview(v);
+    if (shown && CODE_KINDS.has(v.startKind) && partsListed.has(v.part)) return openPreview(v);
     pageBody.replaceChildren(detailsPage(v));
   }
 
@@ -352,6 +506,8 @@
     if (v.needsRuntime || isPoster(v)) badges.push(badge('needs claude.ai to run'));
     if (unverified(v)) badges.push(badge("not checked against claude.ai's checksum"));
     pageBadges.replaceChildren(...badges);
+    pageNote.hidden = true;
+    pageNote.textContent = '';
     const links = [];
     const startHref = v.notExported ? null : openHref(v, v.startSaved);
     if (startHref) links.push(link('btn open-file', 'Open file', startHref, false));
@@ -382,6 +538,7 @@
     page.hidden = true;
     home.hidden = false;
     pageBody.replaceChildren();
+    pageNote.hidden = true;
     document.title = homeTitle;
     if (location.hash && location.hash !== '#') {
       try { history.replaceState(null, '', location.pathname + location.search); } catch (e) { /* the hash just stays */ }

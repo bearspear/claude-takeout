@@ -1730,3 +1730,15 @@ test('artifact logic edges', () => {
   assert.strictEqual(parseArtifactHash('#chat=x&a=abc'), null);
   assert.strictEqual(parseArtifactHash('#a=abc&x=1'), null);
 });
+
+test('markdownParser: raw HTML stays text, Markdown still renders, after a tag too', () => {
+  const marked = require('../viewer/marked.min.js');
+  const { markdownParser } = require('../viewer/viewer-logic.js');
+  const md = markdownParser(marked);
+  const html = md.parse('# Hi\n\nraw <b>x</b> and **bold**\n\n<script>alert(1)</script>\n');
+  assert.ok(html.includes('<h1>Hi</h1>'), html);
+  assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;') && html.includes('<strong>bold</strong>'), html);
+  assert.ok(!html.includes('<script>') && html.includes('<p class="raw-html">&lt;script&gt;'), html);
+  // Two parsers don't share state.
+  assert.notStrictEqual(markdownParser(marked), md);
+});
