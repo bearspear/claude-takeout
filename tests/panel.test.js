@@ -104,7 +104,9 @@ function resp(status, { json, bytes, stream, headers = {} } = {}) {
     arrayBuffer: async () => (bytes || new Uint8Array()).buffer.slice(bytes ? bytes.byteOffset : 0, bytes ? bytes.byteOffset + bytes.byteLength : 0),
   };
 }
-function publishedHarness({ src, srcThrow, files, expiresIn = 3600 } = {}) {
+// info(body): changes the /api/frame/<uuid> reply; filesJson(): the _files.json response; direct(): a file
+// fetched by its own path under /_f/<ver>/ (not _src/).
+function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, cookie = 'lastActiveOrg=11111111-0000-4000-8000-000000000001', account, info, filesJson, direct } = {}) {
   const reqs = [], delays = [], logs = [];
   const record = (...a) => { logs.push(a.map(String).join(' ')); };
   const listing = files || {
@@ -118,14 +120,18 @@ function publishedHarness({ src, srcThrow, files, expiresIn = 3600 } = {}) {
     window: { addEventListener() {}, location: {} }, console: { log: record, warn: record, error: record },
     setTimeout: (f, ms) => { delays.push(ms); f(); },
     crypto: require('crypto').webcrypto, btoa, atob, TextEncoder, URL, Uint8Array, String, Math, Number, Date, Map, Error,
-    document: { createElement: () => ({}), head: { appendChild() {} }, cookie: 'lastActiveOrg=11111111-0000-4000-8000-000000000001' },
+    document: { createElement: () => ({}), head: { appendChild() {} }, cookie },
     fetch: async (url, opts) => {
       reqs.push({ url, opts });
+      if (url.includes('/api/frame/frames')) return frames();
+      if (url.includes('/api/account')) return resp(200, { json: account });
       if (url.includes('/api/frame/')) {
         const exp = Math.floor(Date.now() / 1000) + expiresIn;
-        return resp(200, { json: { ver: 'V', title: 'T', history: ['V'], files: [], assetToken: 'a.b.c.' + exp } });
+        const body = { ver: 'V', title: 'T', history: ['V'], files: [], assetToken: 'a.b.c.' + exp };
+        return resp(200, { json: info ? info(body) : body });
       }
-      if (url.includes('_files.json')) return resp(200, { json: { ver: 'V', files: listing } });
+      if (url.includes('_files.json')) return filesJson ? filesJson() : resp(200, { json: { ver: 'V', files: listing } });
+      if (direct && !url.includes('/_src/')) return direct();
       if (srcThrow) throw srcThrow;
       return src ? src() : resp(200, { bytes: new Uint8Array([1, 2, 3]) });
     },
@@ -456,6 +462,34 @@ const tests = {
     assertTokenStaysHome(h);
   },
 
+  'publishedPageInfo counts the runtime files it drops': async () => {
+    const h = publishedHarness({ files: { 'index.html': { size: 1 }, 'artifact-type/a.js': { size: 1 }, 'artifact-type/b.js': { size: 1 } } });
+    const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.strictEqual(res.runtimeSkipped, 2);
+    assert.deepStrictEqual(res.files.map((f) => f.path), ['index.html']);
+  },
+
+  'listArtifacts sends X-Frame-CP, returns only allowed fields and codes on failure': async () => {
+    const frame = { slug: PUB, title: 'T', type_slug: 'ts', type_title: 'Tt', source_surface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', created_at: 'c',
+      owner_email: 'o@x.y', thumbImgURL: 'https://t/x.png', owner_account: { a: 1 } };
+    const h = publishedHarness({ frames: () => resp(200, { json: { frames: [frame] } }), account: { display_name: 'Mika' } });
+    const res = await h.call({ action: 'listArtifacts', withAccountName: true });
+    const call = h.reqs.find((r) => r.url.includes('/api/frame/frames'));
+    assert.strictEqual(call.opts.headers['X-Frame-CP'], 'go');
+    assert.ok(call.url.includes('limit=1000') && call.url.includes('org=11111111-0000-4000-8000-000000000001'));
+    assert.deepStrictEqual(res.frames, [{ slug: PUB, title: 'T', typeSlug: 'ts', typeTitle: 'Tt', sourceSurface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', createdAt: 'c' }]);
+    assert.strictEqual(res.accountName, 'Mika');
+    assert.ok(!JSON.stringify(res).includes('o@x.y') && !JSON.stringify(res).includes('t/x.png'));
+    const bare = await publishedHarness({ frames: () => resp(200, { json: { frames: [] } }) }).call({ action: 'listArtifacts' });
+    assert.strictEqual(bare.accountName, null);
+    const err = (frames, extra) => publishedHarness({ frames, ...extra }).call({ action: 'listArtifacts' });
+    assert.deepStrictEqual(await err(() => resp(401)), { error: 'HTTP 401', status: 401 });
+    assert.deepStrictEqual(await err(() => resp(200, { json: { frames: {} } })), { error: 'bad response' });
+    assert.deepStrictEqual(await err(() => ({ ...resp(200), json: async () => { throw new Error('x'); } })), { error: 'bad response' });
+    assert.deepStrictEqual(await err(() => resp(200, {}), { cookie: '' }), { error: 'no org' });
+    assert.deepStrictEqual(await err(() => { throw new Error('secret https://x'); }), { error: 'network' });
+  },
+
   'publishedPageFile retries once on 403 and encodes in chunks': async () => {
     const bytes = new Uint8Array(3 * 1024 * 1024).map((_, i) => (i * 7) % 256);
     let n = 0;
@@ -548,6 +582,94 @@ const tests = {
     const res = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 3 });
     assert.strictEqual(res.base64, 'AQID');
     assert.deepStrictEqual(h.delays, [1000]);
+  },
+
+  'a Cowork page whose _files.json is 404 is listed from the frame info and fetched through _src': async () => {
+    const infoFiles = [{ path: 'index.html', contentType: 'text/html', size: 99, sha256: 'zz', extra: 'x' }, { path: 'artifact-type/r.js', contentType: 'text/javascript' },
+      { path: '../evil', contentType: 'text/plain' }, { path: 7 }, null];
+    const h = publishedHarness({ info: (b) => ({ ...b, files: infoFiles }), filesJson: () => resp(404) });
+    const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.deepStrictEqual(res.files, [{ path: 'index.html', size: null, contentType: 'text/html', sha256: null }]);
+    assert.deepStrictEqual(res.rejected, ['../evil']);
+    assert.strictEqual(res.runtimeSkipped, 1);
+    const file = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: null });
+    assert.strictEqual(file.base64, 'AQID');
+    assert.strictEqual(file.size, 3);
+    const got = h.reqs.filter((r) => r.url.includes('.frame.claudeusercontent.com/')).map((r) => r.url.replace(/\?.*/, ''));
+    assert.deepStrictEqual(got, [`https://${PUB}.frame.claudeusercontent.com/_f/V/_files.json`, `https://${PUB}.frame.claudeusercontent.com/_f/V/_src/index.html`]);
+    assert.ok(!JSON.stringify([res, file]).includes('a.b.c'));
+    assertTokenStaysHome(h);
+  },
+
+  'a frame-info file missing from _src is fetched by its own path': async () => {
+    const h = publishedHarness({ info: (b) => ({ ...b, files: [{ path: 'a b.html', contentType: 'text/html' }] }), filesJson: () => resp(404), src: () => resp(404), direct: () => resp(200, { bytes: new Uint8Array([9]) }) });
+    const file = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'a b.html' });
+    assert.strictEqual(file.base64, 'CQ==');
+    const got = h.reqs.filter((r) => r.url.includes('.frame.claudeusercontent.com/')).map((r) => r.url.replace(/\?.*/, ''));
+    assert.deepStrictEqual(got.slice(1), [`https://${PUB}.frame.claudeusercontent.com/_f/V/_src/a%20b.html`, `https://${PUB}.frame.claudeusercontent.com/_f/V/a%20b.html`]);
+    assertTokenStaysHome(h);
+  },
+
+  'a normal listing never falls back to the direct path': async () => {
+    const h = publishedHarness({ src: () => resp(404), direct: () => resp(200, { bytes: new Uint8Array([9]) }) });
+    assert.deepStrictEqual(await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html', size: 3 }), { error: 'HTTP 404', status: 404 });
+    assert.ok(!h.reqs.some((r) => r.url.includes('/_f/V/index.html')));
+  },
+
+  'a token reply with _files.json 403 twice is an error, not the info list': async () => {
+    const h = publishedHarness({ info: (b) => ({ ...b, files: [{ path: 'index.html', contentType: 'text/html' }] }), filesJson: () => resp(403) });
+    assert.deepStrictEqual(await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' }), { error: 'HTTP 403', status: 403 });
+    const h2 = publishedHarness({ info: (b) => ({ ...b, files: [{ path: 'index.html', contentType: 'text/html' }] }), filesJson: () => resp(500) });
+    assert.deepStrictEqual(await h2.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' }), { error: 'HTTP 500', status: 500 });
+  },
+
+  'a shared page with no asset token is fetched without one': async () => {
+    const tokenless = (b) => { const { assetToken, ...rest } = b; return { ...rest, authoredByOthers: true, files: [{ path: 'index.html', contentType: 'text/html' }] }; };
+    const h = publishedHarness({ info: tokenless, filesJson: () => { throw new TypeError('Failed to fetch'); }, src: () => { throw new TypeError('Failed to fetch'); }, direct: () => resp(200, { bytes: new Uint8Array([1, 2]) }) });
+    const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.deepStrictEqual(res.files, [{ path: 'index.html', size: null, contentType: 'text/html', sha256: null }]);
+    const file = await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html' });
+    assert.strictEqual(file.base64, 'AQI=');
+    const host = h.reqs.filter((r) => r.url.includes('.frame.claudeusercontent.com/'));
+    assert.deepStrictEqual(host.map((r) => r.url), [`https://${PUB}.frame.claudeusercontent.com/_f/V/index.html`], 'without a token _files.json and _src are skipped (both fail before any status on claude.ai)');
+    assert.ok(!h.reqs.some((r) => r.url.includes('__frame_t')));
+    assert.strictEqual(h.frameCalls().length, 1, 'no token refresh for a page without one');
+    for (const r of host) assert.deepStrictEqual([r.opts.credentials, r.opts.redirect, r.opts.referrerPolicy], ['omit', 'error', 'no-referrer']);
+  },
+
+  'a page with no asset token whose file fails both ways gives the code': async () => {
+    const tokenless = (b) => { const { assetToken, ...rest } = b; return { ...rest, files: [{ path: 'index.html', contentType: 'text/html' }] }; };
+    const h = publishedHarness({ info: tokenless, filesJson: () => resp(403), src: () => resp(403), direct: () => resp(404) });
+    assert.deepStrictEqual(await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html' }), { error: 'HTTP 404', status: 404 });
+    const h2 = publishedHarness({ info: tokenless, filesJson: () => resp(403), src: () => resp(404), direct: () => resp(403) });
+    assert.deepStrictEqual(await h2.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html' }), { error: 'HTTP 403', status: 403 });
+    assert.strictEqual(h2.frameCalls().length, 1);
+    const h3 = publishedHarness({ info: (b) => { const { assetToken, ...rest } = b; return { ...rest, ver: '' }; } });
+    assert.deepStrictEqual(await h3.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' }), { error: 'bad response' });
+  },
+
+  'a frame-info file that streams past the cap is too large': async () => {
+    const chunk = new Uint8Array(8 * 1024 * 1024);
+    const h = publishedHarness({ info: (b) => ({ ...b, files: [{ path: 'index.html', contentType: 'text/html' }] }), filesJson: () => resp(404),
+      src: () => resp(200, { stream: [chunk, chunk, chunk, chunk, chunk] }) });
+    assert.deepStrictEqual(await h.call({ action: 'publishedPageFile', uuid: PUB, ver: '', path: 'index.html' }), { error: 'too large' });
+  },
+
+  'a fallback status with no files in the frame info keeps the error': async () => {
+    const h = publishedHarness({ filesJson: () => resp(404) });
+    assert.deepStrictEqual(await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' }), { error: 'HTTP 404', status: 404 });
+    const h2 = publishedHarness({ info: (b) => { const { files, ...rest } = b; return rest; }, filesJson: () => resp(404) });
+    assert.deepStrictEqual(await h2.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' }), { error: 'HTTP 404', status: 404 });
+    const h3 = publishedHarness({ info: (b) => { const { assetToken, ...rest } = b; return rest; }, filesJson: () => resp(403) });
+    assert.deepStrictEqual(await h3.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' }), { error: 'HTTP 403', status: 403 });
+  },
+
+  'a page with no asset token whose _files.json is 404 uses the frame info list': async () => {
+    const tokenless = (b) => { const { assetToken, ...rest } = b; return { ...rest, files: [{ path: '__proto__', contentType: 'text/plain' }, { path: 'index.html', contentType: 'text/html' }] }; };
+    const h = publishedHarness({ info: tokenless, filesJson: () => resp(404) });
+    const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.deepStrictEqual(res.files.map((f) => f.path), ['__proto__', 'index.html']);
+    assert.ok(!h.reqs.some((r) => r.url.includes('__frame_t')));
   },
 
   'published actions reject a bad uuid or version before any fetch': async () => {

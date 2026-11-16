@@ -8,9 +8,11 @@ let orgId = null;
 // ============================================================================
 
 class ExportErrorCollector {
-  constructor(conversationName, conversationUuid) {
+  // label: an export that is not one conversation (Export Artifacts); the report's header names it instead.
+  constructor(conversationName, conversationUuid, { label = null } = {}) {
     this.conversationName = conversationName || 'Untitled';
     this.conversationUuid = conversationUuid || 'unknown';
+    this.label = label;
     this.errors = [];
     this.warnings = [];
   }
@@ -105,6 +107,9 @@ class ExportErrorCollector {
       case 'published_page':
         return 'A page Claude published on claude.ai (publish_files) could not be saved, or only in part, or its file names were changed to be safe on disk. The chat itself is exported. Open the page on claude.ai (link in the note) while signed in, and export again; a page that was unpublished or deleted can no longer be saved.';
 
+      case 'artifact_export':
+        return 'Export Artifacts saves the current version of each artifact claude.ai lists. This one was not saved, or only in part, or its file names were changed to stay inside its folder; the other artifacts are in the export. Open it on claude.ai (link in the note) while signed in, and run Export Artifacts again. An artifact that was unpublished, deleted or unshared can no longer be saved. When claude.ai\'s list looks cut short, compare index.md with claude.ai/artifacts.';
+
       case 'doc_diagram':
         return 'claude.ai draws a Claude Docs document\'s diagrams only on the document\'s own page, so the export shows each by its caption. To keep them, ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again: that copy is saved in artefacts/ and linked from the document. Or open the live document (link in the note).';
 
@@ -137,8 +142,7 @@ class ExportErrorCollector {
       '# Export Errors Report',
       '',
       `**Export Date:** ${new Date().toISOString()}`,
-      `**Conversation:** ${this.conversationName}`,
-      `**UUID:** ${this.conversationUuid}`,
+      ...(this.label ? [`**Export:** ${this.label}`] : [`**Conversation:** ${this.conversationName}`, `**UUID:** ${this.conversationUuid}`]),
       '',
       '---',
       '',
@@ -244,6 +248,11 @@ class ExportErrorCollector {
     lines.push('| 401 | Unauthorized | Not logged in. Sign in to claude.ai and retry. |');
     lines.push('| 500 | Server error | Claude API issue. Wait and retry later. |');
     lines.push('');
+    // An export that is not one chat (Export Artifacts) has none of the chat files the steps below name.
+    if (this.label) {
+      lines.push('Sign in to claude.ai, open the artifact there, and run Export Artifacts again.');
+      return lines.join('\n');
+    }
     lines.push('### Manual Recovery Steps');
     lines.push('');
     lines.push('1. **For `artifact_opaque_mutation` warnings — run the replay CLI:**');
@@ -3194,8 +3203,10 @@ function cleanPublishedInfo(r) {
   const files = [];
   const rejected = (Array.isArray(r.rejected) ? r.rejected : []).filter((p) => typeof p === 'string').map((p) => p.slice(0, 200));
   const seen = new Set();
+  let runtimeSkipped = Number.isInteger(r.runtimeSkipped) && r.runtimeSkipped > 0 ? r.runtimeSkipped : 0;
   for (const f of r.files) {
-    if (!f || typeof f.path !== 'string' || seen.has(f.path) || f.path.startsWith('artifact-type/')) continue;
+    if (f && typeof f.path === 'string' && f.path.startsWith('artifact-type/')) { runtimeSkipped++; continue; }
+    if (!f || typeof f.path !== 'string' || seen.has(f.path)) continue;
     if (!publishedPathOk(f.path)) { rejected.push(f.path.slice(0, 200)); continue; }
     seen.add(f.path);
     files.push({
@@ -3209,7 +3220,7 @@ function cleanPublishedInfo(r) {
     ver: r.ver,
     title: typeof r.title === 'string' ? r.title : '',
     history: (Array.isArray(r.history) ? r.history : []).filter((h) => typeof h === 'string' && PUBLISHED_VER_RE.test(h)),
-    files, rejected,
+    files, rejected, runtimeSkipped,
   };
 }
 
@@ -3238,9 +3249,10 @@ async function sha256Hex(bytes) {
 }
 
 // Saved names for a version's file paths, in listing order: each segment through publishedSegment, and a
-// name that a file or folder already has, whatever the case, gets _2, _3, ... Returns { names: Map, renames }.
-function publishedSavedNames(paths) {
-  const used = new Set();
+// name that a file or folder already has, whatever the case, gets _2, _3, ... reserved: names at the top level
+// that are taken already (artifact.json in Export Artifacts). Returns { names: Map, renames }.
+function publishedSavedNames(paths, reserved = []) {
+  const used = new Set(reserved.map((r) => String(r).toLowerCase()));
   const folders = new Map();
   const names = new Map();
   const renames = [];
@@ -3303,6 +3315,77 @@ function writeSharedPublished(shared) {
   if (!shared || !shared.published) return;
   for (const rec of shared.published.values()) {
     if ([...rec.versions.values()].some((v) => v.ver)) shared.root.file(`published/${rec.dir}/published.json`, JSON.stringify(publishedJson(rec), null, 2));
+  }
+}
+
+const publishedSignedOutReply = (r) => !!(r && (r.status === 401 || r.error === 'HTTP 401'));
+
+// Fetch one page version's files (from cleanPublishedInfo) through content.js and write each to
+// target at prefix + its saved name (names: path -> saved name). Each file is checked against the listing:
+// size caps (PUBLISHED_MAX_FILE each, PUBLISHED_MAX_BYTES in all) and SHA-256. A file listed with neither size
+// nor SHA-256 (claude.ai's frame info, as for Cowork and Claude Code pages) is saved unchecked, its real size counted against
+// the total, and noted in unverified (path -> SHA-256 of the saved bytes, null when not saved). A 401 sets
+// state.publishedSignedOut, calls onSignedOut once, and every later file is skipped. Returns { saved,
+// missing: [path], problems: ['path (why)'], incomplete, start, startSaved, startText, needsRuntime, unverified }.
+async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished }) {
+  const start = publishedStart(files);
+  const missing = [];
+  const problems = [];
+  let total = 0;
+  let written = 0;
+  let startText = null;
+  const unverified = new Map();
+  for (const f of files) {
+    const fail = (why) => { missing.push(f.path); if (why) problems.push(`${f.path} (${why})`); };
+    // Unverified only when the listing has neither size nor checksum (claude.ai's frame info list).
+    const checked = !(f.size == null && !f.sha256);
+    if (!checked) unverified.set(f.path, null);
+    if (state.publishedSignedOut) { fail(null); continue; }
+    if (checked && (f.size == null || !f.sha256)) { fail('bad listing'); continue; }
+    if (f.size != null) {
+      if (f.size > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
+      if (total + f.size > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
+      total += f.size;
+    }
+    const reply = await fetchPublished({ action: 'publishedPageFile', uuid, ver, path: f.path, size: f.size });
+    if (publishedSignedOutReply(reply)) {
+      if (!state.publishedSignedOut && typeof onSignedOut === 'function') onSignedOut();
+      state.publishedSignedOut = true;
+      fail(null);
+      continue;
+    }
+    if (!reply || reply.error || reply.connectionError || typeof reply.base64 !== 'string') { fail(publishedCode(reply)); continue; }
+    let bytes;
+    try { bytes = base64ToBytes(reply.base64); } catch (e) { fail('bad response'); continue; }
+    if (bytes.length > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
+    if (checked) {
+      if (await sha256Hex(bytes) !== f.sha256) { fail('checksum does not match'); continue; }
+    } else {
+      if (f.size == null) {
+        if (total + bytes.length > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
+        total += bytes.length;
+      }
+      unverified.set(f.path, { sha256: await sha256Hex(bytes), size: bytes.length });
+    }
+    target.file(`${prefix}${names.get(f.path)}`, bytes);
+    written++;
+    if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
+  }
+  const startOk = !!start && !missing.includes(start.path);
+  return {
+    saved: written > 0, missing, problems, incomplete: missing.length > 0,
+    start: startOk ? start.path : null, startSaved: startOk ? names.get(start.path) : null,
+    startText, needsRuntime: publishedNeedsRuntime(startText), unverified,
+  };
+}
+
+// File entries (for published.json or artifact.json) of files saved unchecked: sha256 and size of the saved
+// bytes and verified: false.
+function markUnverified(files, unverified) {
+  for (const f of files) {
+    if (!unverified.has(f.path)) continue;
+    const got = unverified.get(f.path);
+    Object.assign(f, got ? { sha256: got.sha256, size: got.size, verified: false } : { sha256: null, verified: false });
   }
 }
 
@@ -3374,13 +3457,12 @@ async function savePublishedPages(folder, data, ctx = {}) {
     warn('published pages', 'Published pages not fetched: claude.ai answered HTTP 401, as if you were signed out. Pages after this one in the export were skipped.',
       'Sign in to claude.ai in this tab and export again.');
   };
-  const signedOutReply = (r) => r && (r.status === 401 || r.error === 'HTTP 401');
 
   const getInfo = async (rec, ver) => {
     if (rec.infos.has(ver)) return rec.infos.get(ver);
     if (state.publishedSignedOut) return { error: 'signed out', skipped: true };
     const reply = await fetchPublished({ action: 'publishedPageInfo', uuid: rec.uuid, ver });
-    if (signedOutReply(reply)) { markSignedOut(); return { error: 'signed out', skipped: true }; }
+    if (publishedSignedOutReply(reply)) { markSignedOut(); return { error: 'signed out', skipped: true }; }
     const info = cleanPublishedInfo(reply);
     rec.infos.set(ver, info);
     if (!info.error) {
@@ -3448,41 +3530,21 @@ async function savePublishedPages(folder, data, ctx = {}) {
 
   const fetchVersion = async (rec, v) => {
     v.attempted = true;
-    const start = publishedStart(v.files);
-    const missing = [];
-    const problems = [];
-    let total = 0;
-    let written = 0;
-    let startText = null;
-    for (const f of v.files) {
-      const fail = (why) => { missing.push(f.path); if (why) problems.push(`${f.path} (${why})`); };
-      if (state.publishedSignedOut) { fail(null); continue; }
-      if (f.size == null || !f.sha256) { fail('bad listing'); continue; }
-      if (f.size > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
-      if (total + f.size > PUBLISHED_MAX_BYTES) { fail('page over 50 MB'); continue; }
-      total += f.size;
-      const reply = await fetchPublished({ action: 'publishedPageFile', uuid: rec.uuid, ver: v.ver, path: f.path, size: f.size });
-      if (signedOutReply(reply)) { markSignedOut(); fail(null); continue; }
-      if (!reply || reply.error || reply.connectionError || typeof reply.base64 !== 'string') { fail(publishedCode(reply)); continue; }
-      let bytes;
-      try { bytes = base64ToBytes(reply.base64); } catch (e) { fail('bad response'); continue; }
-      if (bytes.length > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
-      if (await sha256Hex(bytes) !== f.sha256) { fail('checksum does not match'); continue; }
-      target.file(`published/${rec.dir}/${v.folderName}/${v.names.get(f.path)}`, bytes);
-      written++;
-      if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
-    }
-    v.saved = written > 0;
-    v.missing = missing;
-    v.incomplete = missing.length > 0;
-    const startOk = start && !missing.includes(start.path);
-    v.start = startOk ? start.path : null;
-    v.startSaved = startOk ? v.names.get(start.path) : null;
-    v.needsRuntime = publishedNeedsRuntime(startText);
-    v.text = startText !== null && startText.length <= limit ? startText : null;
-    if (problems.length) {
+    const got = await fetchPublishedFiles({
+      target, prefix: `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
+      state, onSignedOut: markSignedOut, fetchPublished,
+    });
+    v.saved = got.saved;
+    markUnverified(v.files, got.unverified);
+    v.missing = got.missing;
+    v.incomplete = got.incomplete;
+    v.start = got.start;
+    v.startSaved = got.startSaved;
+    v.needsRuntime = got.needsRuntime;
+    v.text = got.startText !== null && got.startText.length <= limit ? got.startText : null;
+    if (got.problems.length) {
       noted.add(rec.uuid);
-      warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): ${problems.length} file${problems.length === 1 ? '' : 's'} could not be saved: ${problems.join(', ')}.`, openNote(rec));
+      warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): ${got.problems.length} file${got.problems.length === 1 ? '' : 's'} could not be saved: ${got.problems.join(', ')}.`, openNote(rec));
     }
   };
 
@@ -4539,11 +4601,12 @@ function exportStamp(date = new Date()) {
 }
 
 // claude-takeout-<display name>-[changes-]<stamp>.zip, all lowercase. The folder export uses it without .zip.
+// Export Artifacts (kind 'artifacts') puts its kind first: claude-takeout-artifacts-<display name>-<stamp>.zip.
 function megaZipName(accountName, kind, dateStr) {
   const name = typeof accountName === 'string'
     ? Array.from(accountName.normalize('NFC').toLowerCase().replace(/[^\p{L}\p{N}\p{M}]+/gu, '_').replace(/^_+|_+$/g, '')).slice(0, 40).join('')
     : '';
-  return `claude-takeout-${name ? `${name}-` : ''}${kind === 'changes' ? 'changes-' : ''}${dateStr}.zip`;
+  return `claude-takeout-${kind === 'artifacts' ? 'artifacts-' : ''}${name ? `${name}-` : ''}${kind === 'changes' ? 'changes-' : ''}${dateStr}.zip`;
 }
 
 // Bulk export all conversations as a single mega-zip.
@@ -4814,6 +4877,363 @@ async function bulkExportZip(options = {}) {
   })();
 }
 
+// ============================================================================
+// Export Artifacts: the current version of every artifact claude.ai lists, one folder each
+// ============================================================================
+// content.js lists them (listArtifacts) and fetches their files (publishedPageInfo, publishedPageFile); the
+// asset token never reaches the popup. Each artifact gets <title>_<shortId>/ with its files at the top level
+// and artifact.json; the root has index.md, index.html, export-manifest.json and errors.txt when needed.
+// Claude Docs are listed, not fetched: their text is in no file. The export record is never read or written.
+
+const CLAUDE_DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
+const DOCS_ARTIFACT_NOTE = "Claude Docs text isn't available as a file; export the chat that made it to get the document.";
+// Root names an artifact folder may not take, matched without case.
+const ARTIFACT_ROOT_NAMES = ['index.md', 'index.html', 'export-manifest.json', 'errors.txt', 'write-errors.txt'];
+
+// A string from claude.ai's list, safe to write: anything shaped like a frame URL or its token is dropped.
+const artifactText = (v) => String(typeof v === 'string' ? v : '').replace(/\S*(?:claudeusercontent\.com|__frame_t)\S*/gi, '[link removed]').slice(0, 500);
+const isClaudeDocsArtifact = (a) => a.typeSlug === CLAUDE_DOCS_TYPE || (!a.typeSlug && a.typeTitle === 'Docs');
+// Shared with you: claude.ai says so with a rel other than 'mine'; an empty rel says nothing.
+const isSharedArtifact = (rel) => typeof rel === 'string' && rel !== '' && rel !== 'mine';
+const artifactCount = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// text cut to at most max bytes of UTF-8, at a code point boundary.
+function capUtf8(text, max) {
+  let out = '';
+  let bytes = 0;
+  for (const ch of String(text || '')) {
+    const n = new TextEncoder().encode(ch).length;
+    if (bytes + n > max) break;
+    bytes += n;
+    out += ch;
+  }
+  return out;
+}
+// base, or base_2, base_3, ... when taken; folder names are compared without case.
+function claimArtifactFolder(base, usedFolders) {
+  let folder = base;
+  for (let n = 2; usedFolders.has(folder.toLowerCase()); n++) folder = `${base}_${n}`;
+  usedFolders.add(folder.toLowerCase());
+  return folder;
+}
+const ARTIFACT_UNEXPECTED_NOTE = 'not exported: unexpected error (see errors.txt)';
+
+// Save one listed artifact (from artifactsFromList) into root at its own folder. ctx: { fetchPublished, state
+// (publishedSignedOut: one 401 stops fetching the rest), warn(filename, message, note), usedFolders (lowercased) }.
+// Returns { row (for the indexes), entry (for export-manifest.json) }.
+async function saveArtifact(root, a, ctx) {
+  const { fetchPublished, state, warn, usedFolders } = ctx;
+  const uuid = String(a.slug).toLowerCase();
+  const shortId = uuidToBase58(uuid);
+  const url = `https://claude.ai/artifact/${shortId || uuid}`;
+  const title = artifactText(a.title);
+  const typeSlug = artifactText(a.typeSlug);
+  const typeTitle = artifactText(a.typeTitle);
+  const rel = artifactText(a.rel);
+  const shared = isSharedArtifact(rel);
+  const folder = claimArtifactFolder(`${capUtf8(safeFileTitle(title), 200) || 'artifact'}_${shortId || uuid}`, usedFolders);
+  const name = title || folder;
+  const openNote = `Open it on claude.ai: ${url}`;
+
+  const meta = {
+    format: 1, uuid, shortId, url, title, typeTitle, sourceSurface: artifactText(a.sourceSurface), rel,
+    ver: typeof a.live === 'string' && PUBLISHED_VER_RE.test(a.live) ? a.live : '',
+    createdAt: artifactText(a.createdAt), updatedAt: artifactText(a.updatedAt),
+    files: [], missing: [], incomplete: false, needsRuntime: false, note: '',
+  };
+  const notes = [];
+  let startSaved = null;
+  const signOut = () => {
+    if (state.publishedSignedOut) return;
+    state.publishedSignedOut = true;
+    warn('artifacts', `Artifacts not exported: claude.ai answered HTTP 401, as if you were signed out. "${name}" and the artifacts after it were not saved.`,
+      'Sign in to claude.ai in this tab and run Export Artifacts again.');
+  };
+  const notExported = (why) => { meta.incomplete = true; notes.push(`not exported: ${why}`); };
+
+  if (isClaudeDocsArtifact(a)) {
+    notes.push(DOCS_ARTIFACT_NOTE);
+  } else if (!meta.ver) {
+    notes.push('no published version');
+  } else if (state.publishedSignedOut) {
+    notExported('signed out of claude.ai (see errors.txt)');
+  } else try {
+    const reply = await fetchPublished({ action: 'publishedPageInfo', uuid, ver: meta.ver });
+    const info = publishedSignedOutReply(reply) ? (signOut(), null) : cleanPublishedInfo(reply);
+    if (!info) {
+      notExported('signed out of claude.ai (see errors.txt)');
+    } else if (info.error) {
+      notExported(`${info.error} (see errors.txt)`);
+      warn(name, `Artifact "${name}" could not be fetched: ${info.error}.`, openNote);
+    } else {
+      meta.ver = info.ver;
+      const { names, renames } = publishedSavedNames(info.files.map((f) => f.path), ['artifact.json']);
+      const files = info.files.map((f) => ({ path: f.path, savedAs: names.get(f.path), size: f.size, contentType: f.contentType, sha256: f.sha256 }));
+      meta.files = files;
+      // Rejected paths are only counted: they come from claude.ai and may hold anything.
+      if (renames.length || info.rejected.length) {
+        const parts = [];
+        if (renames.length) parts.push(`saved ${renames.join(', ')}`);
+        if (info.rejected.length) parts.push(`${artifactCount(info.rejected.length, 'file')} with unsafe paths not fetched`);
+        warn(name, `Artifact "${name}": file names changed to stay inside its folder: ${parts.join('; ')}.`, openNote);
+      }
+      const got = await fetchPublishedFiles({ target: root, prefix: `${folder}/`, uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished });
+      meta.missing = got.missing;
+      meta.incomplete = got.incomplete;
+      markUnverified(files, got.unverified);
+      startSaved = got.startSaved;
+      meta.needsRuntime = info.runtimeSkipped > 0 || typeSlug !== '' || got.needsRuntime;
+      if (!files.length) notes.push(typeSlug || info.runtimeSkipped > 0 ? 'open on claude.ai' : 'no files; open on claude.ai');
+      if (got.problems.length) {
+        warn(name, `Artifact "${name}" (${info.ver}): ${artifactCount(got.problems.length, 'file')} could not be saved: ${got.problems.join(', ')}.`, openNote);
+      }
+      if (got.missing.length) notes.push(`${artifactCount(got.missing.length, 'file')} not saved (see errors.txt)`);
+      if ([...got.unverified.values()].some(Boolean)) notes.push("files not checked against claude.ai's checksum");
+    }
+  } catch (e) {
+    // Not a refusal from claude.ai (those are replies, not throws): the artifact is listed as not exported.
+    warn(name, `Artifact "${name}" could not be exported: unexpected error.`, openNote);
+    notes.splice(0, notes.length, ARTIFACT_UNEXPECTED_NOTE);
+    Object.assign(meta, { ver: '', files: [], missing: [], incomplete: true, needsRuntime: false });
+    startSaved = null;
+  }
+  meta.note = [...(shared ? ['shared with you'] : []), ...notes].join('; ');
+  try {
+    root.file(`${folder}/artifact.json`, JSON.stringify(meta, null, 2));
+  } catch (e) { /* the row and errors.txt still say what happened */ }
+  return {
+    row: {
+      title, typeTitle, sourceSurface: meta.sourceSurface, rel, folder, startSaved, url, note: notes.join('; '),
+      needsRuntime: meta.needsRuntime, fileCount: meta.files.length - meta.missing.length, missingCount: meta.missing.length,
+    },
+    entry: { uuid, title, folder, ver: meta.ver },
+  };
+}
+
+// An artifact whose saveArtifact threw before it could say so itself: a row, a manifest entry, a warning and,
+// when it can be written, artifact.json, all naming it not exported.
+function unexpectedArtifactRow(root, a, ctx) {
+  const uuid = String(a.slug).toLowerCase();
+  const title = artifactText(a.title);
+  const rel = artifactText(a.rel);
+  let shortId = '';
+  try { shortId = uuidToBase58(uuid); } catch (e) { /* the uuid names it instead */ }
+  const url = `https://claude.ai/artifact/${shortId || uuid}`;
+  const folder = claimArtifactFolder(`artifact_${shortId || uuid}`, ctx.usedFolders);
+  ctx.warn(title || folder, `Artifact "${title || folder}" could not be exported: unexpected error.`, `Open it on claude.ai: ${url}`);
+  const meta = {
+    format: 1, uuid, shortId, url, title, typeTitle: artifactText(a.typeTitle), sourceSurface: artifactText(a.sourceSurface), rel,
+    ver: '', createdAt: artifactText(a.createdAt), updatedAt: artifactText(a.updatedAt),
+    files: [], missing: [], incomplete: true, needsRuntime: false,
+    note: [...(isSharedArtifact(rel) ? ['shared with you'] : []), ARTIFACT_UNEXPECTED_NOTE].join('; '),
+  };
+  try { root.file(`${folder}/artifact.json`, JSON.stringify(meta, null, 2)); } catch (e) { /* best effort */ }
+  return {
+    row: { title, typeTitle: meta.typeTitle, sourceSurface: meta.sourceSurface, rel, folder, startSaved: null, url, note: ARTIFACT_UNEXPECTED_NOTE, needsRuntime: false, fileCount: 0, missingCount: 0 },
+    entry: { uuid, title, folder, ver: '' },
+  };
+}
+
+const sortArtifactRows = (rows) => rows.slice().sort((a, b) => {
+  const x = String(a.title || '').toLowerCase();
+  const y = String(b.title || '').toLowerCase();
+  return x < y ? -1 : x > y ? 1 : (a.folder < b.folder ? -1 : a.folder > b.folder ? 1 : 0);
+});
+const artifactRowNotes = (r) => [r.note, r.needsRuntime ? 'needs claude.ai to run' : ''].filter(Boolean).join('; ');
+const artifactSource = (r) => [r.sourceSurface, isSharedArtifact(r.rel) ? 'shared with you' : ''].filter(Boolean).join(', ');
+// The claude.ai link, rebuilt from the short id so nothing else from the reply can become a link.
+const artifactUrl = (r) => {
+  const m = /^https:\/\/claude\.ai\/artifact\/([1-9A-HJ-NP-Za-km-z]+|[0-9a-f-]{36})$/.exec(String(r.url || ''));
+  return m ? `https://claude.ai/artifact/${m[1]}` : null;
+};
+const artifactLocal = (r) => (r.startSaved ? encodePath(`${r.folder}/${r.startSaved}`) : null);
+
+// index.md: one table row per artifact, by title. opts: { listed, exportedAt, warnings }.
+function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0 } = {}) {
+  const cell = (t) => mdLinkText(String(t || '')).replace(/[<>|*_`#]/g, '\\$&');
+  const lines = [
+    '# Claude Takeout - Artifacts',
+    '',
+    `**Exported:** ${formatTimestamp(exportedAt)}`,
+    `**Listed by claude.ai:** ${listed}`,
+    `**Saved with files:** ${rows.filter((r) => r.fileCount > 0).length}`,
+  ];
+  if (warnings) lines.push(`**Issues:** ${artifactCount(warnings, 'warning')} (see errors.txt)`);
+  lines.push('', '| # | Artifact | Kind | Source | Files | Notes |', '|---|----------|------|--------|-------|-------|');
+  sortArtifactRows(rows).forEach((r, i) => {
+    const local = artifactLocal(r);
+    const remote = artifactUrl(r);
+    const name = cell(r.title || 'Untitled');
+    const link = local ? `[${name}](${local.replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29'))})` : name;
+    lines.push(`| ${i + 1} | ${link}${remote ? ` · [claude.ai](${remote})` : ''} | ${cell(r.typeTitle || 'Page')} | ${cell(artifactSource(r))} | ${r.fileCount}${r.missingCount ? ` (${r.missingCount} missing)` : ''} | ${cell(artifactRowNotes(r))} |`);
+  });
+  return lines.join('\n') + '\n';
+}
+
+// index.html: a static page, no scripts; every value is escaped and the only links are each artifact's start
+// file in the export and its claude.ai page. opts as artifactsIndexMd.
+function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0 } = {}) {
+  const esc = (t) => escapeHtmlText(String(t == null ? '' : t)).replace(/'/g, '&#39;');
+  const body = sortArtifactRows(rows).map((r) => {
+    const local = artifactLocal(r);
+    const remote = artifactUrl(r);
+    const name = esc(r.title || 'Untitled');
+    return `<tr><td>${local ? `<a href="${esc(local)}">${name}</a>` : name}${remote ? ` <a class="remote" href="${esc(remote)}" rel="noopener noreferrer">claude.ai</a>` : ''}</td>`
+      + `<td>${esc(r.typeTitle || 'Page')}</td><td>${esc(artifactSource(r))}</td>`
+      + `<td>${r.fileCount}${r.missingCount ? ` (${r.missingCount} missing)` : ''}</td><td>${esc(artifactRowNotes(r))}</td></tr>`;
+  }).join('\n');
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Claude Artifacts</title>
+<style>
+:root { color-scheme: light dark; --bg: #faf9f5; --fg: #1f1e1d; --muted: #6b6a68; --line: #e3e1da; --link: #a14a2c; }
+@media (prefers-color-scheme: dark) { :root { --bg: #1f1e1d; --fg: #eeece6; --muted: #a6a39b; --line: #3a3936; --link: #e08a6a; } }
+body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+main { max-width: 1100px; margin: 0 auto; }
+h1 { font-size: 1.5rem; margin: 0 0 4px; }
+.meta { color: var(--muted); margin: 0 0 20px; }
+.wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
+th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+a { color: var(--link); }
+a.remote { font-size: 0.85em; margin-left: 6px; }
+</style>
+</head>
+<body>
+<main>
+<h1>Claude Artifacts</h1>
+<p class="meta">Exported ${esc(formatTimestamp(exportedAt))} · Listed by claude.ai: ${Number(listed) || 0}${warnings ? ` · ${artifactCount(warnings, 'warning')} (see errors.txt)` : ''}</p>
+<div class="wrap">
+<table>
+<thead><tr><th>Artifact</th><th>Kind</th><th>Source</th><th>Files</th><th>Notes</th></tr></thead>
+<tbody>
+${body}
+</tbody>
+</table>
+</div>
+</main>
+</body>
+</html>
+`;
+}
+
+// Export Artifacts. options.directory: a folder from showDirectoryPicker; the export goes into a new folder
+// inside it instead of a ZIP download. The list is fetched first: nothing is made when it fails or is empty.
+async function exportArtifacts(options = {}) {
+  const directory = options && options.directory ? options.directory : null;
+  const status = document.getElementById('status');
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  if (!(tab?.url || '').includes('claude.ai')) {
+    status.className = 'status error';
+    status.textContent = 'Please navigate to claude.ai first';
+    return;
+  }
+  status.className = 'status waiting';
+  status.textContent = 'Fetching the artifact list...';
+  // The first call injects content.js if the tab needs it; the rest message it directly.
+  const fetchPublished = tabPublishedFetcher(tab.id);
+  const reply = await fetchPublished({ action: 'listArtifacts', withAccountName: true });
+  if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.frames)) {
+    status.className = 'status error';
+    const code = !reply || reply.error || reply.connectionError ? publishedCode(reply) : 'bad response';
+    status.textContent = publishedSignedOutReply(reply) ? 'Sign in to claude.ai, then try again.' : `Could not fetch the artifact list: ${code}.`;
+    return;
+  }
+  const { artifacts, full, listed } = artifactsFromList(reply);
+  if (!artifacts.length) {
+    status.className = 'status ready';
+    status.textContent = 'No artifacts on claude.ai.';
+    return;
+  }
+  const total = artifacts.length;
+  const startedAt = new Date().toISOString();
+  const zipName = megaZipName(reply.accountName, 'artifacts', exportStamp());
+  let run = null;
+  if (directory) {
+    try {
+      run = await makeRunFolder(directory, zipName);
+    } catch (e) {
+      status.className = 'status error';
+      status.textContent = `Could not make a folder there: ${e.message}`;
+      return;
+    }
+  }
+  status.textContent = `Found ${artifactCount(total, 'artifact')}. Exporting to ${run ? `the folder ${run.name}` : 'a ZIP'}...`;
+  showProgress(0, total, `0 / ${total}`);
+  try {
+    const root = run ? createDiskFolder(run.handle) : new JSZip();
+    const collector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
+    const warn = (filename, message, note = null) => collector.addWarning('artifact_export', filename, message, { note });
+    if (full) {
+      warn('artifact list', `claude.ai listed ${listed} artifacts, a number at which its list may be cut short, so this export may be incomplete.`,
+        'Compare index.md with claude.ai/artifacts.');
+    }
+    const ctx = { fetchPublished, state: {}, warn, usedFolders: new Set(ARTIFACT_ROOT_NAMES) };
+    const rows = [];
+    const entries = [];
+    const writeFailures = [];
+    for (let i = 0; i < total; i++) {
+      try {
+        const { row, entry } = await saveArtifact(root, artifacts[i], ctx);
+        rows.push(row);
+        entries.push(entry);
+      } catch (e) {
+        const { row, entry } = unexpectedArtifactRow(root, artifacts[i], ctx);
+        rows.push(row);
+        entries.push(entry);
+      }
+      // On disk, each artifact is written before the next, which keeps memory down.
+      if (run) writeFailures.push(...await root.flush());
+      showProgress(i + 1, total, `${i + 1} / ${total}`);
+      if (i + 1 < total) await new Promise((r) => setTimeout(r, 200));
+    }
+
+    const warnings = collector.warnings.length + collector.errors.length;
+    const indexOpts = { listed, exportedAt: startedAt, warnings };
+    addFileWithBOM(root, 'index.md', artifactsIndexMd(rows, indexOpts));
+    root.file('index.html', artifactsIndexHtml(rows, indexOpts));
+    root.file('export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', exported_at: startedAt, listed, artifacts: entries }, null, 2));
+    if (collector.hasAny()) root.file('errors.txt', collector.generateErrorReport());
+
+    const withoutFiles = rows.filter((r) => r.fileCount === 0).length;
+    const done = (where) => `Exported ${artifactCount(total, 'artifact')} to ${where}.${withoutFiles ? ` ${withoutFiles} without files (see index.md).` : ''}${warnings ? ' See errors.txt.' : ''}`;
+    if (run) {
+      writeFailures.push(...await root.flush());
+      if (writeFailures.length) {
+        root.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
+        await root.flush();
+      }
+      status.className = writeFailures.length || warnings ? 'status warning' : 'status ready';
+      status.textContent = done(run.name) + (writeFailures.length ? ` ${artifactCount(writeFailures.length, 'file')} could not be written (see write-errors.txt).` : '');
+      return;
+    }
+    status.textContent = 'Compressing archive...';
+    showProgress(95, 100, 'Compressing...');
+    let blob;
+    try {
+      blob = await root.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    } catch (e) {
+      status.className = 'status error';
+      status.textContent = `Zip generation failed: ${e.message}`;
+      return;
+    }
+    download(blob, zipName, 'application/zip');
+    status.className = warnings ? 'status warning' : 'status ready';
+    status.textContent = done('a ZIP');
+  } catch (e) {
+    status.className = 'status error';
+    status.textContent = `Export Artifacts failed: ${e && e.message ? e.message : e}`;
+  } finally {
+    hideProgress();
+  }
+}
+
 // Event listeners with settings-aware filenames
 // One export at a time: a second click, or a shortcut, while one runs does nothing,
 // and the export buttons are disabled meanwhile.
@@ -4824,7 +5244,7 @@ function exportedStatus(status, data, done) {
   status.textContent = problems.length ? `${done.replace(/!$/, '.')} But this chat looks incomplete: ${problems[0].message}` : done;
 }
 
-const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportAllJson'];
+const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportArtifacts', 'exportAllJson'];
 let exportRunning = false;
 function exclusiveExport(run) {
   return async (...args) => {
@@ -4947,42 +5367,58 @@ onExport('exportJson', async () => {
 
 onExport('exportAllMd', () => bulkExport('markdown'));
 onExport('exportAllEmbed', () => bulkExport('embedded'));
-// Export All goes to a folder unless Settings say ZIP. The folder picker must open straight from the
-// click. The popup closes when it opens, so from the popup the side panel opens instead, to click there.
+// Export All and Export Artifacts go to a folder unless Settings say ZIP. The folder picker must open straight
+// from the click. The popup closes when it opens, so from the popup the side panel opens instead, with a note
+// naming the button to click there.
 const IS_POPUP = typeof location !== 'undefined' && /popup\.html$/.test(location.pathname);
-onExport('exportAllZip', async () => {
-  if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return bulkExportZip();
-  const status = document.getElementById('status');
-  if (IS_POPUP) {
-    if (chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
-      chrome.sidePanel.open({ tabId: currentTabId }).then(() => {
-        chrome.storage.session && chrome.storage.session.set({ folderExportNote: Date.now() }).catch(() => {});
-        window.close();
-      }).catch((e) => { status.className = 'status error'; status.textContent = `Could not open the side panel: ${e.message}`; });
-    } else {
-      status.className = 'status error';
-      status.textContent = 'Export All to a folder runs in the side panel. Open it, or choose ZIP in Settings.';
+const FOLDER_BUTTON_LABELS = { exportAllZip: 'Export All (Folder)', exportArtifacts: 'Export Artifacts (Folder)' };
+// A label the popup stored with its note, read from the clicked button; anything else falls back to the above.
+const FOLDER_LABEL_RE = /^Export (?:All|Changes|Artifacts) \(Folder\)$/;
+function folderExport(buttonId, name, run) {
+  return async () => {
+    if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return run();
+    const status = document.getElementById('status');
+    if (IS_POPUP) {
+      if (chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
+        // The note is stored before the panel opens, in the same click task (sidePanel.open needs the user
+        // gesture, so nothing is awaited first), and names the button as it reads now (Export Changes too).
+        const span = document.getElementById(buttonId).querySelector('span');
+        const label = span && typeof span.textContent === 'string' ? span.textContent.trim() : '';
+        if (chrome.storage.session) chrome.storage.session.set({ folderExportNote: { at: Date.now(), button: buttonId, label } }).catch(() => {});
+        chrome.sidePanel.open({ tabId: currentTabId }).then(() => window.close())
+          .catch((e) => { status.className = 'status error'; status.textContent = `Could not open the side panel: ${e.message}`; });
+      } else {
+        status.className = 'status error';
+        status.textContent = `${name} to a folder runs in the side panel. Open it, or choose ZIP in Settings.`;
+      }
+      return;
     }
-    return;
-  }
-  let directory;
-  try {
-    directory = await window.showDirectoryPicker({ mode: 'readwrite', id: 'claude-takeout' });
-  } catch (e) {
-    if (e.name !== 'AbortError') { status.className = 'status error'; status.textContent = e.message; }
-    return;
-  }
-  return bulkExportZip({ directory });
-});
+    let directory;
+    try {
+      directory = await window.showDirectoryPicker({ mode: 'readwrite', id: 'claude-takeout' });
+    } catch (e) {
+      if (e.name !== 'AbortError') { status.className = 'status error'; status.textContent = e.message; }
+      return;
+    }
+    return run({ directory });
+  };
+}
+onExport('exportAllZip', folderExport('exportAllZip', 'Export All', (options) => bulkExportZip(options)));
+onExport('exportArtifacts', folderExport('exportArtifacts', 'Export Artifacts', (options) => exportArtifacts(options)));
 
-// Opened from the popup's Export All: say what to do next.
+// Opened from the popup's Export All or Export Artifacts: say what to do next.
 if (!IS_POPUP && chrome.storage && chrome.storage.session) {
   chrome.storage.session.get('folderExportNote').then((got) => {
-    if (!got || !got.folderExportNote || Date.now() - got.folderExportNote > 60000) return;
+    const note = got && got.folderExportNote;
+    const at = note && typeof note === 'object' ? note.at : note;
+    if (!Number.isFinite(at) || Date.now() - at > 60000) return;
     chrome.storage.session.remove('folderExportNote').catch(() => {});
+    const button = note && typeof note === 'object' && Object.prototype.hasOwnProperty.call(FOLDER_BUTTON_LABELS, note.button) ? note.button : 'exportAllZip';
+    const stored = note && typeof note === 'object' && typeof note.label === 'string' ? note.label : '';
+    const label = FOLDER_LABEL_RE.test(stored) ? stored : FOLDER_BUTTON_LABELS[button];
     const status = document.getElementById('status');
     status.className = 'status waiting';
-    status.textContent = 'Click Export All (Folder) here to choose where to save it.';
+    status.textContent = `Click ${label} here to choose where to save it.`;
   }).catch(() => {});
 }
 onExport('exportAllJson', () => bulkExport('json'));
@@ -5049,6 +5485,11 @@ function applySettings() {
   if (megaLabel) megaLabel.textContent = changes ? `Export Changes (${target})` : `Export All (${target})`;
   if (megaZip) megaZip.title = (toZip ? 'Every chat in one ZIP download' : 'Every chat into a new folder in a folder you choose')
     + (changes ? ', only the chats that are new or changed since the last Export All from this browser (see Settings)' : '');
+  const artifactsButton = document.getElementById('exportArtifacts');
+  const artifactsLabel = artifactsButton && artifactsButton.querySelector('span');
+  if (artifactsLabel) artifactsLabel.textContent = `Export Artifacts (${toZip ? 'ZIP' : 'Folder'})`;
+  if (artifactsButton) artifactsButton.title = 'The current version of every artifact on claude.ai/artifacts, with an index, '
+    + (toZip ? 'in one ZIP download' : 'into a new folder in a folder you choose');
   document.getElementById('showShortcuts').checked = settings.showShortcuts;
 
   // Side panel checkbox (may not exist in all views)

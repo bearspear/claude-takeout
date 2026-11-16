@@ -235,7 +235,7 @@
       <input type="checkbox" id="includeThinking" checked>
     </div>
     <div class="setting-row">
-      <label for="megaFormat">Export All saves as:</label>
+      <label for="megaFormat">Export All and Export Artifacts save as:</label>
       <select id="megaFormat" title="Folder: a new folder inside one you choose, written as it goes. ZIP: one download at the end.">
         <option value="folder">Folder</option>
         <option value="zip">ZIP</option>
@@ -295,6 +295,10 @@
   </button>
   <button id="exportAllZip" class="primary">
     <span>Export All (Folder)</span>
+    <span class="shortcut"></span>
+  </button>
+  <button id="exportArtifacts" class="primary" title="The current version of every artifact on claude.ai/artifacts, with an index">
+    <span>Export Artifacts (Folder)</span>
     <span class="shortcut"></span>
   </button>
   <button id="exportAllJson" class="secondary">

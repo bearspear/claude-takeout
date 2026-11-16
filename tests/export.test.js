@@ -2009,6 +2009,37 @@ test('an old publish result with only a url gets the current version', () => {
   assert.strictEqual(core.base58ToUuid('LkJGYP3ZBnSGbvhLfeWAG1'), '9fe94226-9819-4551-8836-a76d0c116102');
 });
 
+test('uuidToBase58 round-trips with base58ToUuid', () => {
+  assert.strictEqual(core.uuidToBase58('9fe94226-9819-4551-8836-a76d0c116102'), 'LkJGYP3ZBnSGbvhLfeWAG1');
+  for (let i = 0; i < 50; i++) {
+    const u = require('crypto').randomUUID();
+    assert.strictEqual(core.base58ToUuid(core.uuidToBase58(u)), u);
+  }
+  assert.strictEqual(core.uuidToBase58('x'), '');
+});
+
+test('uuidToBase58 keeps leading zero bytes unpadded', () => {
+  const u = '00ffffff-ffff-4fff-8fff-ffffffffffff';
+  const id = core.uuidToBase58(u);
+  assert.ok(!id.startsWith('1'));
+  assert.strictEqual(core.base58ToUuid(id), u);
+});
+
+test('artifactsFromList keeps only the safe fields', () => {
+  const good = { slug: PUB_U, title: 'T', typeSlug: 'ts', typeTitle: 'Tt', sourceSurface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', createdAt: 'c',
+    owner_email: 'a@b.c', thumbImgURL: 'https://x/y.png', link: 'https://claude.ai/z' };
+  const r = plain(core.artifactsFromList({ frames: [good, { ...good }, { ...good, slug: '../x' }, { ...good, slug: PUB_U.replace('0a1b', '0a1c'), live: '../v' }] }));
+  assert.strictEqual(r.artifacts.length, 2);
+  assert.strictEqual(r.full, false);
+  assert.strictEqual(r.artifacts[1].live, '');
+  assert.deepStrictEqual(Object.keys(r.artifacts[0]).sort(), ['createdAt', 'live', 'rel', 'slug', 'sourceSurface', 'title', 'typeSlug', 'typeTitle', 'updatedAt']);
+  assert.ok(!JSON.stringify(r).includes('a@b.c') && !JSON.stringify(r).includes('http'));
+  const n = (k) => core.artifactsFromList({ frames: Array.from({ length: k }, (_, i) => ({ slug: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` })) }).full;
+  for (const k of [60, 70, 500, 1000]) assert.strictEqual(n(k), true, String(k));
+  for (const k of [0, 19, 59, 61, 499]) assert.strictEqual(n(k), false, String(k));
+  assert.deepStrictEqual(plain(core.artifactsFromList({})), { artifacts: [], full: false, listed: 0 });
+});
+
 test('bad ids and versions are dropped', () => {
   const data = oneMessage([
     use('p1', PUB, { files: [] }), pubResult('p1', { slug: '../x', version: 'v1' }),
@@ -2094,6 +2125,52 @@ test('a published page is saved in published/ with published.json, and no frame 
     const t = fileText(written, k);
     assert.ok(!/frame\.claudeusercontent\.com|__frame_t/.test(t), k);
   }
+});
+
+test('a published file with no checksum from claude.ai is saved and marked unverified', async () => {
+  const data = pubChat([pubMsg('a', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G' }), result('w'),
+    ...publish('p1', PUB_U, 'v1', [...guideAs, { as: 'data.json', path: '/home/claude/data.json' }]),
+  ])]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: {
+    'index.html': { body: 'G', unverified: true }, 'data.json': '{"a":1}',
+  } } } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  const dir = 'published/Guide_Short1';
+  assert.strictEqual(fileText(written, `${dir}/v1/index.html`), 'G');
+  const json = JSON.parse(fileText(written, `${dir}/published.json`));
+  assert.deepStrictEqual(json.versions.v1.files, [
+    { path: 'index.html', savedAs: 'index.html', size: 1, contentType: 'text/html', sha256: sha('G'), verified: false },
+    { path: 'data.json', savedAs: 'data.json', size: 7, contentType: 'text/html', sha256: sha('{"a":1}') },
+  ]);
+  assert.strictEqual(json.versions.v1.incomplete, false);
+  assert.deepStrictEqual(plain(pubWarnings(output)), []);
+});
+
+test('a listed file with a size but no valid checksum is still a bad listing', async () => {
+  const data = pubChat([pubMsg('a', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G' }), result('w'),
+    ...publish('p1', PUB_U, 'v1', guideAs),
+  ])]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: {
+    'index.html': { body: 'G', sha256: 'not-a-hash' }, 'b.html': { body: 'B', unverified: true, size: 1 },
+  } } } } });
+  const { written, output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  const json = JSON.parse(fileText(written, 'published/Guide_Short1/published.json'));
+  assert.deepStrictEqual(json.versions.v1.missing, ['index.html', 'b.html']);
+  assert.ok(json.versions.v1.files.every((f) => !('verified' in f)));
+  assert.strictEqual(fetcher.count('publishedPageFile'), 0);
+  assert.ok(pubWarnings(output).some((w) => /index\.html \(bad listing\)/.test(w.message) && /b\.html \(bad listing\)/.test(w.message)));
+});
+
+test('a page claude.ai answers with no file list is still a warning in a chat export', async () => {
+  const data = pubChat([pubMsg('a', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G' }), result('w'),
+    ...publish('p1', PUB_U, 'v1', guideAs),
+  ])]);
+  const fetcher = publishedFetcher({ [PUB_U]: { error: { error: 'HTTP 404', status: 404 } } });
+  const { output } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  assert.ok(pubWarnings(output).some((w) => /could not be fetched: HTTP 404/.test(w.message)));
 });
 
 test('a version identical to the text Claude wrote is not copied; one edited later is', async () => {
@@ -2310,4 +2387,564 @@ test('Export All: a page skipped after a 401 is "not saved" without an errors.tx
   assert.ok(/not saved \(see errors\.txt\)/.test(readmeA), readmeA);
   assert.ok(/not saved/.test(readmeB) && !/see errors\.txt/.test(readmeB), readmeB);
   assert.ok(!zip.file('Chat_b/errors.txt'));
+});
+
+// ---- Export Artifacts ----
+// Every artifact claude.ai lists (claude.ai/artifacts), its current version's files in a folder each, with an index.
+const { runArtifacts } = require('./helpers');
+const { uuidToBase58 } = require('../export-core.js');
+const DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
+const DESIGN_TYPE = 'bcd2878f-a88d-4094-a616-8e39d8a5fd8a';
+const LIVE = '1794783850-4a6e';
+const U = (n) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
+const art = (slug, title, extra = {}) => ({ slug, title, typeSlug: '', typeTitle: '', sourceSurface: 'chat', rel: 'mine', live: LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z', ...extra });
+const livePage = (title, files, extra = {}) => ({ title, live: LIVE, versions: { [LIVE]: { files } }, ...extra });
+const artFolder = (name, uuid) => `${name}_${uuidToBase58(uuid)}`;
+const DOCS_NOTE = "Claude Docs text isn't available as a file; export the chat that made it to get the document.";
+
+test('Export Artifacts saves each artifact\'s current files with artifact.json and an index', async () => {
+  const frames = [art(U(1), 'Quarterly Report'), art(U(2), 'Game', { sourceSurface: 'code' })];
+  const pages = {
+    [U(1)]: livePage('Quarterly Report', { 'index.html': '<h1>Q</h1>' }),
+    [U(2)]: livePage('Game', { 'index.html': '<script src="app.js"></script>', 'app.js': 'go()', 'img/logo.svg': '<svg/>' }),
+  };
+  const { saved, files, status, fetcher, listCalls } = await runArtifacts({ frames, pages });
+  assert.match(saved.name, /^claude-takeout-artifacts-mika-\d{4}-\d{2}-\d{2}_\d{4}\.zip$/);
+  assert.deepStrictEqual(plain(listCalls), [{ action: 'listArtifacts', withAccountName: true }]);
+  const f1 = artFolder('Quarterly_Report', U(1));
+  const f2 = artFolder('Game', U(2));
+  assert.deepStrictEqual(Object.keys(files).sort(), [`${f1}/artifact.json`, `${f1}/index.html`, `${f2}/app.js`, `${f2}/artifact.json`, `${f2}/img/logo.svg`, `${f2}/index.html`,
+    'export-manifest.json', 'index.html', 'index.md'].sort());
+  assert.strictEqual(files[`${f2}/app.js`], 'go()');
+  const meta = JSON.parse(files[`${f2}/artifact.json`]);
+  assert.deepStrictEqual(Object.keys(meta).sort(), ['createdAt', 'files', 'format', 'incomplete', 'missing', 'needsRuntime', 'note', 'rel', 'shortId', 'sourceSurface', 'title', 'typeTitle', 'updatedAt', 'url', 'uuid', 'ver'].sort());
+  const shortId = uuidToBase58(U(2));
+  assert.deepStrictEqual([meta.format, meta.uuid, meta.shortId, meta.url, meta.title, meta.ver, meta.sourceSurface, meta.rel, meta.incomplete, meta.needsRuntime, meta.createdAt, meta.updatedAt],
+    [1, U(2), shortId, `https://claude.ai/artifact/${shortId}`, 'Game', LIVE, 'code', 'mine', false, false, '2026-10-01T00:00:00Z', '2026-11-01T00:00:00Z']);
+  assert.deepStrictEqual(meta.files.map((f) => [f.path, f.savedAs]), [['index.html', 'index.html'], ['app.js', 'app.js'], ['img/logo.svg', 'img/logo.svg']]);
+  assert.ok(meta.files.every((f) => /^[0-9a-f]{64}$/.test(f.sha256) && f.size > 0 && f.contentType));
+  assert.deepStrictEqual(meta.missing, []);
+  const manifest = JSON.parse(files['export-manifest.json']);
+  assert.deepStrictEqual([manifest.format, manifest.kind, manifest.listed], [1, 'artifacts', 2]);
+  assert.ok(manifest.exported_at);
+  assert.deepStrictEqual(manifest.artifacts, [{ uuid: U(1), title: 'Quarterly Report', folder: f1, ver: LIVE }, { uuid: U(2), title: 'Game', folder: f2, ver: LIVE }]);
+  const md = files['index.md'];
+  assert.match(md, /\*\*Listed by claude\.ai:\*\* 2/);
+  assert.ok(md.includes(`[Game](${f2}/index.html)`), md);
+  assert.ok(md.includes(`(https://claude.ai/artifact/${shortId})`), md);
+  assert.ok(/\| 3 \|/.test(md) || /3 files/.test(md), md);
+  assert.match(files['index.html'], /Listed by claude\.ai: 2/);
+  assert.deepStrictEqual(fetcher.calls.filter((c) => c.action === 'publishedPageInfo').map((c) => [c.uuid, c.ver]), [[U(1), LIVE], [U(2), LIVE]]);
+  assert.strictEqual(status.className, 'status ready');
+  assert.match(status.textContent, /Exported 2 artifacts/);
+});
+
+test('Export Artifacts to a folder writes the same files', async () => {
+  const frames = [art(U(1), 'One'), art(U(2), 'Two')];
+  const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'a.html': 'two', 'b.css': 'x' }) };
+  const zipped = await runArtifacts({ frames, pages });
+  const picked = new FakeDir();
+  const disk = await runArtifacts({ frames, pages, options: { directory: picked } });
+  assert.strictEqual(disk.saved, null, 'no download');
+  const runs = [...picked.entries.keys()];
+  assert.strictEqual(runs.length, 1);
+  assert.match(runs[0], /^claude-takeout-artifacts-mika-\d{4}-\d{2}-\d{2}_\d{4}$/);
+  assert.deepStrictEqual(Object.keys(disk.files).sort(), Object.keys(zipped.files).sort());
+  assert.strictEqual(disk.files[`${artFolder('Two', U(2))}/a.html`], 'two');
+  assert.match(disk.status.textContent, new RegExp(`Exported 2 artifacts to ${runs[0]}\\.`));
+});
+
+test('a Claude Docs artifact is listed with a note and not fetched', async () => {
+  const frames = [art(U(1), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' }), art(U(2), 'Notes', { typeTitle: 'Docs' }), art(U(3), 'Mock', { typeSlug: DESIGN_TYPE, typeTitle: 'Docs' })];
+  const pages = { [U(3)]: livePage('Mock', { 'index.html': '<div>mock</div>' }) };
+  const { files, fetcher } = await runArtifacts({ frames, pages });
+  assert.strictEqual(fetcher.calls.filter((c) => c.uuid === U(1) || c.uuid === U(2)).length, 0, 'Docs are not fetched');
+  for (const [name, uuid] of [['Plan', U(1)], ['Notes', U(2)]]) {
+    const folder = artFolder(name, uuid);
+    assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`${folder}/`)), [`${folder}/artifact.json`]);
+    const meta = JSON.parse(files[`${folder}/artifact.json`]);
+    assert.strictEqual(meta.note, DOCS_NOTE);
+    assert.deepStrictEqual(meta.files, []);
+  }
+  assert.ok(files[`${artFolder('Mock', U(3))}/index.html`], 'a typed artifact that is not Docs is fetched');
+  const md = files['index.md'];
+  const planRow = md.split('\n').find((l) => l.includes('Plan'));
+  assert.ok(planRow.includes(`| ${DOCS_NOTE} |`), planRow);
+  assert.ok(planRow.includes(`https://claude.ai/artifact/${uuidToBase58(U(1))}`) && !planRow.includes(`](${artFolder('Plan', U(1))}`), planRow);
+  assert.ok(files['index.html'].includes(`<td>${DOCS_NOTE.replace(/'/g, '&#39;')}</td>`), files['index.html']);
+});
+
+test('an artifact claude.ai refuses is a warning; the rest export', async () => {
+  const frames = [art(U(1), 'Theirs', { rel: 'shared' }), art(U(2), 'Mine'), art(U(3), 'Later'), art(U(4), 'Last')];
+  const pages = {
+    [U(2)]: livePage('Mine', { 'index.html': 'mine' }),
+    [U(3)]: { error: { error: 'HTTP 401', status: 401 } },
+    [U(4)]: livePage('Last', { 'index.html': 'last' }),
+  };
+  const { files, fetcher, status } = await runArtifacts({ frames, pages });
+  assert.strictEqual(files[`${artFolder('Mine', U(2))}/index.html`], 'mine');
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(4)), 0, 'nothing is fetched after a 401');
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(3)), 1);
+  const errors = files['errors.txt'];
+  assert.ok(errors, Object.keys(files).join());
+  assert.match(errors, /Theirs[\s\S]*HTTP 404/);
+  assert.strictEqual((errors.match(/HTTP 401/g) || []).length, 1, errors);
+  assert.ok(!/\*\*Conversation:\*\*/.test(errors) && /Export Artifacts/.test(errors), errors.slice(0, 300));
+  const theirs = JSON.parse(files[`${artFolder('Theirs', U(1))}/artifact.json`]);
+  assert.match(theirs.note, /not exported/i);
+  assert.strictEqual(theirs.incomplete, true);
+  const last = JSON.parse(files[`${artFolder('Last', U(4))}/artifact.json`]);
+  assert.match(last.note, /not exported/i);
+  const row = files['index.md'].split('\n').find((l) => l.includes('Theirs'));
+  assert.match(row, /not exported/i);
+  assert.strictEqual(status.className, 'status warning');
+});
+
+test('same-titled artifacts get distinct folders, and unsafe titles and paths stay inside', async () => {
+  const frames = [art(U(1), 'Same'), art(U(2), 'Same'), art(U(3), '../../etc/passwd'), art(U(4), '')];
+  const pages = {
+    [U(1)]: livePage('Same', { 'index.html': 'a' }),
+    [U(2)]: livePage('Same', { 'index.html': 'b' }),
+    [U(3)]: livePage('x', { 'ok.html': 'ok', 'a:b.html': 'colon', 'CON.txt': 'con', '../escape.html': 'no', 'sub/../../up.html': 'no', '/abs.html': 'no' }),
+    [U(4)]: livePage('', { 'index.html': 'untitled' }),
+  };
+  const { files } = await runArtifacts({ frames, pages });
+  const s1 = artFolder('Same', U(1));
+  const s2 = artFolder('Same', U(2));
+  assert.notStrictEqual(s1, s2);
+  assert.strictEqual(files[`${s1}/index.html`], 'a');
+  assert.strictEqual(files[`${s2}/index.html`], 'b');
+  const evil = artFolder('etcpasswd', U(3));
+  assert.strictEqual(files[`${evil}/ok.html`], 'ok');
+  assert.strictEqual(files[`${evil}/a_b.html`], 'colon');
+  assert.strictEqual(files[`${evil}/_CON.txt`], 'con');
+  assert.ok(files[`${artFolder('artifact', U(4))}/index.html`]);
+  for (const name of Object.keys(files)) {
+    assert.ok(!name.startsWith('/') && name.split('/').every((s) => s && s !== '..' && s !== '.') && !name.includes(':'), name);
+  }
+  assert.ok(!Object.values(files).includes('no'), 'unsafe paths are not fetched');
+  assert.ok(files['errors.txt'].includes('3 files with unsafe paths not fetched'), files['errors.txt']);
+});
+
+test('a full list of 500 warns that it may be incomplete', async () => {
+  const frames = Array.from({ length: 500 }, (_, i) => art(U(i + 1), `A ${i}`, { live: '' }));
+  const { files, fetcher } = await runArtifacts({ frames });
+  assert.strictEqual(fetcher.calls.length, 0);
+  assert.strictEqual((files['errors.txt'].match(/may be incomplete/g) || []).length, 1, files['errors.txt']);
+  assert.match(files['index.md'], /\*\*Listed by claude\.ai:\*\* 500/);
+  const few = await runArtifacts({ frames: frames.slice(0, 19) });
+  assert.ok(!few.files['errors.txt'] || !/may be incomplete/.test(few.files['errors.txt']));
+});
+
+test('nothing private or token-shaped reaches a file', async () => {
+  const TOKEN = 'Tk9pQzLmW7xR2vBn';
+  const frameUrl = (u) => `https://${u}.frame.claudeusercontent.com/_f/${LIVE}/index.html?__frame_t=${TOKEN}`;
+  const leaky = (f) => ({ ...f, owner_email: 'mika@example.com', owner_account: 'acct-777', thumbImgURL: frameUrl(f.slug), thumbDarkURLs: [frameUrl(f.slug)] });
+  const frames = [
+    leaky(art(U(1), `Report ${frameUrl(U(1))} end`)),
+    leaky(art(U(2), 'Broken')),
+    leaky(art(U(3), 'Rejected')),
+    leaky(art(U(4), 'Typed', { typeTitle: `Kind ${frameUrl(U(4))}` })),
+  ];
+  const pages = {
+    [U(1)]: livePage('Report', { 'index.html': 'report' }),
+    [U(2)]: { error: { error: frameUrl(U(2)) } },
+    [U(3)]: { title: 'Rejected', live: LIVE, versions: { [LIVE]: { rejected: [frameUrl(U(3))], files: { 'index.html': 'r' } } } },
+    [U(4)]: livePage('Typed', { 'index.html': 't' }),
+  };
+  for (const options of [{}, { directory: new FakeDir() }]) {
+    const { files } = await runArtifacts({ frames, pages, options });
+    assert.ok(files['errors.txt'], 'the failures are reported');
+    for (const [name, text] of Object.entries(files)) {
+      for (const bad of ['mika@example.com', 'acct-777', '__frame_t', 'frame.claudeusercontent.com', TOKEN, 'thumb']) {
+        assert.ok(!name.includes(bad) && !text.includes(bad), `${name} holds ${bad}`);
+      }
+    }
+  }
+});
+
+test('a typed artifact is marked needs claude.ai to run; one with no own files has only artifact.json', async () => {
+  const frames = [
+    art(U(1), 'Design One', { typeSlug: DESIGN_TYPE, typeTitle: 'Design' }),
+    art(U(2), 'Design Empty', { typeSlug: DESIGN_TYPE, typeTitle: 'Design' }),
+    art(U(3), 'Uses Runtime'),
+    art(U(4), 'Plain'),
+    art(U(5), 'Skipped Runtime'),
+  ];
+  const pages = {
+    [U(1)]: livePage('Design One', { 'index.html': '<div>d</div>' }),
+    [U(2)]: livePage('Design Empty', { 'artifact-type/runtime.js': 'rt' }),
+    [U(3)]: livePage('Uses Runtime', { 'index.html': '<script src="/_f/x/artifact-type/r.js"></script>' }),
+    [U(4)]: livePage('Plain', { 'index.html': '<p>plain</p>' }),
+    [U(5)]: livePage('Skipped Runtime', { 'index.html': '<p>s</p>' }, { runtimeSkipped: 2 }),
+  };
+  const { files } = await runArtifacts({ frames, pages });
+  const meta = (name, n) => JSON.parse(files[`${artFolder(name, U(n))}/artifact.json`]);
+  assert.deepStrictEqual([1, 2, 3, 4, 5].map((n) => meta(['Design_One', 'Design_Empty', 'Uses_Runtime', 'Plain', 'Skipped_Runtime'][n - 1], n).needsRuntime), [true, true, true, false, true]);
+  const empty = artFolder('Design_Empty', U(2));
+  assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`${empty}/`)), [`${empty}/artifact.json`]);
+  assert.match(meta('Design_Empty', 2).note, /open on claude\.ai/);
+  const row = files['index.md'].split('\n').find((l) => l.includes('Design One'));
+  assert.match(row, /needs claude\.ai to run/);
+  assert.ok(!/needs claude\.ai to run/.test(files['index.md'].split('\n').find((l) => l.includes('Plain'))));
+  assert.match(files['index.html'], /needs claude\.ai to run/);
+});
+
+test('a missing live version writes the no-published-version note without fetching', async () => {
+  const frames = [art(U(1), 'Draft', { live: '' }), art(U(2), 'Odd', { live: 'bad ver!' })];
+  const { files, fetcher } = await runArtifacts({ frames, pages: { [U(1)]: livePage('Draft', { 'index.html': 'x' }) } });
+  assert.strictEqual(fetcher.calls.length, 0);
+  for (const [name, n] of [['Draft', 1], ['Odd', 2]]) {
+    const folder = artFolder(name, U(n));
+    assert.deepStrictEqual(Object.keys(files).filter((f) => f.startsWith(`${folder}/`)), [`${folder}/artifact.json`]);
+    const meta = JSON.parse(files[`${folder}/artifact.json`]);
+    assert.strictEqual(meta.note, 'no published version');
+    assert.strictEqual(meta.ver, '');
+  }
+});
+
+test('shared artifacts are exported and labelled shared with you', async () => {
+  const frames = [art(U(1), 'Theirs', { rel: 'shared' }), art(U(2), 'Mine')];
+  const pages = { [U(1)]: livePage('Theirs', { 'index.html': 'theirs' }), [U(2)]: livePage('Mine', { 'index.html': 'mine' }) };
+  const { files } = await runArtifacts({ frames, pages });
+  const folder = artFolder('Theirs', U(1));
+  assert.strictEqual(files[`${folder}/index.html`], 'theirs');
+  const meta = JSON.parse(files[`${folder}/artifact.json`]);
+  assert.strictEqual(meta.rel, 'shared');
+  assert.match(meta.note, /shared with you/);
+  assert.ok(!/shared with you/.test(JSON.parse(files[`${artFolder('Mine', U(2))}/artifact.json`]).note));
+  assert.match(files['index.md'].split('\n').find((l) => l.includes('Theirs')), /shared with you/);
+  assert.ok(!/shared with you/.test(files['index.md'].split('\n').find((l) => l.includes('[Mine]'))));
+  assert.match(files['index.html'], /shared with you/);
+});
+
+test('an empty list or a failed list writes nothing and says why', async () => {
+  const cases = [
+    [{ frames: [] }, 'status ready', /^No artifacts on claude\.ai\.$/],
+    [{ list: { frames: [{ slug: 'not-a-uuid', title: 'x' }], orgId: 'o' } }, 'status ready', /^No artifacts on claude\.ai\.$/],
+    [{ list: { error: 'HTTP 401', status: 401 } }, 'status error', /^Sign in to claude\.ai, then try again\.$/],
+    [{ list: { error: 'network' } }, 'status error', /artifact list.*network/],
+    [{ list: { connectionError: 'x' } }, 'status error', /artifact list/],
+  ];
+  for (const [run, cls, text] of cases) {
+    const picked = new FakeDir();
+    const zip = await runArtifacts(run);
+    assert.strictEqual(zip.saved, null);
+    assert.strictEqual(zip.status.className, cls);
+    assert.match(zip.status.textContent, text);
+    const disk = await runArtifacts({ ...run, options: { directory: picked } });
+    assert.strictEqual(picked.entries.size, 0, 'no folder made');
+    assert.match(disk.status.textContent, text);
+  }
+  const off = await runArtifacts({ frames: [art(U(1), 'x')], setup: (sb) => { sb.chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com/' }]; } });
+  assert.strictEqual(off.saved, null);
+  assert.strictEqual(off.listCalls.length, 0);
+  assert.match(off.status.textContent, /navigate to claude\.ai/);
+});
+
+test('Export Artifacts leaves the export record alone', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' } } }, exporterSettings: { megaZipScope: 'changes' } };
+  const reads = [];
+  const { store, saved } = await runArtifacts({
+    frames: [art(U(1), 'One')], pages: { [U(1)]: livePage('One', { 'index.html': 'one' }) }, stored,
+    setup: (sb) => {
+      vm.runInContext("settings.megaZipScope = 'changes'", sb);
+      const get = sb.chrome.storage.local.get;
+      sb.chrome.storage.local.get = async (keys) => { reads.push(keys); return get(keys); };
+    },
+  });
+  assert.ok(saved);
+  assert.deepStrictEqual(store, stored);
+  assert.ok(!JSON.stringify(reads).includes('exportRecord'), JSON.stringify(reads));
+});
+
+test('a page file named artifact.json or ARTIFACT.json becomes artifact_2.json', async () => {
+  const frames = [art(U(1), 'Lower'), art(U(2), 'Upper')];
+  const pages = {
+    [U(1)]: livePage('Lower', { 'index.html': 'i', 'artifact.json': '{"mine":1}', 'sub/artifact.json': 'deep' }),
+    [U(2)]: livePage('Upper', { 'index.html': 'i', 'ARTIFACT.json': '{"mine":2}' }),
+  };
+  const { files } = await runArtifacts({ frames, pages });
+  const lower = artFolder('Lower', U(1));
+  const upper = artFolder('Upper', U(2));
+  assert.strictEqual(files[`${lower}/artifact_2.json`], '{"mine":1}');
+  assert.strictEqual(files[`${lower}/sub/artifact.json`], 'deep');
+  assert.strictEqual(JSON.parse(files[`${lower}/artifact.json`]).format, 1);
+  assert.strictEqual(files[`${upper}/ARTIFACT_2.json`], '{"mine":2}');
+  assert.ok(!(`${upper}/ARTIFACT.json` in files));
+  assert.strictEqual(JSON.parse(files[`${upper}/artifact.json`]).format, 1);
+  const meta = JSON.parse(files[`${lower}/artifact.json`]);
+  assert.strictEqual(meta.files.find((f) => f.path === 'artifact.json').savedAs, 'artifact_2.json');
+});
+
+test('index.md escapes titles and link targets', async () => {
+  const frames = [art(U(1), 'Evil](javascript:x) <b>bold</b> | pipe')];
+  const pages = { [U(1)]: livePage('x', { 'page (1).html': 'p' }) };
+  const { files } = await runArtifacts({ frames, pages });
+  const md = files['index.md'];
+  const row = md.split('\n').find((l) => l.includes('Evil'));
+  assert.ok(!/[^\\]\]\(javascript:/.test(row), row);
+  assert.ok(!row.includes('<b>'), row);
+  assert.ok(!/[^\\]\| pipe/.test(row), row);
+  const folder = artFolder(require('../export-core.js').safeFileTitle(frames[0].title), U(1));
+  assert.ok(files[`${folder}/page (1).html`], Object.keys(files).join());
+  assert.ok(row.includes(`](${encodeURIComponent(folder)}/page%20%281%29.html)`), row);
+});
+
+test('the recovery hint for artifact_export names Export Artifacts, and errors.txt does not say Conversation', () => {
+  const c = vm.runInContext("new ExportErrorCollector(null, null, { label: 'Export Artifacts' })", exportPopup().sandbox);
+  c.addWarning('artifact_export', 'x', 'y');
+  assert.match(c.warnings[0].recovery, /Export Artifacts/);
+  const report = c.generateErrorReport();
+  assert.ok(!/Conversation/.test(report) && !/\*\*UUID:\*\*/.test(report), report.slice(0, 300));
+  assert.match(report, /Export Artifacts/);
+  const chat = vm.runInContext("new ExportErrorCollector('Chat', 'u1')", exportPopup().sandbox);
+  chat.addWarning('upload', 'f', 'm');
+  assert.match(chat.generateErrorReport(), /\*\*Conversation:\*\* Chat/);
+});
+
+test('EXPORT_BUTTONS includes exportArtifacts; both pages label it from the setting', () => {
+  const fs = require('fs');
+  const popup = exportPopup();
+  const sb = popup.sandbox;
+  assert.ok(vm.runInContext('EXPORT_BUTTONS', sb).includes('exportArtifacts'));
+  const span = { textContent: '' };
+  sb.document.getElementById('exportArtifacts').querySelector = () => span;
+  vm.runInContext("settings.megaFormat = 'zip'; applySettings()", sb);
+  assert.strictEqual(span.textContent, 'Export Artifacts (ZIP)');
+  vm.runInContext("settings.megaFormat = 'folder'; applySettings()", sb);
+  assert.strictEqual(span.textContent, 'Export Artifacts (Folder)');
+  for (const page of ['popup.html', 'sidepanel.html']) {
+    const html = fs.readFileSync(path.join(REPO, page), 'utf8');
+    assert.match(html, /<button id="exportAllZip"[\s\S]*?<\/button>\s*<button id="exportArtifacts"[^>]*>\s*<span>Export Artifacts \(Folder\)<\/span>/, page);
+    assert.match(html, /<label for="megaFormat">Export All and Export Artifacts save as:<\/label>/, page);
+  }
+  const src = fs.readFileSync(path.join(REPO, 'popup.js'), 'utf8');
+  assert.ok(!/case '[a-z]':\s*document\.getElementById\('exportArtifacts'\)/.test(src), 'no keyboard shortcut');
+});
+
+test('the popup hands Export Artifacts and Export All in folder mode to the side panel', async () => {
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  for (const [button, label] of [['exportArtifacts', 'Export Artifacts (Folder)'], ['exportAllZip', 'Export All (Folder)']]) {
+    const session = {};
+    const popup = loadPopup({ location: '/popup.html', session });
+    const sb = popup.sandbox;
+    let picker = 0;
+    let opened = null;
+    let closed = false;
+    sb.window.showDirectoryPicker = async () => { picker++; return new FakeDir(); };
+    sb.window.close = () => { closed = true; };
+    sb.chrome.sidePanel.open = async (o) => { opened = o; };
+    vm.runInContext('currentTabId = 7', sb);
+    await sb.document.getElementById(button).handlers.click();
+    await tick();
+    assert.strictEqual(picker, 0, `${button}: no picker in the popup`);
+    assert.deepStrictEqual(plain(opened), { tabId: 7 });
+    assert.ok(closed);
+    assert.strictEqual(session.folderExportNote.button, button);
+    assert.ok(Number.isFinite(session.folderExportNote.at));
+
+    const panelSession = { folderExportNote: session.folderExportNote };
+    // The tab query never answers, so loading the chat leaves the status to the note.
+    const panel = loadPopup({ location: '/sidepanel.html', session: panelSession, before: (sb) => { sb.chrome.tabs.query = () => new Promise(() => {}); } });
+    await tick();
+    const status = panel.sandbox.document.getElementById('status');
+    assert.strictEqual(status.textContent, `Click ${label} here to choose where to save it.`);
+    assert.ok(!('folderExportNote' in panelSession));
+    let called = false;
+    panel.sandbox.window.showDirectoryPicker = () => { called = true; return new Promise(() => {}); };
+    panel.sandbox.document.getElementById(button).handlers.click();
+    assert.strictEqual(called, true, `${button}: the side panel opens the picker before awaiting anything`);
+  }
+});
+
+test('index.html escapes everything from claude.ai and links only local files and claude.ai', async () => {
+  const frames = [
+    art(U(1), 'beta <img src=x onerror=alert(1)>', { typeTitle: '<script>alert(2)</script>', sourceSurface: '"onmouseover="x' }),
+    art(U(2), 'Alpha & "quotes"'),
+    art(U(3), 'gamma', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' }),
+  ];
+  const pages = { [U(1)]: livePage('b', { 'pa ge#1.html': 'b' }), [U(2)]: livePage('a', { 'index.html': 'a' }) };
+  const { files } = await runArtifacts({ frames, pages });
+  const html = files['index.html'];
+  const fnHtml = vm.runInContext('artifactsIndexHtml', exportPopup().sandbox);
+  assert.strictEqual(typeof fnHtml, 'function');
+  assert.ok(!/<script/i.test(html), 'no scripts');
+  assert.ok(!html.includes('<img'), 'no tags from titles');
+  assert.ok(html.includes('beta &lt;img src=x onerror=alert(1)&gt;'), html);
+  assert.ok(html.includes('&lt;script&gt;alert(2)&lt;/script&gt;'));
+  assert.ok(html.includes('&quot;onmouseover=&quot;x'));
+  assert.ok(html.includes('Alpha &amp; &quot;quotes&quot;'));
+  assert.match(html, /<head>\s*<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'">/);
+  assert.ok(html.indexOf('Alpha') < html.indexOf('beta') && html.indexOf('beta') < html.indexOf('gamma'), 'sorted by title, ignoring case');
+  const hrefs = [...html.matchAll(/href="([^"]*)"/g)].map((m) => m[1]);
+  assert.ok(hrefs.length >= 5, hrefs.join());
+  for (const h of hrefs) {
+    const remote = /^https:\/\/claude\.ai\/artifact\/[1-9A-HJ-NP-Za-km-z]+$/.test(h);
+    const local = !h.includes(':') && !h.startsWith('/') && !h.split('/').includes('..');
+    assert.ok(remote || local, h);
+  }
+  assert.ok(hrefs.includes(`${encodeURIComponent(artFolder(require('../export-core.js').safeFileTitle(frames[0].title), U(1)))}/pa%20ge%231.html`), hrefs.join());
+  for (const m of html.matchAll(/<a [^>]*href="https:[^"]*"[^>]*>/g)) assert.match(m[0], /rel="noopener noreferrer"/);
+  assert.match(html, /prefers-color-scheme: dark/);
+});
+
+// ---- Export Artifacts: review fixes ----
+
+test('listed is claude.ai\'s raw count, even when a frame is dropped', async () => {
+  const frames = Array.from({ length: 60 }, (_, i) => art(U(i + 1), `A ${i}`, { live: '' }));
+  frames[5] = { ...frames[5], slug: '../bad' };
+  assert.strictEqual(require('../export-core.js').artifactsFromList({ frames }).listed, 60);
+  const { files } = await runArtifacts({ frames });
+  assert.match(files['index.md'], /\*\*Listed by claude\.ai:\*\* 60\n/);
+  assert.match(files['index.html'], /Listed by claude\.ai: 60\b/);
+  assert.strictEqual(JSON.parse(files['export-manifest.json']).listed, 60);
+  assert.strictEqual(JSON.parse(files['export-manifest.json']).artifacts.length, 59);
+  assert.match(files['errors.txt'], /claude\.ai listed 60 artifacts/);
+  assert.strictEqual(files['index.md'].split('\n').filter((l) => /^\| \d+ \|/.test(l)).length, 59);
+});
+
+test('an artifact whose export throws unexpectedly still gets a row, a manifest entry and artifact.json', async () => {
+  const frames = [art(U(1), 'Fine'), art(U(2), 'Throws'), art(U(3), 'Boom')];
+  const pages = { [U(1)]: livePage('Fine', { 'index.html': 'fine' }), [U(2)]: livePage('Throws', { 'index.html': 'x' }), [U(3)]: livePage('Boom', { 'index.html': 'y' }) };
+  const NOTE = 'not exported: unexpected error (see errors.txt)';
+  const { files, status } = await runArtifacts({
+    frames, pages, setup: (sb) => vm.runInContext(`(() => {
+      const orig = fetchPublishedFiles;
+      fetchPublishedFiles = async (o) => { if (o.uuid === '${U(2)}') throw new TypeError('boom'); return orig(o); };
+      const title = safeFileTitle;
+      safeFileTitle = (t) => { if (t === 'Boom') throw new RangeError('bad'); return title(t); };
+    })()`, sb),
+  });
+  assert.strictEqual(files[`${artFolder('Fine', U(1))}/index.html`], 'fine');
+  const manifest = JSON.parse(files['export-manifest.json']);
+  assert.strictEqual(manifest.artifacts.length, 3);
+  for (const [name, uuid] of [['Throws', U(2)], ['Boom', U(3)]]) {
+    const entry = manifest.artifacts.find((e) => e.uuid === uuid);
+    assert.ok(entry, name);
+    assert.strictEqual(entry.ver, '');
+    const meta = JSON.parse(files[`${entry.folder}/artifact.json`]);
+    assert.strictEqual(meta.note, NOTE);
+    assert.strictEqual(meta.incomplete, true);
+    const mdRow = files['index.md'].split('\n').find((l) => l.includes(name));
+    assert.ok(mdRow && mdRow.includes(NOTE), mdRow);
+    const htmlRow = files['index.html'].split('\n').find((l) => l.startsWith('<tr><td>') && l.includes(name));
+    assert.ok(htmlRow && htmlRow.includes(NOTE), htmlRow);
+  }
+  assert.strictEqual((files['errors.txt'].match(/unexpected error/g) || []).length, 2, files['errors.txt']);
+  assert.strictEqual(status.className, 'status warning');
+});
+
+test('an artifact with an empty rel is not labelled shared', async () => {
+  const frames = [art(U(1), 'Blank', { rel: '' }), art(U(2), 'Given', { rel: 'shared' })];
+  const pages = { [U(1)]: livePage('Blank', { 'index.html': 'a' }), [U(2)]: livePage('Given', { 'index.html': 'b' }) };
+  const { files } = await runArtifacts({ frames, pages });
+  const row = (n) => files['index.md'].split('\n').find((l) => l.includes(n));
+  assert.ok(!row('Blank').includes('shared with you'), row('Blank'));
+  assert.ok(row('Given').includes('shared with you'), row('Given'));
+  assert.ok(!files['index.html'].split('\n').find((l) => l.includes('Blank')).includes('shared with you'));
+  assert.ok(!JSON.parse(files[`${artFolder('Blank', U(1))}/artifact.json`]).note.includes('shared'));
+});
+
+test('errors.txt for Export Artifacts has no chat recovery steps', () => {
+  const c = vm.runInContext("new ExportErrorCollector(null, null, { label: 'Export Artifacts' })", exportPopup().sandbox);
+  c.addWarning('artifact_export', 'x', 'y');
+  const report = c.generateErrorReport();
+  assert.ok(!/Manual Recovery Steps|Debugging Tips|replay_bash|original\.json/.test(report), report);
+  assert.ok(report.includes('Sign in to claude.ai, open the artifact there, and run Export Artifacts again.'), report);
+  const chat = vm.runInContext("new ExportErrorCollector('Chat', 'u1')", exportPopup().sandbox);
+  chat.addWarning('upload', 'f', 'm');
+  assert.match(chat.generateErrorReport(), /Manual Recovery Steps[\s\S]*Debugging Tips/);
+});
+
+test('an artifact folder\'s title part is at most 200 UTF-8 bytes', async () => {
+  const letter = '\u{1D400}';
+  const title = letter.repeat(60);
+  const { files } = await runArtifacts({ frames: [art(U(1), title)], pages: { [U(1)]: livePage(title, { 'index.html': 'a' }) } });
+  const folder = `${letter.repeat(50)}_${uuidToBase58(U(1))}`;
+  assert.strictEqual(files[`${folder}/index.html`], 'a', Object.keys(files).join());
+});
+
+test('a throw mid-export hides the progress, sets an error status and re-enables the buttons', async () => {
+  const frames = [art(U(1), 'One')];
+  const pages = { [U(1)]: livePage('One', { 'index.html': 'a' }) };
+  const setup = (sb) => vm.runInContext("settings.megaFormat = 'zip'; artifactsIndexMd = () => { throw new Error('boom'); }", sb);
+  const { status, popup, saved } = await runArtifacts({ frames, pages, setup });
+  const sb = popup.sandbox;
+  assert.strictEqual(saved, null);
+  assert.strictEqual(sb.document.getElementById('progress').style.display, 'none');
+  assert.strictEqual(status.className, 'status error');
+  assert.match(status.textContent, /boom/);
+  sb.document.getElementById('progress').style.display = 'block';
+  await sb.document.getElementById('exportArtifacts').handlers.click();
+  assert.strictEqual(sb.document.getElementById('progress').style.display, 'none');
+  assert.strictEqual(sb.document.getElementById('exportArtifacts').disabled, false);
+  assert.strictEqual(sb.document.getElementById('exportAllZip').disabled, false);
+});
+
+test('the popup stores the side-panel note before opening the panel, and names the button\'s current label', async () => {
+  const tick = () => new Promise((r) => setTimeout(r, 5));
+  const session = {};
+  const popup = loadPopup({ location: '/popup.html', session });
+  const sb = popup.sandbox;
+  const span = { textContent: '' };
+  sb.document.getElementById('exportAllZip').querySelector = () => span;
+  vm.runInContext("settings.megaZipScope = 'changes'; settings.megaFormat = 'folder'; applySettings()", sb);
+  assert.strictEqual(span.textContent, 'Export Changes (Folder)');
+  let noteAtOpen = null;
+  sb.window.showDirectoryPicker = async () => new FakeDir();
+  sb.chrome.sidePanel.open = (o) => { noteAtOpen = session.folderExportNote; return Promise.resolve(); };
+  vm.runInContext('currentTabId = 7', sb);
+  await sb.document.getElementById('exportAllZip').handlers.click();
+  await tick();
+  assert.ok(noteAtOpen && noteAtOpen.button === 'exportAllZip', 'the note is stored before the side panel opens');
+  const panelSession = { folderExportNote: session.folderExportNote };
+  const panel = loadPopup({ location: '/sidepanel.html', session: panelSession, before: (s) => { s.chrome.tabs.query = () => new Promise(() => {}); } });
+  await tick();
+  assert.strictEqual(panel.sandbox.document.getElementById('status').textContent, 'Click Export Changes (Folder) here to choose where to save it.');
+  // A stored label that isn't a button label falls back to the fixed one.
+  const odd = { folderExportNote: { at: Date.now(), button: 'exportAllZip', label: '<b>x</b>' } };
+  const panel2 = loadPopup({ location: '/sidepanel.html', session: odd, before: (s) => { s.chrome.tabs.query = () => new Promise(() => {}); } });
+  await tick();
+  assert.strictEqual(panel2.sandbox.document.getElementById('status').textContent, 'Click Export All (Folder) here to choose where to save it.');
+});
+
+test('Cowork and Code artifacts listed without checksums are saved unverified', async () => {
+  const frames = [art(U(1), 'Cowork Page', { sourceSurface: 'cowork' }), art(U(2), 'Shared', { rel: 'shared' }), art(U(3), 'Checked')];
+  const pages = {
+    [U(1)]: livePage('Cowork Page', { 'index.html': { body: '<p>cowork</p>', unverified: true } }),
+    [U(2)]: livePage('Shared', { 'index.html': { body: '<p>s</p>', unverified: true }, 'gone.css': { body: '', unverified: true, error: { error: 'HTTP 404', status: 404 } } }),
+    [U(3)]: livePage('Checked', { 'index.html': 'ok' }),
+  };
+  const { files, fetcher } = await runArtifacts({ frames, pages });
+  const meta = (name, n) => JSON.parse(files[`${artFolder(name, U(n))}/artifact.json`]);
+  assert.strictEqual(files[`${artFolder('Cowork_Page', U(1))}/index.html`], '<p>cowork</p>');
+  const cowork = meta('Cowork_Page', 1);
+  assert.deepStrictEqual(cowork.files, [{ path: 'index.html', savedAs: 'index.html', size: 13, contentType: 'text/html', sha256: sha('<p>cowork</p>'), verified: false }]);
+  assert.strictEqual(cowork.incomplete, false);
+  assert.strictEqual(cowork.note, "files not checked against claude.ai's checksum");
+  const shared = meta('Shared', 2);
+  assert.deepStrictEqual(shared.files.map((f) => [f.path, f.sha256, f.verified]), [['index.html', sha('<p>s</p>'), false], ['gone.css', null, false]]);
+  assert.deepStrictEqual(shared.missing, ['gone.css']);
+  assert.match(shared.note, /^shared with you; .*files not checked against claude\.ai's checksum/);
+  const checked = meta('Checked', 3);
+  assert.ok(!('verified' in checked.files[0]));
+  assert.strictEqual(checked.note, '');
+  const call = fetcher.calls.find((c) => c.action === 'publishedPageFile' && c.uuid === U(1));
+  assert.ok(call.size == null, 'no size is claimed for an unlisted size');
+  assert.match(files['index.md'].split('\n').find((l) => l.includes('Cowork Page')), /files not checked against claude\.ai's checksum/);
+  for (const [k, t] of Object.entries(files)) assert.ok(!/__frame_t|frame\.claudeusercontent/.test(t), k);
+});
+
+test('files of unknown size count their real bytes against the 50 MB page total', async () => {
+  const big = 'a'.repeat(26 * 1024 * 1024);
+  const frames = [art(U(1), 'Big')];
+  const pages = { [U(1)]: livePage('Big', { 'index.html': { body: big, unverified: true }, 'more.html': { body: big, unverified: true } }) };
+  const { files } = await runArtifacts({ frames, pages });
+  const folder = artFolder('Big', U(1));
+  assert.strictEqual(files[`${folder}/index.html`].length, big.length);
+  assert.strictEqual(files[`${folder}/more.html`], undefined);
+  const meta = JSON.parse(files[`${folder}/artifact.json`]);
+  assert.deepStrictEqual(meta.missing, ['more.html']);
+  assert.match(files['errors.txt'], /more\.html \(page over 50 MB\)/);
 });
