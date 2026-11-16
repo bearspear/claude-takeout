@@ -4931,7 +4931,7 @@ async function bulkExportZip(options = {}) {
 const CLAUDE_DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
 const DOCS_ARTIFACT_NOTE = "Claude Docs text isn't available as a file; export the chat that made it to get the document.";
 // Root names an artifact folder may not take, matched without case.
-const ARTIFACT_ROOT_NAMES = ['index.md', 'index.html', 'export-manifest.json', 'errors.txt', 'write-errors.txt'];
+const ARTIFACT_ROOT_NAMES = ['index.md', 'index.html', 'export-manifest.json', 'errors.txt', 'write-errors.txt', 'viewer.html', 'viewer-check.gif', 'viewer-files'];
 
 // A string from claude.ai's list, safe to write: anything shaped like a frame URL or its token is dropped.
 const artifactText = (v) => String(typeof v === 'string' ? v : '').replace(/\S*(?:claudeusercontent\.com|__frame_t)\S*/gi, '[link removed]').slice(0, 500);
@@ -5043,10 +5043,26 @@ async function saveArtifactThumb(root, uuid, id, fetchPublished) {
   return path;
 }
 
-// Export Artifacts' viewer.html (Task 4a). Until then, a slot in the export's order that builds nothing; returns
-// whether viewer.html was written.
+// Export Artifacts' viewer.html and viewer-check.gif at the root. The page holds only the views
+// ({ exported, listed, artifacts }); artifact texts and images are in viewer-files/ parts, written before.
+// opts.fileScripts: parts were written, so the page may load them. Returns whether viewer.html was written;
+// any failure writes nothing and returns false, because the export must still finish.
 async function writeArtifactsViewer(root, views, opts = {}) {
-  return false;
+  try {
+    const [template, logic, app, marked] = await Promise.all(CTViewer.ARTIFACTS_VIEWER_ASSETS.map(async (asset) => {
+      const response = await fetch(chrome.runtime.getURL(asset));
+      if (!response.ok) throw new Error(`${asset}: HTTP ${response.status}`);
+      return response.text();
+    }));
+    const data = { exported: opts.exported || null, listed: opts.listed == null ? null : opts.listed, artifacts: views };
+    const html = CTViewer.assembleViewer({ template, css: '', marked, katex: '', highlight: '', logic, app, data, fileScripts: !!opts.fileScripts });
+    root.file('viewer.html', html);
+    root.file(CTViewer.VIEWER_CHECK_FILE, CTViewer.VIEWER_CHECK_BASE64, { base64: true });
+    return true;
+  } catch (e) {
+    console.error('Could not build viewer.html:', e);
+    return false;
+  }
 }
 
 // Save one listed artifact (from artifactsFromList) into root at its own folder. ctx: { fetchPublished, state
@@ -5406,6 +5422,7 @@ async function exportArtifacts(options = {}) {
     if (collector.hasAny()) root.file('errors.txt', collector.generateErrorReport());
 
     const withoutFiles = rows.filter((r) => r.fileCount === 0).length;
+    const viewerNote = viewerBuilt ? '' : ' viewer.html could not be built.';
     const done = (where) => `Exported ${artifactCount(total, 'artifact')} to ${where}.${withoutFiles ? ` ${withoutFiles} without files (see index.md).` : ''}${warnings ? ' See errors.txt.' : ''}`;
     if (run) {
       writeFailures.push(...await root.flush());
@@ -5413,8 +5430,8 @@ async function exportArtifacts(options = {}) {
         root.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
         await root.flush();
       }
-      status.className = writeFailures.length || warnings ? 'status warning' : 'status ready';
-      status.textContent = done(run.name) + (writeFailures.length ? ` ${artifactCount(writeFailures.length, 'file')} could not be written (see write-errors.txt).` : '');
+      status.className = writeFailures.length || warnings || !viewerBuilt ? 'status warning' : 'status ready';
+      status.textContent = done(run.name) + (writeFailures.length ? ` ${artifactCount(writeFailures.length, 'file')} could not be written (see write-errors.txt).` : '') + viewerNote;
       return;
     }
     status.textContent = 'Compressing archive...';
@@ -5428,8 +5445,8 @@ async function exportArtifacts(options = {}) {
       return;
     }
     download(blob, zipName, 'application/zip');
-    status.className = warnings ? 'status warning' : 'status ready';
-    status.textContent = done('a ZIP');
+    status.className = warnings || !viewerBuilt ? 'status warning' : 'status ready';
+    status.textContent = done('a ZIP') + viewerNote;
   } catch (e) {
     status.className = 'status error';
     status.textContent = `Export Artifacts failed: ${e && e.message ? e.message : e}`;

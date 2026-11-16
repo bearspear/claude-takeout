@@ -203,12 +203,13 @@ const assetRoutes = () => [[/^chrome-extension:\/\/test\/(.*)$/, (url) => ({ ok:
 // when given, as the whole reply), publishedPageInfo and publishedPageFile come from publishedFetcher(pages),
 // artifactThumb from thumbs (uuid -> reply, or a function (msg) -> reply; anything else { error: 'no picture' }),
 // with a real JSZip and storage kept in memory. options go to exportArtifacts ({ directory } for a folder);
-// routes go to exportPopup's fetch. Returns { store, saved (the download), zip, files (path -> text, from the ZIP
+// routes go to exportPopup's fetch, before the extension's own files (assetRoutes; assets: false leaves those out,
+// so viewer.html can't be built). Returns { store, saved (the download), zip, files (path -> text, from the ZIP
 // or the run folder), raw (path -> Buffer), views (what writeArtifactsViewer was given, or null), status,
 // fetcher, listCalls, thumbCalls, popup }.
-async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}, accountName = 'Mika', list = null, setup = null, thumbs = {}, routes = [] } = {}) {
+async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}, accountName = 'Mika', list = null, setup = null, thumbs = {}, routes = [], assets = true } = {}) {
   const JSZip = require('../jszip.min.js');
-  const popup = exportPopup({ routes });
+  const popup = exportPopup({ routes: [...routes, ...(assets ? assetRoutes() : [])] });
   const sb = popup.sandbox;
   const store = JSON.parse(JSON.stringify(stored));
   const fetcher = publishedFetcher(pages);

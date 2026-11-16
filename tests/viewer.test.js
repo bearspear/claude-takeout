@@ -216,6 +216,23 @@ test('VIEWER_ASSETS lists the seven viewer files', () => {
   assert.deepStrictEqual(VIEWER_ASSETS, ['viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js', 'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js']);
 });
 
+test('ARTIFACTS_VIEWER_ASSETS lists the artifacts viewer\'s four files, and each exists', () => {
+  assert.deepStrictEqual(V.ARTIFACTS_VIEWER_ASSETS, ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js']);
+  for (const f of V.ARTIFACTS_VIEWER_ASSETS) assert.ok(fs.existsSync(path.join(__dirname, '..', f)), f);
+});
+
+test('the artifacts template keeps the chat viewer\'s policy, with no frames', () => {
+  const art = fs.readFileSync(path.join(__dirname, '../viewer/artifacts-template.html'), 'utf8');
+  const policy = (t) => /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(t)[1];
+  assert.strictEqual(policy(art), policy(template).replace("frame-src file:", "frame-src 'none'"));
+  assert.ok(art.includes('<meta name="generator" content="Claude Takeout">'));
+  for (const p of ['DATA_JSON', 'MARKED_JS', 'LOGIC_JS', 'APP_JS']) assert.strictEqual(art.split(`/*${p}*/`).length, 2, p);
+  for (const f of ['viewer/artifacts-template.html', 'viewer/artifacts-app.js']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    for (const s of ['claudeusercontent', '__frame_t', '_thumb']) assert.ok(!text.includes(s), `${f}: ${s}`);
+  }
+});
+
 const Logic = require('../viewer/viewer-logic.js');
 
 test('the highlighter survives being inlined, and the worker can use it', () => {

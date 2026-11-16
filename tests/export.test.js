@@ -2428,7 +2428,7 @@ test('Export Artifacts saves each artifact\'s current files with artifact.json a
   const f1 = artFolder('Quarterly_Report', U(1));
   const f2 = artFolder('Game', U(2));
   assert.deepStrictEqual(Object.keys(files).sort(), [`${f1}/artifact.json`, `${f1}/index.html`, `${f2}/app.js`, `${f2}/artifact.json`, `${f2}/img/logo.svg`, `${f2}/index.html`,
-    'export-manifest.json', 'index.html', 'index.md', 'viewer-files/part-0001.js'].sort());
+    'export-manifest.json', 'index.html', 'index.md', 'viewer-check.gif', 'viewer-files/part-0001.js', 'viewer.html'].sort());
   assert.strictEqual(files[`${f2}/app.js`], 'go()');
   const meta = JSON.parse(files[`${f2}/artifact.json`]);
   assert.deepStrictEqual(Object.keys(meta).sort(), ['createdAt', 'files', 'format', 'incomplete', 'missing', 'needsRuntime', 'note', 'public', 'rel', 'shortId', 'sourceSurface', 'start', 'title', 'typeTitle', 'updatedAt', 'url', 'uuid', 'ver'].sort());
@@ -3157,8 +3157,10 @@ test('index.html and index.md drop a shared artifact\'s local HTML link; index.h
   assert.ok(htmlRow('Mine').includes(`href="${artFolder('Mine', U(2))}/index.html"`), htmlRow('Mine'));
   assert.ok(htmlRow('Their picture').includes('/a.png"'), 'a shared picture keeps its link');
   assert.ok(mdRow('[Mine]'), files['index.md']);
-  assert.ok(!html.includes('viewer.html'), 'no viewer link when none was built');
-  const built = await runArtifacts({ frames, pages, setup: (sb) => vm.runInContext('writeArtifactsViewer = async () => true', sb) });
+  assert.ok(html.includes('<a href="viewer.html">'), 'the viewer link when it was built');
+  const failed = await runArtifacts({ frames, pages, assets: false });
+  assert.ok(!failed.files['index.html'].includes('viewer.html'), 'no viewer link when none was built');
+  const built = await runArtifacts({ frames, pages, assets: false, setup: (sb) => vm.runInContext('writeArtifactsViewer = async () => true', sb) });
   assert.match(built.files['index.html'], /<a href="viewer\.html">/);
 });
 
@@ -3310,4 +3312,82 @@ test('a view counts the listed files that were not saved', async () => {
   const { views } = await runArtifacts({ frames, pages });
   assert.strictEqual(views[0].missingCount, 2);
   assert.deepStrictEqual(views[0].files.map((f) => f.path), ['index.html']);
+});
+
+// ---- Export Artifacts: viewer.html ----
+const CTV = require('../takeout-viewer.js');
+const artifactsViewerData = (html) => JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(html)[1]);
+
+test('Export Artifacts writes viewer.html and viewer-check.gif', async () => {
+  const frames = [art(U(1), 'Quarterly Report'), art(U(2), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' })];
+  const pages = { [U(1)]: livePage('Quarterly Report', { 'index.html': '<h1>Q</h1>' }) };
+  for (const options of [{}, { directory: new FakeDir() }]) {
+    const { files, raw, views, status } = await runArtifacts({ frames, pages, options });
+    const html = files['viewer.html'];
+    assert.ok(html, 'viewer.html written');
+    assert.ok(/^<!doctype html>/i.test(html));
+    assert.ok(html.includes('<meta name="generator" content="Claude Takeout">'));
+    const policy = /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(html)[1];
+    assert.match(policy, /frame-src 'none'/);
+    assert.ok(!/frame-src[^;]*file:/.test(policy), policy);
+    assert.match(policy, /script-src[^;]*file:/, 'parts load from viewer-files/');
+    const data = artifactsViewerData(html);
+    assert.deepStrictEqual(Object.keys(data).sort(), ['artifacts', 'exported', 'listed']);
+    assert.strictEqual(data.listed, 2);
+    assert.strictEqual(data.exported, JSON.parse(files['export-manifest.json']).exported_at);
+    assert.deepStrictEqual(data.artifacts, views);
+    assert.ok(!/\/\*(DATA_JSON|MARKED_JS|LOGIC_JS|APP_JS)\*\//.test(html.replace(/<script id="data"[\s\S]*?<\/script>/, '')));
+    assert.deepStrictEqual(raw['viewer-check.gif'], Buffer.from(CTV.VIEWER_CHECK_BASE64, 'base64'));
+    assert.match(files['index.html'], /<a href="viewer\.html">/);
+    assert.strictEqual(status.className, 'status ready');
+    assert.ok(!/viewer\.html could not be built/.test(status.textContent), status.textContent);
+    for (const s of ['claudeusercontent', '__frame_t', '_thumb']) assert.ok(!html.includes(s), s);
+  }
+});
+
+test('an artifacts export with no parts keeps file: out of the viewer\'s script-src', async () => {
+  const frames = [art(U(1), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' })];
+  const { files } = await runArtifacts({ frames });
+  assert.ok(!Object.keys(files).some((n) => n.startsWith('viewer-files/part-')));
+  const policy = /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(files['viewer.html'])[1];
+  assert.ok(!/script-src[^;]*file:/.test(policy), policy);
+});
+
+test('a viewer build failure leaves the artifacts export complete', async () => {
+  const frames = [art(U(1), 'One'), art(U(2), 'Two')];
+  const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) };
+  const throwing = [[/^chrome-extension:/, () => { throw new Error('asset gone'); }]];
+  for (const options of [{}, { directory: new FakeDir() }]) {
+    const { files, status } = await runArtifacts({ frames, pages, options, routes: throwing });
+    assert.ok(!files['viewer.html'] && !files['viewer-check.gif']);
+    assert.strictEqual(files[`${artFolder('Two', U(2))}/index.html`], 'two');
+    assert.ok(files['index.md'] && files['export-manifest.json']);
+    assert.ok(!files['index.html'].includes('viewer.html'), 'no viewer link');
+    assert.match(status.textContent, /Exported 2 artifacts to .*\. viewer\.html could not be built\.$/);
+    assert.strictEqual(status.className, 'status warning');
+  }
+  const failed = await runArtifacts({ frames, pages, assets: false });
+  assert.ok(!failed.files['viewer.html']);
+  assert.match(failed.status.textContent, /viewer\.html could not be built\./);
+});
+
+test('viewer.html holds no artifact texts', async () => {
+  const marker = 'TEXT-MARKER-7f3a';
+  const frames = [art(U(1), 'Page'), art(U(2), 'Pic')];
+  const pages = {
+    [U(1)]: livePage('Page', { 'index.html': `<p>${marker}</p>`, 'style.css': `/* ${marker} */`, 'notes.md': marker }),
+    [U(2)]: livePage('Pic', { 'a.png': { body: PNG, type: 'image/png' } }),
+  };
+  const { files } = await runArtifacts({ frames, pages });
+  assert.ok(!files['viewer.html'].includes(marker));
+  assert.ok(!files['viewer.html'].includes(PNG.toString('base64')));
+  const parts = Object.keys(files).filter((n) => n.startsWith('viewer-files/part-'));
+  assert.ok(parts.some((n) => files[n].includes(marker)), 'the text is in a part');
+});
+
+test('viewer.html stays small for 1000 artifacts', async () => {
+  const many = Array.from({ length: 1000 }, (_, i) => art(U(i + 1), `A rather long artifact title number ${i} with some words`, { live: '' }));
+  const { files } = await runArtifacts({ frames: many });
+  assert.strictEqual(artifactsViewerData(files['viewer.html']).artifacts.length, 1000);
+  assert.ok(Buffer.byteLength(files['viewer.html']) < 1.5 * 1024 * 1024, String(Buffer.byteLength(files['viewer.html'])));
 });

@@ -32,6 +32,7 @@
 //                                      viewer with no parts. Exports set fileScripts only when moveUploadText made parts
 //   kindFor(filename, mime, hasText)   a GenFile's kind
 //   VIEWER_ASSETS                      paths of the seven viewer files
+//   ARTIFACTS_VIEWER_ASSETS            Export Artifacts' viewer: template, logic, app and marked, in that order
 //   TOOL_TEXT_LIMIT                    longest tool result text kept
 //   TEXT_EMBED_LIMIT                   longest upload or project text a caller should pass in ctx
 //   VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64  a 1x1 GIF beside viewer.html: if it won't load, the ZIP wasn't unzipped
@@ -68,6 +69,8 @@
     'viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js',
     'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js'
   ];
+  // Export Artifacts' viewer.html: template, logic, app, marked (no KaTeX or highlight.js).
+  const ARTIFACTS_VIEWER_ASSETS = ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js'];
 
   function cut(text) {
     const s = String(text == null ? '' : text);
@@ -858,7 +861,7 @@
     return page.replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
-  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT, artifactViewParts, ARTIFACT_PARTS_BUDGET };
+  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, ARTIFACTS_VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT, artifactViewParts, ARTIFACT_PARTS_BUDGET };
   root.CTViewer = Object.assign(root.CTViewer || {}, api);
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);
