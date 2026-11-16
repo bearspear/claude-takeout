@@ -1659,6 +1659,19 @@ test('the attached copy of a same version is not listed again; an upload named l
   assert.deepStrictEqual(chat.messages[0].uploads.map(u => u.name), ['index.html']);
 });
 
+test('resolveArtifactPath trims long runs of spaces in linear time', () => {
+  const url = 'a' + ' '.repeat(100000) + 'b.png';
+  let t = Date.now();
+  assert.strictEqual(resolveArtifactPath('index.html', url), url);
+  assert.ok(Date.now() - t < 100, `resolveArtifactPath took ${Date.now() - t} ms`);
+  assert.strictEqual(resolveArtifactPath('index.html', ' \t\x00 a.png \x1f '), 'a.png');
+  assert.strictEqual(resolveArtifactPath('index.html', ' '.repeat(5)), null);
+  const html = `<img src="${' '.repeat(1500000)}x">`;
+  t = Date.now();
+  inlineArtifact(html, 'index.html', { texts: [], images: [] });
+  assert.ok(Date.now() - t < 500, `inlineArtifact took ${Date.now() - t} ms`);
+});
+
 test('resolveArtifactPath', () => {
   assert.strictEqual(resolveArtifactPath('site/index.html', './app.css'), 'site/app.css');
   assert.strictEqual(resolveArtifactPath('site/index.html', '../x.js'), 'x.js');
@@ -1729,6 +1742,24 @@ test('artifact logic edges', () => {
   assert.ok(STORAGE_SHIM.includes('i>=0&&i<k.length'));
   assert.strictEqual(parseArtifactHash('#chat=x&a=abc'), null);
   assert.strictEqual(parseArtifactHash('#a=abc&x=1'), null);
+});
+
+test('STORAGE_SHIM: key() answers null for an index that is not a whole number in range', () => {
+  const { STORAGE_SHIM } = require('../viewer/viewer-logic.js');
+  const vm = require('vm');
+  const blocked = { get() { throw new Error('SecurityError'); }, configurable: true };
+  const win = {};
+  Object.defineProperty(win, 'localStorage', blocked);
+  Object.defineProperty(win, 'sessionStorage', blocked);
+  win.window = win;
+  vm.runInNewContext(STORAGE_SHIM.replace(/^<script>|<\/script>$/g, ''), win);
+  const ls = win.localStorage;
+  ls.setItem('a', 1);
+  ls.setItem('b', 2);
+  assert.strictEqual(ls.key(0), 'a');
+  assert.strictEqual(ls.key('1'), 'b');
+  for (const i of [0.5, 1.5, -1, 2, NaN, Infinity, 'x']) assert.strictEqual(ls.key(i), null, String(i));
+  assert.strictEqual(ls.length, 2);
 });
 
 test('markdownParser: raw HTML stays text, Markdown still renders, after a tag too', () => {

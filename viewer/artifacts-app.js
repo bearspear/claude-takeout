@@ -491,6 +491,8 @@
     if (isPoster(v)) return pageBody.replaceChildren(posterPage(v));
     const shown = !v.notExported && v.start && !v.tooLarge && unzipped !== false;
     if (shown && PREVIEW_KINDS.has(v.startKind) && !v.startMissing) return openPreview(v);
+    // The owner's own image not in the part (too large, or past the budget) still shows from its saved file.
+    if (v.startKind === 'image' && v.shared === false && !v.notExported && v.start && unzipped !== false && openHref(v, v.startSaved)) return openPreview(v);
     pageBody.replaceChildren(detailsPage(v));
   }
 

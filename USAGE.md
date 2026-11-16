@@ -97,7 +97,7 @@ Saves what claude.ai/artifacts lists: every artifact you made in any chat, proje
 You get `claude-takeout-artifacts-<your name>-<YYYY-MM-DD>_<HHMM>` with:
 
 - `viewer.html` and `viewer-files/`: the viewer (see below). `viewer-files/thumbs/` holds the card pictures and `part-NNNN.js` the text and images the previews use.
-- `index.html`: a table of every artifact (title, kind, source, files, notes) and "Card pictures: N of M". The title opens the artifact's page from disk, except for the HTML or SVG of an artifact shared with you; "claude.ai" opens it online; "Viewer" opens `viewer.html`.
+- `index.html`: a table of every artifact (title, kind, source, files, notes) and "Card pictures: N of M". The title opens the artifact's page from disk, except when an artifact shared with you starts with anything but documents, images, media, archives and plain data files; "claude.ai" opens it online; "Open the artifacts viewer" opens `viewer.html`, when it was written.
 - `index.md` and `export-manifest.json` (`kind: "artifacts"`): the same list for other tools, with "Listed by claude.ai: N", the count claude.ai gave.
 - One folder `<Title>_<id>/` per artifact: its current version's files and an `artifact.json`.
 - `errors.txt`, only when there are warnings (`artifact_export`).
@@ -116,14 +116,14 @@ Limits to know:
 
 #### The artifacts viewer
 
-Open `viewer.html` in Chrome from the folder (unzip a ZIP first; opened from inside a ZIP the viewer says so). It shows a grid like claude.ai/artifacts, newest first, with tabs All, **Yours** and **Shared with you**. A card opens that artifact's page (`#a=<id>` in the address, so the browser's Back works). Pages made of HTML or SVG run in a sandbox; Markdown and images are shown; React, Mermaid, Claude Docs, Design and other artifacts that need claude.ai show a details page with the saved files and a claude.ai link. A start file over 2 MB is "too large to show here". An export of a huge account keeps preview data for the first 256 MB only; the rest show their details page.
+Open `viewer.html` in Chrome from the folder (unzip a ZIP first; opened from inside a ZIP the viewer says so). It shows a grid like claude.ai/artifacts, newest first, with tabs All, **Yours** and **Shared with you**. A card opens that artifact's page (`#a=<id>` in the address, so the browser's Back works). Pages made of HTML or SVG run in a sandbox; Markdown and images are shown; React, Mermaid, Claude Docs, Design and other artifacts that need claude.ai show a details page with the saved files and a claude.ai link. A start file over 2 MB is "too large to show here", except your own image, which shows from its saved file. An export of a huge account keeps preview data for the first 256 MB only; the rest show their details page.
 
-**Open file** opens a saved file in the browser. It is shown for your own artifacts, and for files of any artifact that are documents, images, audio, video, archives or plain data. A page shared with you has no Open file for its HTML or SVG, since it was written by someone else and would run from disk with full access to your files. The viewer previews it in the sandbox instead, which is no safer than the other previews: see below.
+**Open file** opens a saved file in the browser. It is shown for your own artifacts, and for files of any artifact that are documents, images, audio, video, archives or plain data. A page shared with you has no Open file for anything but documents, images, media, archives and plain data files (HTML, SVG and XML among them), since it was written by someone else and could run from disk with full access to your files. The viewer previews it in the sandbox instead, which is no safer than the other previews: see below.
 
 What to know about artifact previews:
 
-- Everything the page needs must be one of its saved files. Relative `<script src>`, `<link href>`, `<img src>` and similar are filled in from the saved files; anything else is not fetched, since the preview has no network. Scripts that `fetch` or load a web font or library find nothing.
-- Links between an artifact's pages don't work: a preview can't navigate. Open the file from the Files list instead.
+- Everything the page needs must be one of its saved files. Relative `<script src>`, `<link href>` and `<img src>` are filled in from the saved files (SVG `<image>`, `<source srcset>` and CSS `url()` are not); anything else is not fetched, since the preview has no network. Scripts that `fetch` or load a web font or library find nothing.
+- Links between an artifact's pages don't work: a preview can't navigate. Open the file from the Files list instead (your own artifacts).
 - CSS inlined from a saved file keeps its own `url(...)` and `@import`, which are not resolved, so a stylesheet's background image or font may be missing. Scripts that `import` modules are not inlined either.
 - `localStorage` and `sessionStorage` work inside the preview but live in memory only, and are gone when you leave the page. Nothing is shared with the viewer.
 - Claude's own page code (Design and other typed artifacts) is not run offline.

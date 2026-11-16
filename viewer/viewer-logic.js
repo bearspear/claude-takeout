@@ -525,7 +525,13 @@ function previewDoc(text, lookup) {
 // any .. past the artifact root and a decoded segment holding a slash. A backslash counts as a slash.
 function resolveArtifactPath(startPath, url) {
   if (typeof startPath !== 'string' || typeof url !== 'string') return null;
-  const raw = url.replace(/[\t\n\r]/g, '').replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, '').replace(/\\/g, '/');
+  // C0 controls and spaces trimmed with index loops: a regex anchored at the end is quadratic on long inner runs.
+  const clean = url.replace(/[\t\n\r]/g, '');
+  let from = 0;
+  let to = clean.length;
+  while (from < to && clean.charCodeAt(from) <= 0x20) from++;
+  while (to > from && clean.charCodeAt(to - 1) <= 0x20) to--;
+  const raw = clean.slice(from, to).replace(/\\/g, '/');
   if (!raw || /^[a-z][a-z0-9+.-]*:/i.test(raw) || raw[0] === '/' || /[?#]/.test(raw)) return null;
   const stack = startPath.replace(/\\/g, '/').split('/').filter(Boolean);
   stack.pop();
@@ -610,7 +616,7 @@ function inlineArtifact(html, startPath, payload) {
 }
 
 // Storage is blocked in a sandbox without allow-same-origin, and a page that touches it would throw; this gives it memory.
-const STORAGE_SHIM = `<script>(function(){function mem(){var d=Object.create(null);return{getItem:function(k){k=String(k);return k in d?d[k]:null},setItem:function(k,v){d[String(k)]=String(v)},removeItem:function(k){delete d[String(k)]},clear:function(){d=Object.create(null)},key:function(i){var k=Object.keys(d);i=Number(i);return i>=0&&i<k.length?k[i]:null},get length(){return Object.keys(d).length}}}['localStorage','sessionStorage'].forEach(function(n){var ok=true;try{window[n].getItem('x')}catch(e){ok=false}if(!ok){try{Object.defineProperty(window,n,{value:mem(),configurable:true})}catch(e){}}})})()</script>`;
+const STORAGE_SHIM = `<script>(function(){function mem(){var d=Object.create(null);return{getItem:function(k){k=String(k);return k in d?d[k]:null},setItem:function(k,v){d[String(k)]=String(v)},removeItem:function(k){delete d[String(k)]},clear:function(){d=Object.create(null)},key:function(i){var k=Object.keys(d);i=Number(i);return Number.isInteger(i)&&i>=0&&i<k.length?k[i]:null},get length(){return Object.keys(d).length}}}['localStorage','sessionStorage'].forEach(function(n){var ok=true;try{window[n].getItem('x')}catch(e){ok=false}if(!ok){try{Object.defineProperty(window,n,{value:mem(),configurable:true})}catch(e){}}})})()</script>`;
 
 // WebRTC sends packets that Chrome's CSP doesn't stop. (Chrome doesn't know the webrtc directive and logs a console error
 // for it, so PREVIEW_CSP leaves it out.) So the page's own window loses these names, for good. A frame the page makes

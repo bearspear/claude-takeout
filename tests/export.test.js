@@ -2468,6 +2468,20 @@ test('Export Artifacts to a folder writes the same files', async () => {
   assert.match(disk.status.textContent, new RegExp(`Exported 2 artifacts to ${runs[0]}\\.`));
 });
 
+test('Export Artifacts to a folder: viewer.html that fails to write is not linked', async () => {
+  const frames = [art(U(1), 'One')];
+  const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }) };
+  const ok = await runArtifacts({ frames, pages, options: { directory: new FakeDir() } });
+  assert.ok(ok.files['index.html'].includes('href="viewer.html"'), 'linked when written');
+  const picked = new FakeDir('picked', (name) => name === 'viewer.html');
+  const disk = await runArtifacts({ frames, pages, options: { directory: picked } });
+  assert.ok(!('viewer.html' in disk.files) || disk.files['viewer.html'] === undefined);
+  assert.ok(!disk.files['index.html'].includes('viewer.html'), disk.files['index.html']);
+  assert.match(disk.files['write-errors.txt'], /viewer\.html/);
+  assert.match(disk.status.textContent, /viewer\.html could not be built\./);
+  assert.strictEqual(disk.status.className, 'status warning');
+});
+
 test('a Claude Docs artifact is listed with a note and not fetched', async () => {
   const frames = [art(U(1), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' }), art(U(2), 'Notes', { typeTitle: 'Docs' }), art(U(3), 'Mock', { typeSlug: DESIGN_TYPE, typeTitle: 'Docs' })];
   const pages = { [U(3)]: livePage('Mock', { 'index.html': '<div>mock</div>' }) };
@@ -2858,6 +2872,39 @@ test('an artifact with an empty rel is not labelled shared', async () => {
   assert.ok(row('Given').includes('shared with you'), row('Given'));
   assert.ok(!files['index.html'].split('\n').find((l) => l.includes('Blank')).includes('shared with you'));
   assert.ok(!JSON.parse(files[`${artFolder('Blank', U(1))}/artifact.json`]).note.includes('shared'));
+});
+
+test('a shared artifact links its start file locally only for types the viewer would open', async () => {
+  const blocked = ['page.shtml', 'page.xht', 'page.xml', 'page.xsl', 'index.html', 'art.svg'];
+  const names = [...blocked, 'notes.pdf'];
+  const frames = names.map((n, i) => art(U(i + 1), `S${i}`, { rel: 'shared' })).concat([art(U(20), 'OwnXml'), art(U(21), 'OwnSvg')]);
+  const pages = {};
+  names.forEach((n, i) => { pages[U(i + 1)] = livePage(`S${i}`, { [n]: 'x' }); });
+  pages[U(20)] = livePage('OwnXml', { 'page.xml': 'x' });
+  pages[U(21)] = livePage('OwnSvg', { 'art.svg': 'x' });
+  const { files } = await runArtifacts({ frames, pages });
+  blocked.forEach((n, i) => {
+    const folder = encodeURIComponent(artFolder(`S${i}`, U(i + 1)));
+    assert.ok(!files['index.md'].includes(`${folder}/`), `${n}: no local link in index.md`);
+    assert.ok(!files['index.html'].includes(`${folder}/`), `${n}: no local link in index.html`);
+  });
+  const pdf = encodeURIComponent(artFolder('S6', U(7)));
+  assert.ok(files['index.md'].includes(`(${pdf}/notes.pdf)`), files['index.md']);
+  assert.ok(files['index.html'].includes(`href="${pdf}/notes.pdf"`));
+  for (const [t, n, u] of [['OwnXml', 'page.xml', U(20)], ['OwnSvg', 'art.svg', U(21)]]) {
+    const href = `${encodeURIComponent(artFolder(t, u))}/${n}`;
+    assert.ok(files['index.md'].includes(`(${href})`), `own ${n} keeps its link`);
+    assert.ok(files['index.html'].includes(`href="${href}"`));
+  }
+});
+
+test('export-core.js and the viewer allow the same file types to open', () => {
+  const core = require('../export-core.js');
+  const viewer = require('../viewer/viewer-logic.js');
+  assert.deepStrictEqual([...core.OPENABLE_EXTENSIONS].sort(), [...viewer.OPENABLE_EXTENSIONS].sort());
+  for (const name of ['a.pdf', 'b/c.PNG', 'x.html', 'y.svg', 'z.xml', 'noext', 'q.tar.gz']) {
+    assert.strictEqual(core.openableName(name), viewer.openableHref(encodeURIComponent(name).replace(/%2F/g, '/')), name);
+  }
 });
 
 test('errors.txt for Export Artifacts has no chat recovery steps', () => {
@@ -3280,6 +3327,15 @@ test('the start file\'s text is kept first, and a view says when it is not in th
   assert.deepStrictEqual(images[0], ['start.png', `data:image/png;base64,${PNG.toString('base64')}`]);
   assert.strictEqual(images.length, 5);
   assert.deepStrictEqual([views[2].startKind, views[2].startMissing], ['image', false]);
+  // A start file as large as its siblings, listed after four of them, still comes first.
+  const bigStart = '<p>' + 's'.repeat(1900 * 1024) + '</p>';
+  const four = {};
+  for (let i = 0; i < 4; i++) four[`s${i}.css`] = sib;
+  const crowd = await runArtifacts({ frames: [art(U(6), 'Crowded')], pages: { [U(6)]: livePage('Crowded', { ...four, 'index.html': bigStart }) } });
+  const crowdTexts = payloadOf(crowd.files, crowd.views[0]).texts;
+  assert.deepStrictEqual(crowdTexts[0], ['index.html', bigStart]);
+  assert.strictEqual(crowdTexts.length, 4, 'three siblings fit beside the start file in 8 MB');
+  assert.deepStrictEqual([crowd.views[0].startMissing, crowd.views[0].tooLarge], [false, false]);
   // Past the parts budget the start text is not in any part.
   const tight = await runArtifacts({ frames: [art(U(2), 'Budget')], pages, setup: (sb) => vm.runInContext('CTViewer.ARTIFACT_PARTS_BUDGET = 5', sb) });
   assert.deepStrictEqual([tight.views[0].part, tight.views[0].startMissing, tight.views[0].tooLarge], [null, true, false]);

@@ -5220,11 +5220,12 @@ const artifactUrl = (r) => {
   const m = /^https:\/\/claude\.ai\/artifact\/([1-9A-HJ-NP-Za-km-z]+|[0-9a-f-]{36})$/.exec(String(r.url || ''));
   return m ? `https://claude.ai/artifact/${m[1]}` : null;
 };
-// The local link of an artifact's start file. None for a shared artifact's HTML or SVG: opened from disk it would
-// run someone else's code with network access and the shared file:// storage.
+// The local link of an artifact's start file. A shared artifact's only when the viewer would open its type
+// (openableName, export-core.js): anything else, HTML, SVG or XML among them, opened from disk could run
+// someone else's code with network access and the shared file:// storage.
 const artifactLocal = (r) => {
   if (!r.startSaved) return null;
-  if (isSharedArtifact(r.rel) && /\.(x?html?|svg)$/i.test(r.startSaved)) return null;
+  if (isSharedArtifact(r.rel) && !openableName(r.startSaved)) return null;
   return encodePath(`${r.folder}/${r.startSaved}`);
 };
 
@@ -5413,6 +5414,12 @@ async function exportArtifacts(options = {}) {
     try {
       viewerBuilt = await writeArtifactsViewer(root, views, { exported: startedAt, listed, fileScripts: partCount > 0 }) === true;
     } catch (e) { viewerBuilt = false; }
+    // On disk, written now, so index.html links viewer.html only when it is really there.
+    if (run) {
+      const failed = await root.flush();
+      writeFailures.push(...failed);
+      if (failed.some((f) => f.path === 'viewer.html')) viewerBuilt = false;
+    }
 
     const warnings = collector.warnings.length + collector.errors.length;
     const indexOpts = { listed, exportedAt: startedAt, warnings, thumbs, viewer: viewerBuilt };

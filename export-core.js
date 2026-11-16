@@ -1438,10 +1438,19 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
   return { name: data.project?.name || '', fileDir, fileNames, docs, instructions: cut };
 }
 
+// The file types a link may open from disk: documents, images, audio, video, archives and plain data. A copy of
+// OPENABLE_EXTENSIONS in viewer/viewer-logic.js (the viewer pages don't load this file); a test keeps them identical.
+const OPENABLE_EXTENSIONS = new Set(('pdf doc docx xls xlsx ppt pptx odt ods odp rtf pages numbers key epub zip gz tar 7z rar ' +
+  'csv tsv txt log md markdown json png jpg jpeg gif webp heic tif tiff bmp mp3 m4a wav ogg flac aac mp4 mov webm m4v mkv avi').split(' '));
+function openableName(name) {
+  const ext = /\.([a-z0-9]+)$/i.exec(String(name || '').split('/').pop());
+  return !!ext && OPENABLE_EXTENSIONS.has(ext[1].toLowerCase());
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
-    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
+    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
   };
 }

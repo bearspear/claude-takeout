@@ -349,6 +349,8 @@ async function exportTo(frames, pages, thumbs) {
     art(U(60), 'rtc top', { rel: 'shared' }),
     art(U(61), 'rtc nested', { rel: 'shared' }),
     art(U(62), 'Component'),
+    art(U(63), 'Big picture'),
+    art(U(64), 'Big shared picture', { rel: 'shared' }),
     ...navs.map(([name], i) => art(navUuid(i), name, { rel: 'shared' })),
   ];
   const prevPages = {
@@ -367,6 +369,9 @@ async function exportTo(frames, pages, thumbs) {
     [U(60)]: live('rtc top', { 'index.html': RTC_TOP }),
     [U(61)]: live('rtc nested', { 'index.html': RTC_NESTED }),
     [U(62)]: live('Component', { 'App.jsx': 'export default () => <div/>', 'app.js': 'x()' }),
+    // Over the 2 MB preview cap (padding after IEND, which the browser ignores): not in the part.
+    [U(63)]: live('Big picture', { 'big.png': { body: Buffer.concat([png(40, 30), Buffer.alloc(2200000)]), type: 'image/png' } }),
+    [U(64)]: live('Big shared picture', { 'big.png': { body: Buffer.concat([png(40, 30), Buffer.alloc(2200000)]), type: 'image/png' } }),
     [U(39)]: live('Shared board', { 'index.html': '<h1>Shared board</h1>', 'art.svg': { body: '<svg xmlns="http://www.w3.org/2000/svg"/>', type: 'image/svg+xml' }, 'notes.pdf': { body: '%PDF-1.4', type: 'application/pdf' } }),
   };
   navs.forEach(([name, attempt, head], i) => { prevPages[navUuid(i)] = live(name, { 'index.html': navArtifact(name, attempt, head).versions[0] }); });
@@ -501,6 +506,15 @@ async function exportTo(frames, pages, thumbs) {
   await md.page.waitForFunction(() => { const i = document.querySelector('#page-body .preview img'); return i && i.complete && i.naturalWidth > 0; }, null, { timeout: 3000 }).catch(() => {});
   const imgSrc = await md.page.$eval('#page-body .preview img', i => i.getAttribute('src')).catch(() => null);
   check('image: shown from the part', !!imgSrc && imgSrc.startsWith('data:image/png;base64,'), String(imgSrc).slice(0, 40));
+  check('fixture: the big pictures are too large', prevViews.filter(v => /^Big/.test(v.title)).every(v => v.tooLarge && v.startKind === 'image'), JSON.stringify(prevViews.filter(v => /^Big/.test(v.title))));
+  await md.page.goto(md.url + `#a=${p(63)}`);
+  await md.page.waitForFunction(() => { const i = document.querySelector('#page-body .preview img'); return i && i.complete && i.naturalWidth > 0; }, null, { timeout: 3000 }).catch(() => {});
+  const bigSrc = await md.page.$eval('#page-body .preview img', i => i.getAttribute('src')).catch(() => null);
+  check("own image too large for the part: shown from its saved file", !!bigSrc && /^Big_picture_[^/]+\/big\.png$/.test(bigSrc)
+    && await md.page.$eval('#page-body .preview img', i => i.naturalWidth) === 40, String(bigSrc));
+  await md.page.goto(md.url + `#a=${p(64)}`);
+  await md.page.waitForSelector('#page-body .details', { timeout: 3000 }).catch(() => {});
+  check("shared image too large: details page", await md.page.locator('#page-body .preview').count() === 0 && /too large to show here/.test(await md.page.locator('#page-body').textContent()));
   await md.page.goto(md.url + `#a=${p(37)}`);
   const sf = await frameOf(md);
   check('svg: shown in the sandboxed frame', await sf.waitForSelector('#r', { timeout: 3000 }).then(() => true).catch(() => false));
