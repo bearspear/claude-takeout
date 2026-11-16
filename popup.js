@@ -3343,6 +3343,8 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   const images = new Map();
   let textBytes = 0;
   let imageBytes = 0;
+  // Preview candidates, kept after the loop: the start file first, so other files never crowd it out.
+  const candidates = [];
   const keep = (f, bytes) => {
     const kind = previewKind(f.path);
     if (!kind || bytes.length > PREVIEW_ITEM_MAX) return;
@@ -3392,8 +3394,10 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
     written++;
     if (f === start) startSize = bytes.length;
     if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
-    if (collect) keep(f, bytes);
+    if (collect && previewKind(f.path) && bytes.length <= PREVIEW_ITEM_MAX) candidates.push([f, bytes]);
   }
+  for (const [f, bytes] of candidates) if (f === start) keep(f, bytes);
+  for (const [f, bytes] of candidates) if (f !== start) keep(f, bytes);
   const startOk = !!start && !missing.includes(start.path);
   return {
     saved: written > 0, missing, problems, incomplete: missing.length > 0,
@@ -3403,15 +3407,18 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
 }
 
 // Preview files for Export Artifacts' viewer: 'text' for pages, styles, scripts, SVG and Markdown, an image's MIME
-// type for PNG, JPEG, GIF and WebP (by extension), null for anything else.
+// type for PNG, JPEG, GIF, WebP, AVIF, BMP and ICO (by extension), null for anything else. Agrees with
+// artifactFileKind: every 'image' kind is collected.
 const PREVIEW_ITEM_MAX = 2 * 1024 * 1024;   // one text or image (TEXT_EMBED_LIMIT)
 const PREVIEW_TOTAL_MAX = 8 * 1024 * 1024;  // texts in all, and images in all, of one artifact
-const PREVIEW_IMAGE_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp' };
+const PREVIEW_IMAGE_TYPES = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon',
+};
 function previewKind(p) {
   const ext = (/\.([a-z0-9]+)$/i.exec(String(p)) || [])[1];
   if (!ext) return null;
   const e = ext.toLowerCase();
-  if (['html', 'htm', 'css', 'js', 'mjs', 'svg', 'md'].includes(e)) return 'text';
+  if (['html', 'htm', 'css', 'js', 'mjs', 'svg', 'md', 'markdown'].includes(e)) return 'text';
   return Object.prototype.hasOwnProperty.call(PREVIEW_IMAGE_TYPES, e) ? PREVIEW_IMAGE_TYPES[e] : null;
 }
 
@@ -4960,7 +4967,7 @@ function artifactFileKind(p) {
   if (ext === 'html' || ext === 'htm') return 'html';
   if (ext === 'svg') return 'svg';
   if (ext === 'md' || ext === 'markdown') return 'md';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'avif', 'bmp', 'ico'].includes(ext)) return 'image';
+  if (previewKind(p) && /^image\//.test(previewKind(p))) return 'image';
   if (ext === 'jsx' || ext === 'tsx') return 'react';
   if (ext === 'mmd' || ext === 'mermaid') return 'mermaid';
   if (ext === 'css') return 'css';
@@ -4983,15 +4990,20 @@ function bytesToBase64(bytes) {
 
 // An artifact's record for the artifacts viewer (ArtifactView, without part and key). o: { uuid, shortId, url,
 // title, typeSlug, typeTitle, shared, public, docs, createdAt, updatedAt, folder, files (artifact.json's), missing,
-// start, startSaved, startSize, needsRuntime, notExported, note }. Files lists those saved.
+// start, startSaved, startSize, needsRuntime, notExported, note, inPayload (the start's text or image is in the
+// preview payload) }. Files lists those saved; missingCount counts the listed ones not saved. A start file a preview
+// could show but whose text or image is not in the payload is tooLarge when over PREVIEW_ITEM_MAX, otherwise
+// startMissing (the export loop sets startMissing too when the payload gets no part).
 function artifactView(o) {
   const missing = new Set(o.missing || []);
   const startSize = Number.isFinite(o.startSize) ? o.startSize : null;
+  const tooLarge = !!o.start && startSize != null && startSize > PREVIEW_ITEM_MAX;
   return {
     id: o.shortId || o.uuid, title: o.title, kind: o.typeTitle || 'Page', typed: o.typeSlug !== '', docs: !!o.docs,
     shared: !!o.shared, public: o.public === true, createdAt: o.createdAt, updatedAt: o.updatedAt, folder: o.folder,
     start: o.start || null, startSaved: o.start ? o.startSaved || null : null, startKind: artifactStartKind(o.start || null),
-    startSize: o.start ? startSize : null, tooLarge: !!o.start && startSize != null && startSize > PREVIEW_ITEM_MAX,
+    startSize: o.start ? startSize : null, tooLarge,
+    startMissing: !!o.start && !tooLarge && !!previewKind(o.start) && !o.inPayload, missingCount: missing.size,
     files: (o.files || []).filter((f) => !missing.has(f.path)).map((f) => ({ path: f.path, savedAs: f.savedAs, kind: artifactFileKind(f.path), verified: f.verified !== false })),
     needsRuntime: !!o.needsRuntime, notExported: !!o.notExported, note: o.note || '', url: o.url, thumb: null,
   };
@@ -5131,6 +5143,7 @@ async function saveArtifact(root, a, ctx) {
     uuid, shortId, url, title, typeSlug, typeTitle, shared, public: a.public === true, docs: isClaudeDocsArtifact(a),
     createdAt: meta.createdAt, updatedAt: meta.updatedAt, folder, files: meta.files, missing: meta.missing,
     start, startSaved, startSize: got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
+    inPayload: !!(got && !failed && start && (got.texts.has(start) || got.images.has(start))),
   });
   return {
     row: {
@@ -5170,7 +5183,7 @@ function unexpectedArtifactRow(root, a, ctx) {
     });
   } catch (e) {
     view = { id: shortId || uuid, title, kind: 'Page', typed: false, docs: false, shared: false, public: false, createdAt: '', updatedAt: '', folder, start: null,
-      startSaved: null, startKind: null, startSize: null, tooLarge: false, files: [], needsRuntime: false, notExported: true, note: ARTIFACT_UNEXPECTED_NOTE, url, thumb: null };
+      startSaved: null, startKind: null, startSize: null, tooLarge: false, startMissing: false, missingCount: 0, files: [], needsRuntime: false, notExported: true, note: ARTIFACT_UNEXPECTED_NOTE, url, thumb: null };
   }
   return {
     row: { title, typeTitle: meta.typeTitle, sourceSurface: meta.sourceSurface, rel, folder, startSaved: null, url, note: ARTIFACT_UNEXPECTED_NOTE, needsRuntime: false, fileCount: 0, missingCount: 0 },
@@ -5365,6 +5378,8 @@ async function exportArtifacts(options = {}) {
           writeParts(parts.drain());
         }
       } catch (e) { view = { ...view, part: null, key: null }; }
+      // A start file the preview would show that ended up in no part.
+      if (view.part == null && view.start && !view.tooLarge && previewKind(view.start)) view = { ...view, startMissing: true };
       views.push(view);
       // On disk, each artifact is written before the next, which keeps memory down.
       if (run) writeFailures.push(...await root.flush());

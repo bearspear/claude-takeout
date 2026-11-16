@@ -2998,7 +2998,7 @@ test('each artifact gets a view record', async () => {
     assert.deepStrictEqual(game, {
       id, title: 'Game', kind: 'Page', typed: false, docs: false, shared: false, public: false,
       createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', folder: artFolder('Game', U(2)),
-      start: 'index.html', startSaved: 'index.html', startKind: 'html', startSize: 30, tooLarge: false,
+      start: 'index.html', startSaved: 'index.html', startKind: 'html', startSize: 30, tooLarge: false, startMissing: false, missingCount: 0,
       files: [{ path: 'index.html', savedAs: 'index.html', kind: 'html', verified: true }, { path: 'app.js', savedAs: 'app.js', kind: 'js', verified: true },
         { path: 'img/logo.svg', savedAs: 'img/logo.svg', kind: 'svg', verified: true }],
       needsRuntime: false, notExported: false, note: '', url: `https://claude.ai/artifact/${id}`, thumb: null, part: game.part, key: 'a1',
@@ -3255,4 +3255,59 @@ test('artifactViewParts splits at the part limit', () => {
   const proto = artifactViewParts();
   const pv = proto.add({}, { texts: [['__proto__', 'p']], images: [] });
   assert.deepStrictEqual(readPart(proto.flush()[0].body).d[pv.key].texts, [['__proto__', 'p']]);
+});
+
+test('the start file\'s text is kept first, and a view says when it is not in the payload', async () => {
+  const sib = 'c'.repeat(1900 * 1024);
+  const many = {};
+  for (let i = 0; i < 5; i++) many[`s${i}.css`] = sib;
+  const frames = [art(U(1), 'Late start'), art(U(2), 'Budget'), art(U(3), 'Picture')];
+  const pages = {
+    [U(1)]: livePage('Late start', { ...many, 'index.html': '<p>start</p>' }),
+    [U(2)]: livePage('Budget', { 'index.html': '<p>b</p>' }),
+    // With no HTML the start file is the first listed one.
+    [U(3)]: livePage('Picture', { 'start.png': { body: PNG, type: 'image/png' },
+      ...Object.fromEntries(Array.from({ length: 5 }, (_, i) => [`p${i}.png`, { body: Buffer.concat([PNG, Buffer.alloc(1900 * 1024)]), type: 'image/png' }])) }),
+  };
+  const { views, files } = await runArtifacts({ frames, pages });
+  const texts = payloadOf(files, views[0]).texts;
+  assert.deepStrictEqual(texts[0], ['index.html', '<p>start</p>']);
+  assert.strictEqual(texts.length, 5, 'four siblings fit beside the start file');
+  assert.deepStrictEqual([views[0].startMissing, views[0].tooLarge], [false, false]);
+  const images = payloadOf(files, views[2]).images;
+  assert.deepStrictEqual(images[0], ['start.png', `data:image/png;base64,${PNG.toString('base64')}`]);
+  assert.strictEqual(images.length, 5);
+  assert.deepStrictEqual([views[2].startKind, views[2].startMissing], ['image', false]);
+  // Past the parts budget the start text is not in any part.
+  const tight = await runArtifacts({ frames: [art(U(2), 'Budget')], pages, setup: (sb) => vm.runInContext('CTViewer.ARTIFACT_PARTS_BUDGET = 5', sb) });
+  assert.deepStrictEqual([tight.views[0].part, tight.views[0].startMissing, tight.views[0].tooLarge], [null, true, false]);
+  // A throwing parts step: the same.
+  const thrown = await runArtifacts({ frames: [art(U(2), 'Budget')], pages, setup: (sb) => vm.runInContext('CTViewer.artifactViewParts = () => ({ add: () => { throw new Error("x"); }, drain: () => [], flush: () => [], count: 0 })', sb) });
+  assert.strictEqual(thrown.views[0].startMissing, true);
+  // Over 2 MB is tooLarge, not startMissing; a start that is no preview kind is neither.
+  const big = await runArtifacts({ frames: [art(U(4), 'Big'), art(U(5), 'Pdf')], pages: { [U(4)]: livePage('Big', { 'index.html': 'x'.repeat(2 * 1024 * 1024 + 1) }), [U(5)]: livePage('Pdf', { 'a.pdf': { body: '%PDF', type: 'application/pdf' } }) } });
+  assert.deepStrictEqual([big.views[0].tooLarge, big.views[0].startMissing], [true, false]);
+  assert.deepStrictEqual([big.views[1].tooLarge, big.views[1].startMissing], [false, false]);
+});
+
+test('file kinds and preview collection agree', async () => {
+  const frames = [art(U(1), 'Kinds')];
+  const pages = { [U(1)]: livePage('Kinds', {
+    'readme.markdown': '# r', 'a.avif': { body: 'avif', type: 'image/avif' }, 'b.bmp': { body: 'BM', type: 'image/bmp' }, 'c.ico': { body: 'ico', type: 'image/x-icon' }, 'd.tiff': { body: 't', type: 'image/tiff' },
+  }) };
+  const { views, files } = await runArtifacts({ frames, pages });
+  const v = views[0];
+  assert.deepStrictEqual(v.files.map((f) => [f.path, f.kind]), [['readme.markdown', 'md'], ['a.avif', 'image'], ['b.bmp', 'image'], ['c.ico', 'image'], ['d.tiff', 'other']]);
+  assert.strictEqual(v.startKind, 'md');
+  const payload = payloadOf(files, v);
+  assert.deepStrictEqual(payload.texts, [['readme.markdown', '# r']]);
+  assert.deepStrictEqual(payload.images.map(([p, d]) => [p, d.split(';')[0]]), [['a.avif', 'data:image/avif'], ['b.bmp', 'data:image/bmp'], ['c.ico', 'data:image/x-icon']]);
+});
+
+test('a view counts the listed files that were not saved', async () => {
+  const frames = [art(U(1), 'Gaps')];
+  const pages = { [U(1)]: livePage('Gaps', { 'index.html': 'i', 'a.css': { body: 'a', error: { error: 'HTTP 404', status: 404 } }, 'b.js': { body: 'b', error: { error: 'HTTP 404', status: 404 } } }) };
+  const { views } = await runArtifacts({ frames, pages });
+  assert.strictEqual(views[0].missingCount, 2);
+  assert.deepStrictEqual(views[0].files.map((f) => f.path), ['index.html']);
 });
