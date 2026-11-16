@@ -2873,6 +2873,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       docKey: claudeDocKey,
       widgetFile,
       widgetKey,
+      published,
       flags: viewerFlags(errorCollector.warnings),
       project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions, CTViewer.TEXT_EMBED_LIMIT)
     });

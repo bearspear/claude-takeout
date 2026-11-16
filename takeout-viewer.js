@@ -39,6 +39,15 @@
 //                Claude's own message is { path: 'artefacts/<name>', text: null }
 //   ctx.project: { name, fileDir, fileNames, docs: [{ name, text }], instructions }, fileDir relative to the chat folder;
 //                instructions: the project's prompt template ('' when none), cut at TEXT_EMBED_LIMIT
+//   ctx.published: the pages the chat published (savePublishedPages in popup.js, chatFromDisk in tools/archive-lib.js),
+//                [{ uuid, title, url, current, dir, versions: [{ label, order, startSaved, same, writtenAs, incomplete,
+//                needsRuntime, text, folderName, publishes: [{ messageUuid, toolUseId }] }] }], dir relative to the chat
+//                folder. Each publish_files call gets a card for the version its toolUseId is in, one GenFile per page
+//                (key published:<uuid>, on or off the active branch) with published: { url, current, needsRuntime } and
+//                versions in `order`, each { label, text, href, same }: a same version links the file Claude wrote, any
+//                other its start file under dir, and one with nothing saved has no link. The card replaces the
+//                tool's "Published on claude.ai" line, and an upload claude.ai attached to that message under the
+//                name of one of the page's sources is dropped, so the page shows once.
 (function (root) {
   'use strict';
 
@@ -354,12 +363,48 @@
     // /mnt/user-data/outputs, or made with the artifacts tool. The rest are working files.
     const sharedKeys = new Set();
     // Off-branch keys are 'x:<message>:<key>', and count by the key they wrap.
-    const isShared = key => /^(x:[^:]*:)?(artifact:|doc:|widget:|deliver:|name:|missing:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
+    const isShared = key => /^(x:[^:]*:)?(artifact:|doc:|widget:|deliver:|name:|missing:|published:)/.test(key) || /(^|:)\/mnt\/user-data\/outputs\//.test(key);
     // Off the active branch: the last off-branch file at each path, for a present_files there.
     const offBranch = new Map(); // path -> { key, build }
 
+    // Published pages: each publish_files call, by its tool_use id, to its page and the version it made.
+    const pageOf = new Map(); // toolUseId -> { key, build, version }, version an index in the page's sorted versions
+    for (const entry of Array.isArray(c.published) ? c.published : []) {
+      if (!entry || typeof entry.uuid !== 'string') continue;
+      const versions = (Array.isArray(entry.versions) ? entry.versions : []).filter(Boolean)
+        .map((v, i) => ({ v, i })).sort((a, b) => (Number(a.v.order) || 0) - (Number(b.v.order) || 0) || a.i - b.i).map(x => x.v);
+      if (!versions.length) continue;
+      const pageDir = joinPath(folder, entry.dir);
+      const build = () => {
+        const out = versions.map(v => {
+          const text = typeof v.text === 'string' ? v.text : null;
+          let href = null;
+          if (v.same && v.writtenAs) href = hrefOf(v.writtenAs);
+          else if (v.startSaved && pageDir !== null) href = relHref(pageDir, v.folderName, v.startSaved);
+          return { label: String(v.label || ''), text, href, same: !!v.same };
+        });
+        const named = versions.map(v => v.startSaved || v.writtenAs).find(Boolean) || '';
+        const hasText = out.some(v => v.text !== null);
+        const kind = out.some(v => v.text !== null || v.href !== null) ? kindFor(String(named), null, hasText) : 'missing';
+        return {
+          name: String(entry.title || 'Published page'), kind,
+          published: { url: String(entry.url || ''), current: !!entry.current, needsRuntime: versions.some(v => !!v.needsRuntime) },
+          versions: out,
+        };
+      };
+      versions.forEach((v, i) => {
+        for (const p of Array.isArray(v.publishes) ? v.publishes : []) {
+          if (p && p.toolUseId != null) pageOf.set(p.toolUseId, { key: 'published:' + entry.uuid, build, version: i });
+        }
+      });
+    }
+    // The names a page's files had in Claude's sandbox, from the publish call itself.
+    const sourceNames = input => new Set((Array.isArray(input.files) ? input.files : []).filter(f => f && typeof f === 'object')
+      .flatMap(f => [f.as, baseName(f.path)]).filter(n => typeof n === 'string' && n));
+
     source.forEach((m, mi) => {
       const message = messages[mi];
+      const pageSources = new Set();
       const active = pos.has(m.uuid);
       const touches = new Map(); // fileKey -> { after, build, version }; the last block touching a file wins
       const touch = (after, fileKey, build, version) => { touches.delete(fileKey); touches.set(fileKey, { after, build, version }); };
@@ -380,6 +425,16 @@
         if (failed.has(b.id) && !bash) continue;
 
         // Keys in artifactIndex are extractArtifacts' state keys.
+        // A publish that savePublishedPages saw: its page's card, which carries the claude.ai link.
+        if (pageOf.has(b.id) && /(^|__|:)publish_files$/.test(String(b.name || ''))) {
+          const page = pageOf.get(b.id);
+          touch(after, page.key, page.build, page.version);
+          sharedKeys.add(page.key);
+          delete after.published;
+          for (const n of sourceNames(input)) pageSources.add(n);
+          continue;
+        }
+
         let key = null, mime = null, name = null, text = null, edit = false;
         if (b.name === 'create_file') { key = input.path; text = input.file_text; }
         else if (b.name === 'Write') { key = input.file_path; text = input.content; }
@@ -470,6 +525,8 @@
         }
       }
 
+      // The copy of a published page claude.ai attached to the message is the card's page: not listed again.
+      if (pageSources.size && Array.isArray(message.uploads)) message.uploads = message.uploads.filter(u => !pageSources.has(u.name));
       if (!touches.size) return;
       const out = [];
       for (const block of message.blocks) {

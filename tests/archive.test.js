@@ -5,7 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { findArchives, scanAdded, isGeneratedViewer, chatFromDisk, matchFile, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES } = require('../tools/archive-lib.js');
-const { textBlob, projectResponses, exportPopup, runFolder, withUploads, oneMessage } = require('./helpers');
+const { textBlob, projectResponses, exportPopup, runFolder, withUploads, oneMessage, use, result, publishedFetcher, zipStub } = require('./helpers');
 
 const tmpRoot = () => fs.mkdtempSync(path.join(os.tmpdir(), 'archive-test-'));
 const put = (root, rel, text = 'x') => {
@@ -19,7 +19,7 @@ const byRoot = (res, root) => res.archives.find(a => a.root === root);
 
 test('constants cover the export layout', () => {
   for (const f of ['README.md', 'meta.md', 'original.json', 'index.md', 'viewer.html', 'viewer-check.gif']) assert.ok(KNOWN_ROOT_FILES.includes(f), f);
-  for (const d of ['responses', 'artefacts', 'attachments', 'uploads', 'project', 'projects', 'viewer-files']) assert.ok(KNOWN_DIRS.includes(d), d);
+  for (const d of ['responses', 'artefacts', 'attachments', 'uploads', 'project', 'projects', 'viewer-files', 'published']) assert.ok(KNOWN_DIRS.includes(d), d);
   for (const n of ['.DS_Store', 'Thumbs.db', '__MACOSX', '.git', 'node_modules']) assert.ok(IGNORED_NAMES.includes(n), n);
 });
 
@@ -255,6 +255,7 @@ test('scanAdded reports an unreadable folder and keeps going', { skip: process.g
 const writeFolder = (dir, written) => {
   for (const [name, entry] of Object.entries(written)) {
     const content = entry && entry.options ? entry.content : entry;
+    if (ArrayBuffer.isView(content)) { put(dir, name, Buffer.from(content.buffer, content.byteOffset, content.byteLength)); continue; }
     put(dir, name, typeof content === 'string' ? content : String(content && content.marker !== undefined ? content.marker : 'binary'));
   }
 };
@@ -333,6 +334,95 @@ test('mega with a shared projects/ folder: the link comes from the chat README',
   const archive = { root: mega, kind: 'mega', chats: [{ dir: `${mega}/c`, relDir: 'c' }] };
   const p = chatFromDisk(archive, archive.chats[0]).viewerChat.project;
   assert.deepStrictEqual(p.files.map(f => f.href), ['projects/My%20Proj/files/Paper.pdf']);
+});
+
+// ---- published pages ----
+const PUB = 'mcp__claude-artifacts__publish_files';
+const PAGE_A = '0a1b2c3d-1111-4222-8333-444455556666';
+const PAGE_B = '1a1b2c3d-1111-4222-8333-444455556666';
+const sha = text => require('crypto').createHash('sha256').update(Buffer.from(text)).digest('hex');
+const publishBlocks = (id, uuid, ver, short, title = 'Guide', files = [{ as: 'index.html', path: '/home/claude/guide.html' }]) => [
+  use(id, PUB, { title, files }),
+  { type: 'tool_result', tool_use_id: id, name: PUB, content: [{ type: 'text', text: JSON.stringify({ slug: uuid, version: ver, url: `https://claude.ai/artifact/${short}`, title }) }] },
+];
+const amsg = (uuid, parent, content, extra = {}) => ({ uuid, parent_message_uuid: parent, sender: 'assistant', created_at: '2026-01-01T00:00:00Z', content, ...extra });
+// Page A: v1 the same as guide.html as written, v2 edited on claude.ai (saved), v3 whose index.html failed its
+// checksum (saved, no start); a branch off m1 publishes v2 again. Page B: its info call fails, so it has no folder.
+const pagesChat = (uuid = 'c1', name = 'Pages') => ({
+  uuid, name, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z', current_leaf_message_uuid: 'm3',
+  chat_messages: [
+    amsg('m1', null, [use('w', 'Write', { file_path: '/home/claude/guide.html', content: '<p>G1</p>' }), result('w'), ...publishBlocks('p1', PAGE_A, 'v1', 'ShortA')]),
+    amsg('m2', 'm1', [...publishBlocks('p2', PAGE_A, 'v2', 'ShortA'), ...publishBlocks('pb', PAGE_B, 'w1', 'ShortB', 'Broken')]),
+    amsg('m3', 'm2', publishBlocks('p3', PAGE_A, 'v3', 'ShortA', 'Guide', [{ as: 'index.html', path: '/home/claude/guide.html' }, { as: 'data.json', path: '/home/claude/data.json' }])),
+    amsg('m2b', 'm1', publishBlocks('p2b', PAGE_A, 'v2', 'ShortA')),
+  ],
+});
+const pagesTable = () => ({ [PAGE_A]: { title: 'Guide', history: ['v1', 'v2', 'v3'], versions: {
+  v1: { files: { 'index.html': '<p>G1</p>' } },
+  v2: { files: { 'index.html': '<p>G2 from claude.ai</p>', 'app.js': 'run()' } },
+  v3: { files: { 'index.html': { body: '<p>G3</p>', sha256: sha('something else') }, 'data.json': '{"n":3}' } },
+} } });
+
+test('parity: published pages on disk rebuild the same viewer chat', async () => {
+  const dir = tmpRoot();
+  const { written, chat: expected } = await runFolder(exportPopup(), pagesChat(), { fetchPublished: publishedFetcher(pagesTable()).fetch });
+  writeFolder(dir, written);
+  assert.ok(fs.existsSync(`${dir}/published/Guide_ShortA/v2/index.html`));
+  assert.ok(!fs.existsSync(`${dir}/published/Broken_ShortB`));
+  const page = Object.values(expected.files).find(f => f.published);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(page.versions.map(v => [v.label, v.href, v.same]))), [
+    ['v1', 'artefacts/guide.html', true], ['v2', 'published/Guide_ShortA/v2/index.html', false], ['v3', null, false]]);
+  const broken = Object.values(expected.files).find(f => f.name === 'Broken');
+  assert.strictEqual(broken.kind, 'missing');
+  const got = chatFromDisk(singleOf(dir), singleOf(dir).chats[0]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(got.viewerChat)), JSON.parse(JSON.stringify(expected)));
+  // A version listed but never saved (skipped after a 401) keeps its start in published.json, and gets no link.
+  const jsonFile = `${dir}/published/Guide_ShortA/published.json`;
+  const json = JSON.parse(fs.readFileSync(jsonFile, 'utf8'));
+  json.versions.v2.saved = false;
+  fs.writeFileSync(jsonFile, JSON.stringify(json));
+  const after = Object.values(chatFromDisk(singleOf(dir), singleOf(dir).chats[0]).viewerChat.files).find(f => f.published);
+  assert.deepStrictEqual(after.versions.map(v => v.href), ['artefacts/guide.html', null, null]);
+});
+
+test('parity: Export All published pages at the export root rebuild the same viewer chats', async () => {
+  const mega = tmpRoot();
+  const popup = exportPopup();
+  const root = zipStub();
+  const shared = { root, byUuid: new Map(), usedDirs: new Set(), published: new Map() };
+  const fetcher = publishedFetcher(pagesTable());
+  const a = await runFolder(popup, pagesChat('ca', 'Chat a'), { folderName: 'Chat_a', shared, fetchPublished: fetcher.fetch });
+  // Chat b publishes v1 with a different text of its own, so v1 is stored at the root for it.
+  const b = await runFolder(popup, { ...pagesChat('cb', 'Chat b'), current_leaf_message_uuid: 'm1',
+    chat_messages: [amsg('m1', null, [use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'other' }), result('w'), ...publishBlocks('q1', PAGE_A, 'v1', 'ShortA')])] },
+  { folderName: 'Chat_b', shared, fetchPublished: fetcher.fetch });
+  popup.sandbox.__shared = shared;
+  require('vm').runInContext('writeSharedPublished(__shared)', popup.sandbox);
+  put(mega, 'index.md');
+  writeFolder(path.join(mega, 'Chat_a'), a.written);
+  writeFolder(path.join(mega, 'Chat_b'), b.written);
+  writeFolder(mega, root.written);
+  assert.ok(fs.existsSync(`${mega}/published/Guide_ShortA/v1/index.html`));
+  assert.ok(!fs.existsSync(`${mega}/Chat_a/published`));
+  const archive = { root: mega, kind: 'mega', chats: [{ dir: `${mega}/Chat_a`, relDir: 'Chat_a' }, { dir: `${mega}/Chat_b`, relDir: 'Chat_b' }] };
+  for (const [i, run] of [a, b].entries()) {
+    const got = chatFromDisk(archive, archive.chats[i]).viewerChat;
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(got)), JSON.parse(JSON.stringify(run.chat)), archive.chats[i].relDir);
+  }
+  const pageB = Object.values(b.chat.files).find(f => f.published);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(pageB.versions.map(v => [v.href, v.same]))), [['published/Guide_ShortA/v1/index.html', false]]);
+});
+
+test('scanAdded does not list published/ at a mega root or in a chat folder', () => {
+  const mega = tmpRoot();
+  put(mega, 'index.md');
+  put(mega, 'c/original.json', CHAT);
+  put(mega, 'c/published/P_x/v1/index.html', 'p');
+  put(mega, 'published/P_y/published.json', '{}');
+  put(mega, 'published/P_y/v1/index.html', 'p');
+  put(mega, 'notes.txt', 'mine');
+  const archive = byRoot(find(mega), mega);
+  assert.deepStrictEqual(scanAdded(archive).files.map(f => f.path), ['notes.txt']);
 });
 
 test('project is null without a project uuid, and built from project.json when only the folder is there', () => {

@@ -155,3 +155,58 @@ test('a source with no chats fails without leaving anything behind, and the CLI 
   assert.match(res.stdout, /failed: no Claude chats/);
   assert.deepStrictEqual(fs.readdirSync(out), []);
 });
+
+test('merging two archives that share a page keeps one page with both versions', async () => {
+  const PUB = 'mcp__claude-artifacts__publish_files';
+  const U = '0a1b2c3d-1111-4222-8333-444455556666';
+  const pub = (id, ver) => [
+    { type: 'tool_use', id, name: PUB, input: { title: 'Guide', files: [{ as: 'index.html', path: '/home/claude/guide.html' }] } },
+    { type: 'tool_result', tool_use_id: id, name: PUB, content: [{ type: 'text', text: JSON.stringify({ slug: U, version: ver, url: 'https://claude.ai/artifact/ShortA', title: 'Guide' }) }] },
+  ];
+  const chat = (uuid, updated, blocks) => JSON.stringify({ uuid, name: 'Chat ' + uuid, created_at: '2026-01-01T00:00:00Z', updated_at: updated,
+    current_leaf_message_uuid: uuid + '-1', chat_messages: [{ uuid: uuid + '-1', parent_message_uuid: null, sender: 'assistant', content: blocks }] });
+  const file = (text) => ({ path: 'index.html', savedAs: 'index.html', size: text.length, contentType: 'text/html', sha256: crypto.createHash('sha256').update(text).digest('hex') });
+  const version = (ver, order, saved, publishedIn, text) => ({ ver, label: `v${order + 1}`, order, saved, files: [file(text)], start: 'index.html', startSaved: 'index.html',
+    incomplete: false, needsRuntime: false, missing: [], publishedIn });
+  const pageJson = (versions, title = 'Guide') => JSON.stringify({ format: 1, title, url: 'https://claude.ai/artifact/ShortA', shortId: 'ShortA', uuid: U, versions });
+  const tmp = tmpRoot();
+  const base = path.join(tmp, 'claude-takeout-2026-11-01');
+  const changes = path.join(tmp, 'claude-takeout-changes-2026-11-05');
+  mega(base, '2026-11-01T00:00:00Z', { Chat_a: chat('a', '2026-10-01T00:00:00Z', pub('p1', 'v1')) });
+  put(base, 'published/Guide_ShortA/published.json', pageJson({ v1: version('v1', 0, true, [{ chat: 'a', messageUuid: 'a-1', toolUseId: 'p1', same: false, writtenAs: null }], 'one') }));
+  put(base, 'published/Guide_ShortA/v1/index.html', 'one');
+  // The later export: the page has a new title (so a new folder name), chat b published v1 again (same as its
+  // own file, not stored) and v2 (stored); another page of the same name but another uuid takes a free name.
+  mega(changes, '2026-11-05T00:00:00Z', { Chat_b: chat('b', '2026-11-04T00:00:00Z', [...pub('q1', 'v1'), ...pub('q2', 'v2')]) });
+  put(changes, 'published/Guide_2_ShortA/published.json', pageJson({
+    v1: version('v1', 0, false, [{ chat: 'b', messageUuid: 'b-1', toolUseId: 'q1', same: true, writtenAs: 'guide.html' }], 'one'),
+    v2: version('v2', 1, true, [{ chat: 'b', messageUuid: 'b-1', toolUseId: 'q2', same: false, writtenAs: null }], 'two'),
+  }, 'Guide 2'));
+  put(changes, 'published/Guide_2_ShortA/v2/index.html', 'two');
+  put(changes, 'Chat_b/artefacts/guide.html', 'one');
+  put(changes, 'published/Guide_ShortA/published.json', JSON.stringify({ format: 1, title: 'Other', uuid: '9a1b2c3d-1111-4222-8333-444455556666', versions: {} }));
+  const before = [hashTree(base), hashTree(changes)];
+  const out = path.join(tmp, 'out');
+
+  const r = await merge([base, changes], { out, now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  assert.ok(r.ok, JSON.stringify(r.warnings));
+  const dest = path.join(out, 'claude-takeout-merged-2026-11-09');
+  const tree = Object.keys(hashTree(path.join(dest, 'published'))).sort();
+  assert.deepStrictEqual(tree, ['Guide_2_ShortA', 'Guide_2_ShortA/published.json', 'Guide_2_ShortA/v1', 'Guide_2_ShortA/v1/index.html',
+    'Guide_2_ShortA/v2', 'Guide_2_ShortA/v2/index.html', 'Guide_ShortA', 'Guide_ShortA/published.json']);
+  const json = JSON.parse(fs.readFileSync(path.join(dest, 'published/Guide_2_ShortA/published.json'), 'utf8'));
+  assert.strictEqual(json.uuid, U);
+  assert.strictEqual(json.title, 'Guide 2');
+  assert.deepStrictEqual(Object.keys(json.versions), ['v1', 'v2']);
+  assert.strictEqual(json.versions.v1.saved, true);
+  assert.deepStrictEqual(json.versions.v1.publishedIn.map((p) => [p.chat, p.toolUseId, p.same]), [['b', 'q1', true], ['a', 'p1', false]]);
+  assert.deepStrictEqual(json.versions.v2.publishedIn.map((p) => p.chat), ['b']);
+  assert.strictEqual(fs.readFileSync(path.join(dest, 'published/Guide_2_ShortA/v1/index.html'), 'utf8'), 'one');
+  // Both chats' cards link the one page folder.
+  const viewer = fs.readFileSync(path.join(dest, 'viewer.html'), 'utf8');
+  const data = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(viewer)[1]);
+  const hrefs = Object.fromEntries(data.chats.map((c) => [c.id, Object.values(c.files).filter((f) => f.published).flatMap((f) => f.versions.map((v) => v.href))]));
+  assert.deepStrictEqual(hrefs, { a: ['published/Guide_2_ShortA/v1/index.html'], b: ['Chat_b/artefacts/guide.html', 'published/Guide_2_ShortA/v2/index.html'] });
+  assert.deepStrictEqual([hashTree(base), hashTree(changes)], before, 'sources unchanged');
+});

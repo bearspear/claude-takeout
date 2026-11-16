@@ -518,6 +518,7 @@ function fileViews(kind, version) {
 const KIND_WORDS = { html: 'Document', md: 'Document', pdf: 'Document', svg: 'Image', image: 'Image', audio: 'Audio', video: 'Video', code: 'Code', react: 'Component', mermaid: 'Diagram', binary: 'File' };
 
 function fileKindLabel(file) {
+  if (file.published) return file.kind === 'missing' ? 'Published page · Not in this export' : 'Published page';
   if (file.kind === 'missing') return 'Not in this export';
   const ext = (/\.([a-z0-9]{1,6})$/i.exec(file.name || '') || [])[1];
   return [KIND_WORDS[file.kind] || 'File', ext && ext.toUpperCase()].filter(Boolean).join(' · ');
