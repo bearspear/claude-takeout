@@ -331,6 +331,7 @@ const PUBLISH_VER_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
 // The frames claude.ai listed, reduced to the fields an export may keep. Anything else (owner, thumbnail,
 // URLs) is dropped, a slug that is not a UUID is dropped, and a uuid appears once. full: the list may be cut
 // short (no paging is known): 60 or more frames and a multiple of 10, which includes a limit of 1000.
+// listed: how many frames claude.ai sent, before any was dropped.
 function artifactsFromList(reply) {
   const frames = reply && Array.isArray(reply.frames) ? reply.frames : [];
   const str = (v) => (typeof v === 'string' ? v : '');
@@ -348,7 +349,7 @@ function artifactsFromList(reply) {
       updatedAt: str(f.updatedAt), createdAt: str(f.createdAt),
     });
   }
-  return { artifacts, full: frames.length >= 60 && frames.length % 10 === 0 };
+  return { artifacts, full: frames.length >= 60 && frames.length % 10 === 0, listed: frames.length };
 }
 
 // The pages a chat published, one entry per uuid + version, in chat order over every message (also

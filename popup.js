@@ -248,6 +248,11 @@ class ExportErrorCollector {
     lines.push('| 401 | Unauthorized | Not logged in. Sign in to claude.ai and retry. |');
     lines.push('| 500 | Server error | Claude API issue. Wait and retry later. |');
     lines.push('');
+    // An export that is not one chat (Export Artifacts) has none of the chat files the steps below name.
+    if (this.label) {
+      lines.push('Sign in to claude.ai, open the artifact there, and run Export Artifacts again.');
+      return lines.join('\n');
+    }
     lines.push('### Manual Recovery Steps');
     lines.push('');
     lines.push('1. **For `artifact_opaque_mutation` warnings — run the replay CLI:**');
@@ -4861,7 +4866,30 @@ const ARTIFACT_ROOT_NAMES = ['index.md', 'index.html', 'export-manifest.json', '
 // A string from claude.ai's list, safe to write: anything shaped like a frame URL or its token is dropped.
 const artifactText = (v) => String(typeof v === 'string' ? v : '').replace(/\S*(?:claudeusercontent\.com|__frame_t)\S*/gi, '[link removed]').slice(0, 500);
 const isClaudeDocsArtifact = (a) => a.typeSlug === CLAUDE_DOCS_TYPE || (!a.typeSlug && a.typeTitle === 'Docs');
+// Shared with you: claude.ai says so with a rel other than 'mine'; an empty rel says nothing.
+const isSharedArtifact = (rel) => typeof rel === 'string' && rel !== '' && rel !== 'mine';
 const artifactCount = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// text cut to at most max bytes of UTF-8, at a code point boundary.
+function capUtf8(text, max) {
+  let out = '';
+  let bytes = 0;
+  for (const ch of String(text || '')) {
+    const n = new TextEncoder().encode(ch).length;
+    if (bytes + n > max) break;
+    bytes += n;
+    out += ch;
+  }
+  return out;
+}
+// base, or base_2, base_3, ... when taken; folder names are compared without case.
+function claimArtifactFolder(base, usedFolders) {
+  let folder = base;
+  for (let n = 2; usedFolders.has(folder.toLowerCase()); n++) folder = `${base}_${n}`;
+  usedFolders.add(folder.toLowerCase());
+  return folder;
+}
+const ARTIFACT_UNEXPECTED_NOTE = 'not exported: unexpected error (see errors.txt)';
 
 // Save one listed artifact (from artifactsFromList) into root at its own folder. ctx: { fetchPublished, state
 // (publishedSignedOut: one 401 stops fetching the rest), warn(filename, message, note), usedFolders (lowercased) }.
@@ -4875,11 +4903,8 @@ async function saveArtifact(root, a, ctx) {
   const typeSlug = artifactText(a.typeSlug);
   const typeTitle = artifactText(a.typeTitle);
   const rel = artifactText(a.rel);
-  const shared = rel !== 'mine';
-  const base = `${safeFileTitle(title) || 'artifact'}_${shortId || uuid}`;
-  let folder = base;
-  for (let n = 2; usedFolders.has(folder.toLowerCase()); n++) folder = `${base}_${n}`;
-  usedFolders.add(folder.toLowerCase());
+  const shared = isSharedArtifact(rel);
+  const folder = claimArtifactFolder(`${capUtf8(safeFileTitle(title), 200) || 'artifact'}_${shortId || uuid}`, usedFolders);
   const name = title || folder;
   const openNote = `Open it on claude.ai: ${url}`;
 
@@ -4905,7 +4930,7 @@ async function saveArtifact(root, a, ctx) {
     notes.push('no published version');
   } else if (state.publishedSignedOut) {
     notExported('signed out of claude.ai (see errors.txt)');
-  } else {
+  } else try {
     const reply = await fetchPublished({ action: 'publishedPageInfo', uuid, ver: meta.ver });
     const info = publishedSignedOutReply(reply) ? (signOut(), null) : cleanPublishedInfo(reply);
     if (!info) {
@@ -4936,9 +4961,17 @@ async function saveArtifact(root, a, ctx) {
       }
       if (got.missing.length) notes.push(`${artifactCount(got.missing.length, 'file')} not saved (see errors.txt)`);
     }
+  } catch (e) {
+    // Not a refusal from claude.ai (those are replies, not throws): the artifact is listed as not exported.
+    warn(name, `Artifact "${name}" could not be exported: unexpected error.`, openNote);
+    notes.splice(0, notes.length, ARTIFACT_UNEXPECTED_NOTE);
+    Object.assign(meta, { ver: '', files: [], missing: [], incomplete: true, needsRuntime: false });
+    startSaved = null;
   }
   meta.note = [...(shared ? ['shared with you'] : []), ...notes].join('; ');
-  root.file(`${folder}/artifact.json`, JSON.stringify(meta, null, 2));
+  try {
+    root.file(`${folder}/artifact.json`, JSON.stringify(meta, null, 2));
+  } catch (e) { /* the row and errors.txt still say what happened */ }
   return {
     row: {
       title, typeTitle, sourceSurface: meta.sourceSurface, rel, folder, startSaved, url, note: notes.join('; '),
@@ -4948,13 +4981,37 @@ async function saveArtifact(root, a, ctx) {
   };
 }
 
+// An artifact whose saveArtifact threw before it could say so itself: a row, a manifest entry, a warning and,
+// when it can be written, artifact.json, all naming it not exported.
+function unexpectedArtifactRow(root, a, ctx) {
+  const uuid = String(a.slug).toLowerCase();
+  const title = artifactText(a.title);
+  const rel = artifactText(a.rel);
+  let shortId = '';
+  try { shortId = uuidToBase58(uuid); } catch (e) { /* the uuid names it instead */ }
+  const url = `https://claude.ai/artifact/${shortId || uuid}`;
+  const folder = claimArtifactFolder(`artifact_${shortId || uuid}`, ctx.usedFolders);
+  ctx.warn(title || folder, `Artifact "${title || folder}" could not be exported: unexpected error.`, `Open it on claude.ai: ${url}`);
+  const meta = {
+    format: 1, uuid, shortId, url, title, typeTitle: artifactText(a.typeTitle), sourceSurface: artifactText(a.sourceSurface), rel,
+    ver: '', createdAt: artifactText(a.createdAt), updatedAt: artifactText(a.updatedAt),
+    files: [], missing: [], incomplete: true, needsRuntime: false,
+    note: [...(isSharedArtifact(rel) ? ['shared with you'] : []), ARTIFACT_UNEXPECTED_NOTE].join('; '),
+  };
+  try { root.file(`${folder}/artifact.json`, JSON.stringify(meta, null, 2)); } catch (e) { /* best effort */ }
+  return {
+    row: { title, typeTitle: meta.typeTitle, sourceSurface: meta.sourceSurface, rel, folder, startSaved: null, url, note: ARTIFACT_UNEXPECTED_NOTE, needsRuntime: false, fileCount: 0, missingCount: 0 },
+    entry: { uuid, title, folder, ver: '' },
+  };
+}
+
 const sortArtifactRows = (rows) => rows.slice().sort((a, b) => {
   const x = String(a.title || '').toLowerCase();
   const y = String(b.title || '').toLowerCase();
   return x < y ? -1 : x > y ? 1 : (a.folder < b.folder ? -1 : a.folder > b.folder ? 1 : 0);
 });
 const artifactRowNotes = (r) => [r.note, r.needsRuntime ? 'needs claude.ai to run' : ''].filter(Boolean).join('; ');
-const artifactSource = (r) => [r.sourceSurface, r.rel !== 'mine' ? 'shared with you' : ''].filter(Boolean).join(', ');
+const artifactSource = (r) => [r.sourceSurface, isSharedArtifact(r.rel) ? 'shared with you' : ''].filter(Boolean).join(', ');
 // The claude.ai link, rebuilt from the short id so nothing else from the reply can become a link.
 const artifactUrl = (r) => {
   const m = /^https:\/\/claude\.ai\/artifact\/([1-9A-HJ-NP-Za-km-z]+|[0-9a-f-]{36})$/.exec(String(r.url || ''));
@@ -5059,7 +5116,7 @@ async function exportArtifacts(options = {}) {
     status.textContent = publishedSignedOutReply(reply) ? 'Sign in to claude.ai, then try again.' : `Could not fetch the artifact list: ${code}.`;
     return;
   }
-  const { artifacts, full } = artifactsFromList(reply);
+  const { artifacts, full, listed } = artifactsFromList(reply);
   if (!artifacts.length) {
     status.className = 'status ready';
     status.textContent = 'No artifacts on claude.ai.';
@@ -5080,64 +5137,71 @@ async function exportArtifacts(options = {}) {
   }
   status.textContent = `Found ${artifactCount(total, 'artifact')}. Exporting to ${run ? `the folder ${run.name}` : 'a ZIP'}...`;
   showProgress(0, total, `0 / ${total}`);
-
-  const root = run ? createDiskFolder(run.handle) : new JSZip();
-  const collector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
-  const warn = (filename, message, note = null) => collector.addWarning('artifact_export', filename, message, { note });
-  if (full) {
-    warn('artifact list', `claude.ai listed ${total} artifacts, a number at which its list may be cut short, so this export may be incomplete.`,
-      'Compare index.md with claude.ai/artifacts.');
-  }
-  const ctx = { fetchPublished, state: {}, warn, usedFolders: new Set(ARTIFACT_ROOT_NAMES) };
-  const rows = [];
-  const entries = [];
-  const writeFailures = [];
-  for (let i = 0; i < total; i++) {
-    try {
-      const { row, entry } = await saveArtifact(root, artifacts[i], ctx);
-      rows.push(row);
-      entries.push(entry);
-    } catch (e) {
-      warn(artifactText(artifacts[i].title) || 'artifact', `Artifact "${artifactText(artifacts[i].title)}" could not be exported: unexpected error.`);
-    }
-    // On disk, each artifact is written before the next, which keeps memory down.
-    if (run) writeFailures.push(...await root.flush());
-    showProgress(i + 1, total, `${i + 1} / ${total}`);
-    if (i + 1 < total) await new Promise((r) => setTimeout(r, 200));
-  }
-
-  const warnings = collector.warnings.length + collector.errors.length;
-  const indexOpts = { listed: total, exportedAt: startedAt, warnings };
-  addFileWithBOM(root, 'index.md', artifactsIndexMd(rows, indexOpts));
-  root.file('index.html', artifactsIndexHtml(rows, indexOpts));
-  root.file('export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', exported_at: startedAt, listed: total, artifacts: entries }, null, 2));
-  if (collector.hasAny()) root.file('errors.txt', collector.generateErrorReport());
-
-  const withoutFiles = rows.filter((r) => r.fileCount === 0).length;
-  const done = (where) => `Exported ${artifactCount(total, 'artifact')} to ${where}.${withoutFiles ? ` ${withoutFiles} without files (see index.md).` : ''}${warnings ? ' See errors.txt.' : ''}`;
-  if (run) {
-    writeFailures.push(...await root.flush());
-    if (writeFailures.length) {
-      root.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
-      await root.flush();
-    }
-    hideProgress();
-    status.className = writeFailures.length || warnings ? 'status warning' : 'status ready';
-    status.textContent = done(run.name) + (writeFailures.length ? ` ${artifactCount(writeFailures.length, 'file')} could not be written (see write-errors.txt).` : '');
-    return;
-  }
-  status.textContent = 'Compressing archive...';
-  showProgress(95, 100, 'Compressing...');
   try {
-    const blob = await root.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    const root = run ? createDiskFolder(run.handle) : new JSZip();
+    const collector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
+    const warn = (filename, message, note = null) => collector.addWarning('artifact_export', filename, message, { note });
+    if (full) {
+      warn('artifact list', `claude.ai listed ${listed} artifacts, a number at which its list may be cut short, so this export may be incomplete.`,
+        'Compare index.md with claude.ai/artifacts.');
+    }
+    const ctx = { fetchPublished, state: {}, warn, usedFolders: new Set(ARTIFACT_ROOT_NAMES) };
+    const rows = [];
+    const entries = [];
+    const writeFailures = [];
+    for (let i = 0; i < total; i++) {
+      try {
+        const { row, entry } = await saveArtifact(root, artifacts[i], ctx);
+        rows.push(row);
+        entries.push(entry);
+      } catch (e) {
+        const { row, entry } = unexpectedArtifactRow(root, artifacts[i], ctx);
+        rows.push(row);
+        entries.push(entry);
+      }
+      // On disk, each artifact is written before the next, which keeps memory down.
+      if (run) writeFailures.push(...await root.flush());
+      showProgress(i + 1, total, `${i + 1} / ${total}`);
+      if (i + 1 < total) await new Promise((r) => setTimeout(r, 200));
+    }
+
+    const warnings = collector.warnings.length + collector.errors.length;
+    const indexOpts = { listed, exportedAt: startedAt, warnings };
+    addFileWithBOM(root, 'index.md', artifactsIndexMd(rows, indexOpts));
+    root.file('index.html', artifactsIndexHtml(rows, indexOpts));
+    root.file('export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', exported_at: startedAt, listed, artifacts: entries }, null, 2));
+    if (collector.hasAny()) root.file('errors.txt', collector.generateErrorReport());
+
+    const withoutFiles = rows.filter((r) => r.fileCount === 0).length;
+    const done = (where) => `Exported ${artifactCount(total, 'artifact')} to ${where}.${withoutFiles ? ` ${withoutFiles} without files (see index.md).` : ''}${warnings ? ' See errors.txt.' : ''}`;
+    if (run) {
+      writeFailures.push(...await root.flush());
+      if (writeFailures.length) {
+        root.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
+        await root.flush();
+      }
+      status.className = writeFailures.length || warnings ? 'status warning' : 'status ready';
+      status.textContent = done(run.name) + (writeFailures.length ? ` ${artifactCount(writeFailures.length, 'file')} could not be written (see write-errors.txt).` : '');
+      return;
+    }
+    status.textContent = 'Compressing archive...';
+    showProgress(95, 100, 'Compressing...');
+    let blob;
+    try {
+      blob = await root.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+    } catch (e) {
+      status.className = 'status error';
+      status.textContent = `Zip generation failed: ${e.message}`;
+      return;
+    }
     download(blob, zipName, 'application/zip');
-    hideProgress();
     status.className = warnings ? 'status warning' : 'status ready';
     status.textContent = done('a ZIP');
   } catch (e) {
-    hideProgress();
     status.className = 'status error';
-    status.textContent = `Zip generation failed: ${e.message}`;
+    status.textContent = `Export Artifacts failed: ${e && e.message ? e.message : e}`;
+  } finally {
+    hideProgress();
   }
 }
 
@@ -5279,16 +5343,21 @@ onExport('exportAllEmbed', () => bulkExport('embedded'));
 // naming the button to click there.
 const IS_POPUP = typeof location !== 'undefined' && /popup\.html$/.test(location.pathname);
 const FOLDER_BUTTON_LABELS = { exportAllZip: 'Export All (Folder)', exportArtifacts: 'Export Artifacts (Folder)' };
+// A label the popup stored with its note, read from the clicked button; anything else falls back to the above.
+const FOLDER_LABEL_RE = /^Export (?:All|Changes|Artifacts) \(Folder\)$/;
 function folderExport(buttonId, name, run) {
   return async () => {
     if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return run();
     const status = document.getElementById('status');
     if (IS_POPUP) {
       if (chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
-        chrome.sidePanel.open({ tabId: currentTabId }).then(() => {
-          chrome.storage.session && chrome.storage.session.set({ folderExportNote: { at: Date.now(), button: buttonId } }).catch(() => {});
-          window.close();
-        }).catch((e) => { status.className = 'status error'; status.textContent = `Could not open the side panel: ${e.message}`; });
+        // The note is stored before the panel opens, in the same click task (sidePanel.open needs the user
+        // gesture, so nothing is awaited first), and names the button as it reads now (Export Changes too).
+        const span = document.getElementById(buttonId).querySelector('span');
+        const label = span && typeof span.textContent === 'string' ? span.textContent.trim() : '';
+        if (chrome.storage.session) chrome.storage.session.set({ folderExportNote: { at: Date.now(), button: buttonId, label } }).catch(() => {});
+        chrome.sidePanel.open({ tabId: currentTabId }).then(() => window.close())
+          .catch((e) => { status.className = 'status error'; status.textContent = `Could not open the side panel: ${e.message}`; });
       } else {
         status.className = 'status error';
         status.textContent = `${name} to a folder runs in the side panel. Open it, or choose ZIP in Settings.`;
@@ -5315,7 +5384,9 @@ if (!IS_POPUP && chrome.storage && chrome.storage.session) {
     const at = note && typeof note === 'object' ? note.at : note;
     if (!Number.isFinite(at) || Date.now() - at > 60000) return;
     chrome.storage.session.remove('folderExportNote').catch(() => {});
-    const label = (note && typeof note === 'object' && Object.prototype.hasOwnProperty.call(FOLDER_BUTTON_LABELS, note.button) && FOLDER_BUTTON_LABELS[note.button]) || FOLDER_BUTTON_LABELS.exportAllZip;
+    const button = note && typeof note === 'object' && Object.prototype.hasOwnProperty.call(FOLDER_BUTTON_LABELS, note.button) ? note.button : 'exportAllZip';
+    const stored = note && typeof note === 'object' && typeof note.label === 'string' ? note.label : '';
+    const label = FOLDER_LABEL_RE.test(stored) ? stored : FOLDER_BUTTON_LABELS[button];
     const status = document.getElementById('status');
     status.className = 'status waiting';
     status.textContent = `Click ${label} here to choose where to save it.`;

@@ -92,7 +92,7 @@ If a single conversation fails (deleted, server hiccup, rate limit), the bulk ex
 
 ### Export Artifacts
 
-Saves what claude.ai/artifacts lists: every artifact you made in any chat, project or Claude Code session, plus artifacts shared with you. It is separate from Export All and ignores its **Export All exports** setting. Open claude.ai in a tab, signed in; the button is the one after Export All (Mega-Zip). It saves into a folder or a ZIP as **Export All and Export Artifacts save as** says; use **Folder** for a large account, since a ZIP is built in memory. In a folder, the popup opens the side panel, where you click the button again.
+Saves what claude.ai/artifacts lists: every artifact you made in any chat, project or Claude Code session, plus artifacts shared with you. It is separate from Export All and ignores its **Export All exports** setting. Open claude.ai in a tab, signed in; the button is the one after Export All (Folder or Mega-Zip). It saves into a folder or a ZIP as **Export All and Export Artifacts save as** says; use **Folder** for a large account, since a ZIP is built in memory. In a folder, the popup opens the side panel, where you click the button again.
 
 You get `claude-takeout-artifacts-<your name>-<YYYY-MM-DD>_<HHMM>` with:
 
