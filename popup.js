@@ -3342,8 +3342,9 @@ function writeSharedPublished(shared) {
 // Returns reuse(uuid, ver) for runArtifactStep: { files: { <published path>: <root-relative file> }, texts, images }
 // or null to fetch. A version saved in published/ is reused only when saved whole and every file was checked
 // against claude.ai's checksum; one the chat wrote the same (not copied into published/) points at that chat's
-// artefacts/ file, for a one-file version. Only text already in memory is used (the start file's, which the
-// preview needs): a start file the preview shows whose text isn't there means fetch.
+// artefacts/ file, for a one-file version. Only previews already in memory are used (a saved version's preview
+// texts and images, start file first; a same version's written text): a start file the preview shows that isn't
+// there means fetch.
 function publishedReuse(shared, chatFolders) {
   const pages = shared && shared.published && typeof shared.published.get === 'function' ? shared.published : null;
   const folders = chatFolders instanceof Map ? chatFolders : new Map();
@@ -3362,11 +3363,19 @@ function publishedReuse(shared, chatFolders) {
     for (const v of versions) {
       if (!v.saved || v.incomplete || (v.missing && v.missing.length)) continue;
       if (v.files.some((f) => f.verified === false || !f.sha256 || typeof f.savedAs !== 'string' || !f.savedAs)) continue;
-      const texts = startTexts(v.start, v.text);
-      if (!texts) continue;
+      const preview = v.preview && typeof v.preview === 'object' ? v.preview : { texts: [], images: [] };
+      const start = (list) => [...list.filter((t) => t[0] === v.start), ...list.filter((t) => t[0] !== v.start)];
+      let texts = start(preview.texts || []);
+      const images = start(preview.images || []);
+      // The start file the preview shows must be there: from the preview, else the text the record kept.
+      const kind = v.start ? previewKind(v.start) : null;
+      if (kind === 'text' && !texts.some((t) => t[0] === v.start)) {
+        if (typeof v.text !== 'string') continue;
+        texts = [[v.start, v.text], ...texts];
+      } else if (kind && kind !== 'text' && !images.some((t) => t[0] === v.start)) continue;
       const files = {};
       for (const f of v.files) files[f.path] = `published/${rec.dir}/${v.folderName}/${f.savedAs}`;
-      return { files, texts, images: [] };
+      return { files, texts, images };
     }
     for (const v of versions) {
       if (v.files.length !== 1 || !Array.isArray(v.publishedIn)) continue;
@@ -3652,8 +3661,10 @@ async function savePublishedPages(folder, data, ctx = {}) {
     v.attempted = true;
     const got = await fetchPublishedFiles({
       target, prefix: `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
-      state, onSignedOut: markSignedOut, fetchPublished,
+      state, onSignedOut: markSignedOut, fetchPublished, collect: exportAll,
     });
+    // Export All: the version's preview texts and images, for the artifact step (publishedReuse); not part of published.json.
+    if (exportAll) Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
     v.saved = got.saved;
     markUnverified(v.files, got.unverified);
     v.missing = got.missing;
@@ -4924,12 +4935,12 @@ async function bulkExportZip(options = {}) {
     // and its warnings go to artifacts/errors.txt.
     let step = null;
     let picturesAllowed = false;
+    let parts = null;
     if (includedArtifacts.length) {
       const count = includedArtifacts.length;
       status.textContent = `Exporting ${artifactCount(count, 'artifact')}...`;
       showProgress(0, count, `0 / ${count}`);
       try { picturesAllowed = await webImagesAllowed(); } catch (e) { picturesAllowed = false; }
-      let parts = null;
       try {
         parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
       } catch (e) { /* no previews; the export goes on */ }
@@ -4943,9 +4954,11 @@ async function bulkExportZip(options = {}) {
     }
     const artifactWarnings = step ? step.collector.warnings.length + step.collector.errors.length : 0;
     const artifactNote = `${listNote}${artifactWarnings ? ' See artifacts/errors.txt.' : ''}`;
-    // Recorded with the chats after the write: artifacts really saved (a failed one is tried again next time).
+    const savedArtifacts = step ? step.views.filter((v) => !v.notExported).length : 0;
+    const andArtifacts = savedArtifacts ? ` and ${artifactCount(savedArtifacts, 'artifact')}` : '';
+    // Recorded with the chats after the write: artifacts saved whole (one with a missing file is tried again next time).
     const exportedArtifacts = step ? includedArtifacts
-      .filter((a, i) => step.views[i] && !step.views[i].notExported)
+      .filter((a, i) => step.whole[i] === true)
       .map((a) => ({ uuid: String(a.slug).toLowerCase(), ver: listedArtifactVer(a) })) : [];
 
     // Create index.md at root
@@ -5011,7 +5024,8 @@ async function bulkExportZip(options = {}) {
 
     status.textContent = 'Building viewer...';
     const viewerOpts = step
-      ? { artifacts: { views: step.views, listed: artifactList.listed, exported: startedAt, since }, firstPart: step.partCount + 1 }
+      // Every part the artifact step numbered, even one an error kept from being counted in partCount.
+      ? { artifacts: { views: step.views, listed: artifactList.listed, exported: startedAt, since }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }
       : {};
     const viewerWritten = exported > 0 && await writeViewer(megaZip, viewerChats, viewerOpts);
     const viewerBuilt = exported === 0 || viewerWritten;
@@ -5040,7 +5054,7 @@ async function bulkExportZip(options = {}) {
       const writeNote = writeFailures.length ? ` ${writeFailures.length} file${writeFailures.length > 1 ? 's' : ''} could not be written (see write-errors.txt).` : '';
       const issueNote = totalFileErrors || totalFileWarnings ? ' Some chats have errors.txt.' : '';
       status.className = errors.length ? 'status error' : (writeFailures.length || issueNote || !viewerBuilt || artifactNote) ? 'status warning' : 'status ready';
-      status.textContent = `Exported ${exported}${errors.length ? `/${total}` : ''} ${since ? 'changed ' : ''}conversations to ${run.name}.${failedNote}${writeNote}${issueNote}${viewerNote}${artifactNote}${firstNote}`;
+      status.textContent = `Exported ${exported}${errors.length ? `/${total}` : ''} ${since ? 'changed ' : ''}conversations${andArtifacts} to ${run.name}.${failedNote}${writeNote}${issueNote}${viewerNote}${artifactNote}${firstNote}`;
       return;
     }
 
@@ -5068,7 +5082,7 @@ async function bulkExportZip(options = {}) {
       if (hasConvErrors) {
         // Conversation-level failures (couldn't fetch/process entire conversations)
         status.className = 'status error';
-        let msg = `Exported ${exported}/${total} to mega-zip. ${errors.length} conversation${errors.length > 1 ? 's' : ''} failed.`;
+        let msg = `Exported ${exported}/${total}${andArtifacts} to mega-zip. ${errors.length} conversation${errors.length > 1 ? 's' : ''} failed.`;
         if (hasFileIssues) {
           msg += ` Also ${totalFileErrors} file error${totalFileErrors !== 1 ? 's' : ''}.`;
         }
@@ -5081,13 +5095,13 @@ async function bulkExportZip(options = {}) {
         if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
         status.className = 'status warning';
         const looks = incomplete ? ` ${incomplete} chat${incomplete === 1 ? ' looks' : 's look'} incomplete.` : '';
-        status.textContent = `Exported ${exported} conversations - ${issueParts.join(', ')}.${looks} See errors.txt${viewerBuilt && !artifactNote ? '' : `.${viewerNote}${artifactNote}`}${firstNote}`;
+        status.textContent = `Exported ${exported} conversations${andArtifacts} - ${issueParts.join(', ')}.${looks} See errors.txt${viewerBuilt && !artifactNote ? '' : `.${viewerNote}${artifactNote}`}${firstNote}`;
       } else if (!viewerBuilt || artifactNote) {
         status.className = 'status warning';
-        status.textContent = `Exported ${exported} conversations to mega-zip.${viewerNote}${artifactNote}${firstNote}`;
+        status.textContent = `Exported ${exported} conversations${andArtifacts} to mega-zip.${viewerNote}${artifactNote}${firstNote}`;
       } else {
         status.className = 'status ready';
-        status.textContent = `Exported ${exported} ${since ? 'changed ' : ''}conversations to mega-zip!${firstNote}`;
+        status.textContent = `Exported ${exported} ${since ? 'changed ' : ''}conversations${andArtifacts} to mega-zip!${firstNote}`;
       }
     } catch (e) {
       hideProgress();
@@ -5587,7 +5601,7 @@ ${body}
 // opts: { prefix, artifacts, full, listed, fetchPublished, picturesAllowed, reuse(uuid, ver) (see saveArtifact; null
 // for none), parts (CTViewer.artifactViewParts or null), onProgress(done, total), run (truthy on disk: flush per
 // artifact), collector (optional; otherwise one labelled 'Export Artifacts') }. Never throws.
-// Returns { views, rows, entries, thumbs, collector, writeFailures, partCount, signedOut }; rows and entries name
+// Returns { views, rows, entries, whole (per artifact: saved with nothing missing), thumbs, collector, writeFailures, partCount, signedOut }; rows and entries name
 // folders relative to prefix.
 async function runArtifactStep(root, opts = {}) {
   const { prefix = '', artifacts = [], full = false, listed = artifacts.length, fetchPublished, picturesAllowed = false, reuse = null, parts = null, onProgress = null, run = false } = opts;
@@ -5598,6 +5612,7 @@ async function runArtifactStep(root, opts = {}) {
   const rows = [];
   const entries = [];
   const views = [];
+  const whole = [];  // per artifact: saved with nothing missing or incomplete (Export All records only those)
   const writeFailures = [];
   let thumbs = 0;
   let partCount = 0;
@@ -5618,6 +5633,7 @@ async function runArtifactStep(root, opts = {}) {
       }
       rows.push(saved.row);
       entries.push(saved.entry);
+      whole.push(!!(saved.meta && !saved.meta.incomplete && !(saved.meta.missing && saved.meta.missing.length) && !saved.view.notExported));
       let view = { ...saved.view, thumb: null, part: null, key: null };
       // The card picture and the preview part are extras: a failure leaves them out, with no warning.
       try {
@@ -5654,7 +5670,7 @@ async function runArtifactStep(root, opts = {}) {
   } catch (e) {
     console.error('Artifact step stopped early:', e);
   }
-  return { views, rows, entries, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true };
+  return { views, rows, entries, whole, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true };
 }
 
 // Export Artifacts. options.directory: a folder from showDirectoryPicker; the export goes into a new folder

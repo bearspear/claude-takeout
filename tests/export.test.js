@@ -3823,7 +3823,8 @@ test('Export All with artifacts on writes artifacts/ beside the chats', async ()
   assert.ok(index.indexOf('## Conversations') < index.indexOf('## Artifacts'));
   assert.ok(Object.keys(files).some((n) => /^viewer-files\/part-\d{4}\.js$/.test(n)), 'preview parts at the root');
   assert.deepStrictEqual(out.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: LIVE });
-  assert.ok(!/rtifacts/.test(out.status.textContent), out.status.textContent);
+  assert.ok(!/errors\.txt|could not be listed/.test(out.status.textContent), out.status.textContent);
+  assert.match(out.status.textContent, /Exported 1 conversations and 2 artifacts to /);
 });
 
 test('the combined artifacts index links the viewer one folder up', () => {
@@ -3947,6 +3948,7 @@ test('Export Changes runs when only an artifact changed', async () => {
   assert.deepStrictEqual([manifest.chats.length, manifest.artifacts.items.map((e) => e.uuid)], [0, [U(2)]]);
   assert.ok(files[`artifacts/${artFolder('Two', U(2))}/index.html`]);
   assert.deepStrictEqual(first.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: LIVE });
+  assert.match(first.status.textContent, /Exported 0 changed conversations and 1 artifact to mega-zip/);
 
   const again = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored: first.store, options: { changesOnly: true }, setup: bulkWithArtifacts({ frames, fetcher }) });
   assert.strictEqual(again.saved, null);
@@ -4006,4 +4008,33 @@ test('changedArtifacts takes artifacts whose listed version differs, and all wit
   assert.deepStrictEqual(pick(undefined), [U(1), U(2), U(3)]);
   assert.deepStrictEqual(pick({ [U(1)]: LIVE, [U(2)]: 'v1', [U(3)]: '' }), [U(2)]);
   assert.deepStrictEqual(pick({}), [U(1), U(2), U(3)]);
+});
+
+test('an artifact saved with a file missing is not recorded, after a failed file or a 401', async () => {
+  for (const failure of [{ error: 'HTTP 500', status: 500 }, { error: 'HTTP 401', status: 401 }]) {
+    const list = [listed('a', '2026-01-01T00:00:00Z')];
+    const frames = [art(U(1), 'One'), art(U(2), 'Two')];
+    const fetcher = publishedFetcher({
+      [U(1)]: livePage('One', { 'index.html': '1' }),
+      [U(2)]: livePage('Two', { 'index.html': '2', 'style.css': { body: 'x', error: failure } }),
+    });
+    const { store, zip } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup: bulkWithArtifacts({ frames, fetcher }) });
+    assert.deepStrictEqual(store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE }, failure.error);
+    assert.ok((await zipFiles(zip))['artifacts/errors.txt'], failure.error);
+  }
+});
+
+test('a multi-file page reused from published/ previews with all its files', async () => {
+  const files = [...guideAs, { as: 'style.css', path: '/home/claude/style.css' }];
+  const chat = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', files))]), { uuid: 'a', name: 'Chat a' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v1', history: ['v1'], versions: { v1: { files: { 'index.html': 'PAGE-HTML', 'style.css': { body: 'PAGE-CSS', type: 'text/css' } } } } } });
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
+  const out = await zipFiles(zip);
+  assert.strictEqual(fetcher.count('publishedPageFile', PUB_U), 2);
+  const meta = JSON.parse(out[`artifacts/${artFolder('Guide', PUB_U)}/artifact.json`]);
+  assert.deepStrictEqual(meta.savedIn, { 'index.html': 'published/Guide_Short1/v1/index.html', 'style.css': 'published/Guide_Short1/v1/style.css' });
+  const part = Object.entries(out).find(([n]) => /^viewer-files\/part-/.test(n));
+  assert.ok(part && part[1].includes('PAGE-HTML') && part[1].includes('PAGE-CSS'), part && part[1]);
+  assert.ok(part[1].indexOf('PAGE-HTML') < part[1].indexOf('PAGE-CSS'), 'start file first');
+  assert.ok(!out['published/Guide_Short1/published.json'].includes('PAGE-'), 'previews stay out of published.json');
 });
