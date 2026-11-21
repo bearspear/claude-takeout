@@ -2269,7 +2269,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         fullContent.push(...toolImageLines(block, toolImages, '../'));
       } else if (block.type === 'tool_result' && isImageSearchTool(block.name)) {
         fullContent.push(...imageSearchLines(block, webImages, '../'));
-      } else if (block.type === 'tool_result' && isPublishTool(block.name)) {
+      } else if (block.type === 'tool_result' && (isPublishTool(block.name) || publishedReply(block.name, block))) {
         fullContent.push(...publishedLines(block));
       } else if (block.type === 'tool_result' && block.name === 'web_search') {
         if (Array.isArray(block.content)) {
@@ -3574,7 +3574,9 @@ async function savePublishedPages(folder, data, ctx = {}) {
     for (const pub of publishes) {
       const matched = new Map();
       for (const f of files) {
-        const src = f.sha256 ? sources.find((s) => (s.as || s.path.split('/').pop()) === f.path) : null;
+        // A one-file publish (the Artifact tool) names no published path: its one file is the one source.
+        const src = !f.sha256 ? null : sources.find((s) => (s.as || s.path.split('/').pop()) === f.path)
+          || (files.length === 1 && sources.length === 1 && !sources[0].as ? sources[0] : null);
         let hit = null;
         for (const c of src ? candidates(src, pub.messageUuid) : []) {
           if (await hashText(c.text) === f.sha256) { hit = c; break; }
@@ -3731,10 +3733,10 @@ function tabPublishedFetcher(tabId) {
   };
 }
 
-// The page a publish_files call put on claude.ai, as a quoted link, with a link to the export's copy when
+// The page a publish_files or Artifact call put on claude.ai, as a quoted link, with a link to the export's copy when
 // links (publishedLinks) has one for this call; [] when there is neither.
 function publishedLines(block, links = null, up = '') {
-  const reply = leadingJson(resultText(block)) || {};
+  const reply = publishedReply(block && block.name, block) || {};
   const local = links && block && Object.prototype.hasOwnProperty.call(links, block.tool_use_id) ? `${up}${links[block.tool_use_id]}` : null;
   if (!reply.url) return local ? [`> **Published page:** [saved copy](${local})`, ''] : [];
   return [`> **Published on claude.ai:** [${mdLinkText(reply.title || reply.url)}](${mdUrl(reply.url)})${local ? ` · [saved copy](${local})` : ''}`, ''];
@@ -4080,8 +4082,10 @@ function convertToMarkdown(data, options = {}) {
           } else if (isImageSearchTool(toolName)) {
             lines.push('```plaintext', `Image search: ${input.query || ''}`, '```', '');
 
-          } else if (isPublishTool(toolName)) {
-            const sent = (Array.isArray(input.files) ? input.files : []).map((f) => (f && f.path ? f.path.split('/').pop() : '')).filter(Boolean);
+          } else if (isPublishTool(toolName) || isArtifactPublish(toolName, input)) {
+            const sent = isPublishTool(toolName)
+              ? (Array.isArray(input.files) ? input.files : []).map((f) => (f && f.path ? f.path.split('/').pop() : '')).filter(Boolean)
+              : [input.file_path.split('/').pop()];
             lines.push('```plaintext', `Publishing on claude.ai: ${input.title || 'page'}${sent.length ? ` (${sent.join(', ')})` : ''}`, '```', '');
 
           } else if (claudeDocsAction(toolName)) {
@@ -4133,7 +4137,7 @@ function convertToMarkdown(data, options = {}) {
             lines.push(...toolImageLines(block, toolImages));
           } else if (isImageSearchTool(toolName) && imagesOf(block).length) {
             lines.push(...imageSearchLines(block, webImages));
-          } else if (isPublishTool(toolName) && publishedLines(block, pageLinks).length) {
+          } else if ((isPublishTool(toolName) || isArtifactTool(toolName)) && publishedLines(block, pageLinks).length) {
             lines.push(...publishedLines(block, pageLinks));
           } else if (toolName === 'web_search' && Array.isArray(block.content)) {
             // Format web search results nicely

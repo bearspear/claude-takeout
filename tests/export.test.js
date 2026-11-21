@@ -2209,6 +2209,77 @@ test('a version identical to the text Claude wrote is not copied; one edited lat
   assert.ok(docText(written, 'full_chat.md').includes('(artefacts/guide_v1.html)'));
 });
 
+// ---- claude.ai's Artifact tool: publish a file, or open an artifact ----
+const ART = 'Artifact';
+const artReply = (path, url, ver, n = 1) => `Published ${path} at ${url} (Version ${n}, version id ${ver}) Icon: "book".\n\nLive subscription: not supported yet.`;
+const artPublish = (id, path, url, ver, n, input = {}) => [use(id, ART, { file_path: path, description: 'A page', icon: 'book', ...input }),
+  { ...pubResult(id, artReply(path, url, ver, n)), name: ART }];
+
+test('artifactPublishReply reads the Artifact tool reply, and only a publish', () => {
+  const short = core.uuidToBase58(PUB_U);
+  assert.deepStrictEqual(plain(core.artifactPublishReply(artReply('/home/claude/a.html', `https://claude.ai/artifact/${short}`, '1794168443-5b08'))),
+    { url: `https://claude.ai/artifact/${short}`, uuid: PUB_U, shortId: short, ver: '1794168443-5b08' });
+  const code = core.artifactPublishReply(`Published /home/claude/a.html at https://claude.ai/code/artifact/${PUB_U.toUpperCase()}`);
+  assert.deepStrictEqual(plain(code), { url: `https://claude.ai/code/artifact/${PUB_U.toUpperCase()}`, uuid: PUB_U, shortId: short, ver: '' });
+  assert.strictEqual(core.artifactPublishReply(`Opened the Artifact at https://claude.ai/artifact/${short} for the user. Nothing was published or changed.`), null);
+  assert.strictEqual(core.artifactPublishReply('Published /x at https://claude.ai/artifact/0OIl (Version 1, version id v1)'), null);
+  assert.strictEqual(core.artifactPublishReply(`Published /x at https://evil.example/artifact/${short}`), null);
+  assert.strictEqual(core.artifactPublishReply(artReply('/x', `https://claude.ai/artifact/${short}`, '../a')).ver, '');
+  assert.ok(core.isArtifactPublish('Artifact', { file_path: '/home/claude/a.html' }));
+  assert.ok(core.isArtifactPublish('mcp__x__Artifact', { file_path: '/a', action: 'publish' }));
+  assert.ok(!core.isArtifactPublish('Artifact', { action: 'open', url: 'https://claude.ai/artifact/x' }));
+  assert.ok(!core.isArtifactPublish('Artifact', { file_path: '/a', action: 'open' }));
+  assert.ok(!core.isArtifactPublish('artifacts', { file_path: '/a' }));
+  assert.ok(!core.isArtifactPublish('Artifact', { file_path: '' }));
+});
+
+test('publishedPagesOf lists Artifact tool publishes, titled by file name, and skips opens and errors', () => {
+  const short = core.uuidToBase58(PUB_U);
+  const url = `https://claude.ai/artifact/${short}`;
+  const data = { chat_messages: [
+    { uuid: 'm1', sender: 'assistant', content: [...artPublish('a1', '/home/claude/verb/astral-body.html', url, 'v1')] },
+    { uuid: 'm2', sender: 'assistant', content: [
+      use('o1', ART, { action: 'open', url }), { ...pubResult('o1', `Opened the Artifact at ${url} for the user. Nothing was published or changed.`), name: ART },
+      use('a2', ART, { file_path: '/home/claude/verb/astral-body.html' }), { ...pubResult('a2', artReply('/home/claude/verb/astral-body.html', url, 'v2', 2)), name: ART },
+      use('a3', ART, { file_path: '/home/claude/b.html' }), { ...pubResult('a3', 'Error: not allowed', true), name: ART },
+    ] },
+  ] };
+  const pages = plain(core.publishedPagesOf(data));
+  assert.deepStrictEqual(pages.map((p) => [p.uuid, p.shortId, p.ver, p.title, p.url, p.current, p.publishes.map((x) => x.toolUseId)]),
+    [[PUB_U, short, 'v1', 'astral-body', url, false, ['a1']], [PUB_U, short, 'v2', 'astral-body', url, false, ['a2']]]);
+  assert.deepStrictEqual(pages[0].sources, [{ as: '', path: '/home/claude/verb/astral-body.html' }]);
+});
+
+test('an Artifact tool publish is saved like publish_files, the same as the written file, with a card and a link', async () => {
+  const short = core.uuidToBase58(PUB_U);
+  const url = `https://claude.ai/artifact/${short}`;
+  const data = pubChat([
+    pubMsg('m1', null, [use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'G1' }), result('w'), ...artPublish('a1', '/home/claude/guide.html', url, 'v1')]),
+    pubMsg('m2', 'm1', [use('o', ART, { action: 'open', url }), { ...pubResult('o', `Opened the Artifact at ${url} for the user.`), name: ART }, { type: 'text', text: 'Opened it.' }]),
+  ]);
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': 'G1' } } } } });
+  const { written, output, chat } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
+  assert.deepStrictEqual(plain(output.published[0].versions.map((v) => [v.ver, v.same, v.writtenAs])), [['v1', true, 'guide.html']]);
+  assert.strictEqual(output.published[0].dir, `published/guide_${short}`);
+  const json = JSON.parse(fileText(written, `published/guide_${short}/published.json`));
+  assert.strictEqual(json.title, 'Guide');
+  assert.deepStrictEqual(json.versions.v1.publishedIn, [{ chat: 'c1', messageUuid: 'm1', toolUseId: 'a1', same: true, writtenAs: 'guide.html' }]);
+  const md = docText(written, 'full_chat.md');
+  assert.ok(md.includes('Publishing on claude.ai: page (guide.html)'));
+  assert.ok(md.includes(`> **Published on claude.ai:** [${url}](${url}) · [saved copy](artefacts/guide.html)`));
+  const blocks = chat.messages.flatMap((m) => m.blocks);
+  const pub = blocks.find((b) => b.t === 'tool' && b.name === ART && b.input && b.input.file_path);
+  assert.strictEqual(pub.label, 'Published a page: guide.html');
+  assert.strictEqual(pub.output, true);
+  // As with publish_files: the written file's card, then the page's card with its claude.ai link; no plain link line.
+  const cards = blocks.filter((b) => b.t === 'card').map((b) => chat.files[b.file]);
+  assert.deepStrictEqual(plain(cards.map((f) => [f.name, f.published ? f.published.url : null])), [['guide.html', null], ['Guide', url]]);
+  assert.ok(!pub.published);
+  const open = blocks.find((b) => b.t === 'tool' && b.name === ART && b.input && b.input.action === 'open');
+  assert.strictEqual(open.label, 'Opened an artifact');
+  assert.ok(!open.output && !open.published);
+});
+
 test('a page attached by claude.ai to the publishing message counts as the written copy', async () => {
   const attachedChat = pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', [{ as: 'index.html', path: '/mnt/user-data/outputs/guide.html' }]),
     { files_v2: [{ success: true, file_name: 'guide.html', file_uuid: 'att-1', file_kind: 'blob' }] })]);

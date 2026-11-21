@@ -105,6 +105,9 @@
       }
       case 'present_files': return 'Presented files';
       case 'artifacts': return i.title ? `Artifact: ${i.title}` : 'Artifact';
+      case 'Artifact':
+        if (core('isArtifactPublish')(name, i)) return `Published a page: ${baseName(i.file_path)}`;
+        return i.action === 'open' ? 'Opened an artifact' : 'Artifact';
       case 'image_search': return i.query ? `Searched for images: ${i.query}` : 'Searched for images';
       default: {
         // Tools under a connector prefix (mcp__visualize__show_widget) or with one: the visualize and
@@ -292,11 +295,14 @@
     return hasText ? 'code' : 'binary';
   }
 
-  // export-core.js's versionAsOf: a global where export-core.js is loaded first, else required (Node).
-  function coreVersionAsOf() {
-    if (typeof root.versionAsOf === 'function') return root.versionAsOf;
-    return require('./export-core.js').versionAsOf;
+  // A function of export-core.js: a global where export-core.js is loaded first, else required (Node).
+  function core(name) {
+    if (typeof root[name] === 'function') return root[name];
+    return require('./export-core.js')[name];
   }
+  function coreVersionAsOf() { return core('versionAsOf'); }
+  // A publish call: publish_files, or the Artifact tool publishing a file.
+  const isPublishCall = (name, input) => /(^|__|:)publish_files$/.test(String(name || '')) || core('isArtifactPublish')(name, input);
 
   const missingFile = name => ({ name, kind: 'missing', versions: [{ label: '', text: null, href: null }] });
 
@@ -407,8 +413,8 @@
       });
     }
     // The names of the files Claude wrote that a publish published (their sandbox paths), from the call itself.
-    const sourceNames = input => (Array.isArray(input.files) ? input.files : []).filter(f => f && typeof f === 'object')
-      .map(f => baseName(f.path)).filter(n => typeof n === 'string' && n);
+    const sourceNames = input => (Array.isArray(input.files) ? input.files : typeof input.file_path === 'string' ? [{ path: input.file_path }] : [])
+      .filter(f => f && typeof f === 'object').map(f => baseName(f.path)).filter(n => typeof n === 'string' && n);
 
     source.forEach((m, mi) => {
       const message = messages[mi];
@@ -434,7 +440,7 @@
 
         // Keys in artifactIndex are extractArtifacts' state keys.
         // A publish that savePublishedPages saw: its page's card, which carries the claude.ai link.
-        if (pageOf.has(b.id) && /(^|__|:)publish_files$/.test(String(b.name || ''))) {
+        if (pageOf.has(b.id) && isPublishCall(b.name, input)) {
           const page = pageOf.get(b.id);
           touch(after, page.key, page.build, page.version);
           sharedKeys.add(page.key);
@@ -637,6 +643,11 @@
         tool.error = !!b.is_error;
         if (/(^|__|:)image_search$/.test(String(b.name || tool.name))) tool.web = webImages(b.content, c);
         if (/(^|__|:)publish_files$/.test(String(b.name || tool.name))) tool.published = publishedPage(b.content);
+        else if (core('isArtifactPublish')(tool.name, toolInputs.get(b.tool_use_id))) {
+          const reply = core('publishedReply')(tool.name, b);
+          // The reply names no title: the published file's name stands in.
+          if (reply) { tool.published = { title: reply.title || baseName(toolInputs.get(b.tool_use_id).file_path), url: reply.url }; tool.output = true; }
+        }
         if (/_display_v\d+$/.test(String(tool.name))) tool.display = displayData(tool.name, toolInputs.get(b.tool_use_id), b.content, c);
       }
     }
