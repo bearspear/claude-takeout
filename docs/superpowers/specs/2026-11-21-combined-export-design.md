@@ -106,7 +106,7 @@ Mentions anywhere else (a pasted list, `list_artifacts` results, an `Artifact` o
 - Folder mode keeps its per-chat and per-artifact flush and memory bound.
 - The manifest bump is 1.17.0, with README, USAGE, TECHNICAL and CLAUDE.md (§2, §7, §8).
 
-### Old-archive tools (owner decision 2026-11-21, on my recommendation: refuse now, support in v1.18)
+### Old-archive tools (my call, recommended when the owner asked; to confirm on approval: refuse now, support in v1.18)
 - `tools/build_viewer.js` and `tools/merge_archives.js` refuse an archive that has an `artifacts/` folder or `export-manifest.json` `artifacts`, before writing anything, with: "This archive includes artifacts (Claude Takeout 1.17 or later). build_viewer/merge_archives don't support those yet; its viewer.html is already complete." (exit code non-zero; `--json` reports it as a refused archive). In a merge with several sources, the refusal names the source and nothing is written.
 - The `build-archive-viewer` skill and USAGE say so.
 - Teaching both tools about `artifacts/` (rebuilding the Artifacts screen from disk; merging newest per uuid) is v1.18.
