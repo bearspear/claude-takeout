@@ -1459,6 +1459,7 @@ async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null
   sb.chrome.tabs.sendMessage = (id, msg, cb) => {
     if (msg.action === 'fetchAllConversations') cb({ data: list, orgId: 'org-1', accountName: msg.withAccountName ? accountName : undefined });
     else if (msg.action === 'fetchConversation') cb({ data: chats[msg.conversationId] });
+    else if (msg.action === 'listArtifacts') cb({ frames: [] });  // no artifacts unless a test lists some
     else cb({});
   };
   sb.JSZip = JSZip;
@@ -3764,4 +3765,245 @@ test('the index links a reused start file from where the index lives', () => {
   assert.ok(vm.runInContext("artifactsIndexMd(__rows, { base: 'artifacts/' })", sb).includes('(../My%20Chat/artefacts/guide.html)'));
   assert.ok(vm.runInContext("artifactsIndexHtml(__rows, { base: 'artifacts/' })", sb).includes('href="../My%20Chat/artefacts/guide.html"'));
   assert.ok(vm.runInContext("artifactsIndexMd(__rows)", sb).includes('(My%20Chat/artefacts/guide.html)'));
+});
+
+// ---- Export All with artifacts ----
+// Export All also saves claude.ai's artifacts into artifacts/ (setting exportAllArtifacts, default on), reusing
+// what the chats saved of the same version, and never asking for the optional web permission.
+// setup for runBulkZip: content.js answers listArtifacts with frames (or list, as the whole reply) and the page
+// calls from fetcher; calls records every message's action; permissionRequests every permission request.
+const bulkWithArtifacts = ({ frames = [], list = null, fetcher = publishedFetcher({}), calls = [], permissionRequests = [], granted = false, off = false } = {}) => (sb) => {
+  sb.chrome.permissions = { contains: async () => granted, request: async (o) => { permissionRequests.push(o); return granted; } };
+  const orig = sb.chrome.tabs.sendMessage;
+  sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+    calls.push(msg.action);
+    if (msg.action === 'listArtifacts') return cb(list || { frames: JSON.parse(JSON.stringify(frames)) });
+    if (/^publishedPage/.test(msg.action)) return fetcher.fetch(msg).then(cb);
+    return orig(id, msg, cb);
+  };
+  if (off) vm.runInContext('settings.exportAllArtifacts = false', sb);
+};
+const zipFiles = async (zip) => {
+  const out = {};
+  for (const n of Object.keys(zip.files)) if (!zip.files[n].dir) out[n] = (await zip.file(n).async('string')).replace(/^﻿/, '');
+  return out;
+};
+const diskFiles = (picked) => {
+  const run = [...picked.entries.values()][picked.entries.size - 1];
+  const out = {};
+  for (const [n, d] of Object.entries(run.flat())) out[n] = (typeof d === 'string' ? d : Buffer.from(d).toString('utf8')).replace(/^﻿/, '');
+  return out;
+};
+
+test('Export All with artifacts on writes artifacts/ beside the chats', async () => {
+  const list = [listed('a', '2026-01-01T00:00:00Z')];
+  const frames = [art(U(1), 'Quarterly Report'), art(U(2), 'Game')];
+  const fetcher = publishedFetcher({ [U(1)]: livePage('Quarterly Report', { 'index.html': '<h1>Q</h1>' }), [U(2)]: livePage('Game', { 'index.html': 'g', 'app.js': 'go()' }) });
+  const picked = new FakeDir();
+  const out = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, options: { directory: picked }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  const files = diskFiles(picked);
+  const f1 = artFolder('Quarterly_Report', U(1));
+  const f2 = artFolder('Game', U(2));
+  assert.ok(files['Chat_a/README.md'], 'the chat is there');
+  assert.ok(files['artifacts/index.md'] && files['artifacts/index.html']);
+  assert.strictEqual(files[`artifacts/${f2}/app.js`], 'go()');
+  assert.strictEqual(JSON.parse(files[`artifacts/${f1}/artifact.json`]).uuid, U(1));
+  assert.ok(files['artifacts/index.md'].includes(`[Game](${f2}/index.html)`), files['artifacts/index.md']);
+  assert.ok(!files['artifacts/errors.txt']);
+  assert.ok(!Object.keys(files).some((n) => /^artifacts\/(viewer|export-manifest)/.test(n)), 'one viewer and one manifest, at the root');
+  const manifest = JSON.parse(files['export-manifest.json']);
+  assert.strictEqual(manifest.artifacts.items.length, 2);
+  assert.deepStrictEqual([manifest.artifacts.listed, manifest.artifacts.thumbs], [2, 0]);
+  assert.deepStrictEqual(manifest.artifacts.items.map((e) => [e.uuid, e.folder, e.ver]), [[U(1), f1, LIVE], [U(2), f2, LIVE]]);
+  const index = files['index.md'];
+  assert.match(index, /## Artifacts/);
+  assert.match(index, /Listed by claude\.ai: 2/);
+  assert.match(index, /Saved: 2/);
+  assert.ok(index.includes('(artifacts/index.md)'), index);
+  assert.ok(index.indexOf('## Conversations') < index.indexOf('## Artifacts'));
+  assert.ok(Object.keys(files).some((n) => /^viewer-files\/part-\d{4}\.js$/.test(n)), 'preview parts at the root');
+  assert.deepStrictEqual(out.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: LIVE });
+  assert.ok(!/rtifacts/.test(out.status.textContent), out.status.textContent);
+});
+
+test('the combined artifacts index links the viewer one folder up', () => {
+  const sb = exportPopup().sandbox;
+  sb.__rows = [];
+  assert.ok(vm.runInContext("artifactsIndexHtml(__rows, { base: 'artifacts/', viewer: true })", sb).includes('href="../viewer.html"'));
+  assert.ok(vm.runInContext('artifactsIndexHtml(__rows, { viewer: true })', sb).includes('href="viewer.html"'));
+});
+
+test('the setting off writes no artifacts and makes no listArtifacts call', async () => {
+  const calls = [];
+  const list = [listed('a', '2026-01-01T00:00:00Z')];
+  const { zip, store } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup: bulkWithArtifacts({ frames: [art(U(1), 'G')], calls, off: true }) });
+  const files = await zipFiles(zip);
+  assert.ok(!calls.includes('listArtifacts'), calls.join());
+  assert.ok(!Object.keys(files).some((n) => n.startsWith('artifacts/')));
+  assert.ok(!('artifacts' in JSON.parse(files['export-manifest.json'])));
+  assert.ok(!files['index.md'].includes('## Artifacts'));
+  assert.ok(!store.exportRecord['org-1'].artifacts);
+});
+
+test('a list failure leaves the chats complete and says so', async () => {
+  for (const [reply, code] of [[{ error: 'HTTP 401', status: 401 }, 'HTTP 401'], [{ connectionError: 'gone' }, 'no connection to the claude.ai tab'], [{ frames: 'x' }, 'bad response']]) {
+    const list = [listed('a', '2026-01-01T00:00:00Z')];
+    const { zip, status, store } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup: bulkWithArtifacts({ list: reply }) });
+    const files = await zipFiles(zip);
+    assert.ok(files['Chat_a/README.md'] && files['Chat_a/full_chat.md'], code);
+    assert.ok(files['index.md'].includes(`Artifacts: not exported (${code})`), files['index.md']);
+    assert.ok(!Object.keys(files).some((n) => n.startsWith('artifacts/')), 'no half-written artifacts/');
+    assert.ok(!('artifacts' in JSON.parse(files['export-manifest.json'])));
+    assert.match(status.textContent, / Artifacts could not be listed\./);
+    assert.strictEqual(status.className, 'status warning');
+    assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats), ['a']);
+  }
+});
+
+test('a chat named Artifacts gets Artifacts_2', async () => {
+  const list = [listed('a', '2026-01-01T00:00:00Z')];
+  const chat = Object.assign(chatFor('a', '2026-01-01T00:00:00Z'), { name: 'ARTIFACTS' });
+  const fetcher = publishedFetcher({ [U(1)]: livePage('G', { 'index.html': 'g' }) });
+  const { zip } = await runBulkZip({ list, chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(U(1), 'G')], fetcher }) });
+  const files = await zipFiles(zip);
+  assert.ok(files['ARTIFACTS_2/README.md'], Object.keys(files).join());
+  assert.ok(files['artifacts/index.md']);
+  assert.strictEqual(JSON.parse(files['export-manifest.json']).chats[0].folder, 'ARTIFACTS_2');
+});
+
+test('an artifact published by a chat is not fetched again', async () => {
+  const chat = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v1', history: ['v1'], versions: { v1: { files: { 'index.html': 'PUBLISHED-PAGE' } } } } });
+  const frames = [art(PUB_U, 'Guide', { live: 'v1' })];
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  const files = await zipFiles(zip);
+  assert.strictEqual(files['published/Guide_Short1/v1/index.html'], 'PUBLISHED-PAGE');
+  assert.strictEqual(fetcher.count('publishedPageFile', PUB_U), 1);
+  assert.strictEqual(fetcher.count('publishedPageInfo', PUB_U), 1);
+  const f = artFolder('Guide', PUB_U);
+  assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`artifacts/${f}/`)), [`artifacts/${f}/artifact.json`]);
+  assert.deepStrictEqual(JSON.parse(files[`artifacts/${f}/artifact.json`]).savedIn, { 'index.html': 'published/Guide_Short1/v1/index.html' });
+  assert.ok(files['artifacts/index.md'].includes('(../published/Guide_Short1/v1/index.html)'), files['artifacts/index.md']);
+  assert.ok(Object.entries(files).some(([n, t]) => /^viewer-files\/part-/.test(n) && t.includes('PUBLISHED-PAGE')), 'the preview has the text');
+});
+
+test('a published version saved incomplete or unverified is fetched for the artifact', async () => {
+  const chat = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v1', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'P', unverified: true } } } } } });
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
+  const files = await zipFiles(zip);
+  assert.strictEqual(fetcher.count('publishedPageFile', PUB_U), 2);
+  const meta = JSON.parse(files[`artifacts/${artFolder('Guide', PUB_U)}/artifact.json`]);
+  assert.ok(!meta.savedIn);
+});
+
+test('a same version points at the chat\'s artefacts file', async () => {
+  const chat = Object.assign(pubChat([pubMsg('m1', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'SAME-TEXT-ONE' }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs),
+  ])]), { uuid: 'a', name: 'Chat a' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v1', history: ['v1'], versions: { v1: { files: { 'index.html': 'SAME-TEXT-ONE' } } } } });
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
+  const files = await zipFiles(zip);
+  assert.strictEqual(fetcher.count('publishedPageFile'), 0);
+  assert.strictEqual(fetcher.count('publishedPageInfo'), 1);
+  assert.ok(!Object.keys(files).some((n) => n.startsWith('published/') && !n.endsWith('published.json')));
+  const meta = JSON.parse(files[`artifacts/${artFolder('Guide', PUB_U)}/artifact.json`]);
+  assert.deepStrictEqual(meta.savedIn, { 'index.html': 'Chat_a/artefacts/guide.html' });
+  assert.strictEqual(files['Chat_a/artefacts/guide.html'], 'SAME-TEXT-ONE');
+  assert.ok(!JSON.stringify(JSON.parse(files['published/Guide_Short1/published.json'])).includes('SAME-TEXT-ONE'), 'the text stays out of published.json');
+  assert.ok(Object.entries(files).some(([n, t]) => /^viewer-files\/part-/.test(n) && t.includes('SAME-TEXT-ONE')), 'the preview has the text');
+});
+
+test('Export Changes includes changed artifacts only and records versions', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' } } } };
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-09T00:00:00Z')];
+  const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-09T00:00:00Z') };
+  const frames = [art(U(1), 'One'), art(U(2), 'Two'), art(U(3), 'Three')];
+  const fetcher = publishedFetcher({ [U(1)]: livePage('One', { 'index.html': '1' }), [U(2)]: livePage('Two', { 'index.html': '2' }), [U(3)]: livePage('Three', { 'index.html': '3' }) });
+  const { zip, store } = await runBulkZip({ list, chats, stored, options: { changesOnly: true }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  const files = await zipFiles(zip);
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(1)), 0);
+  const manifest = JSON.parse(files['export-manifest.json']);
+  assert.deepStrictEqual(manifest.artifacts.items.map((e) => e.uuid), [U(2), U(3)]);
+  assert.strictEqual(manifest.artifacts.listed, 3);
+  assert.ok(!Object.keys(files).some((n) => n.startsWith(`artifacts/${artFolder('One', U(1))}/`)));
+  const date = vm.runInContext('formatTimestamp', exportPopup().sandbox)('2026-01-05T00:00:00Z');
+  assert.ok(files['artifacts/index.md'].includes(`Changed since ${date}: 2 of 3 listed`), files['artifacts/index.md']);
+  assert.ok(files['artifacts/index.html'].includes(`Changed since ${date}: 2 of 3 listed`));
+  assert.ok(files['index.md'].includes(`Changed since ${date}: 2 of 3 listed`), files['index.md']);
+  assert.deepStrictEqual(store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: LIVE, [U(3)]: LIVE });
+  assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats).sort(), ['a', 'b']);
+});
+
+test('Export Changes runs when only an artifact changed', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' } } } };
+  const list = [listed('a', '2026-01-01T00:00:00Z')];
+  const frames = [art(U(1), 'One'), art(U(2), 'Two')];
+  const fetcher = publishedFetcher({ [U(2)]: livePage('Two', { 'index.html': '2' }) });
+  const first = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored, options: { changesOnly: true }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  assert.ok(first.saved, first.status.textContent);
+  const files = await zipFiles(first.zip);
+  const manifest = JSON.parse(files['export-manifest.json']);
+  assert.deepStrictEqual([manifest.chats.length, manifest.artifacts.items.map((e) => e.uuid)], [0, [U(2)]]);
+  assert.ok(files[`artifacts/${artFolder('Two', U(2))}/index.html`]);
+  assert.deepStrictEqual(first.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: LIVE });
+
+  const again = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored: first.store, options: { changesOnly: true }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  assert.strictEqual(again.saved, null);
+  assert.match(again.status.textContent, /Nothing changed since/);
+});
+
+test('an artifact that could not be exported is not recorded, so the next Export Changes tries it again', async () => {
+  const list = [listed('a', '2026-01-01T00:00:00Z')];
+  const frames = [art(U(1), 'One'), art(U(2), 'Two')];
+  const fetcher = publishedFetcher({ [U(1)]: livePage('One', { 'index.html': '1' }) });
+  const { zip, store, status } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  const files = await zipFiles(zip);
+  assert.deepStrictEqual(store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE });
+  assert.match(files['artifacts/errors.txt'], /Two/);
+  assert.match(status.textContent, / See artifacts\/errors\.txt\./);
+  assert.strictEqual(status.className, 'status warning');
+});
+
+test('Export All never asks for the web permission', async () => {
+  for (const directory of [null, new FakeDir()]) {
+    const permissionRequests = [];
+    const list = [listed('a', '2026-01-01T00:00:00Z')];
+    const fetcher = publishedFetcher({ [U(1)]: livePage('G', { 'index.html': 'g' }) });
+    const out = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, options: directory ? { directory } : {}, setup: bulkWithArtifacts({ frames: [art(U(1), 'G')], fetcher, permissionRequests }) });
+    assert.deepStrictEqual(permissionRequests, []);
+    const files = directory ? diskFiles(directory) : await zipFiles(out.zip);
+    assert.match(files['artifacts/index.md'], /Card pictures:\*\* 0 of 1 \(needs the web images permission/);
+  }
+});
+
+test('exportAllArtifacts defaults to true and round-trips', async () => {
+  const sb = exportPopup().sandbox;
+  assert.strictEqual(vm.runInContext('defaultSettings.exportAllArtifacts', sb), true);
+  const box = sb.document.getElementById('exportAllArtifacts');
+  vm.runInContext('applySettings()', sb);
+  assert.strictEqual(box.checked, true);
+  const store = {};
+  sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+  sb.chrome.storage.local.get = async (keys) => Object.fromEntries(keys.filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
+  box.handlers.change({ target: { checked: false } });
+  await new Promise((r) => setTimeout(r, 5));
+  assert.strictEqual(store.exporterSettings.exportAllArtifacts, false);
+  vm.runInContext('settings = { ...defaultSettings }', sb);
+  await vm.runInContext('loadSettings()', sb);
+  assert.strictEqual(vm.runInContext('settings.exportAllArtifacts', sb), false);
+  assert.strictEqual(box.checked, false);
+  for (const page of ['popup.html', 'sidepanel.html']) {
+    const html = fs.readFileSync(path.join(REPO, page), 'utf8');
+    assert.match(html, /<label for="exportAllArtifacts"[^>]*>Include artifacts in Export All:<\/label>\s*<input type="checkbox" id="exportAllArtifacts" checked>/, page);
+  }
+});
+
+test('changedArtifacts takes artifacts whose listed version differs, and all with no record', () => {
+  const sb = exportPopup().sandbox;
+  sb.__list = [art(U(1), 'a'), art(U(2), 'b', { live: 'v2' }), art(U(3), 'c', { live: null })];
+  const pick = (rec) => { sb.__rec = rec; return vm.runInContext('changedArtifacts(__list, __rec)', sb).map((a) => a.slug); };
+  assert.deepStrictEqual(pick(undefined), [U(1), U(2), U(3)]);
+  assert.deepStrictEqual(pick({ [U(1)]: LIVE, [U(2)]: 'v1', [U(3)]: '' }), [U(2)]);
+  assert.deepStrictEqual(pick({}), [U(1), U(2), U(3)]);
 });
