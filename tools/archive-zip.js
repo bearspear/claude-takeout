@@ -160,22 +160,28 @@ async function zipEntryNames(zipPath, loaded = null) {
 async function zipHasArtifacts(zipPath, loaded = null) {
   const { zip } = loaded || await loadZip(zipPath);
   const names = await zipEntryNames(zipPath, loaded || { zip });
-  if (!names.some(n => /(^|\/)original\.json$/.test(n))) return false;
-  const roots = [''];
+  const wrappers = [];
   for (const n of names) {
     const m = /^([^/]+\/)(index\.md|export-manifest\.json)$/.exec(n);
-    if (m && !roots.includes(m[1])) roots.push(m[1]);
+    if (m && !wrappers.includes(m[1])) wrappers.push(m[1]);
   }
-  if (names.some(n => roots.some(r => n.startsWith(r + 'artifacts/')))) return true;
+  // Manifests at the possible roots; an Export Artifacts root (kind "artifacts") is not an archive root.
+  const manifests = new Map();
   for (const entry of Object.values(zip.files)) {
     const name = entry.unsafeOriginalName || entry.name;
-    if (entry.dir || !roots.some(r => name === r + 'export-manifest.json')) continue;
+    const r = ['', ...wrappers].find(x => name === x + 'export-manifest.json');
+    if (r === undefined || entry.dir) continue;
     try {
       const m = JSON.parse((await entry.async('string')).replace(/^\uFEFF/, ''));
-      if (m && typeof m === 'object' && Object.prototype.hasOwnProperty.call(m, 'artifacts')) return true;
+      if (m && typeof m === 'object') manifests.set(r, m);
     } catch (e) { /* not a manifest we can read */ }
   }
-  return false;
+  const roots = ['', ...wrappers].filter(r => !(manifests.get(r) && manifests.get(r).kind === 'artifacts'));
+  // A chat is an original.json at the root (a single chat) or in a folder directly under it.
+  const hasChat = roots.some(r => names.some(n => n.startsWith(r) && /^([^/]+\/)?original\.json$/.test(n.slice(r.length))));
+  if (!hasChat) return false;
+  if (names.some(n => roots.some(r => n.startsWith(r + 'artifacts/')))) return true;
+  return roots.some(r => manifests.has(r) && Object.prototype.hasOwnProperty.call(manifests.get(r), 'artifacts'));
 }
 
 module.exports = { zipHasArtifacts, loadZip, extractZip, zipFreeSpaceOk, zipEntryNames, partialOf, MAX_ZIP_BYTES };

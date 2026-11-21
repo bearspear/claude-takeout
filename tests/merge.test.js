@@ -270,3 +270,27 @@ test('an Export Artifacts ZIP is not refused as a combined archive; it holds no 
   assert.strictEqual(r.status, 'failed');
   assert.match(r.reason, /no Claude chats/);
 });
+
+test('an unwrapped ZIP whose chat folder holds artifacts/ is not refused', async () => {
+  const tmp = tmpRoot();
+  const zip = new JSZip();
+  zip.file('Chat_y/original.json', chatJson('y', '2026-10-02T00:00:00Z'));
+  zip.file('Chat_y/artifacts/x.txt', 'x');
+  const zipPath = path.join(tmp, 'single.zip');
+  fs.writeFileSync(zipPath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  const r = await merge([zipPath], { out: path.join(tmp, 'out'), name: 'all', now: NOW });
+  assert.notStrictEqual(r.refused, true);
+  assert.strictEqual(r.status, 'written', r.reason);
+});
+
+test('an Export Artifacts ZIP with a user file named original.json is not refused', async () => {
+  const tmp = tmpRoot();
+  const zip = new JSZip();
+  zip.file('claude-takeout-artifacts-x/export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', artifacts: [] }));
+  zip.file('claude-takeout-artifacts-x/Page_ab/artifact.json', '{}');
+  zip.file('claude-takeout-artifacts-x/Page_ab/original.json', '{}');
+  const zipPath = path.join(tmp, 'claude-takeout-artifacts-x.zip');
+  fs.writeFileSync(zipPath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  const r = await merge([zipPath], { out: path.join(tmp, 'out'), name: 'all', now: NOW });
+  assert.notStrictEqual(r.refused, true);
+});
