@@ -487,6 +487,19 @@ for (const [label, routes] of [
   });
 }
 
+test('writeViewer builds a viewer from artifacts alone, with their listed count and since', async () => {
+  const popup = exportPopup({ routes: assetRoutes() });
+  const zip = zipStub();
+  popup.sandbox.__zip = zip;
+  popup.sandbox.__chats = [];
+  popup.sandbox.__opts = { artifacts: { views: [{ id: 'Abc', title: 'Guide', folder: 'artifacts/Guide_Abc' }], listed: 4, exported: '2026-03-01T00:00:00Z', since: '2026-02-01T00:00:00Z' }, firstPart: 2 };
+  assert.strictEqual(await vm.runInContext('writeViewer(__zip, __chats, __opts)', popup.sandbox), true);
+  const html = zip.written['viewer.html'];
+  for (const text of ['"title":"Guide"', '"links":[]', '"docFile":null', '"listed":4', '"artifactsSince":"2026-02-01T00:00:00Z"']) assert.ok(html.includes(text), text);
+  popup.sandbox.__opts = { artifacts: { views: [], listed: 0, exported: 'e', since: null } };
+  assert.strictEqual(await vm.runInContext('writeViewer(__zip, __chats, __opts)', popup.sandbox), false);
+});
+
 test('writeViewer with no chats, or no CTViewer, returns false and writes nothing', async () => {
   const popup = exportPopup({ routes: assetRoutes() });
   popup.sandbox.__zip = zipStub();
@@ -1448,9 +1461,9 @@ test('changedSince picks chats that are new or updated since the record', () => 
 });
 
 // Runs bulkExportZip in the sandbox with a chat list and chats, a real JSZip, and storage kept in memory.
-async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null, accountName = null }) {
+async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null, accountName = null, assets = false }) {
   const JSZip = require('../jszip.min.js');
-  const popup = exportPopup();
+  const popup = exportPopup(assets ? { routes: assetRoutes() } : {});
   const sb = popup.sandbox;
   const store = { ...stored };
   sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
@@ -3941,11 +3954,12 @@ test('Export Changes runs when only an artifact changed', async () => {
   const list = [listed('a', '2026-01-01T00:00:00Z')];
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
   const fetcher = publishedFetcher({ [U(2)]: livePage('Two', { 'index.html': '2' }) });
-  const first = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored, options: { changesOnly: true }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  const first = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored, options: { changesOnly: true }, setup: bulkWithArtifacts({ frames, fetcher }), assets: true });
   assert.ok(first.saved, first.status.textContent);
   const files = await zipFiles(first.zip);
   const manifest = JSON.parse(files['export-manifest.json']);
   assert.deepStrictEqual([manifest.chats.length, manifest.artifacts.items.map((e) => e.uuid)], [0, [U(2)]]);
+  assert.ok(files['viewer.html'], 'artifacts alone still get a viewer');
   assert.ok(files[`artifacts/${artFolder('Two', U(2))}/index.html`]);
   assert.deepStrictEqual(first.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: LIVE });
   assert.match(first.status.textContent, /Exported 0 changed conversations and 1 artifact to mega-zip/);

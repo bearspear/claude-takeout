@@ -414,7 +414,9 @@ async function viewerUploadText(name, content) {
 // viewer-files part number the chats may use, after the artifact step's parts }.
 async function writeViewer(zip, chats, opts = {}) {
   try {
-    if (!chats.length) return false;
+    const artifacts = opts && opts.artifacts && Array.isArray(opts.artifacts.views) && opts.artifacts.views.length ? opts.artifacts : null;
+    // No chats and no artifacts: nothing to show. Artifacts alone (an Export Changes run with no chat changes) still get a viewer.
+    if (!chats.length && !artifacts) return false;
     const assets = await Promise.all(CTViewer.VIEWER_ASSETS.map(async (asset) => {
       const response = await fetch(chrome.runtime.getURL(asset));
       if (!response.ok) throw new Error(`${asset}: HTTP ${response.status}`);
@@ -423,7 +425,7 @@ async function writeViewer(zip, chats, opts = {}) {
     const [template, logic, app, marked, katex, css, highlight] = assets;
     // Large upload text goes to viewer-files/, loaded when the upload is opened.
     const firstPart = opts && Number.isInteger(opts.firstPart) && opts.firstPart > 1 ? opts.firstPart : 1;
-    const { data, parts } = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString() }), { firstPart });
+    const { data, parts } = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString(), artifacts }), { firstPart });
     const html = CTViewer.assembleViewer({ template, css, marked, katex, highlight, logic, app, data, fileScripts: parts.length > 0 || firstPart > 1 });
     for (const part of parts) zip.file(`viewer-files/${part.name}`, part.body);
     zip.file('viewer.html', html);
@@ -5027,8 +5029,10 @@ async function bulkExportZip(options = {}) {
       // Every part the artifact step numbered, even one an error kept from being counted in partCount.
       ? { artifacts: { views: step.views, listed: artifactList.listed, exported: startedAt, since }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }
       : {};
-    const viewerWritten = exported > 0 && await writeViewer(megaZip, viewerChats, viewerOpts);
-    const viewerBuilt = exported === 0 || viewerWritten;
+    // Chats or artifacts to show: an Export Changes run where only artifacts changed still gets a viewer.
+    const viewerWanted = exported > 0 || !!(viewerOpts.artifacts && viewerOpts.artifacts.views.length);
+    const viewerWritten = viewerWanted && await writeViewer(megaZip, viewerChats, viewerOpts);
+    const viewerBuilt = !viewerWanted || viewerWritten;
     viewerChats.length = 0;  // viewer.html holds them now, and compressing needs the memory
     const viewerNote = viewerBuilt ? '' : ' viewer.html could not be built.';
 
