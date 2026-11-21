@@ -417,7 +417,7 @@ function publishedPagesOf(data) {
           // The reply has no title: the file's name stands in until claude.ai's page info gives one.
           const file = b.input.file_path.split('/').pop();
           page = {
-            uuid: reply.uuid, shortId: reply.shortId, ver: reply.ver, title: file.replace(/\.[^.]+$/, '') || file,
+            uuid: reply.uuid, shortId: reply.shortId, ver: reply.ver, title: file.replace(/\.[^.]+$/, '') || file, titleFromFile: true,
             url: reply.url, current: !reply.ver, publishes: [], sources: [{ as: '', path: b.input.file_path }],
           };
           byKey.set(key, page);

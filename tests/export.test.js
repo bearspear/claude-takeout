@@ -2247,6 +2247,7 @@ test('publishedPagesOf lists Artifact tool publishes, titled by file name, and s
   const pages = plain(core.publishedPagesOf(data));
   assert.deepStrictEqual(pages.map((p) => [p.uuid, p.shortId, p.ver, p.title, p.url, p.current, p.publishes.map((x) => x.toolUseId)]),
     [[PUB_U, short, 'v1', 'astral-body', url, false, ['a1']], [PUB_U, short, 'v2', 'astral-body', url, false, ['a2']]]);
+  assert.ok(pages.every((p) => p.titleFromFile === true));
   assert.deepStrictEqual(pages[0].sources, [{ as: '', path: '/home/claude/verb/astral-body.html' }]);
 });
 
@@ -2260,8 +2261,10 @@ test('an Artifact tool publish is saved like publish_files, the same as the writ
   const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': 'G1' } } } } });
   const { written, output, chat } = await runFolder(exportPopup(), data, { fetchPublished: fetcher.fetch });
   assert.deepStrictEqual(plain(output.published[0].versions.map((v) => [v.ver, v.same, v.writtenAs])), [['v1', true, 'guide.html']]);
-  assert.strictEqual(output.published[0].dir, `published/guide_${short}`);
-  const json = JSON.parse(fileText(written, `published/guide_${short}/published.json`));
+  // Named by claude.ai's title once the page info arrives, not by the file name it was first known by.
+  assert.strictEqual(output.published[0].dir, `published/Guide_${short}`);
+  assert.ok(!Object.keys(written).some((k) => k.startsWith(`published/guide_${short}`)));
+  const json = JSON.parse(fileText(written, `published/Guide_${short}/published.json`));
   assert.strictEqual(json.title, 'Guide');
   assert.deepStrictEqual(json.versions.v1.publishedIn, [{ chat: 'c1', messageUuid: 'm1', toolUseId: 'a1', same: true, writtenAs: 'guide.html' }]);
   const md = docText(written, 'full_chat.md');

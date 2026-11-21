@@ -3475,15 +3475,19 @@ async function savePublishedPages(folder, data, ctx = {}) {
   }
 
   // One record per page for the export: its folder is chosen once, as titles change.
-  const pageRecord = (first) => {
-    if (pages.has(first.uuid)) return pages.get(first.uuid);
-    const shortId = /^[A-Za-z0-9_-]{1,64}$/.test(first.shortId || '') ? first.shortId : '';
-    const name = `${safeFileTitle(first.title) || 'page'}_${shortId || first.uuid}`;
+  const pageDir = (title, id) => {
+    const name = `${safeFileTitle(title) || 'page'}_${id}`;
     let dir = name;
     for (let n = 2; dirs.has(dir.toLowerCase()); n++) dir = `${name}_${n}`;
     dirs.add(dir.toLowerCase());
+    return dir;
+  };
+  const pageRecord = (first) => {
+    if (pages.has(first.uuid)) return pages.get(first.uuid);
+    const shortId = /^[A-Za-z0-9_-]{1,64}$/.test(first.shortId || '') ? first.shortId : '';
     const rec = {
-      uuid: first.uuid, shortId, url: shortId ? `https://claude.ai/artifact/${shortId}` : '', title: String(first.title || ''), dir,
+      uuid: first.uuid, shortId, url: shortId ? `https://claude.ai/artifact/${shortId}` : '', title: String(first.title || ''),
+      dir: pageDir(first.title, shortId || first.uuid), titleFromFile: !!first.titleFromFile,
       history: [], infos: new Map(), versions: new Map(), folders: new Set(['published.json']),
     };
     pages.set(first.uuid, rec);
@@ -3528,6 +3532,13 @@ async function savePublishedPages(folder, data, ctx = {}) {
       if (!rec.infos.has(info.ver)) rec.infos.set(info.ver, info);
       if (info.history.length >= rec.history.length) rec.history = info.history;
       if (info.title) rec.title = info.title;
+      // A page named after its file (an Artifact tool publish) takes claude.ai's title for its folder too. Nothing
+      // is written before the first page info, so the folder can still be renamed.
+      if (info.title && rec.titleFromFile) {
+        rec.titleFromFile = false;
+        dirs.delete(rec.dir.toLowerCase());
+        rec.dir = pageDir(info.title, rec.shortId || rec.uuid);
+      }
     }
     return info;
   };
