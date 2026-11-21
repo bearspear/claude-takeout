@@ -3662,3 +3662,106 @@ test('artifactLinksOf: mentions, opens, list results, errors and bad ids do not 
   ]);
   assert.deepStrictEqual(plain(core.artifactLinksOf(data)), []);
 });
+
+// ---- runArtifactStep: the Export Artifacts loop, under a prefix, with reuse ----
+async function runStep(frames, pages, { prefix = 'artifacts/', reuse = null, thumbs = false } = {}) {
+  const popup = exportPopup();
+  const sb = popup.sandbox;
+  const fetcher = publishedFetcher(pages);
+  const root = zipStub();
+  sb.setTimeout = (f) => setTimeout(f, 0);
+  sb.__root = root;
+  sb.__fetch = fetcher.fetch;
+  sb.__reuse = reuse;
+  sb.__prefix = prefix;
+  sb.__arts = JSON.parse(JSON.stringify(frames));
+  const progress = [];
+  sb.__progress = (d, t) => progress.push([d, t]);
+  const out = await vm.runInContext(`runArtifactStep(__root, { prefix: __prefix, artifacts: __arts, full: false, listed: __arts.length, fetchPublished: __fetch, picturesAllowed: false, reuse: __reuse, parts: null, onProgress: __progress, run: false })`, sb);
+  return { out: JSON.parse(JSON.stringify({ ...out, collector: undefined })), collector: out.collector, written: root.written, fetcher, progress };
+}
+
+test('runArtifactStep under artifacts/ writes folders, artifact.json and views with root-relative paths', async () => {
+  const frames = [art(U(1), 'Guide')];
+  const { out, written, progress } = await runStep(frames, { [U(1)]: livePage('Guide', { 'index.html': '<h1>G</h1>' }) });
+  const f = artFolder('Guide', U(1));
+  assert.deepStrictEqual(Object.keys(written).sort(), [`artifacts/${f}/artifact.json`, `artifacts/${f}/index.html`]);
+  assert.strictEqual(out.views[0].folder, `artifacts/${f}`);
+  assert.strictEqual(out.views[0].start, 'index.html');
+  assert.strictEqual(out.rows[0].folder, f);
+  assert.deepStrictEqual(progress, [[1, 1]]);
+  assert.strictEqual(out.signedOut, false);
+});
+
+test('runArtifactStep keeps card pictures under the root viewer-files', async () => {
+  const frames = [art(U(1), 'Guide')];
+  const popup = exportPopup({ routes: [[/_thumb\.img/, () => ({ ok: true, status: 200, headers: { get: () => 'image/png' }, arrayBuffer: async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]).buffer })]] });
+  const sb = popup.sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: livePage('Guide', { 'index.html': 'x' }) });
+  const root = zipStub();
+  sb.setTimeout = (f) => setTimeout(f, 0);
+  sb.__root = root;
+  sb.__arts = frames;
+  sb.__fetch = async (m) => (m.action === 'artifactThumbUrl' ? { url: `https://${m.uuid}.frame.claudeusercontent.com/_f/V/_thumb.img?__frame_t=T` } : fetcher.fetch(m));
+  const out = await vm.runInContext(`runArtifactStep(__root, { prefix: 'artifacts/', artifacts: __arts, full: false, listed: 1, fetchPublished: __fetch, picturesAllowed: true, reuse: null, parts: null })`, sb);
+  const id = uuidToBase58(U(1));
+  assert.ok(root.written[`viewer-files/thumbs/${id}.png`]);
+  assert.strictEqual(out.views[0].thumb, `viewer-files/thumbs/${id}.png`);
+  assert.strictEqual(out.thumbs, 1);
+  assert.ok(JSON.parse(root.written[`artifacts/${artFolder('Guide', U(1))}/artifact.json`]).thumb);
+});
+
+test('reuse skips the fetch and records savedIn', async () => {
+  const frames = [art(U(1), 'Guide')];
+  const calls = [];
+  const reuse = (uuid, ver) => { calls.push([uuid, ver]); return { files: { 'index.html': 'Chat/artefacts/guide.html' }, texts: [['index.html', 'G1']], images: [] }; };
+  const { out, written, fetcher } = await runStep(frames, { [U(1)]: livePage('Guide', { 'index.html': 'live' }) }, { reuse });
+  assert.deepStrictEqual(calls, [[U(1), LIVE]]);
+  assert.strictEqual(fetcher.count('publishedPageFile'), 0);
+  assert.strictEqual(fetcher.count('publishedPageInfo'), 0);
+  const f = artFolder('Guide', U(1));
+  assert.deepStrictEqual(Object.keys(written), [`artifacts/${f}/artifact.json`]);
+  const meta = JSON.parse(written[`artifacts/${f}/artifact.json`]);
+  assert.deepStrictEqual(meta.savedIn, { 'index.html': 'Chat/artefacts/guide.html' });
+  assert.strictEqual(meta.start, 'index.html');
+  const v = out.views[0];
+  assert.strictEqual(v.startSaved, 'Chat/artefacts/guide.html');
+  assert.deepStrictEqual(v.files.map((x) => [x.path, x.savedAs]), [['index.html', 'Chat/artefacts/guide.html']]);
+  assert.strictEqual(v.reused, true);
+  assert.strictEqual(out.rows[0].startSaved, 'Chat/artefacts/guide.html');
+  assert.strictEqual(out.rows[0].fileCount, 1);
+  assert.strictEqual(out.entries[0].reused, true);
+  assert.ok(!v.notExported);
+});
+
+test('reuse is not used for a typed or Docs artifact, and a throwing reuse falls back to fetching', async () => {
+  const frames = [art(U(1), 'Typed', { typeSlug: DESIGN_TYPE, typeTitle: 'Design' }), art(U(2), 'Doc', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' }), art(U(3), 'Plain')];
+  const pages = { [U(1)]: livePage('Typed', { 'index.html': 't' }), [U(3)]: livePage('Plain', { 'index.html': 'p' }) };
+  const asked = [];
+  const reuse = (uuid) => { asked.push(uuid); throw new Error('boom'); };
+  const { out, written, fetcher } = await runStep(frames, pages, { reuse });
+  assert.deepStrictEqual(asked, [U(3)]);
+  assert.strictEqual(fetcher.count('publishedPageFile', U(3)), 1);
+  assert.strictEqual(fetcher.count('publishedPageFile', U(1)), 1);
+  assert.ok(written[`artifacts/${artFolder('Plain', U(3))}/index.html`]);
+  assert.ok(out.views.every((v) => !v.reused));
+});
+
+test('a 401 in the step stops only the step', async () => {
+  const frames = [art(U(1), 'A'), art(U(2), 'B')];
+  const pages = { [U(1)]: { error: { error: 'HTTP 401', status: 401 }, versions: {} }, [U(2)]: livePage('B', { 'index.html': 'b' }) };
+  const { out, collector } = await runStep(frames, pages);
+  assert.strictEqual(out.signedOut, true);
+  assert.strictEqual(out.views.length, 2);
+  assert.ok(out.views.every((v) => v.notExported));
+  assert.strictEqual(collector.warnings.length, 1);
+});
+
+test('the index links a reused start file from where the index lives', () => {
+  const sb = exportPopup().sandbox;
+  const row = { title: 'Guide', typeTitle: 'Page', sourceSurface: 'chat', rel: 'mine', folder: 'Guide_x', startSaved: 'My Chat/artefacts/guide.html', reused: true, url: '', note: '', needsRuntime: false, fileCount: 1, missingCount: 0 };
+  sb.__rows = [row];
+  assert.ok(vm.runInContext("artifactsIndexMd(__rows, { base: 'artifacts/' })", sb).includes('(../My%20Chat/artefacts/guide.html)'));
+  assert.ok(vm.runInContext("artifactsIndexHtml(__rows, { base: 'artifacts/' })", sb).includes('href="../My%20Chat/artefacts/guide.html"'));
+  assert.ok(vm.runInContext("artifactsIndexMd(__rows)", sb).includes('(My%20Chat/artefacts/guide.html)'));
+});

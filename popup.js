@@ -5037,6 +5037,8 @@ function artifactView(o) {
     startMissing: !!o.start && !tooLarge && !!previewKind(o.start) && !o.inPayload, missingCount: missing.size,
     files: (o.files || []).filter((f) => !missing.has(f.path)).map((f) => ({ path: f.path, savedAs: f.savedAs, kind: artifactFileKind(f.path), verified: f.verified !== false })),
     needsRuntime: !!o.needsRuntime, notExported: !!o.notExported, note: o.note || '', url: o.url, thumb: null,
+    // Files the chats saved: startSaved and each file's savedAs are then root-relative paths, not folder-relative.
+    ...(o.reused ? { reused: true } : {}),
   };
 }
 
@@ -5145,10 +5147,14 @@ async function writeArtifactsViewer(root, views, opts = {}) {
 }
 
 // Save one listed artifact (from artifactsFromList) into root at its own folder. ctx: { fetchPublished, state
-// (publishedSignedOut: one 401 stops fetching the rest), warn(filename, message, note), usedFolders (lowercased) }.
+// (publishedSignedOut: one 401 stops fetching the rest), warn(filename, message, note), usedFolders (lowercased,
+// relative to prefix), prefix ('' or 'artifacts/': where the folders go in root), reuse(uuid, ver) -> null or what
+// the chats already saved: { files: { <published path>: <root-relative file> }, texts, images }, so nothing is
+// fetched or written twice (only plain, non-Docs artifacts are asked) }.
 // Returns { row (for the indexes), entry (for export-manifest.json) }.
 async function saveArtifact(root, a, ctx) {
   const { fetchPublished, state, warn, usedFolders } = ctx;
+  const prefix = ctx.prefix || '';
   const uuid = String(a.slug).toLowerCase();
   const shortId = uuidToBase58(uuid);
   const url = `https://claude.ai/artifact/${shortId || uuid}`;
@@ -5171,6 +5177,7 @@ async function saveArtifact(root, a, ctx) {
   let startSaved = null;
   let got = null;
   let failed = false;
+  let reusedInfo = null;
   const signOut = () => {
     if (state.publishedSignedOut) return;
     state.publishedSignedOut = true;
@@ -5179,7 +5186,34 @@ async function saveArtifact(root, a, ctx) {
   };
   const notExported = (why) => { meta.incomplete = true; failed = true; notes.push(`not exported: ${why}`); };
 
-  if (isClaudeDocsArtifact(a)) {
+  // What the chats saved of this version, when the caller knows: no fetch. A bad answer or a throw means fetch.
+  let reused = null;
+  if (typeof ctx.reuse === 'function' && !isClaudeDocsArtifact(a) && meta.ver && typeSlug === '') {
+    try {
+      const r = ctx.reuse(uuid, meta.ver);
+      const paths = r && r.files && typeof r.files === 'object' ? Object.keys(r.files) : [];
+      if (paths.length && paths.every((k) => typeof r.files[k] === 'string' && r.files[k])) {
+        reused = { files: { ...r.files }, texts: Array.isArray(r.texts) ? r.texts : [], images: Array.isArray(r.images) ? r.images : [] };
+      }
+    } catch (e) { reused = null; }
+  }
+
+  if (reused) {
+    const paths = Object.keys(reused.files);
+    const first = publishedStart(paths.map((path) => ({ path })));
+    const startPath = first ? first.path : null;
+    const startText = reused.texts.find((t) => t[0] === startPath);
+    const startImage = reused.images.find((t) => t[0] === startPath);
+    meta.savedIn = reused.files;
+    meta.needsRuntime = publishedNeedsRuntime(startText ? startText[1] : null);
+    notes.push('files saved with the chats');
+    reusedInfo = {
+      start: startPath, startSaved: startPath ? reused.files[startPath] : null,
+      startSize: startText ? new TextEncoder().encode(startText[1]).length : startImage ? Math.floor(String(startImage[1]).replace(/^[^,]*,/, '').length * 3 / 4) : null,
+      files: paths.map((path) => ({ path, savedAs: reused.files[path] })),
+      payload: reused.texts.length || reused.images.length ? { texts: reused.texts, images: reused.images } : null,
+    };
+  } else if (isClaudeDocsArtifact(a)) {
     notes.push(DOCS_ARTIFACT_NOTE);
   } else if (!meta.ver) {
     notes.push('no published version');
@@ -5205,7 +5239,7 @@ async function saveArtifact(root, a, ctx) {
         if (info.rejected.length) parts.push(`${artifactCount(info.rejected.length, 'file')} with unsafe paths not fetched`);
         warn(name, `Artifact "${name}": file names changed to stay inside its folder: ${parts.join('; ')}.`, openNote);
       }
-      got = await fetchPublishedFiles({ target: root, prefix: `${folder}/`, uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished, collect: true });
+      got = await fetchPublishedFiles({ target: root, prefix: `${prefix}${folder}/`, uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished, collect: true });
       meta.missing = got.missing;
       meta.incomplete = got.incomplete;
       markUnverified(files, got.unverified);
@@ -5228,25 +5262,29 @@ async function saveArtifact(root, a, ctx) {
     failed = true;
   }
   meta.note = [...(shared ? ['shared with you'] : []), ...notes].join('; ');
-  const start = got ? got.start : null;
+  const start = reusedInfo ? reusedInfo.start : got ? got.start : null;
+  if (reusedInfo) startSaved = reusedInfo.startSaved;
   meta.start = start;
   meta.public = a.public === true;
   try {
-    root.file(`${folder}/artifact.json`, JSON.stringify(meta, null, 2));
+    root.file(`${prefix}${folder}/artifact.json`, JSON.stringify(meta, null, 2));
   } catch (e) { /* the row and errors.txt still say what happened */ }
   const view = artifactView({
     uuid, shortId, url, title, typeSlug, typeTitle, shared, public: a.public === true, docs: isClaudeDocsArtifact(a),
-    createdAt: meta.createdAt, updatedAt: meta.updatedAt, folder, files: meta.files, missing: meta.missing,
-    start, startSaved, startSize: got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
-    inPayload: !!(got && !failed && start && (got.texts.has(start) || got.images.has(start))),
+    createdAt: meta.createdAt, updatedAt: meta.updatedAt, folder: `${prefix}${folder}`, files: reusedInfo ? reusedInfo.files : meta.files, missing: meta.missing,
+    start, startSaved, startSize: reusedInfo ? reusedInfo.startSize : got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
+    inPayload: reusedInfo ? !!(start && reusedInfo.payload && (reusedInfo.payload.texts.some((t) => t[0] === start) || reusedInfo.payload.images.some((t) => t[0] === start)))
+      : !!(got && !failed && start && (got.texts.has(start) || got.images.has(start))),
+    reused: !!reusedInfo,
   });
   return {
     row: {
       title, typeTitle, sourceSurface: meta.sourceSurface, rel, folder, startSaved, url, note: notes.join('; '),
-      needsRuntime: meta.needsRuntime, fileCount: meta.files.length - meta.missing.length, missingCount: meta.missing.length,
+      needsRuntime: meta.needsRuntime, fileCount: reusedInfo ? reusedInfo.files.length : meta.files.length - meta.missing.length, missingCount: meta.missing.length,
+      ...(reusedInfo ? { reused: true } : {}),
     },
-    entry: { uuid, title, folder, ver: meta.ver },
-    meta, view, payload: got && !failed ? artifactPayload(got) : null,
+    entry: { uuid, title, folder, ver: meta.ver, ...(reusedInfo ? { reused: true } : {}) },
+    meta, view, payload: reusedInfo ? reusedInfo.payload : got && !failed ? artifactPayload(got) : null,
   };
 }
 
@@ -5268,16 +5306,17 @@ function unexpectedArtifactRow(root, a, ctx) {
     note: [...(isSharedArtifact(rel) ? ['shared with you'] : []), ARTIFACT_UNEXPECTED_NOTE].join('; '),
     start: null, public: a.public === true,
   };
-  try { root.file(`${folder}/artifact.json`, JSON.stringify(meta, null, 2)); } catch (e) { /* best effort */ }
+  const prefix = ctx.prefix || '';
+  try { root.file(`${prefix}${folder}/artifact.json`, JSON.stringify(meta, null, 2)); } catch (e) { /* best effort */ }
   let view;
   try {
     view = artifactView({
       uuid, shortId, url, title, typeSlug: artifactText(a.typeSlug), typeTitle: meta.typeTitle, shared: isSharedArtifact(rel), public: a.public === true,
-      docs: isClaudeDocsArtifact(a), createdAt: meta.createdAt, updatedAt: meta.updatedAt, folder, files: [], missing: [], start: null,
+      docs: isClaudeDocsArtifact(a), createdAt: meta.createdAt, updatedAt: meta.updatedAt, folder: `${prefix}${folder}`, files: [], missing: [], start: null,
       startSaved: null, startSize: null, needsRuntime: false, notExported: true, note: ARTIFACT_UNEXPECTED_NOTE,
     });
   } catch (e) {
-    view = { id: shortId || uuid, title, kind: 'Page', typed: false, docs: false, shared: false, public: false, createdAt: '', updatedAt: '', folder, start: null,
+    view = { id: shortId || uuid, title, kind: 'Page', typed: false, docs: false, shared: false, public: false, createdAt: '', updatedAt: '', folder: `${prefix}${folder}`, start: null,
       startSaved: null, startKind: null, startSize: null, tooLarge: false, startMissing: false, missingCount: 0, files: [], needsRuntime: false, notExported: true, note: ARTIFACT_UNEXPECTED_NOTE, url, thumb: null };
   }
   return {
@@ -5302,9 +5341,12 @@ const artifactUrl = (r) => {
 // The local link of an artifact's start file. A shared artifact's only when the viewer would open its type
 // (openableName, export-core.js): anything else, HTML, SVG or XML among them, opened from disk could run
 // someone else's code with network access and the shared file:// storage.
-const artifactLocal = (r) => {
+// base: the folder the index lives in, relative to the export root ('' or 'artifacts/'); a start file the chats
+// saved is a root-relative path, so it is reached from there.
+const artifactLocal = (r, base = '') => {
   if (!r.startSaved) return null;
   if (isSharedArtifact(r.rel) && !openableName(r.startSaved)) return null;
+  if (r.reused) return encodePath(`${'../'.repeat(String(base).split('/').filter(Boolean).length)}${r.startSaved}`);
   return encodePath(`${r.folder}/${r.startSaved}`);
 };
 
@@ -5314,7 +5356,7 @@ const ARTIFACT_THUMB_PERMISSION_STATUS = 'Card pictures need the web images perm
 function artifactThumbsLine(thumbs, listed, needPermission) {
   return `${Number(thumbs) || 0} of ${Number(listed) || 0}${needPermission ? ' (needs the web images permission: Settings, Save web images and artifact card pictures)' : ''}`;
 }
-function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, thumbsNeedPermission = false } = {}) {
+function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, thumbsNeedPermission = false, base = '' } = {}) {
   const cell = (t) => mdLinkText(String(t || '')).replace(/[<>|*_`#]/g, '\\$&');
   const lines = [
     '# Claude Takeout - Artifacts',
@@ -5327,7 +5369,7 @@ function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().
   if (warnings) lines.push(`**Issues:** ${artifactCount(warnings, 'warning')} (see errors.txt)`);
   lines.push('', '| # | Artifact | Kind | Source | Files | Notes |', '|---|----------|------|--------|-------|-------|');
   sortArtifactRows(rows).forEach((r, i) => {
-    const local = artifactLocal(r);
+    const local = artifactLocal(r, base);
     const remote = artifactUrl(r);
     const name = cell(r.title || 'Untitled');
     const link = local ? `[${name}](${local.replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29'))})` : name;
@@ -5338,10 +5380,10 @@ function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().
 
 // index.html: a static page, no scripts; every value is escaped and the only links are each artifact's start
 // file in the export, its claude.ai page and, when it was built (opts.viewer), viewer.html. opts as artifactsIndexMd.
-function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, viewer = false, thumbsNeedPermission = false } = {}) {
+function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, viewer = false, thumbsNeedPermission = false, base = '' } = {}) {
   const esc = (t) => escapeHtmlText(String(t == null ? '' : t)).replace(/'/g, '&#39;');
   const body = sortArtifactRows(rows).map((r) => {
-    const local = artifactLocal(r);
+    const local = artifactLocal(r, base);
     const remote = artifactUrl(r);
     const name = esc(r.title || 'Untitled');
     return `<tr><td>${local ? `<a href="${esc(local)}">${name}</a>` : name}${remote ? ` <a class="remote" href="${esc(remote)}" rel="noopener noreferrer">claude.ai</a>` : ''}</td>`
@@ -5387,6 +5429,82 @@ ${body}
 </body>
 </html>
 `;
+}
+
+// The Export Artifacts loop: saves every listed artifact (artifactsFromList) under prefix ('' or 'artifacts/') in
+// root and returns what the indexes, manifest and viewer are built from. Folder, artifact.json and view paths carry
+// the prefix, so a viewer at the root finds them; card pictures and preview parts stay in the root's viewer-files/.
+// opts: { prefix, artifacts, full, listed, fetchPublished, picturesAllowed, reuse(uuid, ver) (see saveArtifact; null
+// for none), parts (CTViewer.artifactViewParts or null), onProgress(done, total), run (truthy on disk: flush per
+// artifact), collector (optional; otherwise one labelled 'Export Artifacts') }. Never throws.
+// Returns { views, rows, entries, thumbs, collector, writeFailures, partCount, signedOut }; rows and entries name
+// folders relative to prefix.
+async function runArtifactStep(root, opts = {}) {
+  const { prefix = '', artifacts = [], full = false, listed = artifacts.length, fetchPublished, picturesAllowed = false, reuse = null, parts = null, onProgress = null, run = false } = opts;
+  const collector = opts.collector || new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
+  const warn = (filename, message, note = null) => collector.addWarning('artifact_export', filename, message, { note });
+  const state = {};
+  const ctx = { fetchPublished, state, warn, usedFolders: new Set(ARTIFACT_ROOT_NAMES), prefix, reuse };
+  const rows = [];
+  const entries = [];
+  const views = [];
+  const writeFailures = [];
+  let thumbs = 0;
+  let partCount = 0;
+  const total = artifacts.length;
+  try {
+    if (full) {
+      warn('artifact list', `claude.ai listed ${listed} artifacts, a number at which its list may be cut short, so this export may be incomplete.`,
+        'Compare index.md with claude.ai/artifacts.');
+    }
+    const thumbState = {};
+    const writeParts = (list) => { for (const p of list) root.file(`viewer-files/${p.name}`, p.body); };
+    for (let i = 0; i < total; i++) {
+      let saved;
+      try {
+        saved = await saveArtifact(root, artifacts[i], ctx);
+      } catch (e) {
+        saved = unexpectedArtifactRow(root, artifacts[i], ctx);
+      }
+      rows.push(saved.row);
+      entries.push(saved.entry);
+      let view = { ...saved.view, thumb: null, part: null, key: null };
+      // The card picture and the preview part are extras: a failure leaves them out, with no warning.
+      try {
+        if (picturesAllowed && !state.publishedSignedOut) {
+          const uuid = String(artifacts[i].slug).toLowerCase();
+          const thumb = await saveArtifactThumb(root, uuid, view.id, fetchPublished, thumbState);
+          if (thumb) {
+            view.thumb = thumb;
+            thumbs++;
+            root.file(`${view.folder}/artifact.json`, JSON.stringify({ ...saved.meta, thumb }, null, 2));
+          }
+        }
+      } catch (e) { /* no picture */ }
+      try {
+        if (parts) {
+          view = parts.add(view, saved.payload);
+          writeParts(parts.drain());
+        }
+      } catch (e) { view = { ...view, part: null, key: null }; }
+      // A start file the preview would show that ended up in no part.
+      if (view.part == null && view.start && !view.tooLarge && previewKind(view.start)) view = { ...view, startMissing: true };
+      views.push(view);
+      // On disk, each artifact is written before the next, which keeps memory down.
+      if (run) writeFailures.push(...await root.flush());
+      if (typeof onProgress === 'function') onProgress(i + 1, total);
+      if (i + 1 < total) await new Promise((r) => setTimeout(r, 200));
+    }
+    try {
+      if (parts) {
+        writeParts(parts.flush());
+        partCount = parts.count;
+      }
+    } catch (e) { /* the parts written so far stay */ }
+  } catch (e) {
+    console.error('Artifact step stopped early:', e);
+  }
+  return { views, rows, entries, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true };
 }
 
 // Export Artifacts. options.directory: a folder from showDirectoryPicker; the export goes into a new folder
@@ -5435,17 +5553,6 @@ async function exportArtifacts(options = {}) {
   try {
     const root = run ? createDiskFolder(run.handle) : new JSZip();
     const collector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
-    const warn = (filename, message, note = null) => collector.addWarning('artifact_export', filename, message, { note });
-    if (full) {
-      warn('artifact list', `claude.ai listed ${listed} artifacts, a number at which its list may be cut short, so this export may be incomplete.`,
-        'Compare index.md with claude.ai/artifacts.');
-    }
-    const ctx = { fetchPublished, state: {}, warn, usedFolders: new Set(ARTIFACT_ROOT_NAMES) };
-    const rows = [];
-    const entries = [];
-    const views = [];
-    const writeFailures = [];
-    let thumbs = 0;
     // Card pictures only with the optional https permission (asked in a ZIP export's click: options.ask); without
     // it, tiles, and the status line and indexes say the permission is needed.
     let picturesAllowed = false;
@@ -5453,55 +5560,14 @@ async function exportArtifacts(options = {}) {
       if (options && options.ask) await options.ask;
       picturesAllowed = await webImagesAllowed();
     } catch (e) { picturesAllowed = false; }
-    const thumbState = {};
     let parts = null;
     try {
       parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
     } catch (e) { /* no previews; the export goes on */ }
-    const writeParts = (list) => { for (const p of list) root.file(`viewer-files/${p.name}`, p.body); };
-    for (let i = 0; i < total; i++) {
-      let saved;
-      try {
-        saved = await saveArtifact(root, artifacts[i], ctx);
-      } catch (e) {
-        saved = unexpectedArtifactRow(root, artifacts[i], ctx);
-      }
-      rows.push(saved.row);
-      entries.push(saved.entry);
-      let view = { ...saved.view, thumb: null, part: null, key: null };
-      // The card picture and the preview part are extras: a failure leaves them out, with no warning.
-      try {
-        if (picturesAllowed && !ctx.state.publishedSignedOut) {
-          const uuid = String(artifacts[i].slug).toLowerCase();
-          const thumb = await saveArtifactThumb(root, uuid, view.id, fetchPublished, thumbState);
-          if (thumb) {
-            view.thumb = thumb;
-            thumbs++;
-            root.file(`${view.folder}/artifact.json`, JSON.stringify({ ...saved.meta, thumb }, null, 2));
-          }
-        }
-      } catch (e) { /* no picture */ }
-      try {
-        if (parts) {
-          view = parts.add(view, saved.payload);
-          writeParts(parts.drain());
-        }
-      } catch (e) { view = { ...view, part: null, key: null }; }
-      // A start file the preview would show that ended up in no part.
-      if (view.part == null && view.start && !view.tooLarge && previewKind(view.start)) view = { ...view, startMissing: true };
-      views.push(view);
-      // On disk, each artifact is written before the next, which keeps memory down.
-      if (run) writeFailures.push(...await root.flush());
-      showProgress(i + 1, total, `${i + 1} / ${total}`);
-      if (i + 1 < total) await new Promise((r) => setTimeout(r, 200));
-    }
-    let partCount = 0;
-    try {
-      if (parts) {
-        writeParts(parts.flush());
-        partCount = parts.count;
-      }
-    } catch (e) { /* the parts written so far stay */ }
+    const { views, rows, entries, thumbs, writeFailures, partCount } = await runArtifactStep(root, {
+      prefix: '', artifacts, full, listed, fetchPublished, picturesAllowed, reuse: () => null, parts, collector, run,
+      onProgress: (done, count) => showProgress(done, count, `${done} / ${count}`),
+    });
     let viewerBuilt = false;
     try {
       viewerBuilt = await writeArtifactsViewer(root, views, { exported: startedAt, listed, fileScripts: partCount > 0 }) === true;
