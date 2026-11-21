@@ -141,10 +141,13 @@ const withUploads = () => {
 // A chat that writes a Claude Docs document, as claude.ai's Docs tools do: batch creates it with
 // pending sections, update fills them, create adds a comment. turns: [[blocks], ...] of extra content.
 const DOC_URL = 'https://claude.ai/artifact/TESTDOC123';
-function docTools(prefix = 'mcp__Claude_Docs__', { node = 'node-1', title = 'Lorber Notes', idPrefix = '' } = {}) {
-  const batchResult = JSON.stringify({ verdict: 'allow', acks: [{ verdict: 'allow', minted: 'm1' }, { verdict: 'allow', id: node, rev: 1, session: 'sess',
-    xml: "<doc><paragraph id='sess.0' heading='1'>Lorber …</paragraph><paragraph id='.5'><date id='.6' value='2026-11-08'/></paragraph><pending id='.10' intent='a'/><pending id='.11' intent='b'/></doc>" }],
-    frame: { url: DOC_URL } }) + '\n\nThe doc is NOT open for the user yet. Open it NOW.';
+const DOC_U = 'd0c00000-1111-4222-8333-444455556666';
+const OTHER_U = '0f0f0000-1111-4222-8333-444455556666';
+function docTools(prefix = 'mcp__Claude_Docs__', { node = 'node-1', title = 'Lorber Notes', idPrefix = '', realShape = false, frameUrl = DOC_URL } = {}) {
+  const acks = [{ verdict: 'allow', minted: 'm1' }, { verdict: 'allow', id: node, rev: 1, session: 'sess',
+    xml: "<doc><paragraph id='sess.0' heading='1'>Lorber …</paragraph><paragraph id='.5'><date id='.6' value='2026-11-08'/></paragraph><pending id='.10' intent='a'/><pending id='.11' intent='b'/></doc>" }];
+  const batchResult = JSON.stringify(realShape ? { verdict: 'allow', acks, lids: {}, created: { verdict: 'allow', minted: DOC_U, bound: true }, frame: { slug: OTHER_U } }
+    : { verdict: 'allow', acks, frame: { url: frameUrl } }) + '\n\nThe doc is NOT open for the user yet. Open it NOW.';
   const docBlocks = { asof: { type: 'date', value: '2026-11-08' }, me: { type: 'mention', user: 'me' }, s1: { type: 'pending', intent: 'first' }, s2: { type: 'pending', intent: 'second' } };
   const batch = { type: 'tool_use', id: idPrefix + 'd1', name: prefix + 'batch', input: { container: { kind: 'project', create: { name: title, doc: { blocks: docBlocks,
     markdown: '# ' + title + '\n\nA subtitle\n\n<?claude block asof?> · <?claude block me?>\n\n<?claude block s1?>\n\n<?claude block s2?>' } } }, batch: [] } };
@@ -300,4 +303,4 @@ async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}
   return { store, saved, zip, files, raw, views, status: sb.document.getElementById('status'), fetcher, listCalls, thumbCalls, frameReqs, consoleCalls, permissionRequests, popup };
 }
 
-module.exports = { runArtifacts, assetRoutes, DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };
+module.exports = { runArtifacts, assetRoutes, DOC_URL, DOC_U, OTHER_U, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };

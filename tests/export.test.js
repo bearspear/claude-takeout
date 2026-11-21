@@ -6,7 +6,7 @@ const os = require('os');
 const { execFileSync } = require('child_process');
 const path = require('path');
 const vm = require('vm');
-const { DOC_URL, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher } = require('./helpers');
+const { DOC_URL, DOC_U, OTHER_U, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher } = require('./helpers');
 
 const { fn, sandbox } = loadPopup({
   fetch: async (url) => {
@@ -3623,4 +3623,42 @@ test('viewer.html stays small for 1000 artifacts', async () => {
   const { files } = await runArtifacts({ frames: many });
   assert.strictEqual(artifactsViewerData(files['viewer.html']).artifacts.length, 1000);
   assert.ok(Buffer.byteLength(files['viewer.html']) < 1.5 * 1024 * 1024, String(Buffer.byteLength(files['viewer.html'])));
+});
+
+// ---- artifactLinksOf: which artifacts a chat made, published or edited ----
+test('artifactLinksOf: a Docs batch made the artifact named by created.minted, with its doc key', () => {
+  const t = docTools(undefined, { realShape: true });
+  const data = oneMessage([t.batch, t.batchResult]);
+  assert.deepStrictEqual(plain(core.artifactLinksOf(data)), [{ uuid: DOC_U, messageUuid: data.chat_messages[0].uuid, how: 'made', docKey: 'doc:node-1' }]);
+});
+test('artifactLinksOf: without created.minted, frame.url gives the uuid', () => {
+  const t = docTools(undefined, { frameUrl: `https://claude.ai/artifact/${core.uuidToBase58(DOC_U)}` });
+  const data = oneMessage([t.batch, t.batchResult]);
+  assert.deepStrictEqual(plain(core.artifactLinksOf(data)), [{ uuid: DOC_U, messageUuid: data.chat_messages[0].uuid, how: 'made', docKey: 'doc:node-1' }]);
+});
+test('artifactLinksOf: publishes link as published, Docs container ids and edit_version as edited', () => {
+  const t = docTools();
+  const url2 = `https://claude.ai/artifact/${core.uuidToBase58(PUB_U2)}`;
+  const data = oneMessage([
+    use('p1', PUB, { files: [{ as: 'index.html', path: '/home/claude/a.html' }] }), pubResult('p1', { slug: PUB_U, version: 'v1', title: 'T' }),
+    ...artPublish('a1', '/home/claude/b.html', url2, 'v1'),
+    { ...t.update('u1', 's1', 'x'), input: { ...t.update('u1', 's1', 'x').input, container: { kind: 'project', id: DOC_U } } },
+    use('e1', 'mcp__claude-artifacts__edit_version', { slug: PUB_U3, base_version: 'v1', edits: [], label: 'x' }), pubResult('e1', 'ok'),
+  ]);
+  const links = plain(core.artifactLinksOf(data));
+  assert.deepStrictEqual(links.map((l) => [l.uuid, l.how]), [[PUB_U, 'published'], [PUB_U2, 'published'], [DOC_U, 'edited'], [PUB_U3, 'edited']]);
+  assert.ok(links.every((l) => l.docKey === null));
+});
+test('artifactLinksOf: mentions, opens, list results, errors and bad ids do not link', () => {
+  const t = docTools();
+  const short = core.uuidToBase58(PUB_U);
+  const data = oneMessage([
+    use('o1', ART, { action: 'open', url: `https://claude.ai/artifact/${short}` }), pubResult('o1', `Opened the Artifact at https://claude.ai/artifact/${short}`),
+    use('l1', 'mcp__claude-artifacts__list_artifacts', {}), pubResult('l1', `[{"slug":"${PUB_U}"}]`),
+    { type: 'text', text: `see ${PUB_U}` },
+    use('e1', 'mcp__claude-artifacts__edit_version', { slug: PUB_U3, base_version: 'v1', edits: [], label: 'x' }), pubResult('e1', 'failed', true),
+    t.update('u1', 's1', 'x'),
+    { ...t.update('u2', 's1', 'x'), input: { ...t.update('u2', 's1', 'x').input, container: { kind: 'project', id: DOC_U } } }, pubResult('u2', 'bad', true),
+  ]);
+  assert.deepStrictEqual(plain(core.artifactLinksOf(data)), []);
 });
