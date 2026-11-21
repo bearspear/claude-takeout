@@ -153,4 +153,29 @@ async function zipEntryNames(zipPath, loaded = null) {
   return Object.values(zip.files).map(entry => entry.unsafeOriginalName || entry.name);
 }
 
-module.exports = { loadZip, extractZip, zipFreeSpaceOk, zipEntryNames, partialOf, MAX_ZIP_BYTES };
+// True when a ZIP is an archive with chats whose root shows artifacts: an artifacts/ folder or an
+// export-manifest.json with an artifacts key. The root is the top level, or the one wrapping folder when it
+// holds index.md or export-manifest.json (the same root hasArtifacts checks on disk). A chat's own artifacts/
+// folder doesn't count, nor does an Export Artifacts export (no chats). Reads the manifest entry only.
+async function zipHasArtifacts(zipPath, loaded = null) {
+  const { zip } = loaded || await loadZip(zipPath);
+  const names = await zipEntryNames(zipPath, loaded || { zip });
+  if (!names.some(n => /(^|\/)original\.json$/.test(n))) return false;
+  const roots = [''];
+  for (const n of names) {
+    const m = /^([^/]+\/)(index\.md|export-manifest\.json)$/.exec(n);
+    if (m && !roots.includes(m[1])) roots.push(m[1]);
+  }
+  if (names.some(n => roots.some(r => n.startsWith(r + 'artifacts/')))) return true;
+  for (const entry of Object.values(zip.files)) {
+    const name = entry.unsafeOriginalName || entry.name;
+    if (entry.dir || !roots.some(r => name === r + 'export-manifest.json')) continue;
+    try {
+      const m = JSON.parse((await entry.async('string')).replace(/^\uFEFF/, ''));
+      if (m && typeof m === 'object' && Object.prototype.hasOwnProperty.call(m, 'artifacts')) return true;
+    } catch (e) { /* not a manifest we can read */ }
+  }
+  return false;
+}
+
+module.exports = { zipHasArtifacts, loadZip, extractZip, zipFreeSpaceOk, zipEntryNames, partialOf, MAX_ZIP_BYTES };

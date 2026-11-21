@@ -210,3 +210,63 @@ test('merging two archives that share a page keeps one page with both versions',
   assert.deepStrictEqual(hrefs, { a: ['published/Guide_2_ShortA/v1/index.html'], b: ['Chat_b/artefacts/guide.html', 'published/Guide_2_ShortA/v2/index.html'] });
   assert.deepStrictEqual([hashTree(base), hashTree(changes)], before, 'sources unchanged');
 });
+
+test('merge_archives refuses when any source has artifacts, before writing', async () => {
+  const tmp = tmpRoot();
+  const a = path.join(tmp, 'a');
+  const b = path.join(tmp, 'b');
+  mega(a, '2026-10-01T00:00:00Z', { Chat_a: chatJson('a', '2026-10-01T00:00:00Z') });
+  mega(b, '2026-10-02T00:00:00Z', { Chat_b: chatJson('b', '2026-10-02T00:00:00Z') });
+  put(b, 'export-manifest.json', JSON.stringify({ format: 1, exported_at: '2026-10-02T00:00:00Z', kind: 'full', chats: [], artifacts: { listed: 1, thumbs: 0, items: [] } }));
+  const out = path.join(tmp, 'out');
+  const r = await merge([a, b], { out, name: 'all', now: NOW });
+  assert.strictEqual(r.status, 'failed');
+  assert.strictEqual(r.refused, true);
+  assert.ok(r.reason.includes(b), r.reason);
+  assert.match(r.reason, /merge_archives doesn't support those yet/);
+  assert.ok(!fs.existsSync(out), 'nothing was created under --out');
+  const res = spawnSync(process.execPath, [TOOL, a, b, '--out', out], { encoding: 'utf8' });
+  assert.strictEqual(res.status, 1);
+  assert.match(res.stderr, /merge_archives doesn't support those yet/);
+});
+
+test('a ZIP source with artifacts/ entries is refused before extraction', async () => {
+  const tmp = tmpRoot();
+  const zip = new JSZip();
+  zip.file('claude-takeout-z/index.md', '# all');
+  zip.file('claude-takeout-z/Chat_y/original.json', chatJson('y', '2026-10-02T00:00:00Z'));
+  zip.file('claude-takeout-z/artifacts/x/artifact.json', '{}');
+  const zipPath = path.join(tmp, 'claude-takeout-z.zip');
+  fs.writeFileSync(zipPath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  const out = path.join(tmp, 'out');
+  const r = await merge([zipPath], { out, name: 'all', now: NOW });
+  assert.strictEqual(r.status, 'failed');
+  assert.strictEqual(r.refused, true);
+  assert.ok(!fs.existsSync(out), 'nothing was extracted or created');
+});
+
+test('a chat folder with its own artifacts/ in a ZIP is not refused', async () => {
+  const tmp = tmpRoot();
+  const zip = new JSZip();
+  zip.file('claude-takeout-z/index.md', '# all');
+  zip.file('claude-takeout-z/Chat_y/original.json', chatJson('y', '2026-10-02T00:00:00Z'));
+  zip.file('claude-takeout-z/Chat_y/artifacts/x.txt', 'x');
+  const zipPath = path.join(tmp, 'claude-takeout-z.zip');
+  fs.writeFileSync(zipPath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  const r = await merge([zipPath], { out: path.join(tmp, 'out'), name: 'all', now: NOW });
+  assert.notStrictEqual(r.refused, true);
+  assert.strictEqual(r.status, 'written', r.reason);
+});
+
+test('an Export Artifacts ZIP is not refused as a combined archive; it holds no chats', async () => {
+  const tmp = tmpRoot();
+  const zip = new JSZip();
+  zip.file('claude-takeout-artifacts-x/export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', artifacts: [] }));
+  zip.file('claude-takeout-artifacts-x/Page_ab/artifact.json', '{}');
+  const zipPath = path.join(tmp, 'claude-takeout-artifacts-x.zip');
+  fs.writeFileSync(zipPath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  const r = await merge([zipPath], { out: path.join(tmp, 'out'), name: 'all', now: NOW });
+  assert.notStrictEqual(r.refused, true);
+  assert.strictEqual(r.status, 'failed');
+  assert.match(r.reason, /no Claude chats/);
+});

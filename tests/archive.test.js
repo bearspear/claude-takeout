@@ -2120,3 +2120,46 @@ test('parity: web search images saved in images/ are found again, and images/ ho
   assert.match(got.viewerChat.messages[0].blocks.find(b => b.web).web[0].href, /^images\/[0-9a-f]{8}_Screw\.jpg$/);
   assert.ok(!scanAdded(archive).files.some(f => f.path.startsWith('images/')));
 });
+
+// ---- old-archive tools refuse an archive that includes artifacts ----
+test('build_viewer refuses an archive with artifacts/ and writes nothing', () => {
+  const root = tmpRoot();
+  put(root, 'original.json', chatJson('a1'));
+  put(root, 'viewer.html', '<html>kept</html>');
+  put(root, 'artifacts/x/artifact.json', '{}');
+  const before = hashTree(root);
+  const res = cli(root, '--force');
+  assert.strictEqual(res.status, 1);
+  assert.deepStrictEqual(hashTree(root), before);
+  assert.match(res.stderr, /This archive includes artifacts \(Claude Takeout 1\.17 or later\)\. build_viewer doesn't support those yet; its viewer\.html is already complete\./);
+});
+
+test('build_viewer --json reports a refused archive', () => {
+  const root = tmpRoot();
+  put(root, 'index.md', '# all');
+  put(root, 'Chat_a/original.json', chatJson('a1'));
+  put(root, 'export-manifest.json', JSON.stringify({ format: 1, kind: 'full', artifacts: { listed: 1, thumbs: 0, items: [] } }));
+  const res = cli(root, '--json');
+  assert.strictEqual(res.status, 1);
+  const report = JSON.parse(res.stdout);
+  assert.strictEqual(report.ok, false);
+  assert.strictEqual(report.archives[0].refused, true);
+  assert.match(report.archives[0].message, /build_viewer doesn't support those yet/);
+  assert.ok(!fs.existsSync(path.join(root, 'viewer.html')));
+});
+
+test('build_viewer refuses a ZIP with artifacts before extracting it', async () => {
+  const JSZip = require('../jszip.min.js');
+  const tmp = tmpRoot();
+  const zip = new JSZip();
+  zip.file('claude-takeout-z/index.md', '# all');
+  zip.file('claude-takeout-z/Chat_a/original.json', chatJson('a1'));
+  zip.file('claude-takeout-z/artifacts/x/artifact.json', '{}');
+  fs.writeFileSync(path.join(tmp, 'z.zip'), await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  const out = path.join(tmp, 'out');
+  const res = cli(tmp, '--out', out, '--json');
+  assert.strictEqual(res.status, 1);
+  assert.strictEqual(JSON.parse(res.stdout).zips[0].refused, true);
+  assert.deepStrictEqual(fs.readdirSync(out), []);
+  assert.match(res.stderr, /build_viewer doesn't support/);
+});

@@ -266,6 +266,18 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
   const report = { out: outDir, dest, dryRun, ok: false, status: 'failed', reason: '', sources: [], chats: 0, replaced: 0, files: 0, bytes: 0, viewer: null, warnings: [] };
   if (lstat(dest)) throw new UsageError(`${dest} already exists, so nothing was written. Pick another --name or --out.`);
 
+  // A combined archive (with artifacts) is refused before anything is written, ZIPs before extraction.
+  for (const s of sources) {
+    const refused = s.zip ? await zipLib.zipHasArtifacts(s.input)
+      : lib.findArchives(s.dir).archives.some(a => lib.hasArtifacts(a.root));
+    if (refused) {
+      report.status = 'failed';
+      report.refused = true;
+      report.reason = `${s.input}: ${lib.artifactsRefusal('merge_archives')}`;
+      return report;
+    }
+  }
+
   const scratch = path.join(outDir, `.merge-${process.pid}`);
   const building = path.join(outDir, `.${folderName}.partial-${process.pid}`);
   try {
@@ -395,6 +407,7 @@ async function main(argv) {
   try {
     const report = await merge(args.positionals, { out: args.values.out, name: args.values.name || null, dryRun: !!args.values['dry-run'] });
     console.log(json ? JSON.stringify(report) : formatReport(report));
+    if (report.refused) console.error(report.reason);
     return report.ok ? 0 : 1;
   } catch (e) {
     return fail(e.message);

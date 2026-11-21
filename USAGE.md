@@ -441,6 +441,7 @@ node tools/build_viewer.js ~/Downloads/claude-takeout-2026-11-07 --force
 
 - **What it works on.** A single-chat export, a mega-ZIP or a folder holding many of either, as long as they are unzipped. For ZIPs, see [Adding a viewer to older archives](#adding-a-viewer-to-older-archives): they are extracted under `--out` first.
 - **What it changes.** Only `viewer.html`, `viewer-check.gif` and `viewer-files/`. Your chat files, Markdown, downloads and anything you added stay as they are.
+- **Archives with artifacts.** It refuses an archive that includes artifacts (an Export All made with Claude Takeout 1.17 or later, with an `artifacts/` folder) and writes nothing to it: that archive's `viewer.html` is already complete.
 - **What it can't change.** The rebuilt viewer reads what the export already has on disk. Fixes to the export itself, such as a better Markdown file or a download that used to fail, need a fresh export from claude.ai.
 - **Which releases.** The changelog in `README.md` says "Older exports get this when their viewer is rebuilt with `--force`" on each viewer change.
 
@@ -459,6 +460,7 @@ node tools/merge_archives.js ~/Downloads/claude-takeout-Mika-2026-11-01.zip ~/Do
 - **Sources.** Any number of Mega-Zips, single-chat exports, or folders holding them, as ZIPs or unzipped. ZIPs are extracted into a hidden temporary folder under `--out` and removed afterwards.
 - **Which copy wins.** The one with the latest `updated_at` in its `original.json`. On a tie, the later export (from `export-manifest.json`), then the source named later. Shared project folders come from the newest source.
 - **What it writes.** One new folder under `--out` (`claude-takeout-merged-<date>`, or `--name <name>`), built under a hidden temporary name and renamed when complete. It holds the chat folders, `projects/`, a new `index.md`, an `export-manifest.json` with `kind: "merged"` that names the source of each chat, and a new viewer. Your source archives are only read. An existing folder of that name stops the run.
+- **Archives with artifacts.** If any source includes artifacts (Claude Takeout 1.17 or later), the run is refused before anything is written, ZIPs included; its `viewer.html` is already complete.
 - **Deleted chats.** A chat you deleted on claude.ai stays in the merged archive if an older source has it.
 
 ---

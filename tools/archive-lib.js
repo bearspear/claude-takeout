@@ -133,6 +133,20 @@ function isArchiveRoot(dir) {
   try { return subdirs(dir).some(n => isRealFile(path.join(dir, n, 'original.json'))); } catch (e) { return false; }
 }
 
+// True when an archive includes artifacts (a combined export, Claude Takeout 1.17 or later): an artifacts/
+// folder, or an export-manifest.json with an artifacts key. The old-archive tools don't handle those.
+function hasArtifacts(root) {
+  try { if (fs.lstatSync(path.join(root, 'artifacts')).isDirectory()) return true; } catch (e) { /* none */ }
+  try {
+    const manifest = JSON.parse(stripBom(fs.readFileSync(path.join(root, 'export-manifest.json'), 'utf8')));
+    return !!manifest && typeof manifest === 'object' && Object.prototype.hasOwnProperty.call(manifest, 'artifacts');
+  } catch (e) { return false; }
+}
+
+// The refusal text; tool is the tool's own name.
+const artifactsRefusal = tool =>
+  `This archive includes artifacts (Claude Takeout 1.17 or later). ${tool} doesn't support those yet; its viewer.html is already complete.`;
+
 // ===================================================================
 // Generated-viewer marker
 // ===================================================================
@@ -622,4 +636,4 @@ function chatFromDisk(archive, chat) {
   return { viewerChat, missing, warnings };
 }
 
-module.exports = { findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, NotAChat, matchFile, stripBom, embeddableText, isAddedText, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
+module.exports = { hasArtifacts, artifactsRefusal, findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, NotAChat, matchFile, stripBom, embeddableText, isAddedText, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
