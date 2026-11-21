@@ -328,7 +328,7 @@ function uuidToBase58(uuid) {
 const PUBLISH_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const PUBLISH_VER_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
 
-// The frames claude.ai listed, reduced to the fields an export may keep. Anything else (owner, thumbnail,
+// The frames claude.ai listed, reduced to the fields an export may keep (public: a boolean). Anything else (owner, audience, thumbnail,
 // URLs) is dropped, a slug that is not a UUID is dropped, and a uuid appears once. full: the list may be cut
 // short (no paging is known): 60 or more frames and a multiple of 10, which includes a limit of 1000.
 // listed: how many frames claude.ai sent, before any was dropped.
@@ -346,7 +346,7 @@ function artifactsFromList(reply) {
       slug: f.slug, title: str(f.title), typeSlug: str(f.typeSlug), typeTitle: str(f.typeTitle),
       sourceSurface: str(f.sourceSurface), rel: str(f.rel),
       live: typeof f.live === 'string' && PUBLISH_VER_RE.test(f.live) ? f.live : '',
-      updatedAt: str(f.updatedAt), createdAt: str(f.createdAt),
+      updatedAt: str(f.updatedAt), createdAt: str(f.createdAt), public: f.public === true,
     });
   }
   return { artifacts, full: frames.length >= 60 && frames.length % 10 === 0, listed: frames.length };
@@ -1438,10 +1438,19 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
   return { name: data.project?.name || '', fileDir, fileNames, docs, instructions: cut };
 }
 
+// The file types a link may open from disk: documents, images, audio, video, archives and plain data. A copy of
+// OPENABLE_EXTENSIONS in viewer/viewer-logic.js (the viewer pages don't load this file); a test keeps them identical.
+const OPENABLE_EXTENSIONS = new Set(('pdf doc docx xls xlsx ppt pptx odt ods odp rtf pages numbers key epub zip gz tar 7z rar ' +
+  'csv tsv txt log md markdown json png jpg jpeg gif webp heic tif tiff bmp mp3 m4a wav ogg flac aac mp4 mov webm m4v mkv avi').split(' '));
+function openableName(name) {
+  const ext = /\.([a-z0-9]+)$/i.exec(String(name || '').split('/').pop());
+  return !!ext && OPENABLE_EXTENSIONS.has(ext[1].toLowerCase());
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
-    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport,
+    extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
   };
 }

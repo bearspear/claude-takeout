@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, artifactTabs, relativeTime, parseArtifactHash } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -214,6 +214,23 @@ test('assembleViewer keeps hostile data inert and fills every placeholder', () =
 
 test('VIEWER_ASSETS lists the seven viewer files', () => {
   assert.deepStrictEqual(VIEWER_ASSETS, ['viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js', 'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js']);
+});
+
+test('ARTIFACTS_VIEWER_ASSETS lists the artifacts viewer\'s four files, and each exists', () => {
+  assert.deepStrictEqual(V.ARTIFACTS_VIEWER_ASSETS, ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js']);
+  for (const f of V.ARTIFACTS_VIEWER_ASSETS) assert.ok(fs.existsSync(path.join(__dirname, '..', f)), f);
+});
+
+test('the artifacts template keeps the chat viewer\'s policy, with no frames', () => {
+  const art = fs.readFileSync(path.join(__dirname, '../viewer/artifacts-template.html'), 'utf8');
+  const policy = (t) => /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(t)[1];
+  assert.strictEqual(policy(art), policy(template).replace("frame-src file:", "frame-src 'none'"));
+  assert.ok(art.includes('<meta name="generator" content="Claude Takeout">'));
+  for (const p of ['DATA_JSON', 'MARKED_JS', 'LOGIC_JS', 'APP_JS']) assert.strictEqual(art.split(`/*${p}*/`).length, 2, p);
+  for (const f of ['viewer/artifacts-template.html', 'viewer/artifacts-app.js']) {
+    const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+    for (const s of ['claudeusercontent', '__frame_t', '_thumb']) assert.ok(!text.includes(s), `${f}: ${s}`);
+  }
 });
 
 const Logic = require('../viewer/viewer-logic.js');
@@ -1640,4 +1657,152 @@ test('the attached copy of a same version is not listed again; an upload named l
   const entry = pageEntry([pubVersion(0, { same: true, writtenAs: 'guide.html', text: 'G' })]);
   const chat = buildViewerChat(data, ctxFor(data, { published: [entry], uploads }));
   assert.deepStrictEqual(chat.messages[0].uploads.map(u => u.name), ['index.html']);
+});
+
+test('resolveArtifactPath trims long runs of spaces in linear time', () => {
+  const url = 'a' + ' '.repeat(100000) + 'b.png';
+  let t = Date.now();
+  assert.strictEqual(resolveArtifactPath('index.html', url), url);
+  assert.ok(Date.now() - t < 100, `resolveArtifactPath took ${Date.now() - t} ms`);
+  assert.strictEqual(resolveArtifactPath('index.html', ' \t\x00 a.png \x1f '), 'a.png');
+  assert.strictEqual(resolveArtifactPath('index.html', ' '.repeat(5)), null);
+  const html = `<img src="${' '.repeat(1500000)}x">`;
+  t = Date.now();
+  inlineArtifact(html, 'index.html', { texts: [], images: [] });
+  assert.ok(Date.now() - t < 500, `inlineArtifact took ${Date.now() - t} ms`);
+});
+
+test('resolveArtifactPath', () => {
+  assert.strictEqual(resolveArtifactPath('site/index.html', './app.css'), 'site/app.css');
+  assert.strictEqual(resolveArtifactPath('site/index.html', '../x.js'), 'x.js');
+  assert.strictEqual(resolveArtifactPath('index.html', '../x.js'), null);
+  for (const u of ['https://a/b.js', '//a/b.js', '/a.js', 'a.css?x', 'a.css#y', 'data:text/css,a', 'a%2Fb.js', '..%2f..%2fx.js', '']) assert.strictEqual(resolveArtifactPath('site/index.html', u), null, u);
+  assert.strictEqual(resolveArtifactPath('index.html', 'img/%61.png'), 'img/a.png');
+  assert.strictEqual(resolveArtifactPath('index.html', 'img\\a.png'), 'img/a.png');
+  assert.strictEqual(resolveArtifactPath('index.html', '..\\a.png'), null);
+  assert.strictEqual(resolveArtifactPath('index.html', '%E0%A4%A'), null);
+});
+
+test('inlineArtifact', () => {
+  const payload = { texts: [['css/a.css', 'body{}'], ['js/m.js', 'x="</script><!--"'], ['__proto__', 'p']], images: [['img/a.png', 'data:image/png;base64,AAA']] };
+  const html = '<link rel="stylesheet" href="css/a.css"><script src="js/m.js"></script><img src="img/a.png" alt="a"><img src="img/none.png"><img srcset="img/a.png 1x, b.png 2x"><script src="__proto__"></script>';
+  const out = inlineArtifact(html, 'index.html', payload);
+  assert.ok(out.includes('<style>body{}</style>'));
+  assert.ok(out.includes('x="<\\/script><\\x21--"'));
+  assert.ok(out.includes('<img alt="a" src="data:image/png;base64,AAA">'));
+  assert.ok(out.includes('<img src="img/none.png">'));
+  assert.ok(out.includes('<img src="data:image/png;base64,AAA">') && !out.includes('srcset'));
+  assert.ok(out.includes('src="__proto__"'));
+  const nested = inlineArtifact('<script src="a.js"></script>', 'site/index.html', { texts: [['site/a.js', 'ok()']], images: [] });
+  assert.strictEqual(nested, '<script>ok()</script>');
+});
+
+test('artifactPreviewDoc puts the policy and shim first', () => {
+  const { srcdoc } = artifactPreviewDoc('<!doctype html><script src="a.js"></script>', 'index.html', { texts: [['a.js', 'go()']], images: [] });
+  assert.ok(srcdoc.startsWith('<!doctype html><meta http-equiv="Content-Security-Policy"'));
+  const shim = srcdoc.indexOf('sessionStorage');
+  assert.ok(shim > 0 && shim < srcdoc.indexOf('go()'));
+});
+
+test('artifactTabs and relativeTime', () => {
+  const v = [
+    { title: 'b', shared: false, updatedAt: '2026-01-01T00:00:00Z' },
+    { title: 'A', shared: true, updatedAt: '2026-01-02T00:00:00Z' },
+    { title: 'c', updatedAt: 'nope' },
+    { title: 'a', shared: false, updatedAt: '2026-01-01T00:00:00Z' },
+  ];
+  assert.deepStrictEqual(artifactTabs(v, 'all', '').map(x => x.title), ['A', 'a', 'b', 'c']);
+  assert.deepStrictEqual(artifactTabs(v, 'yours', '').map(x => x.title), ['a', 'b', 'c']);
+  assert.deepStrictEqual(artifactTabs(v, 'shared', '').map(x => x.title), ['A']);
+  assert.deepStrictEqual(artifactTabs(v, 'all', ' B ').map(x => x.title), ['b']);
+  const now = Date.parse('2026-03-10T12:00:00Z');
+  const ago = s => new Date(now - s * 1000).toISOString();
+  assert.strictEqual(relativeTime(ago(59), now), 'just now');
+  assert.strictEqual(relativeTime(ago(60), now), '1m ago');
+  assert.strictEqual(relativeTime(ago(3599), now), '59m ago');
+  assert.strictEqual(relativeTime(ago(3600), now), '1h ago');
+  assert.strictEqual(relativeTime(ago(86400), now), '1d ago');
+  assert.strictEqual(relativeTime(ago(7 * 86400), now), '2026-03-03');
+  assert.strictEqual(relativeTime('x', now), '');
+});
+
+test('parseArtifactHash', () => {
+  assert.strictEqual(parseArtifactHash('#a=LkJG_x-1'), 'LkJG_x-1');
+  for (const h of ['#chat=abc', '#a=', '#a=<script>', '', null]) assert.strictEqual(parseArtifactHash(h), null);
+});
+
+test('artifact logic edges', () => {
+  assert.strictEqual(resolveArtifactPath('index.html', 'java\tscript:x'), null);
+  assert.strictEqual(resolveArtifactPath('index.html', ' \x01a.css '), 'a.css');
+  assert.strictEqual(resolveArtifactPath('index.html', 'a\n/b.css'), 'a/b.css');
+  const p = { texts: [['a.js', 'go()']], images: [['i.png', 'data:image/png;base64,AAA']] };
+  assert.strictEqual(inlineArtifact('<img src="i.png" src="x.png">', 'index.html', p), '<img src="data:image/png;base64,AAA">');
+  assert.strictEqual(inlineArtifact('<script src="a.js" src="b.js"></script>', 'index.html', p), '<script>go()</script>');
+  const { STORAGE_SHIM } = require('../viewer/viewer-logic.js');
+  assert.ok(STORAGE_SHIM.includes('i>=0&&i<k.length'));
+  assert.strictEqual(parseArtifactHash('#chat=x&a=abc'), null);
+  assert.strictEqual(parseArtifactHash('#a=abc&x=1'), null);
+});
+
+test('STORAGE_SHIM: key() answers null for an index that is not a whole number in range', () => {
+  const { STORAGE_SHIM } = require('../viewer/viewer-logic.js');
+  const vm = require('vm');
+  const blocked = { get() { throw new Error('SecurityError'); }, configurable: true };
+  const win = {};
+  Object.defineProperty(win, 'localStorage', blocked);
+  Object.defineProperty(win, 'sessionStorage', blocked);
+  win.window = win;
+  vm.runInNewContext(STORAGE_SHIM.replace(/^<script>|<\/script>$/g, ''), win);
+  const ls = win.localStorage;
+  ls.setItem('a', 1);
+  ls.setItem('b', 2);
+  assert.strictEqual(ls.key(0), 'a');
+  assert.strictEqual(ls.key('1'), 'b');
+  for (const i of [0.5, 1.5, -1, 2, NaN, Infinity, 'x']) assert.strictEqual(ls.key(i), null, String(i));
+  assert.strictEqual(ls.length, 2);
+});
+
+test('markdownParser: raw HTML stays text, Markdown still renders, after a tag too', () => {
+  const marked = require('../viewer/marked.min.js');
+  const { markdownParser } = require('../viewer/viewer-logic.js');
+  const md = markdownParser(marked);
+  const html = md.parse('# Hi\n\nraw <b>x</b> and **bold**\n\n<script>alert(1)</script>\n');
+  assert.ok(html.includes('<h1>Hi</h1>'), html);
+  assert.ok(html.includes('&lt;b&gt;x&lt;/b&gt;') && html.includes('<strong>bold</strong>'), html);
+  assert.ok(!html.includes('<script>') && html.includes('<p class="raw-html">&lt;script&gt;'), html);
+  // Two parsers don't share state.
+  assert.notStrictEqual(markdownParser(marked), md);
+});
+
+test('artifactPreviewDoc removes WebRTC before the page runs', () => {
+  const { srcdoc } = artifactPreviewDoc('<script>go()</script>', 'index.html', { texts: [], images: [] });
+  const shim = srcdoc.indexOf('RTCPeerConnection');
+  assert.ok(shim > 0 && shim < srcdoc.indexOf('go()'));
+  for (const n of ['webkitRTCPeerConnection', 'RTCDataChannel', 'RTCSessionDescription', 'RTCIceCandidate']) assert.ok(srcdoc.includes(n), n);
+  // Runs: in a fake window, every name reads undefined and can't be put back.
+  const { RTC_SHIM } = require('../viewer/viewer-logic.js');
+  const vm = require('vm');
+  const win = { RTCPeerConnection: function () {}, RTCDataChannel: function () {} };
+  win.window = win;
+  vm.runInNewContext(RTC_SHIM.replace(/^<script>|<\/script>$/g, ''), win);
+  assert.strictEqual(win.RTCPeerConnection, undefined);
+  win.RTCPeerConnection = function () {};
+  assert.strictEqual(win.RTCPeerConnection, undefined);
+  assert.throws(() => Object.defineProperty(win, 'RTCDataChannel', { value: 1 }));
+});
+
+test('inlineArtifact decodes entities in src and href; inlineSiblings is unchanged', () => {
+  const p = { texts: [['R&D.js', 'rd()'], ['a"b.css', 'x{}'], ["it's.js", 'q()'], ['é.js', 'e()']], images: [['R&D.png', 'data:image/png;base64,AAA']] };
+  assert.strictEqual(inlineArtifact('<script src="R&amp;D.js"></script>', 'index.html', p), '<script>rd()</script>');
+  assert.strictEqual(inlineArtifact('<link rel="stylesheet" href="a&quot;b.css">', 'index.html', p), '<style>x{}</style>');
+  assert.strictEqual(inlineArtifact('<script src="it&#39;s.js"></script>', 'index.html', p), '<script>q()</script>');
+  assert.strictEqual(inlineArtifact('<script src="&#xe9;.js"></script>', 'index.html', p), '<script>e()</script>');
+  assert.strictEqual(inlineArtifact('<script src="&#233;.js"></script>', 'index.html', p), '<script>e()</script>');
+  assert.strictEqual(inlineArtifact('<img src="R&amp;D.png">', 'index.html', p), '<img src="data:image/png;base64,AAA">');
+  assert.strictEqual(inlineArtifact('<img srcset="R&amp;D.png 2x">', 'index.html', p), '<img src="data:image/png;base64,AAA">');
+  // An entity can't smuggle in a path the resolver rejects.
+  assert.strictEqual(inlineArtifact('<script src="&#46;&#46;/&#46;&#46;/x.js"></script>', 'site/index.html', { texts: [['x.js', 'bad()']] }), '<script src="&#46;&#46;/&#46;&#46;/x.js"></script>');
+  assert.strictEqual(inlineArtifact('<script src="&#x2F;x.js"></script>', 'index.html', { texts: [['x.js', 'bad()']] }), '<script src="&#x2F;x.js"></script>');
+  // The chat viewer's inliner keeps taking the value as written.
+  assert.strictEqual(inlineSiblings('<script src="R&amp;D.js"></script>', n => (n === 'R&D.js' ? 'rd()' : null)), '<script src="R&amp;D.js"></script>');
 });

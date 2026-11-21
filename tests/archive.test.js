@@ -55,6 +55,21 @@ test('an Export Artifacts folder holds no archive', () => {
   assert.deepStrictEqual(res.archives, []);
 });
 
+test('an Export Artifacts folder with a viewer still holds no archive', () => {
+  const tmp = tmpRoot();
+  const viewer = '<!doctype html><html><head><meta name="generator" content="Claude Takeout"></head><body></body></html>';
+  put(tmp, 'index.md');
+  put(tmp, 'index.html');
+  put(tmp, 'viewer.html', viewer);
+  put(tmp, 'viewer-files/part-0001.js', 'window.__archivePart(1, {})');
+  put(tmp, 'viewer-files/thumbs/abc.png');
+  put(tmp, 'export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', listed: 1, thumbs: 1, artifacts: [] }));
+  put(tmp, 'Game_abc/index.html');
+  put(tmp, 'Game_abc/artifact.json', '{}');
+  assert.strictEqual(isGeneratedViewer(viewer), true);
+  assert.deepStrictEqual(find(tmp).archives, []);
+});
+
 test('index.md without chat subfolders is not a mega; the root itself can be an archive', () => {
   const tmp = tmpRoot();
   put(tmp, 'index.md');

@@ -124,7 +124,9 @@ Creates a comprehensive archive:
 
 ```
 claude-takeout-artifacts-<your name>-2026-11-16_1530/
-├── index.html                       # Browse the artifacts; no scripts, works from disk
+├── viewer.html                      # Browse the artifacts as cards, with previews
+├── viewer-files/                    # Preview data (part-NNNN.js) and card pictures (thumbs/)
+├── index.html                       # A plain list of the artifacts; no scripts, works from disk
 ├── index.md                         # The same list as Markdown
 ├── export-manifest.json             # kind: "artifacts", every artifact's uuid, title, folder and version
 ├── errors.txt                       # Only when something went wrong
@@ -133,7 +135,7 @@ claude-takeout-artifacts-<your name>-2026-11-16_1530/
     └── <the artifact's files>       # Its current version
 ```
 
-A Claude Docs document is listed with a link, not saved: its text isn't available as a file.
+A Claude Docs document is listed with a link, not saved: its text isn't available as a file. Open `viewer.html` in Chrome, from the unzipped folder.
 
 ### Mega-Zip (Bulk Export)
 **"Export All (Mega-Zip)"**
@@ -391,6 +393,10 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.16.0
+
+- **Export Artifacts has a viewer** - The export now includes `viewer.html`, a page that looks like claude.ai/artifacts: a grid of cards with the artifact's picture, and tabs for All, Yours and Shared with you. Open a card to preview the page in place (HTML and SVG run in a sandbox, Markdown and images are shown), with its saved files listed and an **Open file** link for your own. Claude Docs documents, Design and other artifacts that need claude.ai show their details and a link to claude.ai. The card pictures are saved in `viewer-files/thumbs/` and `index.html` says "Card pictures: N of M"; they need the same optional permission as web-search images (Settings > Save web images and artifact card pictures), which Export Artifacts asks for when saving a ZIP, and a card without a picture shows a tile. Unzip a ZIP export before opening the viewer. Artifacts shared with you get no **Open file** link for a start file that is anything but documents, images, media, archives and plain data files, in the viewer or in `index.html` and `index.md`. A preview has no network access except the WebRTC gap noted in USAGE, its pages can't link to each other, and its storage is not kept. Use Folder for a large account: a ZIP is built in memory.
 
 ### v1.15.0
 

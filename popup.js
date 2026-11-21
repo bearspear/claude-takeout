@@ -102,7 +102,7 @@ class ExportErrorCollector {
         return 'A picture Claude looked at in the chat (a photo it opened, a page it rendered) could not be downloaded from claude.ai. Export again later; it is still shown in the chat on claude.ai.';
 
       case 'web_image':
-        return 'An image Claude found with image search could not be saved: the site refused it, it is gone, or Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to it. To save these images, turn on Settings > Save images from web searches (Chrome asks once), then export again.';
+        return 'An image Claude found with image search could not be saved: the site refused it, it is gone, or Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to it. To save these images, turn on Settings > Save web images and artifact card pictures (Chrome asks once), then export again.';
 
       case 'published_page':
         return 'A page Claude published on claude.ai (publish_files) could not be saved, or only in part, or its file names were changed to be safe on disk. The chat itself is exported. Open the page on claude.ai (link in the note) while signed in, and export again; a page that was unpublished or deleted can no longer be saved.';
@@ -3042,6 +3042,22 @@ async function webImagesAllowed() {
     return false;
   }
 }
+// Whether the permission is there, as last known (null: not known yet), so a click can decide without awaiting.
+let webImagesGranted = null;
+function noteWebImagesGrant() {
+  webImagesAllowed().then((ok) => { webImagesGranted = ok; });
+}
+noteWebImagesGrant();
+try {
+  if (chrome.permissions && chrome.permissions.onAdded) chrome.permissions.onAdded.addListener(noteWebImagesGrant);
+  if (chrome.permissions && chrome.permissions.onRemoved) chrome.permissions.onRemoved.addListener(noteWebImagesGrant);
+} catch (e) { /* no permission events: the next check corrects it */ }
+// Export Artifacts' card pictures need the same permission: asked in the click (call before any await),
+// only when it isn't known to be granted. Returns the request's promise, or null when nothing was asked.
+function askForCardPictures() {
+  if (webImagesGranted === true) return null;
+  return requestWebImages().then((ok) => { webImagesGranted = !!ok; return !!ok; });
+}
 
 // Images Claude looked at (a photo it opened with Read), which claude.ai keeps and only links: downloaded
 // from claude.ai into images/. Returns file uuid -> 'images/<name>'. A failure is a tool_image warning.
@@ -3086,7 +3102,7 @@ async function saveWebImages(folder, data, errorCollector, onProgress = null) {
   if (!images.length) return saved;
   if (!(await webImagesAllowed())) {
     errorCollector.addWarning('web_image', 'images/', `${images.length} image${images.length === 1 ? '' : 's'} from web searches ${images.length === 1 ? 'was' : 'were'} not saved: Claude Takeout may not fetch images from other sites.`,
-      { note: 'Turn on Settings > Save images from web searches, then export again. The links in full_chat.md still work.' });
+      { note: 'Turn on Settings > Save web images and artifact card pictures, then export again. The links in full_chat.md still work.' });
     return saved;
   }
   const fetchImage = async (url) => {
@@ -3326,15 +3342,38 @@ const publishedSignedOutReply = (r) => !!(r && (r.status === 401 || r.error === 
 // nor SHA-256 (claude.ai's frame info, as for Cowork and Claude Code pages) is saved unchecked, its real size counted against
 // the total, and noted in unverified (path -> SHA-256 of the saved bytes, null when not saved). A 401 sets
 // state.publishedSignedOut, calls onSignedOut once, and every later file is skipped. Returns { saved,
-// missing: [path], problems: ['path (why)'], incomplete, start, startSaved, startText, needsRuntime, unverified }.
-async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished }) {
+// missing: [path], problems: ['path (why)'], incomplete, start, startSaved, startSize, startText, needsRuntime, unverified,
+// texts, images }. With collect (Export Artifacts' viewer), texts (path -> text) and images (path -> { bytes, type })
+// hold the saved files a preview can use, within PREVIEW_ITEM_MAX each and PREVIEW_TOTAL_MAX in all of each kind
+// (see previewKind); otherwise both are empty. Chat exports ignore them.
+async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished, collect = false }) {
   const start = publishedStart(files);
   const missing = [];
   const problems = [];
   let total = 0;
   let written = 0;
   let startText = null;
+  let startSize = null;
   const unverified = new Map();
+  const texts = new Map();
+  const images = new Map();
+  let textBytes = 0;
+  let imageBytes = 0;
+  // Preview candidates, kept after the loop: the start file first, so other files never crowd it out.
+  const candidates = [];
+  const keep = (f, bytes) => {
+    const kind = previewKind(f.path);
+    if (!kind || bytes.length > PREVIEW_ITEM_MAX) return;
+    if (kind === 'text') {
+      if (textBytes + bytes.length > PREVIEW_TOTAL_MAX) return;
+      textBytes += bytes.length;
+      texts.set(f.path, new TextDecoder().decode(bytes));
+    } else {
+      if (imageBytes + bytes.length > PREVIEW_TOTAL_MAX) return;
+      imageBytes += bytes.length;
+      images.set(f.path, { bytes, type: kind });
+    }
+  };
   for (const f of files) {
     const fail = (why) => { missing.push(f.path); if (why) problems.push(`${f.path} (${why})`); };
     // Unverified only when the listing has neither size nor checksum (claude.ai's frame info list).
@@ -3369,14 +3408,34 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
     }
     target.file(`${prefix}${names.get(f.path)}`, bytes);
     written++;
+    if (f === start) startSize = bytes.length;
     if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
+    if (collect && previewKind(f.path) && bytes.length <= PREVIEW_ITEM_MAX) candidates.push([f, bytes]);
   }
+  for (const [f, bytes] of candidates) if (f === start) keep(f, bytes);
+  for (const [f, bytes] of candidates) if (f !== start) keep(f, bytes);
   const startOk = !!start && !missing.includes(start.path);
   return {
     saved: written > 0, missing, problems, incomplete: missing.length > 0,
-    start: startOk ? start.path : null, startSaved: startOk ? names.get(start.path) : null,
-    startText, needsRuntime: publishedNeedsRuntime(startText), unverified,
+    start: startOk ? start.path : null, startSaved: startOk ? names.get(start.path) : null, startSize: startOk ? startSize : null,
+    startText, needsRuntime: publishedNeedsRuntime(startText), unverified, texts, images,
   };
+}
+
+// Preview files for Export Artifacts' viewer: 'text' for pages, styles, scripts, SVG and Markdown, an image's MIME
+// type for PNG, JPEG, GIF, WebP, AVIF, BMP and ICO (by extension), null for anything else. Agrees with
+// artifactFileKind: every 'image' kind is collected.
+const PREVIEW_ITEM_MAX = 2 * 1024 * 1024;   // one text or image (TEXT_EMBED_LIMIT)
+const PREVIEW_TOTAL_MAX = 8 * 1024 * 1024;  // texts in all, and images in all, of one artifact
+const PREVIEW_IMAGE_TYPES = {
+  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon',
+};
+function previewKind(p) {
+  const ext = (/\.([a-z0-9]+)$/i.exec(String(p)) || [])[1];
+  if (!ext) return null;
+  const e = ext.toLowerCase();
+  if (['html', 'htm', 'css', 'js', 'mjs', 'svg', 'md', 'markdown'].includes(e)) return 'text';
+  return Object.prototype.hasOwnProperty.call(PREVIEW_IMAGE_TYPES, e) ? PREVIEW_IMAGE_TYPES[e] : null;
 }
 
 // File entries (for published.json or artifact.json) of files saved unchecked: sha256 and size of the saved
@@ -4888,7 +4947,7 @@ async function bulkExportZip(options = {}) {
 const CLAUDE_DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
 const DOCS_ARTIFACT_NOTE = "Claude Docs text isn't available as a file; export the chat that made it to get the document.";
 // Root names an artifact folder may not take, matched without case.
-const ARTIFACT_ROOT_NAMES = ['index.md', 'index.html', 'export-manifest.json', 'errors.txt', 'write-errors.txt'];
+const ARTIFACT_ROOT_NAMES = ['index.md', 'index.html', 'export-manifest.json', 'errors.txt', 'write-errors.txt', 'viewer.html', 'viewer-check.gif', 'viewer-files'];
 
 // A string from claude.ai's list, safe to write: anything shaped like a frame URL or its token is dropped.
 const artifactText = (v) => String(typeof v === 'string' ? v : '').replace(/\S*(?:claudeusercontent\.com|__frame_t)\S*/gi, '[link removed]').slice(0, 500);
@@ -4918,6 +4977,158 @@ function claimArtifactFolder(base, usedFolders) {
 }
 const ARTIFACT_UNEXPECTED_NOTE = 'not exported: unexpected error (see errors.txt)';
 
+// A file's kind for the artifacts viewer, from its name.
+function artifactFileKind(p) {
+  const ext = ((/\.([a-z0-9]+)$/i.exec(String(p || '')) || [])[1] || '').toLowerCase();
+  if (ext === 'html' || ext === 'htm') return 'html';
+  if (ext === 'svg') return 'svg';
+  if (ext === 'md' || ext === 'markdown') return 'md';
+  if (previewKind(p) && /^image\//.test(previewKind(p))) return 'image';
+  if (ext === 'jsx' || ext === 'tsx') return 'react';
+  if (ext === 'mmd' || ext === 'mermaid') return 'mermaid';
+  if (ext === 'css') return 'css';
+  if (ext === 'js' || ext === 'mjs' || ext === 'cjs') return 'js';
+  return 'other';
+}
+const artifactStartKind = (p) => {
+  if (p == null) return null;
+  const kind = artifactFileKind(p);
+  return kind === 'css' || kind === 'js' ? 'other' : kind;
+};
+
+// Bytes to base64, a piece at a time.
+function bytesToBase64(bytes) {
+  let binary = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
+  return btoa(binary);
+}
+
+// An artifact's record for the artifacts viewer (ArtifactView, without part and key). o: { uuid, shortId, url,
+// title, typeSlug, typeTitle, shared, public, docs, createdAt, updatedAt, folder, files (artifact.json's), missing,
+// start, startSaved, startSize, needsRuntime, notExported, note, inPayload (the start's text or image is in the
+// preview payload) }. Files lists those saved; missingCount counts the listed ones not saved. A start file a preview
+// could show but whose text or image is not in the payload is tooLarge when over PREVIEW_ITEM_MAX, otherwise
+// startMissing (the export loop sets startMissing too when the payload gets no part).
+function artifactView(o) {
+  const missing = new Set(o.missing || []);
+  const startSize = Number.isFinite(o.startSize) ? o.startSize : null;
+  const tooLarge = !!o.start && startSize != null && startSize > PREVIEW_ITEM_MAX;
+  return {
+    id: o.shortId || o.uuid, title: o.title, kind: o.typeTitle || 'Page', typed: o.typeSlug !== '', docs: !!o.docs,
+    shared: !!o.shared, public: o.public === true, createdAt: o.createdAt, updatedAt: o.updatedAt, folder: o.folder,
+    start: o.start || null, startSaved: o.start ? o.startSaved || null : null, startKind: artifactStartKind(o.start || null),
+    startSize: o.start ? startSize : null, tooLarge,
+    startMissing: !!o.start && !tooLarge && !!previewKind(o.start) && !o.inPayload, missingCount: missing.size,
+    files: (o.files || []).filter((f) => !missing.has(f.path)).map((f) => ({ path: f.path, savedAs: f.savedAs, kind: artifactFileKind(f.path), verified: f.verified !== false })),
+    needsRuntime: !!o.needsRuntime, notExported: !!o.notExported, note: o.note || '', url: o.url, thumb: null,
+  };
+}
+
+// A preview payload ({ texts: [[path, text]], images: [[path, dataUri]] }) from fetchPublishedFiles' texts and
+// images, or null when there is nothing to show.
+function artifactPayload(got) {
+  if (!got) return null;
+  const texts = [...got.texts.entries()];
+  const images = [...got.images.entries()].map(([p, img]) => [p, `data:${img.type};base64,${bytesToBase64(img.bytes)}`]);
+  return texts.length || images.length ? { texts, images } : null;
+}
+
+// claude.ai's card picture for one artifact, saved at viewer-files/thumbs/<id>.<ext>. content.js gives the
+// picture URL it checked when listing (artifactThumbUrl); the popup fetches it, which needs the optional https
+// permission (the frame host sends no CORS header for claude.ai). The URL is used for that fetch only: it is
+// never stored, logged, shown or written. On a 403 (an expired token), content.js is asked once per export
+// (state.thumbRefreshed) for a fresh URL, and the picture is tried once more. Returns the saved path, or null:
+// a picture that isn't there, fails or isn't a PNG, JPEG or WebP is just left out, with no warning.
+const ARTIFACT_THUMB_TYPES = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/webp': 'webp' };
+const ARTIFACT_THUMB_MAX = 2 * 1024 * 1024;
+// The type, from the leading bytes only.
+function artifactThumbType(b) {
+  const at = (i, list) => b.length >= i + list.length && list.every((v, j) => b[i + j] === v);
+  if (at(0, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return 'image/png';
+  if (at(0, [0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (at(0, [0x52, 0x49, 0x46, 0x46]) && at(8, [0x57, 0x45, 0x42, 0x50])) return 'image/webp';
+  return null;
+}
+// A body read up to max bytes while it streams; null when it passes max or can't be read.
+async function readCapped(res, max) {
+  const body = res.body;
+  if (!body || typeof body.getReader !== 'function') {
+    const ab = await res.arrayBuffer();
+    return ab.byteLength > max ? null : new Uint8Array(ab);
+  }
+  const reader = body.getReader();
+  const chunks = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > max) { try { reader.cancel().catch(() => {}); } catch (e) { /* stopped anyway */ } return null; }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const c of chunks) { out.set(c, at); at += c.byteLength; }
+  return out;
+}
+// The picture's bytes and type, or null. uuid is lowercased.
+async function fetchArtifactThumb(uuid, fetchPublished, state) {
+  let reply = await fetchPublished({ action: 'artifactThumbUrl', uuid });
+  for (;;) {
+    if (!reply || reply.error || typeof reply.url !== 'string') return null;
+    // content.js checked the URL; this only makes sure it is that artifact's picture on the frame host.
+    if (reply.url.indexOf(`https://${uuid}.frame.claudeusercontent.com/_f/`) !== 0) return null;
+    let res;
+    try {
+      res = await fetch(reply.url, { credentials: 'omit', referrerPolicy: 'no-referrer', redirect: 'error', cache: 'no-store' });
+    } catch (e) { return null; }
+    reply = null;
+    if (res.status === 403 && !state.thumbRefreshed) {
+      state.thumbRefreshed = true;
+      reply = await fetchPublished({ action: 'artifactThumbUrl', uuid, refresh: true });
+      continue;
+    }
+    if (!res.ok) return null;
+    const ct = String((res.headers && res.headers.get ? res.headers.get('Content-Type') : '') || '').toLowerCase().trim();
+    if (ct.indexOf('text/') === 0 || ct.indexOf('svg') !== -1) return null;
+    let bytes;
+    try { bytes = await readCapped(res, ARTIFACT_THUMB_MAX); } catch (e) { return null; }
+    const type = bytes && bytes.length ? artifactThumbType(bytes) : null;
+    return type ? { bytes, type } : null;
+  }
+}
+async function saveArtifactThumb(root, uuid, id, fetchPublished, state = {}) {
+  if (!/^[1-9A-HJ-NP-Za-km-z]+$|^[0-9a-f-]{36}$/.test(id)) return null;
+  const got = await fetchArtifactThumb(uuid, fetchPublished, state);
+  if (!got || !Object.prototype.hasOwnProperty.call(ARTIFACT_THUMB_TYPES, got.type)) return null;
+  const path = `viewer-files/thumbs/${id}.${ARTIFACT_THUMB_TYPES[got.type]}`;
+  root.file(path, got.bytes);
+  return path;
+}
+
+// Export Artifacts' viewer.html and viewer-check.gif at the root. The page holds only the views
+// ({ exported, listed, artifacts }); artifact texts and images are in viewer-files/ parts, written before.
+// opts.fileScripts: parts were written, so the page may load them. Returns whether viewer.html was written;
+// any failure writes nothing and returns false, because the export must still finish.
+async function writeArtifactsViewer(root, views, opts = {}) {
+  try {
+    const [template, logic, app, marked] = await Promise.all(CTViewer.ARTIFACTS_VIEWER_ASSETS.map(async (asset) => {
+      const response = await fetch(chrome.runtime.getURL(asset));
+      if (!response.ok) throw new Error(`${asset}: HTTP ${response.status}`);
+      return response.text();
+    }));
+    const data = { exported: opts.exported || null, listed: opts.listed == null ? null : opts.listed, artifacts: views };
+    const html = CTViewer.assembleViewer({ template, css: '', marked, katex: '', highlight: '', logic, app, data, fileScripts: !!opts.fileScripts });
+    root.file('viewer.html', html);
+    root.file(CTViewer.VIEWER_CHECK_FILE, CTViewer.VIEWER_CHECK_BASE64, { base64: true });
+    return true;
+  } catch (e) {
+    console.error('Could not build viewer.html:', e);
+    return false;
+  }
+}
+
 // Save one listed artifact (from artifactsFromList) into root at its own folder. ctx: { fetchPublished, state
 // (publishedSignedOut: one 401 stops fetching the rest), warn(filename, message, note), usedFolders (lowercased) }.
 // Returns { row (for the indexes), entry (for export-manifest.json) }.
@@ -4943,13 +5154,15 @@ async function saveArtifact(root, a, ctx) {
   };
   const notes = [];
   let startSaved = null;
+  let got = null;
+  let failed = false;
   const signOut = () => {
     if (state.publishedSignedOut) return;
     state.publishedSignedOut = true;
     warn('artifacts', `Artifacts not exported: claude.ai answered HTTP 401, as if you were signed out. "${name}" and the artifacts after it were not saved.`,
       'Sign in to claude.ai in this tab and run Export Artifacts again.');
   };
-  const notExported = (why) => { meta.incomplete = true; notes.push(`not exported: ${why}`); };
+  const notExported = (why) => { meta.incomplete = true; failed = true; notes.push(`not exported: ${why}`); };
 
   if (isClaudeDocsArtifact(a)) {
     notes.push(DOCS_ARTIFACT_NOTE);
@@ -4977,7 +5190,7 @@ async function saveArtifact(root, a, ctx) {
         if (info.rejected.length) parts.push(`${artifactCount(info.rejected.length, 'file')} with unsafe paths not fetched`);
         warn(name, `Artifact "${name}": file names changed to stay inside its folder: ${parts.join('; ')}.`, openNote);
       }
-      const got = await fetchPublishedFiles({ target: root, prefix: `${folder}/`, uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished });
+      got = await fetchPublishedFiles({ target: root, prefix: `${folder}/`, uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished, collect: true });
       meta.missing = got.missing;
       meta.incomplete = got.incomplete;
       markUnverified(files, got.unverified);
@@ -4996,17 +5209,29 @@ async function saveArtifact(root, a, ctx) {
     notes.splice(0, notes.length, ARTIFACT_UNEXPECTED_NOTE);
     Object.assign(meta, { ver: '', files: [], missing: [], incomplete: true, needsRuntime: false });
     startSaved = null;
+    got = null;
+    failed = true;
   }
   meta.note = [...(shared ? ['shared with you'] : []), ...notes].join('; ');
+  const start = got ? got.start : null;
+  meta.start = start;
+  meta.public = a.public === true;
   try {
     root.file(`${folder}/artifact.json`, JSON.stringify(meta, null, 2));
   } catch (e) { /* the row and errors.txt still say what happened */ }
+  const view = artifactView({
+    uuid, shortId, url, title, typeSlug, typeTitle, shared, public: a.public === true, docs: isClaudeDocsArtifact(a),
+    createdAt: meta.createdAt, updatedAt: meta.updatedAt, folder, files: meta.files, missing: meta.missing,
+    start, startSaved, startSize: got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
+    inPayload: !!(got && !failed && start && (got.texts.has(start) || got.images.has(start))),
+  });
   return {
     row: {
       title, typeTitle, sourceSurface: meta.sourceSurface, rel, folder, startSaved, url, note: notes.join('; '),
       needsRuntime: meta.needsRuntime, fileCount: meta.files.length - meta.missing.length, missingCount: meta.missing.length,
     },
     entry: { uuid, title, folder, ver: meta.ver },
+    meta, view, payload: got && !failed ? artifactPayload(got) : null,
   };
 }
 
@@ -5026,11 +5251,24 @@ function unexpectedArtifactRow(root, a, ctx) {
     ver: '', createdAt: artifactText(a.createdAt), updatedAt: artifactText(a.updatedAt),
     files: [], missing: [], incomplete: true, needsRuntime: false,
     note: [...(isSharedArtifact(rel) ? ['shared with you'] : []), ARTIFACT_UNEXPECTED_NOTE].join('; '),
+    start: null, public: a.public === true,
   };
   try { root.file(`${folder}/artifact.json`, JSON.stringify(meta, null, 2)); } catch (e) { /* best effort */ }
+  let view;
+  try {
+    view = artifactView({
+      uuid, shortId, url, title, typeSlug: artifactText(a.typeSlug), typeTitle: meta.typeTitle, shared: isSharedArtifact(rel), public: a.public === true,
+      docs: isClaudeDocsArtifact(a), createdAt: meta.createdAt, updatedAt: meta.updatedAt, folder, files: [], missing: [], start: null,
+      startSaved: null, startSize: null, needsRuntime: false, notExported: true, note: ARTIFACT_UNEXPECTED_NOTE,
+    });
+  } catch (e) {
+    view = { id: shortId || uuid, title, kind: 'Page', typed: false, docs: false, shared: false, public: false, createdAt: '', updatedAt: '', folder, start: null,
+      startSaved: null, startKind: null, startSize: null, tooLarge: false, startMissing: false, missingCount: 0, files: [], needsRuntime: false, notExported: true, note: ARTIFACT_UNEXPECTED_NOTE, url, thumb: null };
+  }
   return {
     row: { title, typeTitle: meta.typeTitle, sourceSurface: meta.sourceSurface, rel, folder, startSaved: null, url, note: ARTIFACT_UNEXPECTED_NOTE, needsRuntime: false, fileCount: 0, missingCount: 0 },
     entry: { uuid, title, folder, ver: '' },
+    meta, view, payload: null,
   };
 }
 
@@ -5046,10 +5284,22 @@ const artifactUrl = (r) => {
   const m = /^https:\/\/claude\.ai\/artifact\/([1-9A-HJ-NP-Za-km-z]+|[0-9a-f-]{36})$/.exec(String(r.url || ''));
   return m ? `https://claude.ai/artifact/${m[1]}` : null;
 };
-const artifactLocal = (r) => (r.startSaved ? encodePath(`${r.folder}/${r.startSaved}`) : null);
+// The local link of an artifact's start file. A shared artifact's only when the viewer would open its type
+// (openableName, export-core.js): anything else, HTML, SVG or XML among them, opened from disk could run
+// someone else's code with network access and the shared file:// storage.
+const artifactLocal = (r) => {
+  if (!r.startSaved) return null;
+  if (isSharedArtifact(r.rel) && !openableName(r.startSaved)) return null;
+  return encodePath(`${r.folder}/${r.startSaved}`);
+};
 
-// index.md: one table row per artifact, by title. opts: { listed, exportedAt, warnings }.
-function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0 } = {}) {
+// index.md: one table row per artifact, by title. opts: { listed, exportedAt, warnings, thumbs (card pictures saved) }.
+// "Card pictures: N of M", with the note when they were skipped for want of the optional permission.
+const ARTIFACT_THUMB_PERMISSION_STATUS = 'Card pictures need the web images permission (Settings).';
+function artifactThumbsLine(thumbs, listed, needPermission) {
+  return `${Number(thumbs) || 0} of ${Number(listed) || 0}${needPermission ? ' (needs the web images permission: Settings, Save web images and artifact card pictures)' : ''}`;
+}
+function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, thumbsNeedPermission = false } = {}) {
   const cell = (t) => mdLinkText(String(t || '')).replace(/[<>|*_`#]/g, '\\$&');
   const lines = [
     '# Claude Takeout - Artifacts',
@@ -5057,6 +5307,7 @@ function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().
     `**Exported:** ${formatTimestamp(exportedAt)}`,
     `**Listed by claude.ai:** ${listed}`,
     `**Saved with files:** ${rows.filter((r) => r.fileCount > 0).length}`,
+    `**Card pictures:** ${artifactThumbsLine(thumbs, listed, thumbsNeedPermission)}`,
   ];
   if (warnings) lines.push(`**Issues:** ${artifactCount(warnings, 'warning')} (see errors.txt)`);
   lines.push('', '| # | Artifact | Kind | Source | Files | Notes |', '|---|----------|------|--------|-------|-------|');
@@ -5071,8 +5322,8 @@ function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().
 }
 
 // index.html: a static page, no scripts; every value is escaped and the only links are each artifact's start
-// file in the export and its claude.ai page. opts as artifactsIndexMd.
-function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0 } = {}) {
+// file in the export, its claude.ai page and, when it was built (opts.viewer), viewer.html. opts as artifactsIndexMd.
+function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, viewer = false, thumbsNeedPermission = false } = {}) {
   const esc = (t) => escapeHtmlText(String(t == null ? '' : t)).replace(/'/g, '&#39;');
   const body = sortArtifactRows(rows).map((r) => {
     const local = artifactLocal(r);
@@ -5108,8 +5359,8 @@ a.remote { font-size: 0.85em; margin-left: 6px; }
 <body>
 <main>
 <h1>Claude Artifacts</h1>
-<p class="meta">Exported ${esc(formatTimestamp(exportedAt))} · Listed by claude.ai: ${Number(listed) || 0}${warnings ? ` · ${artifactCount(warnings, 'warning')} (see errors.txt)` : ''}</p>
-<div class="wrap">
+<p class="meta">Exported ${esc(formatTimestamp(exportedAt))} · Listed by claude.ai: ${Number(listed) || 0} · Card pictures: ${esc(artifactThumbsLine(thumbs, listed, thumbsNeedPermission))}${warnings ? ` · ${artifactCount(warnings, 'warning')} (see errors.txt)` : ''}</p>
+${viewer ? '<p class="viewer"><a href="viewer.html">Open the artifacts viewer</a></p>\n' : ''}<div class="wrap">
 <table>
 <thead><tr><th>Artifact</th><th>Kind</th><th>Source</th><th>Files</th><th>Notes</th></tr></thead>
 <tbody>
@@ -5177,31 +5428,85 @@ async function exportArtifacts(options = {}) {
     const ctx = { fetchPublished, state: {}, warn, usedFolders: new Set(ARTIFACT_ROOT_NAMES) };
     const rows = [];
     const entries = [];
+    const views = [];
     const writeFailures = [];
+    let thumbs = 0;
+    // Card pictures only with the optional https permission (asked in a ZIP export's click: options.ask); without
+    // it, tiles, and the status line and indexes say the permission is needed.
+    let picturesAllowed = false;
+    try {
+      if (options && options.ask) await options.ask;
+      picturesAllowed = await webImagesAllowed();
+    } catch (e) { picturesAllowed = false; }
+    const thumbState = {};
+    let parts = null;
+    try {
+      parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
+    } catch (e) { /* no previews; the export goes on */ }
+    const writeParts = (list) => { for (const p of list) root.file(`viewer-files/${p.name}`, p.body); };
     for (let i = 0; i < total; i++) {
+      let saved;
       try {
-        const { row, entry } = await saveArtifact(root, artifacts[i], ctx);
-        rows.push(row);
-        entries.push(entry);
+        saved = await saveArtifact(root, artifacts[i], ctx);
       } catch (e) {
-        const { row, entry } = unexpectedArtifactRow(root, artifacts[i], ctx);
-        rows.push(row);
-        entries.push(entry);
+        saved = unexpectedArtifactRow(root, artifacts[i], ctx);
       }
+      rows.push(saved.row);
+      entries.push(saved.entry);
+      let view = { ...saved.view, thumb: null, part: null, key: null };
+      // The card picture and the preview part are extras: a failure leaves them out, with no warning.
+      try {
+        if (picturesAllowed && !ctx.state.publishedSignedOut) {
+          const uuid = String(artifacts[i].slug).toLowerCase();
+          const thumb = await saveArtifactThumb(root, uuid, view.id, fetchPublished, thumbState);
+          if (thumb) {
+            view.thumb = thumb;
+            thumbs++;
+            root.file(`${view.folder}/artifact.json`, JSON.stringify({ ...saved.meta, thumb }, null, 2));
+          }
+        }
+      } catch (e) { /* no picture */ }
+      try {
+        if (parts) {
+          view = parts.add(view, saved.payload);
+          writeParts(parts.drain());
+        }
+      } catch (e) { view = { ...view, part: null, key: null }; }
+      // A start file the preview would show that ended up in no part.
+      if (view.part == null && view.start && !view.tooLarge && previewKind(view.start)) view = { ...view, startMissing: true };
+      views.push(view);
       // On disk, each artifact is written before the next, which keeps memory down.
       if (run) writeFailures.push(...await root.flush());
       showProgress(i + 1, total, `${i + 1} / ${total}`);
       if (i + 1 < total) await new Promise((r) => setTimeout(r, 200));
     }
+    let partCount = 0;
+    try {
+      if (parts) {
+        writeParts(parts.flush());
+        partCount = parts.count;
+      }
+    } catch (e) { /* the parts written so far stay */ }
+    let viewerBuilt = false;
+    try {
+      viewerBuilt = await writeArtifactsViewer(root, views, { exported: startedAt, listed, fileScripts: partCount > 0 }) === true;
+    } catch (e) { viewerBuilt = false; }
+    // On disk, written now, so index.html links viewer.html only when it is really there.
+    if (run) {
+      const failed = await root.flush();
+      writeFailures.push(...failed);
+      if (failed.some((f) => f.path === 'viewer.html' || f.path === CTViewer.VIEWER_CHECK_FILE)) viewerBuilt = false;
+    }
 
     const warnings = collector.warnings.length + collector.errors.length;
-    const indexOpts = { listed, exportedAt: startedAt, warnings };
+    const indexOpts = { listed, exportedAt: startedAt, warnings, thumbs, viewer: viewerBuilt, thumbsNeedPermission: !picturesAllowed };
     addFileWithBOM(root, 'index.md', artifactsIndexMd(rows, indexOpts));
     root.file('index.html', artifactsIndexHtml(rows, indexOpts));
-    root.file('export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', exported_at: startedAt, listed, artifacts: entries }, null, 2));
+    root.file('export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', exported_at: startedAt, listed, thumbs, artifacts: entries }, null, 2));
     if (collector.hasAny()) root.file('errors.txt', collector.generateErrorReport());
 
     const withoutFiles = rows.filter((r) => r.fileCount === 0).length;
+    const viewerNote = (viewerBuilt ? '' : ' viewer.html could not be built.') + (picturesAllowed ? '' : ` ${ARTIFACT_THUMB_PERMISSION_STATUS}`);
     const done = (where) => `Exported ${artifactCount(total, 'artifact')} to ${where}.${withoutFiles ? ` ${withoutFiles} without files (see index.md).` : ''}${warnings ? ' See errors.txt.' : ''}`;
     if (run) {
       writeFailures.push(...await root.flush());
@@ -5209,8 +5514,8 @@ async function exportArtifacts(options = {}) {
         root.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
         await root.flush();
       }
-      status.className = writeFailures.length || warnings ? 'status warning' : 'status ready';
-      status.textContent = done(run.name) + (writeFailures.length ? ` ${artifactCount(writeFailures.length, 'file')} could not be written (see write-errors.txt).` : '');
+      status.className = writeFailures.length || warnings || !viewerBuilt ? 'status warning' : 'status ready';
+      status.textContent = done(run.name) + (writeFailures.length ? ` ${artifactCount(writeFailures.length, 'file')} could not be written (see write-errors.txt).` : '') + viewerNote;
       return;
     }
     status.textContent = 'Compressing archive...';
@@ -5224,8 +5529,8 @@ async function exportArtifacts(options = {}) {
       return;
     }
     download(blob, zipName, 'application/zip');
-    status.className = warnings ? 'status warning' : 'status ready';
-    status.textContent = done('a ZIP');
+    status.className = warnings || !viewerBuilt ? 'status warning' : 'status ready';
+    status.textContent = done('a ZIP') + viewerNote;
   } catch (e) {
     status.className = 'status error';
     status.textContent = `Export Artifacts failed: ${e && e.message ? e.message : e}`;
@@ -5374,9 +5679,12 @@ const IS_POPUP = typeof location !== 'undefined' && /popup\.html$/.test(location
 const FOLDER_BUTTON_LABELS = { exportAllZip: 'Export All (Folder)', exportArtifacts: 'Export Artifacts (Folder)' };
 // A label the popup stored with its note, read from the clicked button; anything else falls back to the above.
 const FOLDER_LABEL_RE = /^Export (?:All|Changes|Artifacts) \(Folder\)$/;
-function folderExport(buttonId, name, run) {
+// ask(): optional, called in a ZIP export's click to start a permission request; its promise reaches run as
+// options.ask. Folder mode never asks: showDirectoryPicker needs the click's activation, and a request would
+// risk it (turn the permission on in Settings instead).
+function folderExport(buttonId, name, run, ask = null) {
   return async () => {
-    if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return run();
+    if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return ask ? run({ ask: ask() }) : run();
     const status = document.getElementById('status');
     if (IS_POPUP) {
       if (chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
@@ -5404,7 +5712,7 @@ function folderExport(buttonId, name, run) {
   };
 }
 onExport('exportAllZip', folderExport('exportAllZip', 'Export All', (options) => bulkExportZip(options)));
-onExport('exportArtifacts', folderExport('exportArtifacts', 'Export Artifacts', (options) => exportArtifacts(options)));
+onExport('exportArtifacts', folderExport('exportArtifacts', 'Export Artifacts', (options) => exportArtifacts(options), askForCardPictures));
 
 // Opened from the popup's Export All or Export Artifacts: say what to do next.
 if (!IS_POPUP && chrome.storage && chrome.storage.session) {
@@ -5505,7 +5813,7 @@ function applySettings() {
   });
 }
 
-// Save images from web searches: not a stored setting but Chrome's permission, shown as it stands.
+// Save web images and artifact card pictures: not a stored setting but Chrome's permission, shown as it stands.
 const webImagesBox = document.getElementById('webImages');
 if (webImagesBox) {
   webImagesAllowed().then((ok) => { webImagesBox.checked = ok; });

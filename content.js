@@ -234,10 +234,33 @@
   }
 
   // Every artifact claude.ai lists for the account. Only the fields an export keeps leave this function
-  // (no owner, thumbnail or URL), and a failure is a code, never a message.
-  async function listArtifacts(request) {
-    const org = await getOrgForPublished(request);
-    if (!org) return { error: 'no org' };
+  // (no owner, audience, thumbnail or URL), and a failure is a code, never a message. Each artifact's card
+  // picture URL is checked and kept in artifactThumbUrls; only artifactThumbUrl hands one out, to the popup,
+  // which fetches it (with the optional https permission) and keeps it nowhere.
+  let artifactThumbUrls = null; // lowercased uuid -> rebuilt picture URL, replaced by each listing
+  let artifactThumbRelisted = false; // one re-list on a 403 per export (reset by listArtifacts)
+
+  // The picture URL rebuilt from its checked parts, or null: https, no port, userinfo or hash, host exactly
+  // <uuid>.frame.claudeusercontent.com, path /_f/<ver>/_thumb.img, one query parameter, __frame_t.
+  function checkThumbUrl(uuid, raw) {
+    if (typeof raw !== 'string' || raw.indexOf('#') !== -1) return null;
+    let u;
+    try { u = new URL(raw); } catch (e) { return null; }
+    const host = uuid.toLowerCase() + '.frame.claudeusercontent.com';
+    if (u.protocol !== 'https:' || u.port !== '' || u.username !== '' || u.password !== '' || u.hash !== '' ||
+        u.hostname !== host || u.host !== host) return null;
+    const m = /^\/_f\/([^/]+)\/_thumb\.img$/.exec(u.pathname);
+    if (!m || !PUBLISHED_VER.test(m[1])) return null;
+    const params = Array.from(u.searchParams);
+    if (params.length !== 1 || params[0][0] !== '__frame_t' || !params[0][1]) return null;
+    // The token is kept as listed (decoding and encoding again would turn '+' into '%20'), and only in this
+    // plain form: the query exactly as the listing wrote it, nothing the parser had to encode.
+    const q = /^\?__frame_t=([A-Za-z0-9._~%+-]+)$/.exec(u.search);
+    if (!q || raw.slice(raw.indexOf('?')) !== u.search) return null;
+    return 'https://' + host + '/_f/' + m[1] + '/_thumb.img?__frame_t=' + q[1];
+  }
+
+  async function fetchFrameList(org) {
     let res;
     try {
       res = await fetch('https://claude.ai/api/frame/frames?org=' + encodeURIComponent(org) + '&limit=1000',
@@ -247,14 +270,49 @@
     let body;
     try { body = await res.json(); } catch (e) { throw new PublishedError('bad response'); }
     if (!body || !Array.isArray(body.frames)) throw new PublishedError('bad response');
+    const frames = body.frames.filter((f) => f && typeof f === 'object');
+    const thumbs = new Map();
+    for (const f of frames) {
+      if (typeof f.slug !== 'string' || !PUBLISHED_UUID.test(f.slug)) continue;
+      const url = checkThumbUrl(f.slug, f.thumbImgURL);
+      if (url) thumbs.set(f.slug.toLowerCase(), url);
+    }
+    artifactThumbUrls = thumbs;
+    return frames;
+  }
+
+  async function listArtifacts(request) {
+    const org = await getOrgForPublished(request);
+    artifactThumbUrls = null; // a failed listing leaves no pictures
+    if (!org) return { error: 'no org' };
+    artifactThumbRelisted = false;
+    const raw = await fetchFrameList(org);
     const str = (v) => (typeof v === 'string' ? v : '');
-    const frames = body.frames.filter((f) => f && typeof f === 'object').map((f) => ({
+    const frames = raw.map((f) => ({
       slug: str(f.slug), title: str(f.title), typeSlug: str(f.type_slug), typeTitle: str(f.type_title),
       sourceSurface: str(f.source_surface), rel: str(f.rel), live: str(f.live),
-      updatedAt: str(f.updatedAt), createdAt: str(f.created_at),
+      updatedAt: str(f.updatedAt), createdAt: str(f.created_at), public: f.audience === 'public',
     }));
     const accountName = request.withAccountName ? await fetchAccountName() : null;
     return { frames, accountName, orgId: org };
+  }
+
+  // An artifact's card picture URL as { url }, checked when listed and rebuilt from its parts, or
+  // { error: 'no picture' }. With refresh, the list is fetched again once per export (a 403 picture: one
+  // /api/frame/frames call renews every URL); after that, the URL as it stands. Only the popup asks, and only
+  // to fetch the picture; nothing here logs the URL.
+  async function artifactThumbUrl(request) {
+    const none = { error: 'no picture' };
+    const uuid = typeof request.uuid === 'string' && PUBLISHED_UUID.test(request.uuid) ? request.uuid.toLowerCase() : null;
+    if (!uuid || !artifactThumbUrls) return none;
+    if (request.refresh === true && !artifactThumbRelisted) {
+      artifactThumbRelisted = true;
+      const org = await getOrgForPublished(request);
+      if (!org) return none;
+      try { await fetchFrameList(org); } catch (e) { artifactThumbUrls = null; return none; }
+    }
+    const url = artifactThumbUrls && artifactThumbUrls.get(uuid);
+    return url ? { url } : none;
   }
 
   function publishedBase64(bytes) {
@@ -267,12 +325,12 @@
   }
 
   // Read a body, stopping once it passes the cap whatever the listing claimed. Null means too large.
-  async function publishedReadBody(res) {
+  async function publishedReadBody(res, max = PUBLISHED_MAX_FILE) {
     const body = res.body;
     if (!body || typeof body.getReader !== 'function') {
       let ab;
       try { ab = await res.arrayBuffer(); } catch (e) { throw new PublishedError('network'); }
-      return ab.byteLength > PUBLISHED_MAX_FILE ? null : new Uint8Array(ab);
+      return ab.byteLength > max ? null : new Uint8Array(ab);
     }
     const reader = body.getReader();
     const chunks = [];
@@ -282,7 +340,7 @@
         const { done, value } = await reader.read();
         if (done) break;
         total += value.byteLength;
-        if (total > PUBLISHED_MAX_FILE) { try { reader.cancel().catch(() => {}); } catch (e) {} return null; }
+        if (total > max) { try { reader.cancel().catch(() => {}); } catch (e) {} return null; }
         chunks.push(value);
       }
     } catch (e) { throw new PublishedError('network'); }
@@ -388,6 +446,11 @@
 
     if (request.action === 'listArtifacts') {
       runPublished(listArtifacts, request, sendResponse);
+      return true;
+    }
+
+    if (request.action === 'artifactThumbUrl') {
+      runPublished(artifactThumbUrl, request, sendResponse);
       return true;
     }
 
