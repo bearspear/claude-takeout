@@ -2269,7 +2269,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         fullContent.push(...toolImageLines(block, toolImages, '../'));
       } else if (block.type === 'tool_result' && isImageSearchTool(block.name)) {
         fullContent.push(...imageSearchLines(block, webImages, '../'));
-      } else if (block.type === 'tool_result' && isPublishTool(block.name)) {
+      } else if (block.type === 'tool_result' && (isPublishTool(block.name) || publishedReply(block.name, block))) {
         fullContent.push(...publishedLines(block));
       } else if (block.type === 'tool_result' && block.name === 'web_search') {
         if (Array.isArray(block.content)) {
@@ -3475,15 +3475,19 @@ async function savePublishedPages(folder, data, ctx = {}) {
   }
 
   // One record per page for the export: its folder is chosen once, as titles change.
-  const pageRecord = (first) => {
-    if (pages.has(first.uuid)) return pages.get(first.uuid);
-    const shortId = /^[A-Za-z0-9_-]{1,64}$/.test(first.shortId || '') ? first.shortId : '';
-    const name = `${safeFileTitle(first.title) || 'page'}_${shortId || first.uuid}`;
+  const pageDir = (title, id) => {
+    const name = `${safeFileTitle(title) || 'page'}_${id}`;
     let dir = name;
     for (let n = 2; dirs.has(dir.toLowerCase()); n++) dir = `${name}_${n}`;
     dirs.add(dir.toLowerCase());
+    return dir;
+  };
+  const pageRecord = (first) => {
+    if (pages.has(first.uuid)) return pages.get(first.uuid);
+    const shortId = /^[A-Za-z0-9_-]{1,64}$/.test(first.shortId || '') ? first.shortId : '';
     const rec = {
-      uuid: first.uuid, shortId, url: shortId ? `https://claude.ai/artifact/${shortId}` : '', title: String(first.title || ''), dir,
+      uuid: first.uuid, shortId, url: shortId ? `https://claude.ai/artifact/${shortId}` : '', title: String(first.title || ''),
+      dir: pageDir(first.title, shortId || first.uuid), titleFromFile: !!first.titleFromFile,
       history: [], infos: new Map(), versions: new Map(), folders: new Set(['published.json']),
     };
     pages.set(first.uuid, rec);
@@ -3528,6 +3532,13 @@ async function savePublishedPages(folder, data, ctx = {}) {
       if (!rec.infos.has(info.ver)) rec.infos.set(info.ver, info);
       if (info.history.length >= rec.history.length) rec.history = info.history;
       if (info.title) rec.title = info.title;
+      // A page named after its file (an Artifact tool publish) takes claude.ai's title for its folder too. Nothing
+      // is written before the first page info, so the folder can still be renamed.
+      if (info.title && rec.titleFromFile) {
+        rec.titleFromFile = false;
+        dirs.delete(rec.dir.toLowerCase());
+        rec.dir = pageDir(info.title, rec.shortId || rec.uuid);
+      }
     }
     return info;
   };
@@ -3574,7 +3585,9 @@ async function savePublishedPages(folder, data, ctx = {}) {
     for (const pub of publishes) {
       const matched = new Map();
       for (const f of files) {
-        const src = f.sha256 ? sources.find((s) => (s.as || s.path.split('/').pop()) === f.path) : null;
+        // A one-file publish (the Artifact tool) names no published path: its one file is the one source.
+        const src = !f.sha256 ? null : sources.find((s) => (s.as || s.path.split('/').pop()) === f.path)
+          || (files.length === 1 && sources.length === 1 && !sources[0].as ? sources[0] : null);
         let hit = null;
         for (const c of src ? candidates(src, pub.messageUuid) : []) {
           if (await hashText(c.text) === f.sha256) { hit = c; break; }
@@ -3731,10 +3744,10 @@ function tabPublishedFetcher(tabId) {
   };
 }
 
-// The page a publish_files call put on claude.ai, as a quoted link, with a link to the export's copy when
+// The page a publish_files or Artifact call put on claude.ai, as a quoted link, with a link to the export's copy when
 // links (publishedLinks) has one for this call; [] when there is neither.
 function publishedLines(block, links = null, up = '') {
-  const reply = leadingJson(resultText(block)) || {};
+  const reply = publishedReply(block && block.name, block) || {};
   const local = links && block && Object.prototype.hasOwnProperty.call(links, block.tool_use_id) ? `${up}${links[block.tool_use_id]}` : null;
   if (!reply.url) return local ? [`> **Published page:** [saved copy](${local})`, ''] : [];
   return [`> **Published on claude.ai:** [${mdLinkText(reply.title || reply.url)}](${mdUrl(reply.url)})${local ? ` · [saved copy](${local})` : ''}`, ''];
@@ -4080,8 +4093,10 @@ function convertToMarkdown(data, options = {}) {
           } else if (isImageSearchTool(toolName)) {
             lines.push('```plaintext', `Image search: ${input.query || ''}`, '```', '');
 
-          } else if (isPublishTool(toolName)) {
-            const sent = (Array.isArray(input.files) ? input.files : []).map((f) => (f && f.path ? f.path.split('/').pop() : '')).filter(Boolean);
+          } else if (isPublishTool(toolName) || isArtifactPublish(toolName, input)) {
+            const sent = isPublishTool(toolName)
+              ? (Array.isArray(input.files) ? input.files : []).map((f) => (f && f.path ? f.path.split('/').pop() : '')).filter(Boolean)
+              : [input.file_path.split('/').pop()];
             lines.push('```plaintext', `Publishing on claude.ai: ${input.title || 'page'}${sent.length ? ` (${sent.join(', ')})` : ''}`, '```', '');
 
           } else if (claudeDocsAction(toolName)) {
@@ -4133,7 +4148,7 @@ function convertToMarkdown(data, options = {}) {
             lines.push(...toolImageLines(block, toolImages));
           } else if (isImageSearchTool(toolName) && imagesOf(block).length) {
             lines.push(...imageSearchLines(block, webImages));
-          } else if (isPublishTool(toolName) && publishedLines(block, pageLinks).length) {
+          } else if ((isPublishTool(toolName) || isArtifactTool(toolName)) && publishedLines(block, pageLinks).length) {
             lines.push(...publishedLines(block, pageLinks));
           } else if (toolName === 'web_search' && Array.isArray(block.content)) {
             // Format web search results nicely

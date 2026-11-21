@@ -233,7 +233,7 @@ Claude Docs, the editable documents on claude.ai, live there rather than in a sa
 
 ### Published pages
 
-A `publish_files` call (`isPublishTool`) puts a page on claude.ai; its result's JSON gives the page's URL, whose last part is the page's id in base58 (`base58ToUuid`). `publishedPagesOf` groups a chat's publishes by page id and records, per publish, the files sent (`path`, `as`) and the message. Fetching is `content.js`'s job, through two actions that popup.js reaches by `sendToTab`:
+A `publish_files` call (`isPublishTool`) puts a page on claude.ai; its result's JSON gives the page's URL, whose last part is the page's id in base58 (`base58ToUuid`). `publishedPagesOf` groups a chat's publishes by page id and records, per publish, the files sent (`path`, `as`) and the message. Newer chats publish with the `Artifact` tool instead (`isArtifactPublish`: an `input.file_path` and no `action`; `action: "open"` only opens one): its reply is text, "Published <path> at https://claude.ai/artifact/<id> (Version N, version id <ver>)", read by `artifactPublishReply`. Such a publish has one source with no `as`, titled by its file's name until the page info gives the title (its folder under `published/` is then renamed to that title, before anything is written); `savePublishedPages` matches the one published file to that one source when comparing checksums. `publishedReply` gives `{ title, url }` for either tool, for the Markdown (`publishedLines`) and the viewer, which marks the call `output` so it shows as the page's card, not a step. Fetching is `content.js`'s job, through two actions that popup.js reaches by `sendToTab`:
 
 - `publishedPageInfo` calls `GET /api/frame/<uuid>?org=<org>[&ver=<ver>]` with the header `X-Frame-CP: go` (reply: version, history, title, current files, an asset token), then `GET https://<uuid>.frame.claudeusercontent.com/_f/<ver>/_files.json?__frame_t=<token>` for each file's size, type and SHA-256. It returns `ver`, `title`, `history`, `files[]` and any `rejected` paths.
 - `publishedPageFile` fetches one file from `…/_f/<ver>/_src/<path>?__frame_t=<token>` and returns it as base64 (encoded in chunks).
@@ -306,7 +306,7 @@ A `text` block's `citations[]` items carry `start_index`, `end_index`, `url`, `t
 ├── artefacts/<base>(_vN)<ext>
 ├── attachments/pNN_<name>
 ├── uploads/pNN_<name>
-├── published/<Title>_<id>/    pages published with publish_files: published.json and <version>/<files>
+├── published/<Title>_<id>/    pages published with publish_files or the Artifact tool: published.json and <version>/<files>
 └── project/
 ```
 

@@ -394,6 +394,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.16.1
+
+- **Pages published with the Artifact tool are saved** - Newer chats publish a page with claude.ai's `Artifact` tool instead of `publish_files`. Those pages are now saved in `published/` like any other: a card with the claude.ai link in the viewer, "Published on claude.ai" in `full_chat.md`, and no second copy when the published page is the same as the file Claude wrote. An `Artifact` call that only opens an artifact publishes nothing and shows as a step, "Opened an artifact".
+
 ### v1.16.0
 
 - **Export Artifacts has a viewer** - The export now includes `viewer.html`, a page that looks like claude.ai/artifacts: a grid of cards with the artifact's picture, and tabs for All, Yours and Shared with you. Open a card to preview the page in place (HTML and SVG run in a sandbox, Markdown and images are shown), with its saved files listed and an **Open file** link for your own. Claude Docs documents, Design and other artifacts that need claude.ai show their details and a link to claude.ai. The card pictures are saved in `viewer-files/thumbs/` and `index.html` says "Card pictures: N of M"; they need the same optional permission as web-search images (Settings > Save web images and artifact card pictures), which Export Artifacts asks for when saving a ZIP, and a card without a picture shows a tile. Unzip a ZIP export before opening the viewer. Artifacts shared with you get no **Open file** link for a start file that is anything but documents, images, media, archives and plain data files, in the viewer or in `index.html` and `index.md`. A preview has no network access except the WebRTC gap noted in USAGE, its pages can't link to each other, and its storage is not kept. Use Folder for a large account: a ZIP is built in memory.

@@ -277,7 +277,7 @@ In `viewer.html`, a file with an `artifact_opaque_mutation`, `str_replace_failed
 
 ### Published pages
 
-A page Claude published on claude.ai is saved in `published/<Title>_<id>/`, one folder per version, with `published.json` listing the files. A version identical to a file in `artefacts/` is not copied again (`published.json` says `same`). The export needs a claude.ai tab open and signed in to fetch them, and an export made earlier has no `published/` folder until you export again. Limits to know:
+A page Claude published on claude.ai (with `publish_files` or the `Artifact` tool) is saved in `published/<Title>_<id>/`, one folder per version, with `published.json` listing the files. A version identical to a file in `artefacts/` is not copied again (`published.json` says `same`). The export needs a claude.ai tab open and signed in to fetch them, and an export made earlier has no `published/` folder until you export again. Limits to know:
 
 - "Current" is the live version fetched when an older chat has no recorded version. It is not necessarily what was published at that time.
 - The viewer previews a page's start file. A multi-file page's own scripts and styles may not load in the sandboxed preview, and the side panel shows only the start file.

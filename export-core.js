@@ -297,6 +297,44 @@ function resultText(result) {
 // Pages Claude published with publish_files. Names may carry a connector prefix.
 const isPublishTool = (name) => /(^|__|:)publish_files$/.test(String(name || ''));
 
+// claude.ai's Artifact tool publishes one file (input.file_path) or, with input.action ('open'), opens an
+// artifact without publishing anything. Only a call with a file_path and no other action is a publish.
+// Function declarations, so takeout-viewer.js can reach them on window.
+function isArtifactTool(name) { return /(^|__|:)Artifact$/.test(String(name || '')); }
+function isArtifactPublish(name, input) {
+  return isArtifactTool(name) && !!input && typeof input === 'object'
+    && typeof input.file_path === 'string' && input.file_path !== '' && (input.action == null || input.action === 'publish');
+}
+
+// The reply to an Artifact publish, "Published <path> at https://claude.ai/artifact/<short id> (Version N,
+// version id <ver>) ...", as { url, uuid, shortId, ver }, or null. The url may also be
+// https://claude.ai/code/artifact/<uuid>. ver is '' when the reply names none (then the live version).
+function artifactPublishReply(text) {
+  const m = /^Published \S[^\n]*? at (https:\/\/claude\.ai\/(?:code\/)?artifact\/([A-Za-z0-9-]+))(?=[\s)]|$)/.exec(String(text || '').trim());
+  if (!m) return null;
+  const id = m[2];
+  const uuid = base58ToUuid(id) || (PUBLISH_UUID_RE.test(id.toLowerCase()) ? id.toLowerCase() : '');
+  if (!uuid) return null;
+  const v = /\(Version \d+, version id ([^)\s]+)\)/.exec(text);
+  const ver = v && PUBLISH_VER_RE.test(v[1]) ? v[1] : '';
+  return { url: m[1], uuid, shortId: uuidToBase58(uuid), ver };
+}
+
+// The page a publish call's result names, { title, url }, for publish_files (its leading JSON) and the Artifact
+// tool (its reply text); null when the result names no claude.ai page.
+function publishedReply(name, result) {
+  const text = resultText(result);
+  if (isPublishTool(name)) {
+    const info = leadingJson(text);
+    return info && typeof info === 'object' && typeof info.url === 'string' && info.url ? { title: String(info.title || ''), url: info.url } : null;
+  }
+  if (isArtifactTool(name)) {
+    const reply = artifactPublishReply(text);
+    return reply ? { title: '', url: reply.url } : null;
+  }
+  return null;
+}
+
 const BASE58 = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
 // A claude.ai/artifact short id (base58 of the 16 bytes of a UUID) as the UUID it stands for, or ''
@@ -355,6 +393,8 @@ function artifactsFromList(reply) {
 // The pages a chat published, one entry per uuid + version, in chat order over every message (also
 // branches that are no longer current). A result with no slug and version but an artifact url stands for
 // the live version: ver '' and current true.
+// An Artifact tool publish (isArtifactPublish) gives one entry from its reply text, titled by its file's name
+// (claude.ai's page info gives the real title later) and with one source whose published name is unknown.
 function publishedPagesOf(data) {
   const pages = [];
   const byKey = new Map();
@@ -366,7 +406,27 @@ function publishedPagesOf(data) {
   for (const msg of messages) {
     const blocks = Array.isArray(msg.content) ? msg.content : [];
     for (const b of blocks) {
-      if (!b || b.type !== 'tool_use' || !isPublishTool(b.name)) continue;
+      if (!b || b.type !== 'tool_use') continue;
+      if (isArtifactPublish(b.name, b.input)) {
+        const r = results.get(b.id);
+        const reply = r && !r.is_error ? artifactPublishReply(resultText(r)) : null;
+        if (!reply) continue;
+        const key = `${reply.uuid} ${reply.ver}`;
+        let page = byKey.get(key);
+        if (!page) {
+          // The reply has no title: the file's name stands in until claude.ai's page info gives one.
+          const file = b.input.file_path.split('/').pop();
+          page = {
+            uuid: reply.uuid, shortId: reply.shortId, ver: reply.ver, title: file.replace(/\.[^.]+$/, '') || file, titleFromFile: true,
+            url: reply.url, current: !reply.ver, publishes: [], sources: [{ as: '', path: b.input.file_path }],
+          };
+          byKey.set(key, page);
+          pages.push(page);
+        }
+        page.publishes.push({ messageUuid: msg.uuid, toolUseId: b.id });
+        continue;
+      }
+      if (!isPublishTool(b.name)) continue;
       const r = results.get(b.id);
       if (!r || r.is_error) continue;
       const info = leadingJson(resultText(r));
@@ -1449,7 +1509,7 @@ function openableName(name) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
   };

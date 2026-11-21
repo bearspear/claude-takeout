@@ -393,8 +393,10 @@ function stepsSummary(tools) {
 // Everything Claude did before its answer, folded into one line as claude.ai does: thinking, tool calls and
 // the text between them, as rows in a box. Thinking alone shows as its own line, labelled by its summary.
 const OUTPUT_TOOL = /(^|__|:)(show_widget|image_search|publish_files|\w+_display_v\d+|ask_user_input_v\d+)$/;
+// A tool block shown as output, not as a step: by its name, or marked by the data (an Artifact tool publish).
+const isOutputTool = b => b.t === 'tool' && (!!b.output || OUTPUT_TOOL.test(String(b.name)));
 function renderSteps(blocks, sources, first = true) {
-  blocks = blocks.filter(b => !(b.t === 'tool' && OUTPUT_TOOL.test(String(b.name))));
+  blocks = blocks.filter(b => !isOutputTool(b));
   // Thinking with nothing to show (no text, no summary) only adds to the time, as on claude.ai.
   const seconds = blocks.reduce((n, b) => n + (b.t === 'thinking' && Number.isFinite(b.seconds) ? b.seconds : 0), 0);
   const all = blocks;
@@ -1148,7 +1150,7 @@ function renderAssistant(m, chat) {
 function renderPart(node, blocks, chat, sources, first) {
   // The steps run up to the last thinking or tool block that isn't an output; the rest is the answer.
   let last = -1;
-  blocks.forEach((block, i) => { if (block.t === 'thinking' || (block.t === 'tool' && !OUTPUT_TOOL.test(String(block.name)))) last = i; });
+  blocks.forEach((block, i) => { if (block.t === 'thinking' || (block.t === 'tool' && !isOutputTool(block))) last = i; });
   const steps = blocks.slice(0, last + 1).filter(b => b.t !== 'card');
   const after = [...blocks.slice(0, last + 1).filter(b => b.t === 'card'), ...blocks.slice(last + 1)];
   const line = steps.length ? renderSteps(steps, sources, first) : null;
