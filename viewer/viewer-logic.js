@@ -632,11 +632,13 @@ function artifactPreviewDoc(text, startPath, payload) {
   };
 }
 
-// tab: 'all' | 'yours' | 'shared'. Newest update first, an unparsable date last, ties by title.
+// tab: 'all' | 'yours' | 'shared'. Listed artifacts only (an artifact not in claude.ai's list has listed: false).
+// Newest update first, an unparsable date last, ties by title.
 function artifactTabs(views, tab, query) {
   const q = String(query || '').trim().toLowerCase();
   const time = v => { const t = Date.parse(v.updatedAt); return Number.isNaN(t) ? null : t; };
   return (views || [])
+    .filter(v => v.listed !== false)
     .filter(v => (tab === 'yours' ? !v.shared : tab === 'shared' ? !!v.shared : true))
     .filter(v => !q || String(v.title || '').toLowerCase().includes(q))
     .sort((a, b) => {
@@ -792,35 +794,14 @@ function artifactLinkGroups(view, chats) {
   return groups;
 }
 
-// The versions of an artifact the chats published: current, the label a chat gave the artifact's current version
-// ('' when none published it), and others, each other version once (by ver, else label) that has something saved,
-// as { label, chat, file, version } (a published:<uuid> file and its version), v1, v2, ... in order, then the rest.
-function publishedVersionsOf(data, view) {
-  const chats = data && Array.isArray(data.chats) ? data.chats : [];
-  const id = view && view.id;
-  const now = view && typeof view.ver === 'string' ? view.ver : '';
-  let current = '';
-  const seen = new Set();
-  const others = [];
-  chats.forEach((chat, ci) => {
-    for (const [fid, f] of Object.entries((chat && chat.files) || {})) {
-      if (!f || !f.published || f.artifact !== id || !Array.isArray(f.versions)) continue;
-      f.versions.forEach((v, i) => {
-        if (!v) return;
-        const label = String(v.label || '');
-        const ver = typeof v.ver === 'string' ? v.ver : '';
-        if (ver && ver === now) { if (!current) current = label; return; }
-        const key = ver ? `ver ${ver}` : `label ${label}`;
-        const saved = typeof v.text === 'string' || typeof v.href === 'string' || (Number.isSafeInteger(v.part) && v.part > 0);
-        if (seen.has(key) || !saved) return;
-        seen.add(key);
-        others.push({ label, chat: ci, file: fid, version: i });
-      });
-    }
-  });
-  const num = o => { const m = /^v(\d+)$/.exec(o.label); return m ? Number(m[1]) : null; };
-  others.sort((a, b) => { const x = num(a), y = num(b); return x === null || y === null ? (x === null) - (y === null) : x - y; });
-  return { current, others };
+// The chat viewer's Artifacts entry: shown when the data has the Artifacts screen (an Export All's) and the screen has
+// something: a listed artifact, or a file Claude made in a chat (In chats). count: the listed artifacts, else the
+// In chats files.
+function artifactsEntry(data) {
+  if (!data || !Array.isArray(data.artifacts)) return { show: false, count: 0 };
+  const listed = data.artifacts.filter(v => v && typeof v === 'object' && v.listed !== false).length;
+  const count = listed || inChatsFiles(data).length;
+  return { show: count > 0, count };
 }
 
 // What a file's flag means, for its badge and the note on its page (the chat viewer's and the Artifacts screen's).
@@ -1374,5 +1355,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, publishedVersionsOf, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
 }

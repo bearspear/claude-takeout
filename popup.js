@@ -410,13 +410,14 @@ async function viewerUploadText(name, content) {
 
 // Add viewer.html and viewer-check.gif to the ZIP root, once per export. Returns
 // false and writes nothing on any failure, because the export must still download.
-// opts (Export All): { artifacts: { views, listed, exported, since } from its artifact step, firstPart: the first
-// viewer-files part number the chats may use, after the artifact step's parts }.
+// opts (Export All): { artifacts: { views (its artifact step's), records (each artifact.json written, with dir, its
+// folder from the root), listFetched (claude.ai's list is in this export), listed, exported, since }, firstPart: the
+// first viewer-files part number the chats may use, after the artifact step's parts }.
 async function writeViewer(zip, chats, opts = {}) {
   try {
-    const artifacts = opts && opts.artifacts && Array.isArray(opts.artifacts.views) && opts.artifacts.views.length ? opts.artifacts : null;
-    // No chats and no artifacts: nothing to show. Artifacts alone (an Export Changes run with no chat changes) still get a viewer.
-    if (!chats.length && !artifacts) return false;
+    const artifacts = opts && opts.artifacts && typeof opts.artifacts === 'object' ? opts.artifacts : null;
+    // No chats and no artifact views: nothing to show. Artifacts alone (an Export Changes run with no chat changes) still get a viewer.
+    if (!chats.length && !(artifacts && Array.isArray(artifacts.views) && artifacts.views.length)) return false;
     const assets = await Promise.all(CTViewer.VIEWER_ASSETS.map(async (asset) => {
       const response = await fetch(chrome.runtime.getURL(asset));
       if (!response.ok) throw new Error(`${asset}: HTTP ${response.status}`);
@@ -5085,9 +5086,9 @@ async function bulkExportZip(options = {}) {
     // The combined viewer also needs each artifact's current version (to tell it from older ones chats published)
     // and where claude.ai says it was made (its card's source line); views, entries and rows are one per artifact.
     const combinedViews = step ? step.views.map((v, i) => ({ ...v, ver: (step.entries[i] && step.entries[i].ver) || '', sourceSurface: (step.rows[i] && step.rows[i].sourceSurface) || '' })) : [];
-    // records (every artifact.json written) and listFetched (whether claude.ai's list is in this export) are for the
-    // viewer's artifact screens.
-    const storeRecords = store.records().filter((rec) => store.written(rec)).map((rec) => artifactJsonV2(rec));
+    // records (every artifact.json written, with its folder) and listFetched (whether claude.ai's list is in this
+    // export) are for the viewer's artifact screens.
+    const storeRecords = store.records().filter((rec) => store.written(rec)).map((rec) => ({ ...artifactJsonV2(rec), dir: `${store.prefix}${rec.dir}` }));
     const viewerOpts = step
       // Every part the artifact step numbered, even one an error kept from being counted in partCount.
       ? { artifacts: { views: combinedViews, listed: artifactList.listed, exported: startedAt, since, listFetched: true, records: storeRecords }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }
@@ -5562,6 +5563,8 @@ async function saveArtifact(root, a, ctx) {
   // never in a preview: the version is kept as it is, and the view says the start is too large to preview.
   let kept = null;
   let same = null;
+  // A version the chats saved whole that a failing fetch left as it was.
+  let keptOnFail = null;
   if (!docs && meta.ver && typeSlug === '' && store.has(uuid, meta.ver)) {
     const v = rec.versions.get(meta.ver);
     const preview = v && v.preview && typeof v.preview === 'object' ? v.preview : null;
@@ -5637,6 +5640,11 @@ async function saveArtifact(root, a, ctx) {
           if (!got.saved && prev && prev.sameAs) v.sameAs = prev.sameAs;
           Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
           rec.versions.set(info.ver, v);
+        } else {
+          // The row and the view show the version kept, not this fetch.
+          keptOnFail = prev;
+          Object.assign(meta, { files: prev.files, missing: Array.isArray(prev.missing) ? prev.missing.slice() : [], incomplete: !!prev.incomplete });
+          startSaved = prev.startSaved || null;
         }
         verFolder = v ? v.folder : prev.folder;
       }
@@ -5645,7 +5653,7 @@ async function saveArtifact(root, a, ctx) {
       if (got.problems.length) {
         warn(name, `Artifact "${name}" (${info.ver}): ${artifactCount(got.problems.length, 'file')} could not be saved: ${got.problems.join(', ')}.`, openNote);
       }
-      if (got.missing.length) notes.push(`${artifactCount(got.missing.length, 'file')} not saved (see errors.txt)`);
+      if (meta.missing.length) notes.push(`${artifactCount(meta.missing.length, 'file')} not saved (see errors.txt)`);
       if ([...got.unverified.values()].some(Boolean)) notes.push("files not checked against claude.ai's checksum");
     }
   } catch (e) {
@@ -5659,7 +5667,7 @@ async function saveArtifact(root, a, ctx) {
     failed = true;
   }
   const note = [...(shared ? ['shared with you'] : []), ...notes].join('; ');
-  const start = kept ? kept.start : same ? same.start || null : got ? got.start : null;
+  const start = kept ? kept.start : same ? same.start || null : keptOnFail ? keptOnFail.start || null : got ? got.start : null;
   Object.assign(rec.meta, { note, start, needsRuntime: meta.needsRuntime });
   // Where the current version's files are, relative to prefix.
   const filesAt = verFolder ? `${folder}/${verFolder}` : folder;
@@ -5671,12 +5679,12 @@ async function saveArtifact(root, a, ctx) {
     const older = artifactRowVersions(rec).filter((v) => v.startSaved).pop();
     if (older) { rowAt = older.folder || folder; rowStart = older.startSaved; rowReused = !!older.reused; }
   }
-  const payload = kept ? kept.preview || null : same ? same.preview || null : got && !failed ? artifactPayload(got) : null;
+  const payload = kept ? kept.preview || null : same ? same.preview || null : keptOnFail ? keptOnFail.preview || null : got && !failed ? artifactPayload(got) : null;
   const view = artifactView({
     uuid, shortId, url, title, typeSlug, typeTitle, shared, public: a.public === true, docs,
     createdAt, updatedAt, folder: `${prefix}${filesAt}`, files: meta.files, missing: meta.missing,
-    start, startSaved, startSize: kept || same ? keptStartSize(kept || same) : got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
-    inPayload: kept || same ? !!(start && payload && (payload.texts.some((t) => t[0] === start) || payload.images.some((t) => t[0] === start)))
+    start, startSaved, startSize: kept || same || keptOnFail ? keptStartSize(kept || same || keptOnFail) : got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
+    inPayload: kept || same || keptOnFail ? !!(start && payload && (payload.texts.some((t) => t[0] === start) || payload.images.some((t) => t[0] === start)))
       : !!(got && !failed && start && (got.texts.has(start) || got.images.has(start))),
     reused: !!same,
   });

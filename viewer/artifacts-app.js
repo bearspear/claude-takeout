@@ -16,8 +16,10 @@
 // sandbox, with only its own chat's scripts and stylesheets), Markdown, code, an image, or details.
 // Hosted, the screen also links artifacts and chats: an All card's source line (its linked chats, else Shared with you,
 // Cowork or Code) and "also in chat"; on an artifact's page a line of Made in / Published in / Edited in chats (each
-// opening that chat at its message) and a menu of the other versions chats published (their saved copies); a Docs
+// opening that chat at its message) and a menu of every version the export saved (view.versions); a Docs
 // artifact a chat rebuilt shows that chat's text; an Export Changes run says what it holds under the heading.
+// All / Yours / Shared show only artifacts in claude.ai's list; when the list isn't in the export (data.listFetched
+// false), they say so instead.
 // Every text from the data goes in through textContent or attributes, never as markup.
 // Clicking a card sets #a=<id>, which opens that artifact's page: a top bar (home, title, kind, badges, Open file,
 // Open on claude.ai) above the artifact. What fills it (pageFor): a Docs page, a poster for Design and other typed
@@ -235,6 +237,7 @@
     let tab = 'all';
 
     const EMPTY_TAB = { all: 'No artifacts', yours: 'Nothing of yours here', shared: 'Nothing shared with you' };
+    const NO_LIST = "claude.ai's list isn't in this export";
 
     // ---- In chats (hosted only): one card per file Claude made in the export's chats (inChatsFiles) ----
     const chats = hosted && Array.isArray(data.chats) ? data.chats : [];
@@ -325,10 +328,11 @@
       search.setAttribute('aria-label', searchLabel);
       if (tab === 'chats') renderChats(query);
       else {
-        const shown = artifactTabs(views, tab, query);
+        // claude.ai's list not in the export (hosted): no artifact can be told listed, so these tabs say so.
+        const shown = data.listFetched === false ? [] : artifactTabs(views, tab, query);
         grid.replaceChildren(...shown.map(v => cards.get(v)));
         empty.hidden = shown.length > 0;
-        empty.textContent = shown.length ? '' : query.trim() ? 'No artifacts match' : EMPTY_TAB[tab];
+        empty.textContent = shown.length ? '' : data.listFetched === false ? NO_LIST : query.trim() ? 'No artifacts match' : EMPTY_TAB[tab];
       }
       for (const t of tabs) {
         const on = t.dataset.tab === tab;
@@ -771,37 +775,60 @@
       });
     }
 
-    // Hosted: the versions chats published other than the current one, each opening its saved copy; null when none.
+    // Hosted: every version the export saved of the artifact (v.versions, artifact.json's), the current one chosen;
+    // null for one version or none. Another version shows the text a chat's card of it holds (its copy), and Open
+    // file opens its file in its version folder (or, for one the same as a chat's file, that file).
     function versionMenu(v) {
       if (!hosted) return null;
-      const { current, others } = publishedVersionsOf(data, v);
-      if (!others.length) return null;
+      const list = Array.isArray(v.versions) ? v.versions.filter(e => e && typeof e === 'object') : [];
+      if (list.length < 2) return null;
       const label = el('label', 'version-menu');
       const select = document.createElement('select');
-      for (const [i, o] of others.entries()) {
-        const option = el('option', '', o.label || `Version ${i + 1}`);
-        option.value = String(i);
+      let chosen = false;
+      for (const [i, e] of list.entries()) {
+        const text = String(e.label || `v${i + 1}`);
+        const option = el('option', '', e.current === true ? `${text} (current)` : text);
+        option.value = e.current === true ? 'current' : String(i);
+        if (e.current === true && !chosen) { option.selected = true; chosen = true; }
         select.append(option);
       }
-      const now = el('option', '', current ? `${current} (current)` : 'Current');
-      now.value = 'current';
-      now.selected = true;
-      select.append(now);
+      // The current version not among them (not saved): it is still the artifact's own page.
+      if (!chosen) {
+        const now = el('option', '', 'Current');
+        now.value = 'current';
+        now.selected = true;
+        select.append(now);
+      }
       select.addEventListener('change', () => {
         clearNote();
         if (select.value === 'current') { artifactLinks(v); fillBody(v); return; }
-        const o = others[Number(select.value)];
-        const chat = chats[o.chat];
-        const file = chat && chat.files[o.file];
-        const ver = file && file.versions[o.version];
-        if (!ver) return;
-        const f = { chat: o.chat, file: o.file, name: String(file.name || v.title || 'Page') };
-        const href = fileHref(ver);
+        const e = list[Number(select.value)];
+        if (!e) return;
+        const href = versionHref(v, e);
         pageLinks.replaceChildren(...(href ? [link('btn open-file', 'Open file', href, false)] : []), link('btn open-claude', 'Open on claude.ai', claudeUrl(v), true));
-        showVersionBody(f, ver, String(v.id));
+        const copy = e.copy && typeof e.copy === 'object' && Number.isInteger(e.copy.chat) ? e.copy : null;
+        const chat = copy ? chats[copy.chat] : null;
+        const file = chat && chat.files && typeof copy.file === 'string' && Object.prototype.hasOwnProperty.call(chat.files, copy.file) ? chat.files[copy.file] : null;
+        const ver = file && Array.isArray(file.versions) ? file.versions[copy.version] : null;
+        if (ver) return showVersionBody({ chat: copy.chat, file: copy.file, name: String(file.name || v.title || 'Page') }, ver, String(v.id));
+        const box = sheet('details', `${versionName(e)} can't be shown here.`);
+        if (href) {
+          const row = el('p', 'actions');
+          row.append(link('btn', 'Open file', href, false));
+          box.append(row);
+        }
+        pageBody.replaceChildren(box);
       });
       label.append(el('span', '', 'Version '), select);
       return label;
+    }
+    const versionName = e => String(e.label || 'This version');
+    // A version's start file, under openHref's rules: in its version folder, or the chat's file for a same version.
+    function versionHref(v, e) {
+      if (typeof e.startSaved !== 'string' || !e.startSaved) return null;
+      if (e.same === true) return openHref({ ...v, reused: true }, e.startSaved);
+      if (typeof e.folder !== 'string' || !e.folder) return null;
+      return openHref({ ...v, reused: false, folder: e.folder }, e.startSaved);
     }
 
     // ---- An In chats file's page (hosted): as an artifact's, with "Made in" its chat and a menu of its versions ----

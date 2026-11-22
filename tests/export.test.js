@@ -4505,16 +4505,20 @@ test('a version the chats saved whole stays saved when the artifact step\'s fetc
   const root = zipStub();
   sb.setTimeout = (f) => setTimeout(f, 0);
   Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide')] });
-  await vm.runInContext(`(async () => {
+  const step = await vm.runInContext(`(async () => {
     const store = artifactStore(__root, { prefix: 'artifacts/' });
     // Whole, but with no preview kept, so the step fetches it again.
     store.record('${U(1)}', { title: 'Guide' }).versions.set('${LIVE}', { folder: '${LIVE}', files: [{ path: 'index.html', savedAs: 'index.html', size: 4, contentType: 'text/html', sha256: '${'b'.repeat(64)}' }],
       start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: [{ chat: 'a', messageUuid: 'm1', toolUseId: 'p1', same: false, writtenAs: null }] });
-    await runArtifactStep(__root, { store, artifacts: __arts, full: false, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return runArtifactStep(__root, { store, artifacts: __arts, full: false, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
   })()`, sb);
   assert.strictEqual(fetcher.count('publishedPageFile', U(1)), 1);
   const v = JSON.parse(root.written[`artifacts/${artFolder('Guide', U(1))}/artifact.json`]).versions[LIVE];
   assert.deepStrictEqual([v.folder, v.saved, v.incomplete, v.publishedIn.length], [LIVE, true, false, 1]);
+  // The row and the view say the start file is saved, in the kept version's folder.
+  const at = `${artFolder('Guide', U(1))}/${LIVE}`;
+  assert.deepStrictEqual([step.rows[0].folder, step.rows[0].startSaved], [at, 'index.html']);
+  assert.deepStrictEqual([step.views[0].folder, step.views[0].startSaved], [`artifacts/${at}`, 'index.html']);
 });
 
 test('a sameAs version stays complete when a later chat\'s fetch of it fails', async () => {

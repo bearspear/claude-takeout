@@ -1888,6 +1888,56 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
     assert.ok(Object.values(other.chats[0].files).every(f => !('artifact' in f)));
   });
 
+  // artifact.json (format 2) of the page, with dir: its folder from the export root.
+  const pageRecord = (extra = {}) => ({
+    format: 2, uuid: PAGE_U, shortId: shortOf(PAGE_U), dir: 'artifacts/Guide_X', title: 'Guide', listed: true, current: 'ver2',
+    versions: {
+      ver0: { folder: null, files: [{ path: 'index.html', savedAs: null }], start: 'index.html', startSaved: null, sameAs: { 'index.html': 'c/artefacts/guide.html' }, publishedIn: [] },
+      ver1: { folder: 'ver1', files: [{ path: 'index.html', savedAs: 'index.html' }], start: 'index.html', startSaved: 'index.html', publishedIn: [] },
+      ver2: { folder: 'ver2', files: [{ path: 'index.html', savedAs: 'index.html' }], start: 'index.html', startSaved: 'index.html', publishedIn: [] },
+    },
+    ...extra,
+  });
+
+  test("an artifact's view carries every version of its record, each with the chat copy that holds its text", () => {
+    const chat = built(pubChain(2), { published: [pageEntry([pubVersion(0), pubVersion(1)])] });
+    const data = buildViewerData([chat], { artifacts: { views: [{ ...pubView, ver: 'ver2' }], records: [pageRecord()], listed: 1, exported: 'e', since: null, listFetched: true } });
+    const fileId = Object.keys(data.chats[0].files)[0];
+    assert.strictEqual(data.artifacts[0].listed, true);
+    assert.deepStrictEqual(data.artifacts[0].versions, [
+      { ver: 'ver0', label: 'v1', folder: null, start: 'index.html', startSaved: 'c/artefacts/guide.html', same: true, current: false, copy: { chat: 0, file: fileId, version: 0 } },
+      { ver: 'ver1', label: 'v2', folder: 'artifacts/Guide_X/ver1', start: 'index.html', startSaved: 'index.html', same: false, current: false, copy: { chat: 0, file: fileId, version: 1 } },
+      { ver: 'ver2', label: 'v3', folder: 'artifacts/Guide_X/ver2', start: 'index.html', startSaved: 'index.html', same: false, current: true, copy: null },
+    ]);
+    assert.strictEqual(data.listFetched, true);
+    // No record: no versions.
+    assert.deepStrictEqual(buildViewerData([chat], { artifacts: { views: [pubView], listed: 1, exported: 'e', since: null } }).artifacts[0].versions, []);
+  });
+
+  test('an unlisted artifact stays off All / Yours / Shared, and a published card of it has no Open artifact', () => {
+    const chat = built(pubChain(1), { published: [pageEntry([pubVersion(0)])] });
+    const data = buildViewerData([chat], { artifacts: { views: [pubView], records: [pageRecord({ listed: false })], listed: 0, exported: 'e', since: null, listFetched: true } });
+    assert.strictEqual(data.artifacts[0].listed, false);
+    assert.ok(Object.values(data.chats[0].files).every(f => !('artifact' in f)));
+    assert.deepStrictEqual(artifactTabs(data.artifacts, 'all', ''), []);
+    assert.deepStrictEqual(artifactTabs(data.artifacts, 'yours', ''), []);
+  });
+
+  test("claude.ai's list not fetched: the data has the screen's keys and listFetched false, and the entry shows for In chats files", () => {
+    const { artifactsEntry } = require('../viewer/viewer-logic.js');
+    const chat = built(pubChain(1), { published: [pageEntry([pubVersion(0)])] });
+    const data = buildViewerData([chat], { artifacts: { views: [], records: [pageRecord({ listed: false })], listed: null, exported: 'e', since: null, listFetched: false } });
+    assert.deepStrictEqual([data.artifacts, data.listFetched], [[], false]);
+    // The published card is no In chats file; a file Claude made is.
+    assert.deepStrictEqual(artifactsEntry(data), { show: false, count: 0 });
+    const made = { ...data, chats: [{ ...data.chats[0], files: { ...data.chats[0].files, f1: { name: 'a.md', kind: 'md', versions: [{ label: 'v1', text: '# a', href: 'c/artefacts/a.md' }] } } }] };
+    assert.deepStrictEqual(artifactsEntry(made), { show: true, count: 1 });
+    // Listed views count; unlisted ones don't.
+    assert.deepStrictEqual(artifactsEntry({ chats: [], artifacts: [{ id: 'A' }, { id: 'B', listed: false }] }), { show: true, count: 1 });
+    // A viewer without the screen (a single chat's) never shows it.
+    assert.deepStrictEqual(artifactsEntry({ chats: made.chats }), { show: false, count: 0 });
+  });
+
   test('no artifacts: the data has no artifacts key and chats are unchanged', () => {
     const chat = built(pubChat(), { published: [pageEntry([pubVersion(0)])] });
     const plain = buildViewerData([chat], { exported: 'x' });
@@ -1921,7 +1971,7 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
 
 // ---- In chats: the files Claude made, across the export's chats ----
 {
-  const { inChatsFiles, alsoInChat, fileKindGroup, parseInChatsHash, formatInChatsHash, chatFileTexts, artifactSourceLine, artifactLinkGroups, publishedVersionsOf, flagNote } = require('../viewer/viewer-logic.js');
+  const { inChatsFiles, alsoInChat, fileKindGroup, parseInChatsHash, formatInChatsHash, chatFileTexts, artifactSourceLine, artifactLinkGroups, flagNote } = require('../viewer/viewer-logic.js');
   const ver = (href, extra = {}) => ({ label: '', text: 'x', href, ...extra });
   const msg = (id, at) => ({ id, parent: null, sender: 'assistant', at, blocks: [], uploads: [], attachments: [] });
   const inChatsData = () => ({
@@ -2050,24 +2100,6 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
       { how: 'edited', label: 'Edited in', chats: [{ chat: 1, messageUuid: 'b1' }, { chat: 0, messageUuid: 'a3' }] },
     ]);
     assert.deepStrictEqual(artifactLinkGroups({}, chats), []);
-  });
-
-  test("publishedVersionsOf: the artifact's current version and each other version chats published, once", () => {
-    const page = (versions, artifact = 'Art') => ({ name: 'Page', kind: 'html', published: { url: 'u', current: true }, artifact, versions });
-    const data = { chats: [
-      { files: { p1: page([ver('published/P/v1/index.html', { label: 'v1', ver: 'A' }), ver('C0/artefacts/p.html', { label: 'v3', ver: 'C', same: true })]) } },
-      { files: {
-        p1: page([ver('published/P/v2/index.html', { label: 'v2', ver: 'B' }), ver('published/P/v1/index.html', { label: 'v1', ver: 'A' })]),
-        p2: page([ver('published/Q/v1/index.html', { label: 'v1', ver: 'Q' })], 'Other'),
-        p3: page([{ label: 'v9', ver: 'N', text: null, href: null }]),
-      } },
-    ] };
-    const got = publishedVersionsOf(data, { id: 'Art', ver: 'C' });
-    assert.strictEqual(got.current, 'v3');
-    assert.deepStrictEqual(got.others, [{ label: 'v1', chat: 0, file: 'p1', version: 0 }, { label: 'v2', chat: 1, file: 'p1', version: 0 }]);
-    // Nothing published but the current version: no others.
-    assert.deepStrictEqual(publishedVersionsOf({ chats: [{ files: { p1: page([ver('x', { label: 'v3', ver: 'C' })]) } }] }, { id: 'Art', ver: 'C' }), { current: 'v3', others: [] });
-    assert.deepStrictEqual(publishedVersionsOf({}, { id: 'Art', ver: 'C' }), { current: '', others: [] });
   });
 
   test("flagNote: the chat viewer's may-not-match wording", () => {

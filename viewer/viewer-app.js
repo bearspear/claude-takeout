@@ -1779,12 +1779,13 @@ let artifactsApp = null; // the mounted app, only when the data has artifacts
 let artifactsOn = false;
 let titlesBefore = null; // the chat's page and top bar titles, put back when the screen closes
 
+// The entry shows when the screen has something (artifactsEntry): a listed artifact or a file made in a chat.
 function setupArtifacts(data) {
-  const views = Array.isArray(data.artifacts) ? data.artifacts.filter(v => v && typeof v === 'object') : [];
-  if (!views.length || !window.CTArtifactsApp) return;
+  const entry = artifactsEntry(data);
+  if (!entry.show || !window.CTArtifactsApp) return;
   const nav = document.getElementById('artifacts-nav');
-  nav.querySelector('.n').textContent = String(views.length);
-  nav.setAttribute('aria-label', `Artifacts, ${views.length}`);
+  nav.querySelector('.n').textContent = String(entry.count);
+  nav.setAttribute('aria-label', `Artifacts, ${entry.count}`);
   nav.hidden = false;
   nav.addEventListener('click', () => {
     setDrawer(false);
