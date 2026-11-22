@@ -86,7 +86,7 @@ For exporting your whole history:
 
 **Only new or changed chats.** Set **Mega-Zip exports** in Settings to **Only new or changed**, and the Mega-Zip button becomes **Export Changes (Mega-Zip)**. It makes a `claude-takeout-<your name>-changes-<YYYY-MM-DD>_<HHMM>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold. The default is **All chats**.
 
-**Artifacts in the same export.** With **Include artifacts in Export All** on in Settings (the default), Export All also saves what claude.ai/artifacts lists, after the chats, into `artifacts/` in the same folder or ZIP: a folder per artifact, `index.html`, `index.md` and, only with warnings, `errors.txt`. Pages a chat already saved are reused, not fetched again. A failed artifact step never removes or delays the chats. One `viewer.html` at the root holds both (see [The combined viewer](#the-combined-viewer)). Export All never asks for the card-picture permission, so without it cards are tiles. With **Only new or changed**, only artifacts whose version changed are included, and `index.md` says "Changed since <date>: N of M listed". An artifact saved only in part, with a file missing, is tried again next time. Export Artifacts, the separate button, works as before.
+**Artifacts in the same export.** With **Include artifacts in Export All** on in Settings (the default), Export All also saves what claude.ai/artifacts lists, after the chats, into `artifacts/` in the same folder or ZIP: one folder per artifact (`<Title>_<id>/`, with an `artifact.json` and a subfolder per version), `index.html`, `index.md` and, only with warnings, `errors.txt`. Pages a chat already saved are reused, not fetched again. Export All writes no `published/` folder: the pages chats published live in `artifacts/` too, see [Published pages](#published-pages). With **Include artifacts in Export All** off, `artifacts/` still holds every page a chat published, and nothing from claude.ai's list. A failed artifact step never removes or delays the chats. One `viewer.html` at the root holds both (see [The combined viewer](#the-combined-viewer)). Export All never asks for the card-picture permission, so without it cards are tiles. With **Only new or changed**, only artifacts whose version changed are included, and `index.md` says "Changed since <date>: N of M listed". An artifact saved only in part, with a file missing, is tried again next time. Export Artifacts, the separate button, works as before.
 
 Progress shows below the buttons as `X / Y`. There's a 200–300 ms pause between conversations to be polite to Claude's API. 100 conversations takes about 30 seconds; 1000 will take under 10 minutes.
 
@@ -101,19 +101,19 @@ You get `claude-takeout-artifacts-<your name>-<YYYY-MM-DD>_<HHMM>` with:
 - `viewer.html` and `viewer-files/`: the viewer (see below). `viewer-files/thumbs/` holds the card pictures and `part-NNNN.js` the text and images the previews use. Card pictures need the same permission as web-search images (Settings > **Save web images and artifact card pictures**). Saving as a ZIP, Export Artifacts asks for it in the click, each time until you allow it. Saving to a folder, it doesn't ask (the folder picker needs the click): turn it on in Settings first. Without it, the cards show tiles, the status line says so, and `index.html` says "Card pictures: 0 of N (needs the web images permission ...)".
 - `index.html`: a table of every artifact (title, kind, source, files, notes) and "Card pictures: N of M". The title opens the artifact's page from disk, except when an artifact shared with you starts with anything but documents, images, media, archives and plain data files; "claude.ai" opens it online; "Open the artifacts viewer" opens `viewer.html`, when it was written.
 - `index.md` and `export-manifest.json` (`kind: "artifacts"`): the same list for other tools, with "Listed by claude.ai: N", the count claude.ai gave.
-- One folder `<Title>_<id>/` per artifact: its current version's files and an `artifact.json`.
+- One folder `<Title>_<id>/` per artifact: an `artifact.json` (format 2) and a subfolder per version saved, here the current version (named by its version id, or `current` when claude.ai gave none).
 - `errors.txt`, only when there are warnings (`artifact_export`).
 
 Limits to know:
 
-- **Claude Docs** documents are listed with their title and link, not saved: their text isn't available as a file. Export the chat that made one to get the document.
+- **Claude Docs** documents are listed with their title and link, not saved: their text isn't available as a file. Export the chat that made one to get the document. In Export All, when that chat is in the export, the row says "Text rebuilt from the chat <chat title>." instead.
 - Artifacts built on claude.ai's own page code (Design, and others with a type) save only their own files, or just `artifact.json` when they have none, and say "needs claude.ai to run" or "open on claude.ai".
 - **Shared with you** artifacts are marked so, in both indexes and in `artifact.json`. They were written by someone else: HTML opened from disk runs with whatever that page contains, so open it only if you trust the sender.
 - claude.ai gives no way to ask for more than it returns in one list. If the count is 60 or more and a multiple of 10 (or 1000), `errors.txt` warns that the list may be cut short; compare "Listed by claude.ai" with claude.ai/artifacts.
-- Only the current version is saved, not older ones.
-- Artifacts from **Cowork** and **Claude Code**, and those shared with you, come without claude.ai's checksums. Their files are saved unchecked: `artifact.json` marks them `verified: false` and the note says "files not checked against claude.ai's checksum". The same goes for a page a chat published, in its `published.json`.
+- Only the current version is saved, not older ones. (Export All also keeps each older version a chat published.)
+- Artifacts from **Cowork** and **Claude Code**, and those shared with you, come without claude.ai's checksums. Their files are saved unchecked: `artifact.json` marks them `verified: false` and the note says "files not checked against claude.ai's checksum". The same goes for a page a chat published, in its `artifact.json` (`published.json` in a single chat's ZIP).
 - Folder names are long. On Windows, a deep folder plus a long title can pass the path length limit and the file is listed in `write-errors.txt`; pick a short folder such as `C:\takeout`.
-- The old-archive tool (`build_viewer.js`) and `merge_archives.js` ignore an artifacts export: it holds no chats, even with its viewer.
+- The old-archive tools read an artifacts export: `build_viewer.js` rebuilds its viewer and `merge_archives.js` can merge it into an archive (see [Combining archives](#combining-archives)). Exports made before v1.18 (the current version's files directly in the artifact folder) are read too.
 - If every card is a plain tile, the picture download failed; the export is otherwise complete.
 
 #### The artifacts viewer
@@ -170,7 +170,7 @@ Unzip and you'll see something like this:
 ├── viewer.html                     Offline viewer — see "Reading an export in the viewer" below
 ├── viewer-check.gif                1x1 image the viewer uses to tell if you unzipped
 │
-├── published/                      Pages Claude published on claude.ai (only if the chat published some)
+├── published/                      Pages Claude published on claude.ai (only if the chat published some; a single chat's ZIP only, Export All uses artifacts/)
 │   └── <Title>_<id>/published.json, <version>/<files>
 │
 ├── responses/
@@ -279,12 +279,14 @@ In `viewer.html`, a file with an `artifact_opaque_mutation`, `str_replace_failed
 
 ### Published pages
 
-A page Claude published on claude.ai (with `publish_files` or the `Artifact` tool) is saved in `published/<Title>_<id>/`, one folder per version, with `published.json` listing the files. A version identical to a file in `artefacts/` is not copied again (`published.json` says `same`). The export needs a claude.ai tab open and signed in to fetch them, and an export made earlier has no `published/` folder until you export again. Limits to know:
+A page Claude published on claude.ai (with `publish_files` or the `Artifact` tool) is saved in `published/<Title>_<id>/`, one folder per version, with `published.json` listing the files. A version identical to a file in `artefacts/` is not copied again (`published.json` says `same`). The export needs a claude.ai tab open and signed in to fetch them, and an export made earlier has no `published/` folder until you export again.
+
+In Export All the same pages are saved in the shared `artifacts/<Title>_<id>/<version>/` instead, and `published.json`'s content moves into `artifact.json` (`versions`, each with its files, `publishedIn`, `incomplete` and, for a version identical to a chat's file, `sameAs`). The chat READMEs and `full_chat.md` link there. Every page a chat published gets a folder, also one claude.ai no longer lists and one exported with **Include artifacts in Export All** off. `artifacts/index.html` and `index.md` list those under "Published from chats, not in claude.ai's list", the root `index.md` says "Published from chats only: N", and a row whose version could not be saved whole says "some versions not saved (see the chats' errors.txt)". The viewer shows such pages on their chats' cards but not under All, Yours or Shared with you, which say "claude.ai's list isn't in this export" when the list wasn't fetched (setting off, or an archive made only from older exports). Limits to know:
 
 - "Current" is the live version fetched when an older chat has no recorded version. It is not necessarily what was published at that time.
 - The viewer previews a page's start file. A multi-file page's own scripts and styles may not load in the sandboxed preview, and the side panel shows only the start file.
 - A page built on claude.ai's own page code shows its source and "Needs claude.ai to run"; it won't run offline.
-- Export All may name a page's folder after a newer chat, and merging archives keeps the newest folder name, so a README link in an older chat folder can point at a renamed folder. The viewer still finds it, because it matches pages by id.
+- Merging archives rewrites the links in the merged chats to the new `artifacts/` folder, so they keep working. In a single chat's ZIP, a page's folder can be renamed once claude.ai gives the title, before anything is written.
 
 The Troubleshooting Guide at the bottom of `errors.txt` includes a copy-paste-ready `python3 replay_bash.py` command pointing at the export folder.
 
@@ -443,7 +445,7 @@ node tools/build_viewer.js ~/Downloads/claude-takeout-2026-11-07 --force
 
 - **What it works on.** A single-chat export, a mega-ZIP or a folder holding many of either, as long as they are unzipped. For ZIPs, see [Adding a viewer to older archives](#adding-a-viewer-to-older-archives): they are extracted under `--out` first.
 - **What it changes.** Only `viewer.html`, `viewer-check.gif` and `viewer-files/`. Your chat files, Markdown, downloads and anything you added stay as they are.
-- **Archives with artifacts.** It refuses an archive that includes artifacts (an Export All made with Claude Takeout 1.17 or later, with an `artifacts/` folder) and writes nothing to it: that archive's `viewer.html` is already complete.
+- **Archives with artifacts.** It reads every layout: chat archives with `published/` (before 1.17), 1.17 archives (`published/` beside `artifacts/`), 1.18 archives (`artifacts/` only) and a standalone Export Artifacts export (no chats), and builds the Artifacts screen from what is on disk. It doesn't convert the layout (merging does that). An archive that already has a viewer is still skipped without `--force`. Paths named in `artifact.json` or `published.json` are followed only through real folders, never through a link.
 - **What it can't change.** The rebuilt viewer reads what the export already has on disk. Fixes to the export itself, such as a better Markdown file or a download that used to fail, need a fresh export from claude.ai.
 - **Which releases.** The changelog in `README.md` says "Older exports get this when their viewer is rebuilt with `--force`" on each viewer change.
 
@@ -462,7 +464,14 @@ node tools/merge_archives.js ~/Downloads/claude-takeout-Mika-2026-11-01.zip ~/Do
 - **Sources.** Any number of Mega-Zips, single-chat exports, or folders holding them, as ZIPs or unzipped. ZIPs are extracted into a hidden temporary folder under `--out` and removed afterwards.
 - **Which copy wins.** The one with the latest `updated_at` in its `original.json`. On a tie, the later export (from `export-manifest.json`), then the source named later. Shared project folders come from the newest source.
 - **What it writes.** One new folder under `--out` (`claude-takeout-merged-<date>`, or `--name <name>`), built under a hidden temporary name and renamed when complete. It holds the chat folders, `projects/`, a new `index.md`, an `export-manifest.json` with `kind: "merged"` that names the source of each chat, and a new viewer. Your source archives are only read. An existing folder of that name stops the run.
-- **Archives with artifacts.** If any source includes artifacts (Claude Takeout 1.17 or later), the run is refused before anything is written, ZIPs included; its `viewer.html` is already complete.
+- **Archives with artifacts.** Sources may be any mix of the layouts above, including archives with only artifacts (Export Artifacts, or an Export Changes made with no changed chat). The result always has the Export All shape: one `artifacts/` store (`<Title>_<id>/artifact.json` format 2 and a folder per version), `artifacts/index.html` and `index.md`, a root `index.md`, and an `export-manifest.json` with `kind: "merged"`. The rules:
+  - **Versions.** Every version from every source is kept. A version in several sources comes whole from the newest source (by `exported_at`), never file by file; `publishedIn` lists are joined.
+  - **`listed`.** Decided by the newest full source whose artifact step ran: an artifact it doesn't list is marked not listed, since it was deleted on claude.ai. A changes archive or an earlier merge never decides. With no such source, the newest source's value stays.
+  - **Same as a chat's file.** A version saved only as a pointer to a chat's file is re-pointed at the merged chat's copy when the bytes match (SHA-256); otherwise the bytes are copied into the version folder, preferring a real folder from an older source. A pointer version is also copied when any merged chat published it as not the same.
+  - **Single-chat `published/`.** A single-chat export's `published/` is folded into the store. A `published/` folder merge can't read (no `published.json`) is kept as it is, at `published/<folder>`.
+  - **Links.** In `README.md`, `full_chat.md`, `integrated_chat.md` and `responses/*.md` of the written chats, links into `published/` are rewritten to the new place, only in the copies; links inside code blocks are left alone. A link it can't map is listed in the report, and a broken one is also a warning.
+  - **Failures.** A file that can't be copied fails the merge (exit code 1); the result is not renamed into place.
+  - **Card pictures** are carried over from the newest source that has one.
 - **Deleted chats.** A chat you deleted on claude.ai stays in the merged archive if an older source has it.
 
 ---
@@ -523,7 +532,7 @@ An Export All with artifacts has one `viewer.html`, with an Artifacts screen bes
 
 Previews follow the same rules as in the artifacts viewer above, with two additions. Artifact and In chats previews run inside a guard frame that blocks navigation, so a page can't send the preview to a file on disk. An In chats preview sees only its own chat's files.
 
-The old-archive tools refuse an archive with an `artifacts/` folder (see [Adding a viewer to older archives](#adding-a-viewer-to-older-archives)): its viewer is already complete.
+The Artifacts entry shows for any export with an artifact folder or any file Claude made in a chat. An archive built from older exports, or one made with **Include artifacts in Export All** off, has no claude.ai list, so All, Yours and Shared with you say "claude.ai's list isn't in this export" and only In chats and the chats' cards show artifacts. The old-archive tools can give older archives this screen (see [Adding a viewer to older archives](#adding-a-viewer-to-older-archives)).
 
 ---
 
