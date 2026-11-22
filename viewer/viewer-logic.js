@@ -1401,6 +1401,71 @@ function saveBytes(name, data) {
   return true;
 }
 
+// ---- A Design artifact's canvas (v1.20): its boards and notes from project/canvas.json, drawn without claude.ai ----
+
+const DESIGN_BOARD_MAX = 60;
+const NOTE_FILLS = new Set(['teal', 'orange', 'yellow', 'green', 'blue', 'pink', 'purple', 'red']);
+const BOARD_NAME = /^[^/\\]+\.dc\.html$/;
+const designOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+const designObject = o => !!o && typeof o === 'object' && !Array.isArray(o);
+
+// A note's fill as one of the palette's names, else grey.
+function noteFill(fill) {
+  return typeof fill === 'string' && NOTE_FILLS.has(fill) ? fill : 'grey';
+}
+
+// What a board's text needs that the viewer can't give: the type's templates ({{hole}}, <sc-…>, <dc-import>), or
+// uploaded images (/_blob/<id>, not in the export).
+function boardFlags(text) {
+  const t = typeof text === 'string' ? text : '';
+  return { templated: /\{\{|<sc-|<dc-import/i.test(t), blobs: t.includes('/_blob/') };
+}
+
+// The canvas from canvas.json's text: { width, height, title, boards: [{ name, path, x, y, w, h, title, held }],
+// notes: [{ id, text, x, y, w, fill, heading }], skipped: [{ name, title }] }, shifted so the smallest x and y are 0;
+// null when it isn't a canvas or no board's file is held (held(path) says). Boards: keys of boards naming a
+// <name>.dc.html in project/, with finite x, y, w, h; at most DESIGN_BOARD_MAX drawn, the rest and the ones with bad
+// numbers in skipped. Notes: in noteOrder, then the others, each with finite x and y; w, else maxW, else 320. A note's
+// height isn't known before it's drawn: the canvas leaves 200 below the lowest one.
+function designCanvas(text, held) {
+  let json;
+  try { json = JSON.parse(text); } catch (e) { return null; }
+  if (!designObject(json) || !designObject(json.boards)) return null;
+  const num = v => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+  const str = v => (typeof v === 'string' ? v : '');
+  const boards = [];
+  const skipped = [];
+  for (const name of Object.keys(json.boards)) {
+    if (!BOARD_NAME.test(name) || name === '..') continue;
+    const b = json.boards[name];
+    const title = designObject(b) && str(b.title) ? b.title : name;
+    const [x, y, w, h] = designObject(b) ? [num(b.x), num(b.y), num(b.w), num(b.h)] : [null, null, null, null];
+    if (x === null || y === null || w === null || h === null || w <= 0 || h <= 0 || boards.length >= DESIGN_BOARD_MAX) { skipped.push({ name, title }); continue; }
+    const path = `project/${name}`;
+    boards.push({ name, path, x, y, w, h, title, held: !!held(path) });
+  }
+  if (!boards.some(b => b.held)) return null;
+  const noteSrc = designObject(json.notes) ? json.notes : {};
+  const ordered = Array.isArray(json.noteOrder) ? json.noteOrder.filter(id => typeof id === 'string' && designOwn(noteSrc, id)) : [];
+  const ids = [...new Set([...ordered, ...Object.keys(noteSrc)])];
+  const notes = [];
+  for (const id of ids) {
+    const n = noteSrc[id];
+    if (!designObject(n)) continue;
+    const x = num(n.x);
+    const y = num(n.y);
+    if (x === null || y === null) continue;
+    const w = num(n.w) !== null && n.w > 0 ? n.w : num(n.maxW) !== null && n.maxW > 0 ? n.maxW : 320;
+    notes.push({ id, text: str(n.text), x, y, w, fill: noteFill(n.fill), heading: n.kind === 'title1' });
+  }
+  const minX = Math.min(...boards.map(b => b.x), ...notes.map(n => n.x));
+  const minY = Math.min(...boards.map(b => b.y), ...notes.map(n => n.y));
+  for (const o of [...boards, ...notes]) { o.x -= minX; o.y -= minY; }
+  const width = Math.max(...boards.map(b => b.x + b.w), ...notes.map(n => n.x + n.w));
+  const height = Math.max(...boards.map(b => b.y + b.h), ...notes.map(n => n.y + 200));
+  return { width, height, title: str(json.title), boards, notes, skipped };
+}
+
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX };
 }
