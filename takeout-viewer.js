@@ -748,10 +748,15 @@
       const same = typeof sameFile === 'string' && sameFile !== '';
       const preview = Number.isSafeInteger(place.part) && place.part > 0 && typeof place.key === 'string' && place.key
         ? { part: place.part, key: place.key, startKind: typeof place.startKind === 'string' ? place.startKind : null } : {};
+      // The version's own files, saved where it is: in its folder (savedAs inside it), or a chat's file (root-relative)
+      // for a same version. The artifact page lists these when this version is shown, never the current one's.
+      const savedOf = f => (folder ? (typeof f.savedAs === 'string' && f.savedAs ? f.savedAs : null)
+        : sameAs && typeof sameAs[f.path] === 'string' && sameAs[f.path] ? sameAs[f.path] : null);
       return {
         ver, label: `v${i + 1}`, folder, start,
         startSaved: same ? sameFile : folder && typeof v.startSaved === 'string' && v.startSaved ? v.startSaved : null,
         same, current: typeof rec.current === 'string' && rec.current === ver, copy: copies.get(ver) || null, ...preview,
+        files: files.map(f => ({ path: f.path, savedAs: savedOf(f), verified: f.verified !== false })),
       };
     });
   }

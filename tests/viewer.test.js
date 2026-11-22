@@ -1905,9 +1905,9 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
     const fileId = Object.keys(data.chats[0].files)[0];
     assert.strictEqual(data.artifacts[0].listed, true);
     assert.deepStrictEqual(data.artifacts[0].versions, [
-      { ver: 'ver0', label: 'v1', folder: null, start: 'index.html', startSaved: 'c/artefacts/guide.html', same: true, current: false, copy: { chat: 0, file: fileId, version: 0 } },
-      { ver: 'ver1', label: 'v2', folder: 'artifacts/Guide_X/ver1', start: 'index.html', startSaved: 'index.html', same: false, current: false, copy: { chat: 0, file: fileId, version: 1 } },
-      { ver: 'ver2', label: 'v3', folder: 'artifacts/Guide_X/ver2', start: 'index.html', startSaved: 'index.html', same: false, current: true, copy: null },
+      { ver: 'ver0', label: 'v1', folder: null, start: 'index.html', startSaved: 'c/artefacts/guide.html', same: true, current: false, copy: { chat: 0, file: fileId, version: 0 }, files: [{ path: 'index.html', savedAs: 'c/artefacts/guide.html', verified: true }] },
+      { ver: 'ver1', label: 'v2', folder: 'artifacts/Guide_X/ver1', start: 'index.html', startSaved: 'index.html', same: false, current: false, copy: { chat: 0, file: fileId, version: 1 }, files: [{ path: 'index.html', savedAs: 'index.html', verified: true }] },
+      { ver: 'ver2', label: 'v3', folder: 'artifacts/Guide_X/ver2', start: 'index.html', startSaved: 'index.html', same: false, current: true, copy: null, files: [{ path: 'index.html', savedAs: 'index.html', verified: true }] },
     ]);
     assert.strictEqual(data.listFetched, true);
     // No record: no versions.
@@ -2239,4 +2239,23 @@ test('a heading note takes its maxW, a sticky note its w', () => {
     n: { text: 'Sticky', x: 0, y: 900, w: 420, maxW: 2000 },
   } }), heldAll);
   assert.deepStrictEqual(c.notes.map(n => [n.id, n.w]), [['t', 2420], ['n', 420]]);
+});
+
+// ---- v1.20.3: each version in an artifact's menu carries its own files ----
+test('an artifact\'s version entries carry their own files, saved where that version is', () => {
+  const view = { id: 'AbC', title: 'Guide', kind: 'Page', files: [{ path: 'index.html', savedAs: 'index.html' }, { path: 'new.js', savedAs: 'new.js' }] };
+  const file = (path, extra = {}) => ({ path, savedAs: path, size: 1, contentType: 'text/html', sha256: null, verified: true, ...extra });
+  const record = { uuid: 'u-1', shortId: 'AbC', dir: 'artifacts/Guide_AbC', current: 'v2', versionOrder: ['v1', 'v2', 'v0'],
+    versions: {
+      v1: { folder: 'v1', start: 'index.html', startSaved: 'index.html', files: [file('index.html'), file('old.css', { verified: false })] },
+      v2: { folder: 'v2', start: 'index.html', startSaved: 'index.html', files: [file('index.html'), file('new.js')] },
+      v0: { folder: null, start: 'index.html', startSaved: null, files: [file('index.html', { savedAs: null })], sameAs: { 'index.html': 'Chat_a/artefacts/guide.html' } },
+    } };
+  const data = buildViewerData([], { exported: 'x', artifacts: { views: [view], records: [record], listed: 1, exported: 'x' } });
+  const versions = data.artifacts[0].versions;
+  assert.deepStrictEqual(versions.map(e => [e.ver, e.files]), [
+    ['v1', [{ path: 'index.html', savedAs: 'index.html', verified: true }, { path: 'old.css', savedAs: 'old.css', verified: false }]],
+    ['v2', [{ path: 'index.html', savedAs: 'index.html', verified: true }, { path: 'new.js', savedAs: 'new.js', verified: true }]],
+    ['v0', [{ path: 'index.html', savedAs: 'Chat_a/artefacts/guide.html', verified: true }]],
+  ]);
 });

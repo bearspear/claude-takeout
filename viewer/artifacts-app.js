@@ -1019,7 +1019,10 @@
         if (ver) return showVersionBody({ chat: copy.chat, file: copy.file, name: String(file.name || v.title || 'Page') }, ver, String(v.id));
         // A version with a preview of its own (from disk): shown as the artifact is, from its own folder.
         if (Number.isSafeInteger(e.part) && e.part > 0 && typeof e.key === 'string' && typeof e.start === 'string' && PREVIEW_KINDS.has(e.startKind) && unzipped !== false) {
-          return openPreview({ ...v, start: e.start, startSaved: e.startSaved, startKind: e.startKind, folder: e.folder, reused: e.same === true, part: e.part, key: e.key });
+          // This version's own files, place and payload; nothing of the current version's (its files, missing count,
+          // ZIP or note) goes with it.
+          return openPreview({ ...v, start: e.start, startSaved: e.startSaved, startKind: e.startKind, folder: e.folder, reused: e.same === true, part: e.part, key: e.key,
+            files: Array.isArray(e.files) ? e.files : [], missingCount: 0, zip: null, note: '', startMissing: false, tooLarge: false });
         }
         const box = sheet('details', `${versionName(e)} can't be shown here.`);
         if (href) {
