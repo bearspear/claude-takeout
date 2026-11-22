@@ -2656,3 +2656,16 @@ test('a version\'s zip passes through only for a real file named <folder>.zip', 
   r = viewsOf((root, json) => { json.versions.v2.zip = '../v2.zip'; fs.writeFileSync(path.join(root, 'v2.zip'), PKZIP); });
   assert.strictEqual(r.views[0].zip, null, 'only <folder>.zip beside the folder');
 });
+
+test('payloadFromDisk keeps canvas.json right after the start file', () => {
+  const root = tmpRoot();
+  put(root, 'export-manifest.json', JSON.stringify(STANDALONE));
+  const texts = { 'index.html': '<script src="artifact-type/app.js"></script>', 'project/Main.dc.html': '<p>main</p>', 'project/canvas.json': '{"v":3,"boards":{}}' };
+  const json = format2([['v2', '']]);
+  json.typeTitle = 'Design';
+  json.versions.v2.files = Object.entries(texts).map(([p, t]) => ({ path: p, savedAs: p, size: Buffer.byteLength(t), contentType: 'text/plain', sha256: sha(t), verified: true }));
+  for (const [p, t] of Object.entries(texts)) put(root, `${AF}/v2/${p}`, t);
+  put(root, `${AF}/artifact.json`, JSON.stringify(json));
+  const { payloads } = lib.artifactViewsFromDisk(lib.readArtifactStore(root));
+  assert.deepStrictEqual(payloads[0].texts.map(t => t[0]), ['index.html', 'project/canvas.json', 'project/Main.dc.html']);
+});

@@ -4751,3 +4751,40 @@ test('Export All leaves no stale ZIP when the artifact step refetches a version 
   assert.deepStrictEqual(Object.keys(out.zip.files).filter((n) => n.endsWith('.zip')), [], 'no ZIP the record does not name');
   assert.ok(!('zip' in JSON.parse(await out.zip.file(`artifacts/${f}/artifact.json`).async('string')).versions.v1));
 });
+
+// ---- v1.20: claude.ai's frame preamble doesn't decide the label; .json and canvas.json in artifact previews ----
+const PREAMBLE_PAGE = '<!doctype html><html><head><!-- frame-runtime --><script>window.__FRAME_PREAMBLE={"v":1}</script>'
+  + '<script>(function(){fetch("/_f/"+v+"/x")})()</script></head><body><h1>Hi</h1></body></html>';
+
+test('publishedNeedsRuntime ignores claude.ai\'s frame preamble', () => {
+  const { publishedNeedsRuntime } = require('../export-core.js');
+  assert.strictEqual(publishedNeedsRuntime(PREAMBLE_PAGE), false);
+  assert.strictEqual(publishedNeedsRuntime(PREAMBLE_PAGE.replace('</body>', '<script src="/_f/abc/app.js"></script></body>')), true, 'the page\'s own code still counts');
+  assert.strictEqual(publishedNeedsRuntime('<script>fetch("/_f/x")</script>'), true, 'no marker: as before');
+  assert.strictEqual(publishedNeedsRuntime('<script src="artifact-type/app.js"></script>'), true);
+  assert.strictEqual(publishedNeedsRuntime('<!-- frame-runtime --><script src="artifact-type/app.js"></script>'), true, 'a script that is not the preamble still counts');
+  assert.strictEqual(publishedNeedsRuntime('<h1>plain</h1>'), false);
+});
+
+test('previewKind keeps .json', () => {
+  const { previewKind } = require('../export-core.js');
+  assert.strictEqual(previewKind('project/canvas.json'), 'text');
+  assert.strictEqual(previewKind('a.JSON'), 'text');
+});
+
+test('Export Artifacts keeps canvas.json in a Design artifact\'s preview, after the start file', async () => {
+  const frames = [art(U(1), 'Mock', { typeSlug: DESIGN_TYPE, typeTitle: 'Design' })];
+  const pages = { [U(1)]: livePage('Mock', { 'project/Main.dc.html': '<p>main</p>', 'index.html': '<script src="artifact-type/app.js"></script>', 'project/canvas.json': '{"v":3,"boards":{}}' }) };
+  const { files, views } = await runArtifacts({ frames, pages });
+  // The view's payload, as its part file holds it: window.__archivePart(n, { <key>: payload }).
+  let held = null;
+  const sandbox = { window: { __archivePart: (n, o) => { held = o; } } };
+  vm.runInNewContext(files[`viewer-files/part-${String(views[0].part).padStart(4, '0')}.js`], sandbox);
+  assert.deepStrictEqual([...held[views[0].key].texts.map((t) => t[0])], ['index.html', 'project/canvas.json', 'project/Main.dc.html']);
+});
+
+test('a served copy with only the preamble is not labelled', async () => {
+  const frames = [art(U(1), 'Served', { rel: 'shared', public: true })];
+  const { files } = await runArtifacts({ frames, pages: { [U(1)]: livePage('Served', { 'index.html': PREAMBLE_PAGE }) } });
+  assert.strictEqual(JSON.parse(files[`${artFolder('Served', U(1))}/artifact.json`]).needsRuntime, false);
+});
