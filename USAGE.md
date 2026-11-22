@@ -101,7 +101,7 @@ You get `claude-takeout-artifacts-<your name>-<YYYY-MM-DD>_<HHMM>` with:
 - `viewer.html` and `viewer-files/`: the viewer (see below). `viewer-files/thumbs/` holds the card pictures and `part-NNNN.js` the text and images the previews use. Card pictures need the same permission as web-search images (Settings > **Save web images and artifact card pictures**). Saving as a ZIP, Export Artifacts asks for it in the click, each time until you allow it. Saving to a folder, it doesn't ask (the folder picker needs the click): turn it on in Settings first. Without it, the cards show tiles, the status line says so, and `index.html` says "Card pictures: 0 of N (needs the web images permission ...)".
 - `index.html`: a table of every artifact (title, kind, source, files, notes) and "Card pictures: N of M". The title opens the artifact's page from disk, except when an artifact shared with you starts with anything but documents, images, media, archives and plain data files; "claude.ai" opens it online; "Open the artifacts viewer" opens `viewer.html`, when it was written.
 - `index.md` and `export-manifest.json` (`kind: "artifacts"`): the same list for other tools, with "Listed by claude.ai: N", the count claude.ai gave.
-- One folder `<Title>_<id>/` per artifact: an `artifact.json` (format 2) and a subfolder per version saved, here the current version (named by its version id, or `current` when claude.ai gave none).
+- One folder `<Title>_<id>/` per artifact: an `artifact.json` (format 2) and a subfolder per version saved, here the current version (named by its version id, or `current` when claude.ai gave none). When that version has two or more files, `<version>.zip` beside the folder holds them all, and `artifact.json` names it (`zip`).
 - `errors.txt`, only when there are warnings (`artifact_export`).
 
 Limits to know:
@@ -121,6 +121,8 @@ Limits to know:
 Open `viewer.html` in Chrome from the folder (unzip a ZIP first; opened from inside a ZIP the viewer says so). It shows a grid like claude.ai/artifacts, newest first, with tabs All, **Yours** and **Shared with you**. A card opens that artifact's page (`#a=<id>` in the address, so the browser's Back works). Pages made of HTML or SVG run in a sandbox; Markdown and images are shown; React, Mermaid, Claude Docs, Design and other artifacts that need claude.ai show a details page with the saved files and a claude.ai link. A start file over 2 MB is "too large to show here", except your own image, which shows from its saved file. An export of a huge account keeps preview data for the first 256 MB only; the rest show their details page.
 
 **Open file** opens a saved file in the browser. It is shown for your own artifacts, and for files of any artifact that are documents, images, audio, video, archives or plain data. A page shared with you has no Open file for anything but documents, images, media, archives and plain data files (HTML, SVG and XML among them), since it was written by someone else and could run from disk with full access to your files. The viewer previews it in the sandbox instead, which is no safer than the other previews: see below.
+
+**Download** saves a file the viewer holds: the start file in the top bar, and each file in the details page's list. The viewer holds HTML, SVG, CSS, JavaScript and Markdown files and images up to 2 MB each (its preview data); other files, such as plain text, JSON or binaries, have Open file only, since a page opened from disk can't read them. The file is saved, not opened, so an HTML or SVG page doesn't run. **Download ZIP** downloads the ZIP the export wrote of the current version, all its files; it says "some files missing" when some couldn't be saved. It isn't there for a one-file artifact, or for archives exported before v1.19.
 
 What to know about artifact previews:
 
@@ -213,7 +215,7 @@ Next to the chat's model and date, **Open on claude.ai** opens the chat on claud
 
 The Files button in a chat's top bar lists every file in that chat: Outputs, the files Claude shared with you, each once with its version count; Uploads, what you uploaded or pasted; and Working files, what Claude wrote along the way without sharing, such as helper scripts. A file shared on another branch of the chat is listed under Outputs too. Click one to open it; Tab out of the list or press Escape to close it.
 
-Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". Popups and the file panel have a Copy button in their header for the whole file: it copies the file's text, and in Preview the source rather than the rendered page. Beside it, **Wrap** wraps long lines of a file's text; the viewer remembers it for all files. When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
+Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". Popups and the file panel have a Copy button in their header for the whole file: it copies the file's text, and in Preview the source rather than the rendered page. Beside it, **Wrap** wraps long lines of a file's text; the viewer remembers it for all files, and **Download** saves the file under its name (a version under its own, such as `report_v2.html`). Download saves the text the viewer holds, so HTML and SVG are saved, not opened; a large upload gets the button once its text has loaded. Images, PDFs and other binary files have Open file instead. When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
 
 What to know about previews of generated HTML:
 
@@ -472,6 +474,7 @@ node tools/merge_archives.js ~/Downloads/claude-takeout-Mika-2026-11-01.zip ~/Do
   - **Links.** In `README.md`, `full_chat.md`, `integrated_chat.md` and `responses/*.md` of the written chats, links into `published/` are rewritten to the new place, only in the copies; links inside code blocks are left alone. A link it can't map is listed in the report, and a broken one is also a warning.
   - **Failures.** A file that can't be copied fails the merge (exit code 1); the result is not renamed into place.
   - **Card pictures** are carried over from the newest source that has one.
+  - **ZIPs.** The current version's `<version>.zip` is copied from the source whose folder the merged version came from, when it has one; an older version's ZIP isn't kept, and a file that isn't a ZIP is left out with a warning. The tool never builds a ZIP itself.
 - **Deleted chats.** A chat you deleted on claude.ai stays in the merged archive if an older source has it.
 
 ---
