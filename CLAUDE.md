@@ -54,9 +54,10 @@ For deeper dives, two companion docs live alongside this one:
 | `tests/e2e/published.e2e.js` | Browser test of published-page cards: one card per page, versions, "Same as published", "Needs claude.ai to run", the claude.ai link, Export All links. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/artifacts-viewer.e2e.js` | Browser test of the Export Artifacts viewer: grid, tabs, routing, sandboxed previews and their files, shims, hostile pages, no-network checks. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/artifacts.e2e.js` | Browser test of an Export Artifacts `index.html` over `file://`: rows sorted, title link opens the artifact, Docs row note and no local link, shared label, no network or page errors. | Optional; needs `playwright-core` and Chromium. |
+| `tests/e2e/combined.e2e.js` | Browser test of an Export All with artifacts: the Artifacts screen and its tabs including In chats, links both ways, the guard frame's refusals, no network. | Optional; needs `playwright-core` and Chromium started with `--disable-features=IsolateSandboxedIframes`. |
 | `tests/e2e/hostile.js` | Hostile-input fixtures for the viewer e2e tests. | Not a test by itself. |
 | `takeout-viewer.js` | Builds the offline viewer's data. | Classic script loaded by `popup.html` and `sidepanel.html`, exposing `CTViewer` (`buildViewerChat`, `buildViewerData`, `assembleViewer`, ...). Header comment documents the contract. |
-| `viewer/` | Viewer page sources. | `viewer-template.html`, `viewer-logic.js`, `viewer-app.js`, `artifacts-template.html` and `artifacts-app.js` (the Export Artifacts viewer; they share `viewer-logic.js`), `marked.min.js`, `katex.min.js`, `katex-inline.css`, `highlight.min.js`, `THIRD-PARTY-NOTICES.txt`. `writeViewer` inlines them into one `viewer.html`. |
+| `viewer/` | Viewer page sources. | `viewer-template.html`, `viewer-logic.js`, `viewer-app.js`, `artifacts-template.html`, `artifacts-app.js` and `artifacts.css` (the Artifacts screen: standalone in the Export Artifacts viewer, mounted as `CTArtifactsApp` in the chat viewer's shadow root; they share `viewer-logic.js`), `marked.min.js`, `katex.min.js`, `katex-inline.css`, `highlight.min.js`, `THIRD-PARTY-NOTICES.txt`. `writeViewer` inlines them into one `viewer.html`. |
 | `tests/` | Regression tests. | `sh tests/run.sh`. Uses Node's and Python's built-in test runners, with a synthetic fixture only. Not used by the extension at runtime. |
 | `docs/WASM_REPLAY_APPROACH.md` | Architecture record. | Comprehensive evaluation of running Pyodide in the extension as an alternative to the CLI. We chose the CLI; this doc explains why and what would change the answer. |
 | `icon16.png` / `icon48.png` / `icon128.png` / `icon.svg` | Extension icons. | |
@@ -86,6 +87,7 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 | `extractTextContent`, `download`, `safeFilename` | Small utilities. |
 | `updateUI`, `showProgress`, `hideProgress`, `requestData` | DOM glue. |
 | `exportArtifacts`, `artifactsIndexHtml`, `artifactsIndexMd`, `saveArtifact`, `fetchPublishedFiles` | Export Artifacts: lists claude.ai's artifacts (`content.js` `listArtifacts`, then `artifactsFromList` in export-core.js), fetches each one's current files through `fetchPublishedFiles` (shared with `savePublishedPages`), writes a folder per artifact with `artifact.json`, plus `index.html`, `index.md`, `export-manifest.json` (`kind: "artifacts"`). Folder or ZIP by `settings.megaFormat`; `folderExport` is shared with Export All. `writeArtifactsViewer` builds its `viewer.html` (see TECHNICAL.md "Artifacts viewer"). See TECHNICAL.md "Export Artifacts". |
+| `runArtifactStep`, `publishedReuse` | `runArtifactStep(root, { prefix, artifacts, reuse, ... })` is the Export Artifacts loop, shared by Export Artifacts (prefix `''`) and Export All (prefix `artifacts/`). `publishedReuse(shared, chatFolders)` builds its `reuse(uuid, ver)` from the pages the chats saved. See TECHNICAL.md "Export All with artifacts". |
 | `bulkExport`, `bulkExportZip` | Multi-conversation paths. `bulkExportZip({ directory })` writes into a folder instead (`createDiskFolder`, `makeRunFolder`; the default, `settings.megaFormat`). `bulkExport` downloads one file per conversation (MD/embedded/JSON). `bulkExportZip` builds a single mega-zip with `index.md` + one folder per conversation reusing `populateConversationFolder`. |
 | Click handlers + `refresh` | Button → action mapping. Each per-conversation handler calls `ensureProjectName` before generating the filename or starting the ZIP. |
 | Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, megaZipScope, megaFormat, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
@@ -171,6 +173,7 @@ The user can regenerate a response, producing a tree. `current_leaf_message_uuid
 | `product_carousel_display_v0`, `featured_card_display_v0`, `comparison_card_display_v0`, `ask_user_input_v0` | `products[]` (`name`, `price`, `blurb`, `attributes[]`); `questions[]`; carousel/featured results carry `images[]` ids `product_<n>_<m>` | Product pictures are web images (`isImageResultTool`). Viewer: cards inline (`displayData`, `renderDisplay`), questions hidden. Markdown: headings, a table, lists (`displayLines`). |
 | `image_search` | `query`; result `images[]` | `saveWebImages` saves them in `images/<key>_<title><ext>` (`webImagesOf`, `webImageName`; key = hash of the URL) when the optional https permission is granted; Markdown lists them with the saved picture (`imageSearchLines`), the viewer shows them (`ctx.webImages`, tool block `web`). Without permission, or on failure, `web_image` warnings. |
 | `<connector>Claude_Docs__batch` / `__update` / `__create` | batch: `container.create.{name, doc.{markdown, blocks}}`; its result's leading JSON gives the node id and the ids of the pending sections. A batch on an existing doc (`container.id`, `batch[]` members: `widget` creates, prose `update`s). update: `ref.id`, `payload.ops[]` replacing a pending id with Markdown, or found text (`target.kind: "find"`). create: a comment (`payload.value.body`, `parent.anchor`) | A Claude Docs document. `extractArtifacts` rebuilds it under key `doc:<node id>` as `<sanitized title>.md` (`claudeDocCreated`, `applyDocOps`, `renderClaudeDoc`); an embedded widget shows as `[embedded content: <caption>]`; pending blocks a fill plants are tracked from its reply (`docPendingIds`). Any other edit warns `claude_doc_unreplayed`. A self-contained HTML copy Claude made of a document (sent in the turn that called `Claude_Docs__export` on it, or a page titled like it; `docCompanions`) is linked by a note under the final document's title (`docCompanionNote`); a document with diagrams and no copy gets a **Diagram not included** note and warns `doc_diagram`. `populateConversationFolder` also writes `<title>.html` (`claudeDocHtml`, using `viewer/marked.min.js`, which popup.html and sidepanel.html load). `extract_artifacts.py` mirrors the `.md`, without that note. |
+| `<connector>edit_version` | `slug` | Edits a published artifact. Replays nothing; `artifactLinksOf` links it as `edited` when the result isn't an error. |
 | `web_search` | `query` (input) / `content[]` (result) | Renders the query + formatted result list; citations harvested via `processTextWithCitations`. |
 | `view` / `read_file` | `path` | Used by `extractBlobContent` to recover ephemeral upload content from tool_result blocks when the wiggle API 404s. |
 | `web_fetch`, `str_replace_based_edit_tool`, etc. | varies | Rendered with sensible fallbacks in `convertToMarkdown`; not all are first-class extractors. |
@@ -263,6 +266,8 @@ claude-takeout-[<display name>-][changes-]<YYYY-MM-DD>_<HHMM>.zip   (megaZipName
 └── ...
 ```
 
+With `exportAllArtifacts` on (default), a mega-ZIP or folder also holds `artifacts/` (a folder per artifact, `index.html`, `index.md`, `errors.txt` only with warnings; viewer parts and card pictures stay in the root's `viewer-files/`), `export-manifest.json` gains `artifacts: { listed, thumbs, items }`, and `artifacts` joins `projects` and `published` as reserved chat folder names. One root `viewer.html` covers chats and artifacts. `build_viewer.js` and `merge_archives.js` refuse such an archive.
+
 Export Artifacts (a separate export, `claude-takeout-artifacts-[<name>-]<stamp>`, folder or ZIP; no chats, so the old-archive and merge tools find no archive in it):
 ```
 ├── viewer.html                # Cards and sandboxed previews (viewer/artifacts-*; opens from disk)
@@ -310,12 +315,13 @@ If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a
     "includeThinking": true,
     "megaZipScope": "all" | "changes",  // what Export All exports; "changes" relabels it Export Changes
     "megaFormat": "folder" | "zip",     // Export All and Export Artifacts into a folder (showDirectoryPicker, createDiskFolder) or one Mega-Zip download
+    "exportAllArtifacts": true,         // Export All also saves claude.ai's artifacts into artifacts/ (box "Include artifacts in Export All")
     "showShortcuts": true,
     "useSidePanel": false
   },
   "useSidePanel": false,  // mirrored at top level so background.js can read it
   "exportRecord": {       // written after each mega-ZIP; with megaZipScope "changes", the mega-ZIP takes chats whose listed updated_at differs
-    "<org id>": { "at": "ISO time of that export", "chats": { "<chat uuid>": "updated_at as the chat list gave it" } }
+    "<org id>": { "at": "ISO time of that export", "chats": { "<chat uuid>": "updated_at as the chat list gave it" }, "artifacts": { "<artifact uuid>": "its live version as listed; only artifacts saved whole" } }
   }
 }
 ```
