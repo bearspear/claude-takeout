@@ -3,7 +3,8 @@
 // opens #a=<id> with the sandboxed preview, inside its guard frame; Back and the home button return to the grid; a
 // chat in the sidebar still opens, and history goes back and forth; / searches the artifacts on their screen; a
 // reused page links its file in published/. A hostile shared artifact gets nothing out and can't reach the viewer,
-// and navigations to file: (an export file, an absolute path, a refresh, a link) are refused. An export with the
+// and navigations to file: (an export file, an absolute path, a refresh, a link) are refused; data: and blob: are
+// refused by the guard frame's own frame-src 'none', which the page's policy doesn't have. An export with the
 // setting off has no Artifacts entry. No requests outside file:, no page errors.
 // Run: PW=<playwright-core> CHROME_EXE=<chrome> node tests/e2e/combined.e2e.js
 const { chromium } = require(process.env.PW);
@@ -93,6 +94,9 @@ const navs = dir => [
   ['navrefresh', '', `<meta http-equiv="refresh" content="0;url=${'file://' + path.join(dir, 'escape.html')}">`],
   ['navlink', `const a = document.createElement('a'); a.href = ${JSON.stringify('file://' + path.join(dir, 'escape.html'))}; document.body.append(a); a.click();`],
   ['navhttps', "location.href = 'https://remote.test/nav';"],
+  // The page's frame-src file: refuses these too, but only the guard's policy is frame-src 'none'.
+  ['navdata', "location.href = 'data:text/html,<script>console.log(%22ESCAPED%22)<\\/script>';"],
+  ['navblob', "location.href = URL.createObjectURL(new Blob(['<script>console.log(\"ESCAPED\")<\\/script>'], { type: 'text/html' }));"],
 ];
 
 (async () => {
@@ -292,13 +296,23 @@ const navs = dir => [
   await hv.context.close();
 
   // ---- Navigations, file: above all ----
+  // What each refusal must say, naming its target: Chrome's own rule for file:, the page's policy for the web, and
+  // for data: and blob:, which the page's frame-src file: would refuse as well, the guard's frame-src 'none'.
+  const esc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const escapeFile = 'file://' + path.join(base, 'escape.html');
+  const refusal = name => ({
+    navfile: new RegExp(`^Not allowed to load local resource: ${esc(escapeFile)}$`),
+    navrefresh: new RegExp(`^Not allowed to load local resource: ${esc(escapeFile)}$`),
+    navlink: new RegExp(`^Not allowed to load local resource: ${esc(escapeFile)}$`),
+    navabs: /^Not allowed to load local resource: file:\/\/\/etc\/hosts$/,
+    navhttps: /^Framing 'https:\/\/remote\.test\/' violates the following Content Security Policy directive: "frame-src /,
+    navdata: /^Framing '' violates the following Content Security Policy directive: "frame-src 'none'"/,
+    navblob: /^Framing '' violates the following Content Security Policy directive: "frame-src 'none'"/,
+  })[name];
   for (const [i, [name]] of navs(base).entries()) {
     const nv = await open(dir, `#a=${p(40 + i)}`);
     await previewOf(nv).catch(() => null);
-    const REFUSAL = /Not allowed to load local resource|Refused to (frame|navigate)|violates the following Content Security Policy|blocked/i;
-    // The refusal names what was refused: the file, or remote.test.
-    const target = name === 'navabs' ? 'file:///etc/hosts' : name === 'navhttps' ? 'remote.test' : 'file://' + path.join(base, 'escape.html');
-    const refusedFor = () => nv.seen.logs.some(l => l.includes(target) && REFUSAL.test(l));
+    const refusedFor = () => nv.seen.logs.some(l => refusal(name).test(l));
     const ran = await waitLog(nv, `NAV ran ${name}`) || refusedFor();
     await nv.page.waitForTimeout(500);
     check(`${name}: the attempt ran`, ran, nv.seen.logs.join(' | '));

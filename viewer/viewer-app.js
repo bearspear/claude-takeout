@@ -922,9 +922,10 @@ function addedBox(chat, added) {
 
 // A part's text arrives through window.__archivePart, called by viewer-files/part-NNNN.js. Page code can't read files.
 const partsListed = new Set(); // the part numbers the data names
-const partsLoaded = new Map(); // n -> Promise<object|null>, the most recently used last
+const partsLoaded = new Map(); // n -> the part's object, the most recently used last
 const PARTS_KEPT = 2; // a part is about 4 MB; older ones are dropped and load again if needed
 const partsWaiting = new Map(); // n -> resolve, only while its script is loading
+const partsInFlight = new Map(); // n -> Promise<object|null>, only while loading; never evicted
 
 // Parts hold the text of added files and of large uploads, and the Artifacts screen's texts and images (one numbering,
 // one loader: the artifacts app is handed loadPart).
@@ -947,14 +948,17 @@ function setupParts(data) {
 }
 
 // The part's { key: text }, or null when it can't be loaded. Only a number from the data ever becomes a src.
+// Loaded parts are kept (the PARTS_KEPT most recently used); one still loading is shared through partsInFlight,
+// which nothing evicts, so a second load of it waits on the same script instead of replacing its resolver.
 function loadPart(n) {
   if (!partsListed.has(n)) return Promise.resolve(null);
   if (partsLoaded.has(n)) {
-    const cached = partsLoaded.get(n);
+    const kept = partsLoaded.get(n);
     partsLoaded.delete(n);
-    partsLoaded.set(n, cached);
-    return cached;
+    partsLoaded.set(n, kept);
+    return Promise.resolve(kept);
   }
+  if (partsInFlight.has(n)) return partsInFlight.get(n);
   const loading = new Promise(resolve => {
     partsWaiting.set(n, resolve);
     const script = el('script');
@@ -963,16 +967,22 @@ function loadPart(n) {
       const done = partsWaiting.get(n);
       if (!done) return; // the part called in, and this was its load event
       partsWaiting.delete(n);
-      partsLoaded.delete(n); // so opening the file later tries again
       done(null);
     };
     script.addEventListener('load', finish);
     script.addEventListener('error', finish);
     script.src = `viewer-files/part-${String(n).padStart(4, '0')}.js`;
     document.head.append(script);
+  }).then(part => {
+    partsInFlight.delete(n);
+    // A part that failed isn't kept, so opening the file later tries again.
+    if (part) {
+      partsLoaded.set(n, part);
+      while (partsLoaded.size > PARTS_KEPT) partsLoaded.delete(partsLoaded.keys().next().value);
+    }
+    return part;
   });
-  partsLoaded.set(n, loading);
-  while (partsLoaded.size > PARTS_KEPT) partsLoaded.delete(partsLoaded.keys().next().value);
+  partsInFlight.set(n, loading);
   return loading;
 }
 
