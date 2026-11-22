@@ -14,7 +14,7 @@
 //                                      index into projects, where identical projects are kept once. artifacts:
 //                                      { views, records, listed, exported, since, listFetched } (Export All; records: each
 //                                      artifact.json written, with dir, its folder from the root); with views, records or
-//                                      listFetched false the data also has artifacts (each view plus links: [{ chat (index
+//                                      listFetched false the data also has storeCount (records.length), artifacts (each view plus links: [{ chat (index
 //                                      in chats), messageUuid, how }], docFile: { chat, file } | null, the latest chat's
 //                                      rebuilt document, listed (its record's) and versions: [{ ver, label, folder, start,
 //                                      startSaved, same, current, copy }] from its record), listed, exportedArtifacts,
@@ -718,14 +718,18 @@
     return JSON.stringify([p.name, typeof p.instructions === 'string' ? p.instructions.length : null, docs, files, Object.keys(p).sort()]);
   }
 
-  // A store record's versions for its view, in artifact.json's order: { ver, label (v1, v2, ... in that order),
+  // A store record's versions for its view, in its versionOrder (claude.ai's; an object's keys put numeric-looking ids
+  // first), then any other key: { ver, label (v1, v2, ... in that order),
   // folder (from the export root; null when no copy was saved), start, startSaved (in folder, or for a same version
   // the root-relative file a chat wrote), same, current, copy: { chat, file, version } | null, the chat card's version
   // that holds its text }. copies: 'ver' -> copy, from the chats' published cards of that page.
   function recordVersions(rec, copies) {
     const dir = typeof rec.dir === 'string' ? rec.dir : '';
     const versions = rec.versions && typeof rec.versions === 'object' ? rec.versions : {};
-    return Object.keys(versions).filter(ver => versions[ver] && typeof versions[ver] === 'object').map((ver, i) => {
+    const own = ver => Object.prototype.hasOwnProperty.call(versions, ver) && versions[ver] && typeof versions[ver] === 'object';
+    const order = Array.isArray(rec.versionOrder) ? rec.versionOrder.filter(k => typeof k === 'string' && own(k)) : [];
+    const keys = [...new Set([...order, ...Object.keys(versions).filter(own)])];
+    return keys.map((ver, i) => {
       const v = versions[ver];
       const start = typeof v.start === 'string' && v.start ? v.start : null;
       const files = Array.isArray(v.files) ? v.files.filter(f => f && typeof f.path === 'string') : [];
@@ -742,7 +746,7 @@
   }
 
   // artifacts: { views, records, listed, exported, since, listFetched } from Export All. records: each artifact.json
-  // written (format 2) with dir, its folder from the export root. With views, records or listFetched false, the data
+  // written (format 2) with dir, its folder from the export root, and versionOrder, its version keys in order. With views, records or listFetched false, the data
   // gains artifacts (each view plus links: [{ chat, messageUuid, how }], docFile: { chat, file } | null, listed (its
   // record's; true without one) and versions (recordVersions)), listed, exportedArtifacts, artifactsSince and
   // listFetched (whether claude.ai's list is in the export); a chat's published-page file gets artifact: <id> when
@@ -814,6 +818,8 @@
     });
     const data = { exported, chats: out, projects };
     if (views.length || records.length || !listFetched) {
+      // How many artifact folders the export has (listed or not): the Artifacts entry shows for any.
+      data.storeCount = records.length;
       data.artifacts = views.map(view => {
         const { rec, listed, links, doc, copies } = linked.get(String(view.id));
         return { ...view, listed, links, docFile: doc ? { chat: doc.chat, file: doc.file } : null, versions: rec ? recordVersions(rec, copies) : [] };

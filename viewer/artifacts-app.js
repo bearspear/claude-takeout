@@ -781,7 +781,8 @@
     function versionMenu(v) {
       if (!hosted) return null;
       const list = Array.isArray(v.versions) ? v.versions.filter(e => e && typeof e === 'object') : [];
-      if (list.length < 2) return null;
+      // One version, the current one: nothing to choose.
+      if (!list.length || (list.length === 1 && list[0].current === true)) return null;
       const label = el('label', 'version-menu');
       const select = document.createElement('select');
       let chosen = false;

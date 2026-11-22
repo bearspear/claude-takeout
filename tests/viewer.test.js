@@ -1914,6 +1914,17 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
     assert.deepStrictEqual(buildViewerData([chat], { artifacts: { views: [pubView], listed: 1, exported: 'e', since: null } }).artifacts[0].versions, []);
   });
 
+  test("versions follow the record's versionOrder, not its object's key order (a numeric-looking id would go first)", () => {
+    const rec = pageRecord({ current: '7', versionOrder: ['ver1', '7', 'ver0'] });
+    rec.versions = { ver0: rec.versions.ver0, 7: rec.versions.ver2, ver1: rec.versions.ver1 };
+    assert.deepStrictEqual(Object.keys(rec.versions), ['7', 'ver0', 'ver1']);
+    const got = buildViewerData([], { artifacts: { views: [pubView], records: [rec], listFetched: true } }).artifacts[0].versions;
+    assert.deepStrictEqual(got.map(e => [e.ver, e.label, e.current]), [['ver1', 'v1', false], ['7', 'v2', true], ['ver0', 'v3', false]]);
+    // A key missing from versionOrder comes after; one in it but not in versions is skipped.
+    const partial = buildViewerData([], { artifacts: { views: [pubView], records: [{ ...rec, versionOrder: ['ver0', 'gone'] }], listFetched: true } }).artifacts[0].versions;
+    assert.deepStrictEqual(partial.map(e => e.ver), ['ver0', '7', 'ver1']);
+  });
+
   test('an unlisted artifact stays off All / Yours / Shared, and a published card of it has no Open artifact', () => {
     const chat = built(pubChain(1), { published: [pageEntry([pubVersion(0)])] });
     const data = buildViewerData([chat], { artifacts: { views: [pubView], records: [pageRecord({ listed: false })], listed: 0, exported: 'e', since: null, listFetched: true } });
@@ -1927,15 +1938,18 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
     const { artifactsEntry } = require('../viewer/viewer-logic.js');
     const chat = built(pubChain(1), { published: [pageEntry([pubVersion(0)])] });
     const data = buildViewerData([chat], { artifacts: { views: [], records: [pageRecord({ listed: false })], listed: null, exported: 'e', since: null, listFetched: false } });
-    assert.deepStrictEqual([data.artifacts, data.listFetched], [[], false]);
-    // The published card is no In chats file; a file Claude made is.
-    assert.deepStrictEqual(artifactsEntry(data), { show: false, count: 0 });
-    const made = { ...data, chats: [{ ...data.chats[0], files: { ...data.chats[0].files, f1: { name: 'a.md', kind: 'md', versions: [{ label: 'v1', text: '# a', href: 'c/artefacts/a.md' }] } } }] };
-    assert.deepStrictEqual(artifactsEntry(made), { show: true, count: 1 });
+    assert.deepStrictEqual([data.artifacts, data.listFetched, data.storeCount], [[], false, 1]);
+    // An artifact folder, listed or not, shows the entry; the published card is no In chats file.
+    assert.deepStrictEqual(artifactsEntry(data), { show: true, count: 1 });
+    assert.deepStrictEqual(artifactsEntry({ ...data, storeCount: 0 }), { show: false, count: 0 });
+    // A file Claude made shows it too, counted before the folders.
+    const made = { ...data, storeCount: 0, chats: [{ ...data.chats[0], files: { ...data.chats[0].files, f1: { name: 'a.md', kind: 'md', versions: [{ label: 'v1', text: '# a', href: 'c/artefacts/a.md' }] }, f2: { name: 'b.md', kind: 'md', versions: [{ label: 'v1', text: '# b', href: 'c/artefacts/b.md' }] } } }] };
+    assert.deepStrictEqual(artifactsEntry(made), { show: true, count: 2 });
+    assert.deepStrictEqual(artifactsEntry({ ...made, storeCount: 3 }), { show: true, count: 2 });
     // Listed views count; unlisted ones don't.
     assert.deepStrictEqual(artifactsEntry({ chats: [], artifacts: [{ id: 'A' }, { id: 'B', listed: false }] }), { show: true, count: 1 });
     // A viewer without the screen (a single chat's) never shows it.
-    assert.deepStrictEqual(artifactsEntry({ chats: made.chats }), { show: false, count: 0 });
+    assert.deepStrictEqual(artifactsEntry({ chats: made.chats, storeCount: 2 }), { show: false, count: 0 });
   });
 
   test('no artifacts: the data has no artifacts key and chats are unchanged', () => {

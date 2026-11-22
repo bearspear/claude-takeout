@@ -411,7 +411,7 @@ async function viewerUploadText(name, content) {
 // Add viewer.html and viewer-check.gif to the ZIP root, once per export. Returns
 // false and writes nothing on any failure, because the export must still download.
 // opts (Export All): { artifacts: { views (its artifact step's), records (each artifact.json written, with dir, its
-// folder from the root), listFetched (claude.ai's list is in this export), listed, exported, since }, firstPart: the
+// folder from the root, and versionOrder, its version keys in order), listFetched (claude.ai's list is in this export), listed, exported, since }, firstPart: the
 // first viewer-files part number the chats may use, after the artifact step's parts }.
 async function writeViewer(zip, chats, opts = {}) {
   try {
@@ -5088,7 +5088,13 @@ async function bulkExportZip(options = {}) {
     const combinedViews = step ? step.views.map((v, i) => ({ ...v, ver: (step.entries[i] && step.entries[i].ver) || '', sourceSurface: (step.rows[i] && step.rows[i].sourceSurface) || '' })) : [];
     // records (every artifact.json written, with its folder) and listFetched (whether claude.ai's list is in this
     // export) are for the viewer's artifact screens.
-    const storeRecords = store.records().filter((rec) => store.written(rec)).map((rec) => ({ ...artifactJsonV2(rec), dir: `${store.prefix}${rec.dir}` }));
+    // versionOrder: artifact.json's version keys in claude.ai's order, which the object's own key order loses for a
+    // numeric-looking id.
+    const storeRecords = store.records().filter((rec) => store.written(rec)).map((rec) => {
+      const list = storeVersionList(rec);
+      const noId = storeNoIdKey(list);
+      return { ...artifactJsonV2(rec), dir: `${store.prefix}${rec.dir}`, versionOrder: list.map(([ver]) => ver || noId) };
+    });
     const viewerOpts = step
       // Every part the artifact step numbered, even one an error kept from being counted in partCount.
       ? { artifacts: { views: combinedViews, listed: artifactList.listed, exported: startedAt, since, listFetched: true, records: storeRecords }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }

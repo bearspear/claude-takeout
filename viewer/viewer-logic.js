@@ -794,13 +794,15 @@ function artifactLinkGroups(view, chats) {
   return groups;
 }
 
-// The chat viewer's Artifacts entry: shown when the data has the Artifacts screen (an Export All's) and the screen has
-// something: a listed artifact, or a file Claude made in a chat (In chats). count: the listed artifacts, else the
-// In chats files.
+// The chat viewer's Artifacts entry: shown when the data has the Artifacts screen (an Export All's) and the export has
+// an artifact folder (storeCount, listed or not; a listed artifact not saved has a view only), or a file Claude made
+// in a chat (In chats). count: the listed artifacts, else the In chats files, else the artifact folders. A page not in
+// claude.ai's list is on no tab: its chat's card opens it.
 function artifactsEntry(data) {
   if (!data || !Array.isArray(data.artifacts)) return { show: false, count: 0 };
   const listed = data.artifacts.filter(v => v && typeof v === 'object' && v.listed !== false).length;
-  const count = listed || inChatsFiles(data).length;
+  const folders = Number.isSafeInteger(data.storeCount) && data.storeCount > 0 ? data.storeCount : 0;
+  const count = listed || inChatsFiles(data).length || folders;
   return { show: count > 0, count };
 }
 

@@ -4472,6 +4472,31 @@ test('artifact.json orders versions by claude.ai\'s history, keys the no-id vers
   assert.deepStrictEqual(out.rows, ['v1', 'v2', 'current', 'current_2']);
 });
 
+test("the viewer's versions follow claude.ai's history, a numeric-looking id too, whichever chat published first", async () => {
+  const viewerData = (files) => JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(files['viewer.html'])[1].replace(/<\\\//g, '</'));
+  // Chat a (exported first) publishes the later version 12; chat b the earlier ab-1. Nothing is listed (the setting off).
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, '12', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U, 'ab-1', guideAs))]), { uuid: 'b', name: 'Chat b' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['ab-1', '12'], versions: { 'ab-1': { files: { 'index.html': 'one' } }, 12: { files: { 'index.html': 'two' } } } } });
+  let opts = null;
+  const setup = (sb) => {
+    bulkWithArtifacts({ fetcher, off: true })(sb);
+    const write = sb.writeViewer;
+    sb.writeViewer = (zip, chats, o) => { opts = o; return write(zip, chats, o); };
+  };
+  const out = await runBulkZip({ list: [listed('a', '2026-01-02T00:00:00Z'), listed('b', '2026-01-01T00:00:00Z')], chats: { a: chatA, b: chatB }, setup, assets: true });
+  const data = viewerData(await zipFiles(out.zip));
+  assert.deepStrictEqual([data.artifacts, data.listFetched, data.storeCount], [[], false, 1]);
+  // The record keeps claude.ai's order, which artifact.json's keys can't (12 would come first), and a view of it
+  // follows that order.
+  const [rec] = opts.artifacts.records;
+  assert.deepStrictEqual(Object.keys(rec.versions), ['12', 'ab-1']);
+  assert.deepStrictEqual([...rec.versionOrder], ['ab-1', '12']);
+  const V = require('../takeout-viewer.js');
+  const versions = V.buildViewerData([], { artifacts: { views: [{ id: rec.shortId }], records: [rec], listFetched: false } }).artifacts[0].versions;
+  assert.deepStrictEqual(versions.map((e) => [e.ver, e.label]), [['ab-1', 'v1'], ['12', 'v2']]);
+});
+
 test('a current version the chats saved with a start file too large to preview is kept, not fetched again', async () => {
   const BIG = `<!--${'x'.repeat(2 * 1024 * 1024 + 10)}-->`;
   const viewerData = (files) => JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(files['viewer.html'])[1].replace(/<\\\//g, '</'));
