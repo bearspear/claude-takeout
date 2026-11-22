@@ -35,7 +35,7 @@ artifacts/                              (Export All: under the export root; Expo
 
 ### artifact.json (format 2)
 - Keeps today's fields (title, type, source surface, rel, public, dates, note, thumb, start, needsRuntime), plus:
-  - `format: 2`, `listed` (true when claude.ai's list had it), `current` (the current version id, or null when unknown);
+  - `format: 2`, `listed` (true when claude.ai's list had it), `current` (the current version id, or null when unknown), `order` (the version ids in claude.ai's history order; JSON can't keep key order for numeric-looking ids — *my call*, added during the build);
   - `versions: { <ver>: { folder, files: [{ path, savedAs, size, contentType, sha256, verified }], start, startSaved, incomplete, missing, saved, sameAs?: { <published path>: <root-relative chat file> }, publishedIn: [{ chat, messageUuid, toolUseId, same, writtenAs }] } }` — what `published.json` held per version, for every version. `same`/`writtenAs` stay per publish (as today); `sameAs` is set only when no copy was saved, from the first publish whose chat is in this export and whose files all match (one-file versions as in v1.17; a multi-file `same` version is copied into `<ver>/`). *My call.*
 - `published.json` is no longer written in Export All or Export Artifacts (its content lives in `artifact.json`).
 - Docs note: "Text rebuilt from the chat <chat title>." when a linked chat in this export rebuilt it; otherwise today's note.
