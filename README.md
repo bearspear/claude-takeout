@@ -398,6 +398,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.20.2
+
+- **Design canvas layout** - A board's title row (title, Open alone, badges) now sits above the board, as on claude.ai, instead of pushing the board down onto the notes below it. A heading note is as wide as claude.ai allows it (`maxW`), so it no longer wraps into a narrow column.
+
 ### v1.20.1
 
 - **Design canvas fixes** - A board or note placed or sized far out of range (beyond 100,000 pixels from the origin, or wider or taller than 20,000) is left off the canvas and listed under it, so it can't shrink everything else to nothing; a very wide canvas is shown at no less than 10% and scrolls. **Back to the canvas** puts keyboard focus back on the board you opened.
