@@ -926,13 +926,15 @@ const partsLoaded = new Map(); // n -> Promise<object|null>, the most recently u
 const PARTS_KEPT = 2; // a part is about 4 MB; older ones are dropped and load again if needed
 const partsWaiting = new Map(); // n -> resolve, only while its script is loading
 
-// Parts hold the text of added files and of large uploads.
+// Parts hold the text of added files and of large uploads, and the Artifacts screen's texts and images (one numbering,
+// one loader: the artifacts app is handed loadPart).
 function setupParts(data) {
   allAdded = Array.isArray(data.added) ? data.added : [];
   addedIds = new Map(allAdded.map((entry, i) => [entry, `x${i}`]));
   const uploads = (data.chats || []).flatMap(chat => (chat.messages || []).flatMap(m => m.uploads || []));
   const versions = (data.chats || []).flatMap(chat => Object.values(chat.files || {}).flatMap(f => (f && f.versions) || []));
-  for (const entry of [...allAdded, ...uploads, ...versions]) if (entry && Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
+  const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
+  for (const entry of [...allAdded, ...uploads, ...versions, ...artifacts]) if (entry && Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
   if (!partsListed.size) return;
   Object.defineProperty(window, '__archivePart', {
     value(n, data) {
@@ -1727,6 +1729,8 @@ let drawn = ''; // the chat and leaf in the column, which a change of file leave
 // The only way to change chat, leaf or file. Writes the hash, then renders. options.replace edits the
 // current history entry; options.anchor keeps a message in place; options.fromHash means the hash is already set.
 function navigate(state, options = {}) {
+  const fromArtifacts = artifactsOn;
+  showArtifacts(false);
   const known = chatsById.get(state.chat);
   const chat = known || allChats[0];
   if (!chat) return;
@@ -1742,6 +1746,7 @@ function navigate(state, options = {}) {
     else location.hash = hash;
   } else if (options.fromHash && hash !== location.hash) history.replaceState(null, '', hash);
   shown = hash;
+  if (fromArtifacts) document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
   if (stepper && stepper.chat !== chat.id) closeStepper();
   showPanel(chat, open);
   const column = `${chat.id}\n${leaf}`;
@@ -1751,8 +1756,78 @@ function navigate(state, options = {}) {
 }
 
 function onHashChange() {
-  if (location.hash === shown) return;
+  if (routeArtifacts(location.hash)) return;
+  if (location.hash === shown && !artifactsOn) return;
+  // An archive with artifacts and no chats has nothing else to show.
+  if (!allChats.length && artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); return; }
   navigate(parseHash(location.hash), { fromHash: true });
+}
+
+// ---- The Artifacts screen: the artifacts app (artifacts-app.js) in #artifacts-screen, in place of the chat ----
+// #artifacts is its grid and #a=<id> an artifact; every other hash is the chat viewer's.
+let artifactsApp = null; // the mounted app, only when the data has artifacts
+let artifactsOn = false;
+let titlesBefore = null; // the chat's page and top bar titles, put back when the screen closes
+
+function setupArtifacts(data) {
+  const views = Array.isArray(data.artifacts) ? data.artifacts.filter(v => v && typeof v === 'object') : [];
+  if (!views.length || !window.CTArtifactsApp) return;
+  const nav = document.getElementById('artifacts-nav');
+  nav.querySelector('.n').textContent = String(views.length);
+  nav.setAttribute('aria-label', `Artifacts, ${views.length}`);
+  nav.hidden = false;
+  nav.addEventListener('click', () => {
+    setDrawer(false);
+    if (location.hash !== '#artifacts') location.hash = '#artifacts';
+    else routeArtifacts('#artifacts');
+  });
+  artifactsApp = window.CTArtifactsApp.mount(document.getElementById('artifacts-screen'), { data, loadPart, onOpenChat: openChatAt });
+}
+
+// Shows the screen when hash is one of its own; returns whether it was.
+function routeArtifacts(hash) {
+  if (!artifactsApp) return false;
+  // Taken before the app sets the page's title to the artifact's.
+  const titles = artifactsOn ? null : { page: document.title, top: document.getElementById('title').textContent };
+  if (!artifactsApp.route(hash)) return false;
+  shown = hash;
+  showArtifacts(true, titles);
+  return true;
+}
+
+// titles: what to put back when the screen closes (opening only).
+function showArtifacts(on, titles = null) {
+  if (on === artifactsOn) return;
+  if (!on && artifactsApp) artifactsApp.route(''); // lets go of an open artifact, whose page would keep running
+  artifactsOn = on;
+  document.body.classList.toggle('artifacts-on', on);
+  document.getElementById('artifacts-screen').hidden = !on;
+  document.getElementById('artifacts-nav').setAttribute('aria-current', String(on));
+  const title = document.getElementById('title');
+  if (on) {
+    closeStepper();
+    closeFilesMenu(false);
+    titlesBefore = titles;
+    title.textContent = 'Artifacts';
+    document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
+  } else {
+    if (titlesBefore) { document.title = titlesBefore.page; title.textContent = titlesBefore.top; }
+    titlesBefore = null;
+  }
+}
+
+// The artifacts app's way into a chat: chat is an index into the data's chats; the message, when it's there, is
+// opened on its branch and scrolled to.
+function openChatAt(index, messageUuid) {
+  const chat = Number.isInteger(index) ? allChats[index] : null;
+  if (!chat) return;
+  closeStepper();
+  if (!chat.messages.some(m => m.id === messageUuid)) { navigate({ chat: chat.id }); return; }
+  find = { msg: messageUuid, terms: [], gen: null };
+  navigate({ chat: chat.id, leaf: leafUnder(chat.messages, messageUuid) });
+  if (!find) return;
+  find.gen = renderGeneration;
+  tryFind();
 }
 
 function switchTo(button) {
@@ -2212,7 +2287,7 @@ function setupSearch() {
   });
   // / anywhere outside a text field puts the cursor in the search box.
   document.addEventListener('keydown', e => {
-    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || artifactsOn) return;
     const t = e.target;
     if (t && (t.closest('input, textarea, select, [contenteditable]') || popup)) return;
     e.preventDefault();
@@ -2243,6 +2318,7 @@ function start() {
   const data = JSON.parse(holder.textContent);
   holder.remove();
   setupParts(data);
+  setupArtifacts(data);
   setupFilesMenu();
   setupStepper();
   allChats = linkProjects(data);
@@ -2265,8 +2341,10 @@ function start() {
     if (arrow && !arrow.disabled) switchTo(arrow);
   });
   window.addEventListener('hashchange', onHashChange);
+  if (!data.chats.length) document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
+  if (routeArtifacts(location.hash)) return;
   if (data.chats.length) navigate(parseHash(location.hash), { replace: true });
-  else document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
+  else if (artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); }
 }
 
 start();

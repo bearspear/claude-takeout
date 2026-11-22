@@ -422,11 +422,11 @@ async function writeViewer(zip, chats, opts = {}) {
       if (!response.ok) throw new Error(`${asset}: HTTP ${response.status}`);
       return response.text();
     }));
-    const [template, logic, app, marked, katex, css, highlight] = assets;
+    const [template, logic, app, marked, katex, css, highlight, artifactsApp, artifactsCss] = assets;
     // Large upload text goes to viewer-files/, loaded when the upload is opened.
     const firstPart = opts && Number.isInteger(opts.firstPart) && opts.firstPart > 1 ? opts.firstPart : 1;
     const { data, parts } = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString(), artifacts }), { firstPart });
-    const html = CTViewer.assembleViewer({ template, css, marked, katex, highlight, logic, app, data, fileScripts: parts.length > 0 || firstPart > 1 });
+    const html = CTViewer.assembleViewer({ template, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data, fileScripts: parts.length > 0 || firstPart > 1 });
     for (const part of parts) zip.file(`viewer-files/${part.name}`, part.body);
     zip.file('viewer.html', html);
     zip.file(CTViewer.VIEWER_CHECK_FILE, CTViewer.VIEWER_CHECK_BASE64, { base64: true });
@@ -5294,13 +5294,13 @@ async function saveArtifactThumb(root, uuid, id, fetchPublished, state = {}) {
 // any failure writes nothing and returns false, because the export must still finish.
 async function writeArtifactsViewer(root, views, opts = {}) {
   try {
-    const [template, logic, app, marked] = await Promise.all(CTViewer.ARTIFACTS_VIEWER_ASSETS.map(async (asset) => {
+    const [template, logic, app, marked, artifactsCss] = await Promise.all(CTViewer.ARTIFACTS_VIEWER_ASSETS.map(async (asset) => {
       const response = await fetch(chrome.runtime.getURL(asset));
       if (!response.ok) throw new Error(`${asset}: HTTP ${response.status}`);
       return response.text();
     }));
     const data = { exported: opts.exported || null, listed: opts.listed == null ? null : opts.listed, artifacts: views };
-    const html = CTViewer.assembleViewer({ template, css: '', marked, katex: '', highlight: '', logic, app, data, fileScripts: !!opts.fileScripts });
+    const html = CTViewer.assembleViewer({ template, css: '', artifactsCss, marked, katex: '', highlight: '', logic, app, data, fileScripts: !!opts.fileScripts });
     root.file('viewer.html', html);
     root.file(CTViewer.VIEWER_CHECK_FILE, CTViewer.VIEWER_CHECK_BASE64, { base64: true });
     return true;

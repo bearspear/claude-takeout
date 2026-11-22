@@ -11,18 +11,18 @@ const REPO = path.resolve(__dirname, '..', '..');
 // conversations: claude.ai API payloads. ctxOf(conversation): extra buildViewerChat context, such as artifacts.
 function buildHtml(conversations, exported = new Date().toISOString(), ctxOf = () => ({})) {
   const read = f => fs.readFileSync(path.join(REPO, f), 'utf8');
-  const [template, logic, app, marked, katex, css, highlight] = VIEWER_ASSETS.map(read);
+  const [template, logic, app, marked, katex, css, highlight, artifactsApp, artifactsCss] = VIEWER_ASSETS.map(read);
   const chats = conversations.map(c => buildViewerChat(c, { model: modelLabel(c.model, getModelName(c)), ...ctxOf(c) }));
-  return assembleViewer({ template, css, marked, katex, highlight, logic, app, data: buildViewerData(chats, { exported }) });
+  return assembleViewer({ template, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data: buildViewerData(chats, { exported }) });
 }
 
 // As buildHtml, with large upload text moved into parts as an export does. Returns { html, parts: [{ name, body }] }.
 function buildFiles(conversations, exported = new Date().toISOString(), ctxOf = () => ({})) {
   const read = f => fs.readFileSync(path.join(REPO, f), 'utf8');
-  const [template, logic, app, marked, katex, css, highlight] = VIEWER_ASSETS.map(read);
+  const [template, logic, app, marked, katex, css, highlight, artifactsApp, artifactsCss] = VIEWER_ASSETS.map(read);
   const chats = conversations.map(c => buildViewerChat(c, { model: modelLabel(c.model, getModelName(c)), ...ctxOf(c) }));
   const { data, parts } = moveUploadText(buildViewerData(chats, { exported }));
-  return { html: assembleViewer({ template, css, marked, katex, highlight, logic, app, data, fileScripts: parts.length > 0 }), parts };
+  return { html: assembleViewer({ template, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data, fileScripts: parts.length > 0 }), parts };
 }
 
 if (require.main === module) {

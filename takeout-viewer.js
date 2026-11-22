@@ -32,13 +32,16 @@
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
 //   joinPath(folder, rel)              folder + rel with '..' resolved; null if it climbs above the folder
 //   escapeJson(data)                   JSON that is safe inside a <script> tag
-//   assembleViewer({template, css, marked, katex, highlight, logic, app, data, fileScripts, fileMedia})  one HTML string.
+//   assembleViewer({template, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data, fileScripts,
+//                  fileMedia})          one HTML string. artifactsApp and artifactsCss (viewer/artifacts-app.js and
+//                                      viewer/artifacts.css) fill ARTIFACTS_APP_JS and ARTIFACTS_CSS ('' when left out).
 //                                      fileScripts adds file: to the page's script-src and media-src, for viewer-files/
 //                                      beside it and added audio and video. fileMedia adds it to media-src alone, for a
 //                                      viewer with no parts. Exports set fileScripts only when moveUploadText made parts
 //   kindFor(filename, mime, hasText)   a GenFile's kind
-//   VIEWER_ASSETS                      paths of the seven viewer files
-//   ARTIFACTS_VIEWER_ASSETS            Export Artifacts' viewer: template, logic, app and marked, in that order
+//   VIEWER_ASSETS                      paths of the nine viewer files: template, logic, app, marked, katex, KaTeX CSS,
+//                                      highlight, the artifacts app and its CSS (the Artifacts screen), in that order
+//   ARTIFACTS_VIEWER_ASSETS            Export Artifacts' viewer: template, logic, app, marked and CSS, in that order
 //   TOOL_TEXT_LIMIT                    longest tool result text kept
 //   TEXT_EMBED_LIMIT                   longest upload or project text a caller should pass in ctx
 //   VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64  a 1x1 GIF beside viewer.html: if it won't load, the ZIP wasn't unzipped
@@ -73,10 +76,11 @@
 
   const VIEWER_ASSETS = [
     'viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js',
-    'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js'
+    'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js',
+    'viewer/artifacts-app.js', 'viewer/artifacts.css'
   ];
-  // Export Artifacts' viewer.html: template, logic, app, marked (no KaTeX or highlight.js).
-  const ARTIFACTS_VIEWER_ASSETS = ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js'];
+  // Export Artifacts' viewer.html: template, logic, app, marked, CSS (no KaTeX or highlight.js).
+  const ARTIFACTS_VIEWER_ASSETS = ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js', 'viewer/artifacts.css'];
 
   function cut(text) {
     const s = String(text == null ? '' : text);
@@ -916,11 +920,14 @@
   // One pass with function replacers: '$&' or a placeholder inside a value stays literal.
   // data: object (escaped here) or an already-escaped JSON string.
   // fileScripts: the page may load viewer-files/ scripts and media from disk. fileMedia: only media.
-  function assembleViewer({ template, css, marked, katex, highlight, logic, app, data, fileScripts, fileMedia }) {
+  function assembleViewer({ template, css, marked, katex, highlight, logic, app, artifactsApp = '', artifactsCss = '', data, fileScripts, fileMedia }) {
     // \x21 rather than \!, which a regular expression with the u flag rejects.
     const script = code => String(code).replace(/<\/script/gi, '<\\/script').replace(/<!--/g, () => '<\\x21--');
+    const style = text => String(text).replace(/<\/style/gi, '<\\/style');
     const values = {
-      KATEX_CSS: () => String(css).replace(/<\/style/gi, '<\\/style'),
+      KATEX_CSS: () => style(css),
+      ARTIFACTS_CSS: () => style(artifactsCss),
+      ARTIFACTS_APP_JS: () => script(artifactsApp),
       DATA_JSON: () => (typeof data === 'string' ? data : escapeJson(data)),
       MARKED_JS: () => script(marked),
       KATEX_JS: () => script(katex),
@@ -933,7 +940,7 @@
     let page = String(template);
     if (fileScripts) page = allow(page, 'script-src');
     if (fileScripts || fileMedia) page = allow(page, 'media-src');
-    return page.replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
+    return page.replace(/\/\*(KATEX_CSS|ARTIFACTS_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|ARTIFACTS_APP_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
   const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, ARTIFACTS_VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT, artifactViewParts, ARTIFACT_PARTS_BUDGET };

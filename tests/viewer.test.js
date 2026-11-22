@@ -206,18 +206,18 @@ test('assembleViewer keeps hostile data inert and fills every placeholder', () =
   const html = assembleViewer({ ...assets, data: buildViewerData([{ ...chat, title: hostile }], { exported: 'x' }) });
   const raw = /<script id="data"[^>]*>([\s\S]*?)<\/script>/.exec(html)[1];
   assert.strictEqual(JSON.parse(raw).chats[0].title, hostile);
-  assert.strictEqual((html.match(/<\/script>/g) || []).length, 6);
-  assert.ok(!/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|APP_JS)\*\//.test(html.replace(raw, '')));
+  assert.strictEqual((html.match(/<\/script>/g) || []).length, 7);
+  assert.ok(!/\/\*(KATEX_CSS|ARTIFACTS_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|ARTIFACTS_APP_JS|APP_JS)\*\//.test(html.replace(raw, '')));
   for (const s of ['var marked=1;', 'var katex=1;', 'var hljs=1;', 'var logic=1;', 'var app=1;', '.k{}']) assert.ok(html.includes(s));
   assert.strictEqual(escapeJson({ a: '</x' }), '{"a":"<\\/x"}');
 });
 
-test('VIEWER_ASSETS lists the seven viewer files', () => {
-  assert.deepStrictEqual(VIEWER_ASSETS, ['viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js', 'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js']);
+test('VIEWER_ASSETS lists the nine viewer files', () => {
+  assert.deepStrictEqual(VIEWER_ASSETS, ['viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js', 'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js', 'viewer/artifacts-app.js', 'viewer/artifacts.css']);
 });
 
-test('ARTIFACTS_VIEWER_ASSETS lists the artifacts viewer\'s four files, and each exists', () => {
-  assert.deepStrictEqual(V.ARTIFACTS_VIEWER_ASSETS, ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js']);
+test('ARTIFACTS_VIEWER_ASSETS lists the artifacts viewer\'s five files, and each exists', () => {
+  assert.deepStrictEqual(V.ARTIFACTS_VIEWER_ASSETS, ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js', 'viewer/artifacts.css']);
   for (const f of V.ARTIFACTS_VIEWER_ASSETS) assert.ok(fs.existsSync(path.join(__dirname, '..', f)), f);
 });
 
@@ -226,11 +226,40 @@ test('the artifacts template keeps the chat viewer\'s policy, with no frames', (
   const policy = (t) => /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(t)[1];
   assert.strictEqual(policy(art), policy(template).replace("frame-src file:", "frame-src 'none'"));
   assert.ok(art.includes('<meta name="generator" content="Claude Takeout">'));
-  for (const p of ['DATA_JSON', 'MARKED_JS', 'LOGIC_JS', 'APP_JS']) assert.strictEqual(art.split(`/*${p}*/`).length, 2, p);
-  for (const f of ['viewer/artifacts-template.html', 'viewer/artifacts-app.js']) {
+  for (const p of ['ARTIFACTS_CSS', 'DATA_JSON', 'MARKED_JS', 'LOGIC_JS', 'APP_JS']) assert.strictEqual(art.split(`/*${p}*/`).length, 2, p);
+  for (const f of ['viewer/artifacts-template.html', 'viewer/artifacts-app.js', 'viewer/artifacts.css']) {
     const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
     for (const s of ['claudeusercontent', '__frame_t', '_thumb']) assert.ok(!text.includes(s), `${f}: ${s}`);
   }
+});
+
+// The chat viewer carries the artifacts app (the Artifacts screen) and its CSS, once each; the CSS sits in an inert
+// <template>, so it styles only the screen's shadow root. The standalone artifacts viewer gets the same CSS as its page style.
+test('the combined viewer includes the artifacts app and CSS once', () => {
+  const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const [tpl, logic, app, marked, katex, css, highlight, artifactsApp, artifactsCss] = VIEWER_ASSETS.map(read);
+  const views = [{ id: 'Abc', uuid: 'u-1', title: 'Guide', kind: 'Page', folder: 'artifacts/Guide_Abc', start: 'index.html', startSaved: 'index.html', startKind: 'html', files: [], part: 1, key: 'a0' }];
+  const data = buildViewerData([buildViewerChat(fixture, {})], { exported: 'x', artifacts: { views, listed: 1, exported: 'x' } });
+  const html = assembleViewer({ template: tpl, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data });
+  const count = (text, s) => text.split(s).length - 1;
+  assert.strictEqual(count(html, 'window.CTArtifactsApp = '), 1);
+  assert.strictEqual(count(artifactsApp, 'window.CTArtifactsApp = '), 1);
+  const sample = '#grid { display: grid;';
+  assert.strictEqual(count(artifactsCss, sample), 1);
+  assert.strictEqual(count(html, sample), 1);
+  assert.ok(/<template id="artifacts-style"><style>:root \{/.test(html), 'the CSS is in the inert template');
+  assert.ok(html.indexOf('window.CTArtifactsApp = ') < html.indexOf('function setupArtifacts('), 'the app is defined before the chat viewer mounts it');
+  for (const s of ['claudeusercontent', '__frame_t', '_thumb']) assert.ok(!html.includes(s), s);
+  // The chat viewer's policy is as before: file: frames for PDFs (the screen's previews have their own guard frame).
+  assert.match(html, /frame-src file:;/);
+  // The standalone viewer: the same CSS as its page style, mounted on the body.
+  const [aTpl, aLogic, aApp, aMarked, aCss] = V.ARTIFACTS_VIEWER_ASSETS.map(read);
+  const standalone = assembleViewer({ template: aTpl, css: '', artifactsCss: aCss, marked: aMarked, katex: '', highlight: '', logic: aLogic, app: aApp, data: { artifacts: views } });
+  assert.strictEqual(count(standalone, sample), 1);
+  assert.ok(standalone.includes('<style>:root {'));
+  assert.ok(standalone.includes('<script>CTArtifactsApp.mount(document.body);</script>'));
+  assert.match(standalone, /frame-src 'none';/);
+  assert.ok(!/\/\*[A-Z_]+_(JS|CSS)\*\//.test(standalone));
 });
 
 const Logic = require('../viewer/viewer-logic.js');
