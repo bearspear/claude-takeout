@@ -2267,6 +2267,30 @@ test('readArtifactStore never leaves the archive: links, climbing names and odd 
   assert.ok(store.warnings.some(w => /Bad_1\/artifact\.json/.test(w)), store.warnings.join('|'));
   const out = lib.artifactViewsFromDisk(store);
   assert.ok(!JSON.stringify(out).includes('SECRET'));
+  // 1.17: published/ a link out of the archive, and artifact.json's savedIn naming a file through it.
+  const out17 = tmpRoot();
+  put(out17, 'Guide_x/v2/index.html', '<p>SECRET via published</p>');
+  put(out17, 'Guide_x/published.json', JSON.stringify({ uuid: G_U, versions: { v2: pubVersion('v2', 0, '<p>SECRET via published</p>') } }));
+  const r17 = megaWith(tmpRoot(), FULL);
+  fs.symlinkSync(out17, path.join(r17, 'published'));
+  put(r17, `artifacts/${AF}/artifact.json`, JSON.stringify(format1({ files: [], savedIn: { 'index.html': 'published/Guide_x/v2/index.html' } })));
+  const s17 = lib.readArtifactStore(r17);
+  assert.ok(s17.warnings.some(w => /published\/ is a link/.test(w)), s17.warnings.join('|'));
+  const v17 = s17.records.get(G_U).versions.get('v2');
+  assert.deepStrictEqual([v17.folder, v17.abs, v17.sameAs], [null, null, null]);
+  const o17 = lib.artifactViewsFromDisk(s17);
+  assert.deepStrictEqual(o17.payloads, [null]);
+  assert.ok(!JSON.stringify(o17).includes('SECRET') && !JSON.stringify(o17).includes('published/Guide_x'), JSON.stringify(o17));
+  // 1.18: an artifact folder whose version folder's parent is a link (artifacts/<dir> itself): not read.
+  const out18 = tmpRoot();
+  put(out18, 'v2/index.html', '<p>SECRET via dir</p>');
+  put(out18, 'artifact.json', JSON.stringify(format2([['v2', '<p>SECRET via dir</p>']])));
+  const r18 = megaWith(tmpRoot(), FULL);
+  fs.mkdirSync(path.join(r18, 'artifacts'));
+  fs.symlinkSync(out18, path.join(r18, `artifacts/${AF}`));
+  const s18 = lib.readArtifactStore(r18);
+  assert.strictEqual(s18.records.size, 0);
+  assert.ok(!JSON.stringify(lib.artifactViewsFromDisk(s18)).includes('SECRET'));
   // artifacts/ itself a link: not read, and said so.
   const linked = megaWith(tmpRoot(), FULL);
   fs.symlinkSync(path.join(root, 'artifacts'), path.join(linked, 'artifacts'));

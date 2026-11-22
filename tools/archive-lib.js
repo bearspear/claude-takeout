@@ -362,6 +362,19 @@ function realFileUnder(dir, rel) {
   return isRealFile(at) ? at : null;
 }
 
+// A folder under dir by its '/'-separated name, every segment a real folder (no links), or null. A name read from
+// on-disk JSON (a version folder, a savedIn path) is resolved only through this: a link anywhere on the way, such as
+// a published/ pointing outside the archive, could otherwise reach files elsewhere.
+function realDirUnder(dir, rel) {
+  if (!plainSegments(rel)) return null;
+  let at = dir;
+  for (const seg of rel.split('/')) {
+    at = path.join(at, seg);
+    if (!isRealDir(at)) return null;
+  }
+  return at;
+}
+
 // A 1.18 store record as the published.json of a page (publishedFromDisk reads that shape): versions by folder name,
 // each labelled v1, v2, ... in the record's order (artifact.json keeps no claude.ai version numbers).
 function v18Page(store, rec) {
@@ -401,7 +414,8 @@ function publishedOnDisk(archive, chat, store) {
   if (inMega) {
     for (const rec of store.records.values()) {
       if (rec.format !== 2 || rec.dir.split('/')[0] !== 'artifacts') continue;
-      add(rec.uuid, { json: v18Page(store, rec), dir: `../${rec.dir}`, abs: path.join(store.root, ...rec.dir.split('/')) });
+      const abs = realDirUnder(store.root, rec.dir);
+      if (abs) add(rec.uuid, { json: v18Page(store, rec), dir: `../${rec.dir}`, abs });
     }
   }
   return found;
@@ -455,16 +469,18 @@ const publishedInList = list => (Array.isArray(list) ? list : []).filter(p => p 
   chat: p.chat, messageUuid: p.messageUuid, toolUseId: p.toolUseId, same: !!p.same, writtenAs: typeof p.writtenAs === 'string' ? p.writtenAs : null,
 }));
 
-// A version's sameAs ({ <published path>: <root-relative file> }), only names that stay inside the archive, and
-// sameAsAbs, the files on disk.
+// A version's sameAs ({ <published path>: <root-relative file> }), only names of real files inside the archive, and
+// sameAsAbs, those files on disk.
 function sameAsOf(map, root) {
   if (!map || typeof map !== 'object') return { sameAs: null, sameAsAbs: null };
   const sameAs = {};
   const sameAsAbs = {};
   for (const [p, rel] of Object.entries(map)) {
-    if (typeof rel !== 'string' || !plainSegments(rel)) continue;
+    // Only a real file inside the archive: a name through a link (or not there) points at nothing.
+    const abs = typeof rel === 'string' ? realFileUnder(root, rel) : null;
+    if (!abs) continue;
     sameAs[p] = rel;
-    sameAsAbs[p] = realFileUnder(root, rel);
+    sameAsAbs[p] = abs;
   }
   return Object.keys(sameAs).length ? { sameAs, sameAsAbs } : { sameAs: null, sameAsAbs: null };
 }
@@ -473,8 +489,8 @@ function sameAsOf(map, root) {
 function versionFolder(root, dir, name) {
   if (typeof name !== 'string' || !plainSegments(name) || name.includes('/')) return null;
   const rel = `${dir}/${name}`;
-  const abs = path.join(root, ...rel.split('/'));
-  return isRealDir(abs) ? { rel, abs } : null;
+  const abs = realDirUnder(root, rel);
+  return abs ? { rel, abs } : null;
 }
 
 // claude.ai's card data of an artifact.json (format 1 or 2), as a store record's meta.
@@ -543,7 +559,8 @@ function recordFromV1(root, dir, abs, json) {
     const segs = paths.map(p => savedIn[p].split('/'));
     // Every file in one published/<page>/<version>/ folder: that version folder.
     const head = segs.length && segs.every(s => s.length > 3 && s[0] === 'published' && s[1] === segs[0][1] && s[2] === segs[0][2]) ? segs[0].slice(0, 3).join('/') : null;
-    const at = head && isRealDir(path.join(root, ...head.split('/'))) ? { rel: head, abs: path.join(root, ...head.split('/')) } : null;
+    const headAbs = head ? realDirUnder(root, head) : null;
+    const at = headAbs ? { rel: head, abs: headAbs } : null;
     const files = paths.map(p => {
       const listed = listing.find(f => f.path === p) || { path: p };
       return diskFile({ ...listed, savedAs: at ? savedIn[p].split('/').slice(3).join('/') : null }, at ? at.abs : null);
@@ -600,8 +617,8 @@ function addPublished(rec, page) {
   for (const [folderName, v] of list) {
     if (rec.versions.has(v.ver)) continue;
     rec.order.push(v.ver);
-    const dirAbs = plainSegments(folderName) && !folderName.includes('/') ? path.join(page.abs, folderName) : null;
-    const ok = !!dirAbs && isRealDir(dirAbs);
+    const dirAbs = !folderName.includes('/') ? realDirUnder(page.abs, folderName) : null;
+    const ok = !!dirAbs;
     const saved = v.saved === true && ok;
     rec.versions.set(v.ver, {
       folder: saved ? `${page.dir}/${folderName}` : null, abs: saved ? dirAbs : null, files: fileList(v.files, saved ? dirAbs : null),
@@ -859,8 +876,8 @@ function publishedFromDisk(archive, chat, data, artifacts, diskName, store) {
       }
       // Stored here, with its start file: the files were saved and the start file is on disk.
       // The version folder itself must be a real folder: a link to somewhere else is never read.
-      const versionDir = plainSegments(folderName) && !folderName.includes('/') ? path.join(disk.abs, folderName) : null;
-      const startFile = v.saved === true && startSaved && versionDir && isRealDir(versionDir) ? realFileUnder(versionDir, startSaved) : null;
+      const versionDir = !folderName.includes('/') ? realDirUnder(disk.abs, folderName) : null;
+      const startFile = v.saved === true && startSaved && versionDir ? realFileUnder(versionDir, startSaved) : null;
       if (!startFile) {
         versions.push({ ...base, start: null, startSaved: null, same: false, writtenAs: null, incomplete: true, needsRuntime: !!v.needsRuntime, text: null });
         continue;
