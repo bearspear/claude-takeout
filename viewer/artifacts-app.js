@@ -520,7 +520,11 @@
     // (as the chat viewer's). Page code can't read files, so a part arrives as a script, and only a number from the
     // data ever becomes its src.
     const partsListed = new Set();
-    for (const v of views) if (Number.isSafeInteger(v.part) && v.part > 0) partsListed.add(v.part);
+    for (const v of views) {
+      if (Number.isSafeInteger(v.part) && v.part > 0) partsListed.add(v.part);
+      // Versions with previews of their own (an archive the old-archive tool rebuilt the viewer for).
+      for (const e of Array.isArray(v.versions) ? v.versions : []) if (e && Number.isSafeInteger(e.part) && e.part > 0) partsListed.add(e.part);
+    }
     const partsLoaded = new Map(); // n -> the part's object, the most recently used last
     const PARTS_KEPT = 2; // a part is about 4 MB; older ones are dropped and load again if needed
     const partsWaiting = new Map(); // n -> resolve, only while its script is loading
@@ -776,8 +780,9 @@
     }
 
     // Hosted: every version the export saved of the artifact (v.versions, artifact.json's), the current one chosen;
-    // null for one version or none. Another version shows the text a chat's card of it holds (its copy), and Open
-    // file opens its file in its version folder (or, for one the same as a chat's file, that file).
+    // null for one version or none. Another version shows the text a chat's card of it holds (its copy), else its own
+    // preview when it has one (part, key), and Open file opens its file in its version folder (or, for one the same
+    // as a chat's file, that file).
     function versionMenu(v) {
       if (!hosted) return null;
       const list = Array.isArray(v.versions) ? v.versions.filter(e => e && typeof e === 'object') : [];
@@ -812,6 +817,10 @@
         const file = chat && chat.files && typeof copy.file === 'string' && Object.prototype.hasOwnProperty.call(chat.files, copy.file) ? chat.files[copy.file] : null;
         const ver = file && Array.isArray(file.versions) ? file.versions[copy.version] : null;
         if (ver) return showVersionBody({ chat: copy.chat, file: copy.file, name: String(file.name || v.title || 'Page') }, ver, String(v.id));
+        // A version with a preview of its own (from disk): shown as the artifact is, from its own folder.
+        if (Number.isSafeInteger(e.part) && e.part > 0 && typeof e.key === 'string' && typeof e.start === 'string' && PREVIEW_KINDS.has(e.startKind) && unzipped !== false) {
+          return openPreview({ ...v, start: e.start, startSaved: e.startSaved, startKind: e.startKind, folder: e.folder, reused: e.same === true, part: e.part, key: e.key });
+        }
         const box = sheet('details', `${versionName(e)} can't be shown here.`);
         if (href) {
           const row = el('p', 'actions');

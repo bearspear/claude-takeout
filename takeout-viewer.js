@@ -17,7 +17,9 @@
 //                                      listFetched false the data also has storeCount (records.length), artifacts (each view plus links: [{ chat (index
 //                                      in chats), messageUuid, how }], docFile: { chat, file } | null, the latest chat's
 //                                      rebuilt document, listed (its record's) and versions: [{ ver, label, folder, start,
-//                                      startSaved, same, current, copy }] from its record), listed, exportedArtifacts,
+//                                      startSaved, same, current, copy, and part, key, startKind for a version with
+//                                      its own preview: records from disk, versionPlaces }] from its record), listed,
+//                                      exportedArtifacts,
 //                                      artifactsSince, listFetched; a published:<uuid> file of a listed artifact gets
 //                                      artifact: <view id>.
 //                                      A chat's links (artifactLinksOf) are a non-enumerable property of buildViewerChat's result.
@@ -723,24 +725,33 @@
   // folder (from the export root; null when no copy was saved), start, startSaved (in folder, or for a same version
   // the root-relative file a chat wrote), same, current, copy: { chat, file, version } | null, the chat card's version
   // that holds its text }. copies: 'ver' -> copy, from the chats' published cards of that page.
+  // A record read from disk (tools/archive-lib.js) may add versionPlaces: { <ver>: { folder, part, key, startKind } }:
+  // folder (from the export root) where that version's files are when not under dir (an older layout), and the
+  // version's own preview payload in viewer-files (part, key, as an ArtifactView's) with its start file's kind;
+  // the version then also has part, key and startKind.
   function recordVersions(rec, copies) {
     const dir = typeof rec.dir === 'string' ? rec.dir : '';
     const versions = rec.versions && typeof rec.versions === 'object' ? rec.versions : {};
     const own = ver => Object.prototype.hasOwnProperty.call(versions, ver) && versions[ver] && typeof versions[ver] === 'object';
+    const places = rec.versionPlaces && typeof rec.versionPlaces === 'object' ? rec.versionPlaces : {};
     const order = Array.isArray(rec.versionOrder) ? rec.versionOrder.filter(k => typeof k === 'string' && own(k)) : [];
     const keys = [...new Set([...order, ...Object.keys(versions).filter(own)])];
     return keys.map((ver, i) => {
       const v = versions[ver];
+      const place = Object.prototype.hasOwnProperty.call(places, ver) && places[ver] && typeof places[ver] === 'object' ? places[ver] : {};
       const start = typeof v.start === 'string' && v.start ? v.start : null;
       const files = Array.isArray(v.files) ? v.files.filter(f => f && typeof f.path === 'string') : [];
-      const folder = typeof v.folder === 'string' && v.folder && dir ? `${dir}/${v.folder}` : null;
+      const folder = typeof place.folder === 'string' && place.folder ? place.folder
+        : typeof v.folder === 'string' && v.folder && dir ? `${dir}/${v.folder}` : null;
       const sameAs = !folder && v.sameAs && typeof v.sameAs === 'object' ? v.sameAs : null;
       const sameFile = sameAs ? sameAs[start || (files[0] && files[0].path)] : null;
       const same = typeof sameFile === 'string' && sameFile !== '';
+      const preview = Number.isSafeInteger(place.part) && place.part > 0 && typeof place.key === 'string' && place.key
+        ? { part: place.part, key: place.key, startKind: typeof place.startKind === 'string' ? place.startKind : null } : {};
       return {
         ver, label: `v${i + 1}`, folder, start,
         startSaved: same ? sameFile : folder && typeof v.startSaved === 'string' && v.startSaved ? v.startSaved : null,
-        same, current: typeof rec.current === 'string' && rec.current === ver, copy: copies.get(ver) || null,
+        same, current: typeof rec.current === 'string' && rec.current === ver, copy: copies.get(ver) || null, ...preview,
       };
     });
   }

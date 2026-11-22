@@ -2533,8 +2533,9 @@ test('artifactJsonV2 writes format 2 with versions, listed and current', () => {
   })()`, sb);
   const json = JSON.parse(out);
   assert.deepStrictEqual(Object.keys(json), ['format', 'uuid', 'shortId', 'url', 'title', 'typeTitle', 'sourceSurface', 'rel', 'public', 'createdAt', 'updatedAt',
-    'listed', 'current', 'start', 'needsRuntime', 'note', 'thumb', 'versions']);
+    'listed', 'current', 'start', 'needsRuntime', 'note', 'thumb', 'order', 'versions']);
   assert.deepStrictEqual([json.format, json.listed, json.current, json.uuid, json.title], [2, true, 'v2', U(1), 'Guide']);
+  assert.deepStrictEqual(json.order, ['v1', 'v2']);
   assert.deepStrictEqual(Object.keys(json.versions), ['v1', 'v2']);
   assert.deepStrictEqual(Object.keys(json.versions.v1), ['folder', 'files', 'start', 'startSaved', 'incomplete', 'missing', 'saved', 'sameAs', 'publishedIn']);
   assert.deepStrictEqual(Object.keys(json.versions.v2), ['folder', 'files', 'start', 'startSaved', 'incomplete', 'missing', 'saved', 'publishedIn']);
@@ -2652,7 +2653,7 @@ test('Export Artifacts saves each artifact\'s current files with artifact.json a
     'export-manifest.json', 'index.html', 'index.md', 'viewer-check.gif', 'viewer-files/part-0001.js', 'viewer.html'].sort());
   assert.strictEqual(files[`${f2}/${LIVE}/app.js`], 'go()');
   const meta = JSON.parse(files[`${f2}/artifact.json`]);
-  assert.deepStrictEqual(Object.keys(meta).sort(), ['createdAt', 'current', 'format', 'listed', 'needsRuntime', 'note', 'public', 'rel', 'shortId', 'sourceSurface', 'start', 'title', 'typeTitle', 'updatedAt', 'url', 'uuid', 'versions'].sort());
+  assert.deepStrictEqual(Object.keys(meta).sort(), ['createdAt', 'current', 'format', 'listed', 'needsRuntime', 'note', 'order', 'public', 'rel', 'shortId', 'sourceSurface', 'start', 'title', 'typeTitle', 'updatedAt', 'url', 'uuid', 'versions'].sort());
   const shortId = uuidToBase58(U(2));
   assert.deepStrictEqual([meta.format, meta.uuid, meta.shortId, meta.url, meta.title, meta.current, meta.sourceSurface, meta.rel, curVer(meta).incomplete, meta.needsRuntime, meta.createdAt, meta.updatedAt],
     [2, U(2), shortId, `https://claude.ai/artifact/${shortId}`, 'Game', LIVE, 'code', 'mine', false, false, '2026-10-01T00:00:00Z', '2026-11-01T00:00:00Z']);
@@ -3496,7 +3497,7 @@ test('artifact.json (format 2) has start and public, and the version its files',
   const v = game.versions[LIVE];
   assert.deepStrictEqual({ ...game, versions: { [LIVE]: { ...v, files: v.files.map((f) => f.path) } } }, {
     format: 2, uuid: U(1), shortId: id, url: `https://claude.ai/artifact/${id}`, title: 'Game', typeTitle: '', sourceSurface: 'code', rel: 'mine', public: true,
-    createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', listed: true, current: LIVE, start: 'index.html', needsRuntime: false, note: '',
+    createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', listed: true, current: LIVE, start: 'index.html', needsRuntime: false, note: '', order: [LIVE],
     versions: { [LIVE]: { folder: LIVE, files: ['index.html', 'app.js'], start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: [] } },
   });
   const plan = JSON.parse(files[`${artFolder('Plan', U(2))}/artifact.json`]);

@@ -697,6 +697,59 @@ function viewerDataOf(file) {
 
     clean('main flow', main.seen);
 
+    // ---- A combined archive (Claude Takeout 1.17): the rebuilt viewer keeps the Artifacts screen ----
+    // published/ holds the chats' copies of Guide (v1, v2); artifacts/ lists Guide, its current version (v2) saved in
+    // published/ (savedIn). The artifact previews from there, and v1, which no chat card holds, from its own folder.
+    {
+      const { uuidToBase58 } = require('../../export-core.js');
+      const crypto = require('crypto');
+      const GU = '0a1b2c3d-1111-4222-8333-444455556666';
+      const GID = uuidToBase58(GU);
+      const sha = t => crypto.createHash('sha256').update(t).digest('hex');
+      const ONE = '<!doctype html><h1>GUIDE-ONE</h1>', TWO = '<!doctype html><h1>GUIDE-TWO</h1>';
+      const files = t => [{ path: 'index.html', savedAs: 'index.html', size: Buffer.byteLength(t), contentType: 'text/html', sha256: sha(t) }];
+      const version = (ver, order, t) => ({ ver, label: `v${order + 1}`, order, saved: true, files: files(t), start: 'index.html', startSaved: 'index.html',
+        incomplete: false, needsRuntime: false, missing: [], publishedIn: [{ chat: 'k1', messageUuid: 'k1-2', toolUseId: `t${ver}`, same: false, writtenAs: null }] });
+      const combined = path.join(dir, 'combined');
+      put(combined, 'index.md', '# all');
+      put(combined, 'export-manifest.json', JSON.stringify({ format: 1, kind: 'full', exported_at: '2026-11-20T00:00:00Z', chats: [], artifacts: { listed: 1, thumbs: 0, items: [] } }));
+      put(combined, 'Chat_k/original.json', chatJson('k1', 'Combined chat', '2026-03-01T00:00:00Z'));
+      put(combined, 'published/Guide_x/published.json', JSON.stringify({ format: 1, title: 'Guide', url: `https://claude.ai/artifact/${GID}`, shortId: GID, uuid: GU,
+        versions: { v1: version('v1', 0, ONE), v2: version('v2', 1, TWO) } }));
+      put(combined, 'published/Guide_x/v1/index.html', ONE);
+      put(combined, 'published/Guide_x/v2/index.html', TWO);
+      put(combined, `artifacts/Guide_${GID}/artifact.json`, JSON.stringify({ format: 1, uuid: GU, shortId: GID, url: `https://claude.ai/artifact/${GID}`, title: 'Guide',
+        typeTitle: '', sourceSurface: 'chat', rel: 'mine', ver: 'v2', createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', files: [], missing: [],
+        incomplete: false, needsRuntime: false, note: 'files saved with the chats', start: 'index.html', public: false, savedIn: { 'index.html': 'published/Guide_x/v2/index.html' } }));
+      put(combined, 'artifacts/index.md', '# artifacts');
+      const built = runTool(combined);
+      check('combined: the tool writes a viewer with the artifact', built.ok && built.archives[0].status === 'written' && built.archives[0].artifacts === 1, JSON.stringify(built.archives[0]));
+      const cv = await open(`file://${path.join(combined, 'viewer.html')}`);
+      const nav = cv.page.locator('#artifacts-nav');
+      check('combined: the Artifacts entry shows, with the count', await nav.isVisible() && (await nav.locator('.n').textContent()) === '1', await nav.textContent());
+      await cv.page.evaluate(h => { location.hash = h; }, `#a=${GID}`);
+      await cv.page.waitForSelector('#artifacts-screen #page:not([hidden])');
+      check('combined: the artifact page', (await cv.page.locator('#artifacts-screen #page-title').textContent()) === 'Guide');
+      const srcdoc = async () => {
+        const guard = await (await cv.page.waitForSelector('#artifacts-screen #page-body .preview iframe', { timeout: 3000 })).contentFrame();
+        await guard.waitForSelector('iframe', { timeout: 3000 });
+        return guard.$eval('iframe', f => f.getAttribute('srcdoc'));
+      };
+      check('combined: the current version previews from published/ (savedIn)', (await srcdoc()).includes('GUIDE-TWO'));
+      const openFile = async () => decodeURIComponent(await cv.page.locator('#artifacts-screen #page-links a.open-file').getAttribute('href'));
+      check("combined: Open file is the chats' copy", await openFile() === 'published/Guide_x/v2/index.html');
+      const menu = cv.page.locator('#artifacts-screen #page-from select');
+      check('combined: the version menu lists both, the current chosen', JSON.stringify(await menu.locator('option').allTextContents()) === JSON.stringify(['v1', 'v2 (current)']),
+        JSON.stringify(await menu.locator('option').allTextContents()));
+      await menu.selectOption({ label: 'v1' });
+      check('combined: v1, held by no chat card, previews from its own folder', (await srcdoc()).includes('GUIDE-ONE'));
+      check("combined: v1's Open file is in its own folder", await openFile() === 'published/Guide_x/v1/index.html');
+      await menu.selectOption('current');
+      check('combined: Current goes back', (await srcdoc()).includes('GUIDE-TWO'));
+      clean('combined', cv.seen);
+      await cv.context.close();
+    }
+
     const shots = process.env.SHOT_DIR;
     if (shots) {
       for (const colorScheme of ['light', 'dark']) {

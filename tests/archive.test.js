@@ -44,7 +44,7 @@ test('finds a single, a mega with a renamed chat folder, and a parent of two sin
   assert.ok(!res.archives.some(a => a.root === path.join(tmp, 'parent')));
 });
 
-test('an Export Artifacts folder holds no archive', () => {
+test('an Export Artifacts folder is an archive of its own, with no chats', () => {
   const tmp = tmpRoot();
   put(tmp, 'index.md');
   put(tmp, 'index.html');
@@ -52,22 +52,30 @@ test('an Export Artifacts folder holds no archive', () => {
   put(tmp, 'Game_abc/index.html');
   put(tmp, 'Game_abc/artifact.json', '{}');
   const res = find(tmp);
-  assert.deepStrictEqual(res.archives, []);
+  assert.deepStrictEqual(res.archives.map(a => [a.root, a.kind, a.chats.length, a.hasViewer]), [[tmp, 'artifacts', 0, false]]);
+  assert.strictEqual(require('../tools/archive-lib.js').isArchiveRoot(tmp), true);
+  // Without its manifest it is just a folder.
+  fs.rmSync(path.join(tmp, 'export-manifest.json'));
+  assert.deepStrictEqual(find(tmp).archives, []);
 });
 
-test('an Export Artifacts folder with a viewer still holds no archive', () => {
+test('an Export Artifacts folder with a viewer is found with it; its own files are not added files', () => {
   const tmp = tmpRoot();
   const viewer = '<!doctype html><html><head><meta name="generator" content="Claude Takeout"></head><body></body></html>';
   put(tmp, 'index.md');
   put(tmp, 'index.html');
+  put(tmp, 'errors.txt');
   put(tmp, 'viewer.html', viewer);
   put(tmp, 'viewer-files/part-0001.js', 'window.__archivePart(1, {})');
   put(tmp, 'viewer-files/thumbs/abc.png');
   put(tmp, 'export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', listed: 1, thumbs: 1, artifacts: [] }));
   put(tmp, 'Game_abc/index.html');
   put(tmp, 'Game_abc/artifact.json', '{}');
+  put(tmp, 'my notes.md', 'mine');
   assert.strictEqual(isGeneratedViewer(viewer), true);
-  assert.deepStrictEqual(find(tmp).archives, []);
+  const [archive] = find(tmp).archives;
+  assert.deepStrictEqual([archive.kind, archive.hasViewer], ['artifacts', true]);
+  assert.deepStrictEqual(scanAdded(archive).files.map(f => f.path), ['my notes.md']);
 });
 
 test('index.md without chat subfolders is not a mega; the root itself can be an archive', () => {
@@ -423,36 +431,6 @@ test('a published version folder that is a link is not read, and counts as not i
   assert.ok(!JSON.stringify(got.viewerChat).includes('SECRET'));
   const page = Object.values(got.viewerChat.files).find(f => f.published);
   assert.deepStrictEqual(page.versions.map(v => [v.label, v.href, v.text]), [['v1', 'artefacts/guide.html', '<p>G1</p>'], ['v2', null, null], ['v3', null, null]]);
-});
-
-// popup.js no longer writes a root published/ (v1.18: Export All keeps pages in artifacts/); chatFromDisk reading
-// artifacts/ and this parity for 1.18 archives come with the old-archive tools' artifacts support.
-test('parity: Export All published pages at the export root rebuild the same viewer chats', { skip: 'v1.18: Export All writes artifacts/, read by the old-archive tools in a later step' }, async () => {
-  const mega = tmpRoot();
-  const popup = exportPopup();
-  const root = zipStub();
-  const shared = { root, byUuid: new Map(), usedDirs: new Set(), published: new Map() };
-  const fetcher = publishedFetcher(pagesTable());
-  const a = await runFolder(popup, pagesChat('ca', 'Chat a'), { folderName: 'Chat_a', shared, fetchPublished: fetcher.fetch });
-  // Chat b publishes v1 with a different text of its own, so v1 is stored at the root for it.
-  const b = await runFolder(popup, { ...pagesChat('cb', 'Chat b'), current_leaf_message_uuid: 'm1',
-    chat_messages: [amsg('m1', null, [use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'other' }), result('w'), ...publishBlocks('q1', PAGE_A, 'v1', 'ShortA')])] },
-  { folderName: 'Chat_b', shared, fetchPublished: fetcher.fetch });
-  popup.sandbox.__shared = shared;
-  require('vm').runInContext('writeSharedPublished(__shared)', popup.sandbox);
-  put(mega, 'index.md');
-  writeFolder(path.join(mega, 'Chat_a'), a.written);
-  writeFolder(path.join(mega, 'Chat_b'), b.written);
-  writeFolder(mega, root.written);
-  assert.ok(fs.existsSync(`${mega}/published/Guide_ShortA/v1/index.html`));
-  assert.ok(!fs.existsSync(`${mega}/Chat_a/published`));
-  const archive = { root: mega, kind: 'mega', chats: [{ dir: `${mega}/Chat_a`, relDir: 'Chat_a' }, { dir: `${mega}/Chat_b`, relDir: 'Chat_b' }] };
-  for (const [i, run] of [a, b].entries()) {
-    const got = chatFromDisk(archive, archive.chats[i]).viewerChat;
-    assert.deepStrictEqual(JSON.parse(JSON.stringify(got)), JSON.parse(JSON.stringify(run.chat)), archive.chats[i].relDir);
-  }
-  const pageB = Object.values(b.chat.files).find(f => f.published);
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(pageB.versions.map(v => [v.href, v.same]))), [['published/Guide_ShortA/v1/index.html', false]]);
 });
 
 test('scanAdded does not list published/ at a mega root or in a chat folder', () => {
@@ -2123,52 +2101,415 @@ test('parity: web search images saved in images/ are found again, and images/ ho
   assert.ok(!scanAdded(archive).files.some(f => f.path.startsWith('images/')));
 });
 
-// ---- old-archive tools refuse an archive that includes artifacts ----
-test('build_viewer refuses an archive with artifacts/ and writes nothing', () => {
-  const root = tmpRoot();
-  put(root, 'original.json', chatJson('a1'));
-  put(root, 'viewer.html', '<html>kept</html>');
-  put(root, 'artifacts/x/artifact.json', '{}');
-  const before = hashTree(root);
-  const res = cli(root, '--force');
-  assert.strictEqual(res.status, 1);
-  assert.deepStrictEqual(hashTree(root), before);
-  assert.match(res.stderr, /This archive includes artifacts \(Claude Takeout 1\.17 or later\)\. build_viewer doesn't support those yet; its viewer\.html is already complete\./);
-});
-
-test('build_viewer --json reports a refused archive', () => {
-  const root = tmpRoot();
+// ---- artifacts on disk: every layout (readArtifactStore), and build_viewer keeping the Artifacts screen ----
+const lib = require('../tools/archive-lib.js');
+const { uuidToBase58 } = require('../export-core.js');
+const { assetRoutes, runArtifacts } = require('./helpers');
+const G_U = PAGE_A;
+const G_ID = uuidToBase58(G_U);
+const G1 = '<p>G1</p>', G2 = '<p>G2</p>';
+const filesOf = text => [{ path: 'index.html', savedAs: 'index.html', size: Buffer.byteLength(text), contentType: 'text/html', sha256: sha(text) }];
+const pubIn = id => [{ chat: 'c1', messageUuid: 'c1-2', toolUseId: id, same: false, writtenAs: null }];
+const pubVersion = (ver, order, text) => ({ ver, label: `v${order + 1}`, order, saved: true, files: filesOf(text), start: 'index.html', startSaved: 'index.html',
+  incomplete: false, needsRuntime: false, missing: [], publishedIn: pubIn(`t${ver}`) });
+const card = { url: `https://claude.ai/artifact/${G_ID}`, title: 'Guide', typeTitle: '', sourceSurface: 'chat', rel: 'mine', public: false,
+  createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z' };
+const v2Version = (ver, text) => ({ folder: ver, files: filesOf(text).map(f => ({ ...f, verified: true })), start: 'index.html', startSaved: 'index.html',
+  incomplete: false, missing: [], saved: true, publishedIn: pubIn(`t${ver}`) });
+const format2 = (vers) => ({ format: 2, uuid: G_U, shortId: G_ID, ...card, listed: true, current: 'v2', start: 'index.html', needsRuntime: false, note: '',
+  order: vers.map(([v]) => v), versions: Object.fromEntries(vers.map(([v, t]) => [v, v2Version(v, t)])) });
+const format1 = (extra = {}) => ({ format: 1, uuid: G_U, shortId: G_ID, ...card, ver: 'v2', files: filesOf(G2), missing: [], incomplete: false, needsRuntime: false,
+  note: '', start: 'index.html', ...extra });
+const writePublished = base => {
+  put(base, 'published/Guide_x/published.json', JSON.stringify({ format: 1, title: 'Guide', url: card.url, shortId: G_ID, uuid: G_U,
+    versions: { v1: pubVersion('v1', 0, G1), v2: pubVersion('v2', 1, G2) } }));
+  put(base, 'published/Guide_x/v1/index.html', G1);
+  put(base, 'published/Guide_x/v2/index.html', G2);
+};
+const megaWith = (root, manifest = null) => {
   put(root, 'index.md', '# all');
-  put(root, 'Chat_a/original.json', chatJson('a1'));
-  put(root, 'export-manifest.json', JSON.stringify({ format: 1, kind: 'full', artifacts: { listed: 1, thumbs: 0, items: [] } }));
-  const res = cli(root, '--json');
-  assert.strictEqual(res.status, 1);
-  const report = JSON.parse(res.stdout);
-  assert.strictEqual(report.ok, false);
-  assert.strictEqual(report.archives[0].refused, true);
-  assert.match(report.archives[0].message, /build_viewer doesn't support those yet/);
-  assert.ok(!fs.existsSync(path.join(root, 'viewer.html')));
+  put(root, 'Chat_a/original.json', chatJson('c1'));
+  if (manifest) put(root, 'export-manifest.json', JSON.stringify(manifest));
+  return root;
+};
+const FULL = { format: 1, kind: 'full', exported_at: '2026-11-20T00:00:00Z', listed: 1, chats: [{ uuid: 'c1', folder: 'Chat_a' }], artifacts: { listed: 1, thumbs: 0, items: [] } };
+const STANDALONE = { format: 1, kind: 'artifacts', exported_at: '2026-11-20T00:00:00Z', listed: 1, thumbs: 0, artifacts: [] };
+const AF = `Guide_${G_ID}`;
+// The same artifact, Guide with v1 and v2 (current), in each layout an export wrote.
+const LAYOUTS = {
+  'published (chat ZIP)': root => { put(root, 'original.json', chatJson('c1')); writePublished(root); return root; },
+  'published (Export All)': root => { writePublished(megaWith(root)); return root; },
+  'v17 (savedIn)': root => {
+    writePublished(megaWith(root, FULL));
+    put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(format1({ files: [], savedIn: { 'index.html': 'published/Guide_x/v2/index.html' } })));
+    put(root, 'artifacts/index.md', '# artifacts');
+    return root;
+  },
+  'v17 (flat)': root => {
+    writePublished(megaWith(root, FULL));
+    put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(format1()));
+    put(root, `artifacts/${AF}/index.html`, G2);
+    return root;
+  },
+  v18: root => {
+    megaWith(root, FULL);
+    put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(format2([['v1', G1], ['v2', G2]])));
+    put(root, `artifacts/${AF}/v1/index.html`, G1);
+    put(root, `artifacts/${AF}/v2/index.html`, G2);
+    return root;
+  },
+  'standalone (flat)': root => {
+    put(root, 'export-manifest.json', JSON.stringify(STANDALONE));
+    put(root, `${AF}/artifact.json`, JSON.stringify(format1()));
+    put(root, `${AF}/index.html`, G2);
+    return root;
+  },
+  'standalone (v18)': root => {
+    put(root, 'export-manifest.json', JSON.stringify(STANDALONE));
+    put(root, `${AF}/artifact.json`, JSON.stringify(format2([['v2', G2]])));
+    put(root, `${AF}/v2/index.html`, G2);
+    return root;
+  },
+};
+// What a record holds, whatever the layout: its versions in order with their start file's text on disk.
+const normalized = store => [...store.records.values()].map(r => ({
+  uuid: r.uuid, shortId: r.shortId, title: r.title, listed: r.listed, current: r.current,
+  versions: r.order.map(ver => {
+    const v = r.versions.get(ver);
+    const f = v.files.find(x => x.path === v.start);
+    const abs = v.folder ? f && f.abs : v.sameAsAbs && v.sameAsAbs[v.start];
+    return [ver, v.start, abs ? fs.readFileSync(abs, 'utf8') : null];
+  }),
+}));
+
+test('readArtifactStore reads every layout into the same records', () => {
+  const both = [['v1', 'index.html', G1], ['v2', 'index.html', G2]];
+  const expect = {
+    'published (chat ZIP)': ['published', false, null, both],
+    'published (Export All)': ['published', false, null, both],
+    'v17 (savedIn)': ['v17', true, 'v2', both],
+    'v17 (flat)': ['v17', true, 'v2', both],
+    v18: ['v18', true, 'v2', both],
+    'standalone (flat)': ['standalone-flat', true, 'v2', [both[1]]],
+    'standalone (v18)': ['standalone-v18', true, 'v2', [both[1]]],
+  };
+  for (const [name, make] of Object.entries(LAYOUTS)) {
+    const store = lib.readArtifactStore(make(tmpRoot()));
+    const [layout, listed, current, versions] = expect[name];
+    assert.strictEqual(store.layout, layout, name);
+    assert.deepStrictEqual(store.warnings, [], name);
+    assert.deepStrictEqual(normalized(store), [{ uuid: G_U, shortId: G_ID, title: 'Guide', listed, current, versions }], name);
+    assert.strictEqual(store.listFetched, listed, name);
+  }
 });
 
-test('build_viewer refuses a ZIP with artifacts before extracting it', async () => {
+test('readArtifactStore: a 1.17 savedIn naming a chat\'s own file is that file, as 1.18\'s sameAs', () => {
+  const root = megaWith(tmpRoot(), FULL);
+  put(root, 'Chat_a/artefacts/guide.html', G2);
+  put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(format1({ files: [], savedIn: { 'index.html': 'Chat_a/artefacts/guide.html' } })));
+  const store = lib.readArtifactStore(root);
+  const v = store.records.get(G_U).versions.get('v2');
+  assert.deepStrictEqual([v.folder, v.sameAs], [null, { 'index.html': 'Chat_a/artefacts/guide.html' }]);
+  const { views, payloads, records } = lib.artifactViewsFromDisk(store);
+  assert.deepStrictEqual([views[0].reused, views[0].folder, views[0].startSaved, views[0].files[0].savedAs], [true, `artifacts/${AF}`, 'Chat_a/artefacts/guide.html', 'Chat_a/artefacts/guide.html']);
+  assert.deepStrictEqual(payloads[0], { texts: [['index.html', G2]], images: [] });
+  assert.deepStrictEqual(records[0].versions.v2.sameAs, { 'index.html': 'Chat_a/artefacts/guide.html' });
+});
+
+test('artifactViewsFromDisk: an older version a chat wrote the same (no copy in published/) points at that chat\'s file', () => {
+  const root = megaWith(tmpRoot());
+  writePublished(root);
+  const file = path.join(root, 'published/Guide_x/published.json');
+  const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+  Object.assign(json.versions.v1, { saved: false, publishedIn: [{ chat: 'c1', messageUuid: 'c1-2', toolUseId: 'tv1', same: true, writtenAs: 'guide.html' }] });
+  fs.writeFileSync(file, JSON.stringify(json));
+  fs.rmSync(path.join(root, 'published/Guide_x/v1'), { recursive: true });
+  put(root, 'Chat_a/artefacts/guide.html', G1);
+  const store = lib.readArtifactStore(root);
+  assert.strictEqual(lib.artifactViewsFromDisk(store).records[0].versions.v1.sameAs, undefined, 'no chat folders given: nothing to point at');
+  const out = lib.artifactViewsFromDisk(store, new Map([['c1', 'Chat_a']]));
+  assert.deepStrictEqual(out.records[0].versions.v1.sameAs, { 'index.html': 'Chat_a/artefacts/guide.html' });
+  assert.deepStrictEqual(out.versionPayloads.map(p => [p.ver, p.payload.texts[0][1]]), [['v1', G1], ['v2', G2]]);
+});
+
+test('readArtifactStore: the version order is artifact.json\'s order, not its keys\'', () => {
+  const root = megaWith(tmpRoot(), FULL);
+  const json = format2([['12', G2], ['ab-1', G1]]);
+  json.order = ['ab-1', '12'];
+  put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(json));
+  put(root, `artifacts/${AF}/12/index.html`, G2);
+  put(root, `artifacts/${AF}/ab-1/index.html`, G1);
+  assert.deepStrictEqual(Object.keys(JSON.parse(fs.readFileSync(path.join(root, `artifacts/${AF}/artifact.json`), 'utf8')).versions), ['12', 'ab-1']);
+  assert.deepStrictEqual([...lib.readArtifactStore(root).records.values()][0].order, ['ab-1', '12']);
+  // Without order (an older 1.18 build), the keys' order.
+  delete json.order;
+  put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(json));
+  assert.deepStrictEqual([...lib.readArtifactStore(root).records.values()][0].order, ['12', 'ab-1']);
+});
+
+test('readArtifactStore never leaves the archive: links, climbing names and odd files are not read', () => {
+  const outside = tmpRoot();
+  put(outside, 'index.html', '<p>SECRET</p>');
+  const root = LAYOUTS.v18(tmpRoot());
+  fs.rmSync(path.join(root, `artifacts/${AF}/v1`), { recursive: true });
+  fs.symlinkSync(outside, path.join(root, `artifacts/${AF}/v1`));
+  const json = JSON.parse(fs.readFileSync(path.join(root, `artifacts/${AF}/artifact.json`), 'utf8'));
+  json.versions.v2.files[0].savedAs = '../../../x/index.html';
+  json.versions.v3 = { folder: null, files: filesOf(G1), start: 'index.html', sameAs: { 'index.html': '../outside/index.html' }, publishedIn: [] };
+  json.thumb = '../secret.png';
+  put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(json));
+  put(root, 'artifacts/Bad_1/artifact.json', '{ not json');
+  put(root, 'artifacts/Bad_2/artifact.json', '{}');
+  const store = lib.readArtifactStore(root);
+  const rec = store.records.get(G_U);
+  assert.deepStrictEqual([rec.versions.get('v1').folder, rec.versions.get('v2').files[0].abs, rec.versions.get('v3').sameAs, rec.thumb], [null, null, null, null]);
+  assert.strictEqual(store.records.size, 1);
+  assert.ok(store.warnings.some(w => /Bad_1\/artifact\.json/.test(w)), store.warnings.join('|'));
+  const out = lib.artifactViewsFromDisk(store);
+  assert.ok(!JSON.stringify(out).includes('SECRET'));
+  // artifacts/ itself a link: not read, and said so.
+  const linked = megaWith(tmpRoot(), FULL);
+  fs.symlinkSync(path.join(root, 'artifacts'), path.join(linked, 'artifacts'));
+  const l = lib.readArtifactStore(linked);
+  assert.deepStrictEqual([l.layout, l.records.size], ['none', 0]);
+  assert.ok(l.warnings.some(w => /artifacts\/ is a link/.test(w)));
+});
+
+// A viewer.html the extension made, for --force.
+const GENERATED = '<!doctype html><html><head><meta name="generator" content="Claude Takeout"></head><body></body></html>';
+const partsOf = root => {
+  const out = {};
+  const dir = path.join(root, 'viewer-files');
+  for (const n of fs.existsSync(dir) ? fs.readdirSync(dir).filter(x => /^part-\d+\.js$/.test(x)) : []) {
+    const got = loadPart(fs.readFileSync(path.join(dir, n), 'utf8'));
+    out[got.n] = JSON.parse(JSON.stringify(got.data));  // out of the part's own realm
+  }
+  return out;
+};
+const payload = (parts, o) => (o && o.part ? parts[o.part][o.key] : null);
+
+test('build_viewer --force on a 1.17 combined archive keeps the Artifacts screen and resolves savedIn previews', async () => {
+  const root = LAYOUTS['v17 (savedIn)'](tmpRoot());
+  put(root, 'viewer.html', GENERATED);
+  const before = hashTree(root);
+  const report = await tool().writeViewer(single(root), { force: true });
+  assert.strictEqual(report.status, 'written', report.reason);
+  assert.strictEqual(report.artifacts, 1);
+  assertKept(before, hashTree(root), ['viewer.html']);
+  const html = fs.readFileSync(path.join(root, 'viewer.html'), 'utf8');
+  assert.ok(html.includes('function versionMenu('), 'the Artifacts screen is in the page');
+  const data = viewerData(root);
+  const parts = partsOf(root);
+  assert.deepStrictEqual([data.listFetched, data.storeCount, data.exportedArtifacts], [true, 1, '2026-11-20T00:00:00Z']);
+  const [view] = data.artifacts;
+  assert.deepStrictEqual([view.id, view.title, view.folder, view.startSaved, view.listed, view.startMissing], [G_ID, 'Guide', 'published/Guide_x/v2', 'index.html', true, false]);
+  assert.deepStrictEqual(payload(parts, view).texts, [['index.html', G2]]);
+  assert.deepStrictEqual(view.versions.map(v => [v.label, v.folder, v.current]), [['v1', 'published/Guide_x/v1', false], ['v2', 'published/Guide_x/v2', true]]);
+  // The older version previews from its own folder, with no chat holding it.
+  assert.strictEqual(view.versions[0].copy, null);
+  assert.deepStrictEqual([view.versions[0].startKind, payload(parts, view.versions[0]).texts], ['html', [['index.html', G1]]]);
+});
+
+test('build_viewer on a pre-1.17 Export All: its published pages are artifact folders, and claude.ai\'s list is not there', async () => {
+  const root = LAYOUTS['published (Export All)'](tmpRoot());
+  const report = await tool().writeViewer(single(root), {});
+  assert.strictEqual(report.status, 'written', report.reason);
+  const data = viewerData(root);
+  assert.deepStrictEqual([data.listFetched, data.storeCount, data.artifacts], [false, 1, []]);
+  // A chat ZIP's viewer keeps no Artifacts screen, as the extension writes it.
+  const chatZip = LAYOUTS['published (chat ZIP)'](tmpRoot());
+  assert.strictEqual((await tool().writeViewer(single(chatZip), {})).status, 'written');
+  assert.ok(!('artifacts' in viewerData(chatZip)));
+});
+
+test('build_viewer on a 1.18 archive: an older version no chat holds previews from its own folder', async () => {
+  const root = LAYOUTS.v18(tmpRoot());
+  assert.strictEqual((await tool().writeViewer(single(root), {})).status, 'written');
+  const data = viewerData(root);
+  const parts = partsOf(root);
+  const [view] = data.artifacts;
+  assert.deepStrictEqual([view.folder, payload(parts, view).texts], [`artifacts/${AF}/v2`, [['index.html', G2]]]);
+  assert.deepStrictEqual(view.versions.map(v => [v.label, v.folder, v.copy, v.current]), [['v1', `artifacts/${AF}/v1`, null, false], ['v2', `artifacts/${AF}/v2`, null, true]]);
+  assert.deepStrictEqual(payload(parts, view.versions[0]).texts, [['index.html', G1]]);
+  assert.ok(!('part' in view.versions[1]), 'the current version previews as the artifact does');
+});
+
+// Export All through the popup (bulkExportZip, a ZIP) with claude.ai's artifact list and pages, unzipped into a new
+// folder. Returns { dir, data (the viewer data the extension wrote) }.
+async function exportAllToDisk({ chats, frames, pages }) {
+  const JSZip = require('../jszip.min.js');
+  const sb = exportPopup({ routes: assetRoutes() }).sandbox;
+  const fetcher = publishedFetcher(pages);
+  const store = {};
+  const list = Object.values(chats).map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updated_at }));
+  sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(k => k in store).map(k => [k, store[k]]));
+  sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+  sb.chrome.permissions = { contains: async () => false, request: async () => false };
+  sb.chrome.tabs.query = async () => [{ id: 1, url: 'https://claude.ai/chat/x' }];
+  sb.chrome.tabs.sendMessage = (id, m, cb) => {
+    if (m.action === 'fetchAllConversations') cb({ data: list, orgId: 'org-1' });
+    else if (m.action === 'fetchConversation') cb({ data: JSON.parse(JSON.stringify(chats[m.conversationId])) });
+    else if (m.action === 'listArtifacts') cb({ frames: JSON.parse(JSON.stringify(frames)) });
+    else if (/^publishedPage/.test(m.action)) fetcher.fetch(m).then(cb);
+    else cb({});
+  };
+  sb.JSZip = JSZip;
+  sb.Uint8Array = Uint8Array;
+  let saved = null;
+  sb.download = (blob) => { saved = blob; };
+  sb.setTimeout = (f) => setTimeout(f, 0);
+  vm.runInContext('orgId = "org-1"', sb);
+  await vm.runInContext('bulkExportZip({})', sb);
+  assert.ok(saved, sb.document.getElementById('status').textContent);
+  const zip = await JSZip.loadAsync(await saved.arrayBuffer());
+  const dir = tmpRoot();
+  for (const n of Object.keys(zip.files)) if (!zip.files[n].dir) put(dir, n, await zip.file(n).async('nodebuffer'));
+  return { dir, data: viewerData(dir) };
+}
+
+const LIVE = '1794783850-4a6e', OLD1 = '1794700000-0a01', OLD2 = '1794700001-0a02';
+const U = n => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
+const listItem = (slug, title, extra = {}) => ({ slug, title, typeSlug: '', typeTitle: '', sourceSurface: 'chat', rel: 'mine', live: LIVE,
+  updatedAt: '2026-05-01T10:30:00Z', createdAt: '2026-05-01T10:01:00Z', ...extra });
+const msgAt = (uuid, parent, sender, content) => ({ uuid, parent_message_uuid: parent, sender, created_at: '2026-05-01T10:00:00Z', content, attachments: [], files: [], files_v2: [] });
+const publishCall = (id, slug, version, source, title = 'Guide page') => [
+  use(id, PUB, { title, files: [{ as: 'index.html', path: source }] }),
+  { type: 'tool_result', tool_use_id: id, name: PUB, content: [{ type: 'text', text: JSON.stringify({ slug, version, url: `https://claude.ai/artifact/${uuidToBase58(slug)}`, title }) }] },
+];
+const writeCall = (id, file, content) => [use(id, 'Write', { file_path: file, content }), { type: 'tool_result', tool_use_id: id, name: 'Write', content: [{ type: 'text', text: 'ok' }] }];
+const OLDA = '<!doctype html><h1>Old A</h1>';
+const OLDB = '<!doctype html><h1>Old B served</h1>';
+const PNG_BYTES = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAoAAAAKCAYAAACNMs+9AAAAFUlEQVR42mNkYPhfz0AEYBxVSF+FAAhKDveksOjmAAAAAElFTkSuQmCC', 'base64');
+// Chat "Editing" publishes Guide page (U(1)) at two older versions: the file it wrote (same), then one claude.ai served
+// differently (saved in its version folder). Chat "Side" publishes a page claude.ai doesn't list (U(8)). Game (U(2)) is
+// only in claude.ai's list, with a script and a picture.
+const megaChats = () => ({
+  'chat-edit': { uuid: 'chat-edit', name: 'Editing', model: 'claude-x', created_at: '2026-05-01T10:14:00Z', updated_at: '2026-05-01T10:18:00Z', settings: {}, current_leaf_message_uuid: 'ea2',
+    chat_messages: [
+      msgAt('eh1', null, 'human', [{ type: 'text', text: 'publish the old guide' }]),
+      msgAt('ea1', 'eh1', 'assistant', [...writeCall('ew1', '/home/claude/old.html', OLDA), ...publishCall('ep1', U(1), OLD1, '/home/claude/old.html'), { type: 'text', text: 'Published.' }]),
+      msgAt('eh2', 'ea1', 'human', [{ type: 'text', text: 'and the new one' }]),
+      msgAt('ea2', 'eh2', 'assistant', [...writeCall('ew2', '/home/claude/new.html', '<!doctype html><h1>New as written</h1>'), ...publishCall('ep2', U(1), OLD2, '/home/claude/new.html'), { type: 'text', text: 'Again.' }]),
+    ] },
+  'chat-side': { uuid: 'chat-side', name: 'Side', model: 'claude-x', created_at: '2026-05-01T10:23:00Z', updated_at: '2026-05-01T10:24:00Z', settings: {}, current_leaf_message_uuid: 'sa1',
+    chat_messages: [
+      msgAt('sh1', null, 'human', [{ type: 'text', text: 'publish a side page' }]),
+      msgAt('sa1', 'sh1', 'assistant', [...publishCall('sp', U(8), LIVE, '/home/claude/side.html', 'Side page'), { type: 'text', text: 'Done.' }]),
+    ] },
+});
+const megaPages = () => ({
+  [U(1)]: { title: 'Guide page', live: LIVE, history: [OLD1, OLD2, LIVE], versions: {
+    [OLD1]: { files: { 'index.html': OLDA } }, [OLD2]: { files: { 'index.html': OLDB } }, [LIVE]: { files: { 'index.html': '<!doctype html><h1>Live guide</h1>' } } } },
+  [U(2)]: { title: 'Game', live: LIVE, versions: { [LIVE]: { files: { 'index.html': '<script src="app.js"></script><img src="logo.png">', 'app.js': 'go()', 'logo.png': { body: PNG_BYTES, type: 'image/png' } } } } },
+  [U(8)]: { title: 'Side page', live: LIVE, versions: { [LIVE]: { files: { 'index.html': '<!doctype html><h1>Side</h1>' } } } },
+});
+
+// The differences a rebuilt viewer may have from the extension's, by design: when it was built (exported), where
+// previews sit in viewer-files (part and key numbers), the order of the artifacts (claude.ai's list, against folder
+// names), and an older version's own preview (part, key, startKind: the extension reads those from the chats).
+function comparable(data) {
+  const clean = x => JSON.parse(JSON.stringify(x, (k, v) => (k === 'part' || k === 'key' ? undefined : v)));
+  const out = clean({ ...data, exported: null });
+  if (Array.isArray(out.artifacts)) {
+    out.artifacts.sort((a, b) => (a.id < b.id ? -1 : 1));
+    for (const a of out.artifacts) for (const v of a.versions) delete v.startKind;
+  }
+  return out;
+}
+
+test('parity: build_viewer on a 1.18 Export All builds the viewer data the extension wrote', async () => {
+  const frames = [listItem(U(1), 'Guide page'), listItem(U(2), 'Game', { sourceSurface: 'code' })];
+  const { dir, data: expected } = await exportAllToDisk({ chats: megaChats(), frames, pages: megaPages() });
+  assert.ok(!fs.existsSync(path.join(dir, 'published')));
+  assert.ok(expected.artifacts.length === 2 && expected.listFetched === true);
+  const store = lib.readArtifactStore(dir);
+  assert.deepStrictEqual([store.layout, store.records.size, store.listFetched, store.listed], ['v18', 3, true, 2]);
+  const report = await tool().writeViewer(single(dir), { force: true });
+  assert.strictEqual(report.status, 'written', report.reason);
+  assert.deepStrictEqual(report.warnings, []);
+  const got = viewerData(dir);
+  assert.deepStrictEqual(comparable(got), comparable(expected));
+  // The previews are the same texts and images.
+  const parts = partsOf(dir);
+  const byId = list => Object.fromEntries(list.map(a => [a.id, a]));
+  const game = byId(got.artifacts)[uuidToBase58(U(2))];
+  const gamePayload = payload(parts, game);
+  assert.deepStrictEqual(gamePayload.texts.map(t => t[0]), ['index.html', 'app.js']);
+  assert.match(gamePayload.images[0][1], /^data:image\/png;base64,/);
+  // Every saved older version has its own preview; the extension's took the chats' cards.
+  const guide = byId(got.artifacts)[uuidToBase58(U(1))];
+  assert.deepStrictEqual(guide.versions.map(v => [v.label, !!v.part, !!v.copy]), [['v1', true, true], ['v2', true, true], ['v3', false, false]]);
+});
+
+test('build_viewer on an Export Artifacts export: the artifacts page again, with its card pictures, as the extension wrote it', async () => {
+  const frames = [listItem(U(1), 'Guide page'), listItem(U(2), 'Game', { sourceSurface: 'code' })];
+  const run = await runArtifacts({ frames, pages: megaPages(), thumbs: { [U(2)]: { status: 200, type: 'image/png', body: PNG_BYTES } } });
+  const root = tmpRoot();
+  for (const [n, b] of Object.entries(run.raw)) put(root, n, b);
+  const thumb = `viewer-files/thumbs/${uuidToBase58(U(2))}.png`;
+  assert.ok(fs.existsSync(path.join(root, thumb)));
+  const [archive] = findArchives(root).archives;
+  assert.strictEqual(archive.kind, 'artifacts');
+  const skip = await tool().writeViewer(archive, {});
+  assert.deepStrictEqual([skip.status, skip.reason], ['skipped', 'it already has a viewer.html (--force replaces a generated one)']);
+  const before = hashTree(root);
+  const report = await tool().writeViewer(archive, { force: true });
+  assert.strictEqual(report.status, 'written', report.reason);
+  assert.deepStrictEqual([report.chats, report.artifacts], [0, 2]);
+  assertKept(before, hashTree(root), ['viewer.html']);
+  assert.ok(fs.readFileSync(path.join(root, thumb)).equals(PNG_BYTES), 'the card picture is kept');
+  const data = viewerData(root);
+  assert.deepStrictEqual(Object.keys(data).sort(), ['artifacts', 'exported', 'listed']);
+  assert.strictEqual(data.listed, 2);
+  const strip = list => JSON.parse(JSON.stringify(list, (k, v) => (k === 'part' || k === 'key' ? undefined : v))).sort((a, b) => (a.id < b.id ? -1 : 1));
+  assert.deepStrictEqual(strip(data.artifacts), strip(run.views));
+  assert.strictEqual(data.artifacts.find(a => a.thumb).thumb, thumb);
+  const parts = partsOf(root);
+  assert.deepStrictEqual(payload(parts, data.artifacts.find(a => a.title === 'Guide page')).texts, [['index.html', '<!doctype html><h1>Live guide</h1>']]);
+});
+
+test('build_viewer gives an archive with artifacts a viewer from the command line; a broken artifact.json is a warning', () => {
+  const root = LAYOUTS.v18(tmpRoot());
+  put(root, 'artifacts/Broken_1/artifact.json', '{');
+  const res = cli(root, '--json');
+  assert.strictEqual(res.status, 0, res.stderr);
+  const report = JSON.parse(res.stdout);
+  assert.ok(!report.archives[0].refused);
+  assert.strictEqual(report.archives[0].artifacts, 1);
+  assert.ok(report.archives[0].warnings.some(w => /Broken_1\/artifact\.json/.test(w)));
+  assert.strictEqual(viewerData(root).artifacts.length, 1);
+  assert.strictEqual(res.stderr, '');
+});
+
+test('build_viewer extracts a ZIP with artifacts and gives it a viewer; an Export Artifacts ZIP too', async () => {
   const JSZip = require('../jszip.min.js');
   const tmp = tmpRoot();
-  const zip = new JSZip();
-  zip.file('claude-takeout-z/index.md', '# all');
-  zip.file('claude-takeout-z/Chat_a/original.json', chatJson('a1'));
-  zip.file('claude-takeout-z/artifacts/x/artifact.json', '{}');
-  fs.writeFileSync(path.join(tmp, 'z.zip'), await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  const zipOf = async (root, prefix) => {
+    const zip = new JSZip();
+    const walk = (dir, rel) => {
+      for (const n of fs.readdirSync(dir)) {
+        const p = path.join(dir, n);
+        if (fs.statSync(p).isDirectory()) walk(p, `${rel}${n}/`);
+        else zip.file(`${prefix}${rel}${n}`, fs.readFileSync(p));
+      }
+    };
+    walk(root, '');
+    return zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' });
+  };
+  fs.writeFileSync(path.join(tmp, 'combined.zip'), await zipOf(LAYOUTS.v18(tmpRoot()), 'claude-takeout-z/'));
+  fs.writeFileSync(path.join(tmp, 'arts.zip'), await zipOf(LAYOUTS['standalone (v18)'](tmpRoot()), 'claude-takeout-artifacts-z/'));
   const out = path.join(tmp, 'out');
   const res = cli(tmp, '--out', out, '--json');
-  assert.strictEqual(res.status, 1);
-  assert.strictEqual(JSON.parse(res.stdout).zips[0].refused, true);
-  assert.deepStrictEqual(fs.readdirSync(out), []);
-  assert.match(res.stderr, /build_viewer doesn't support/);
+  assert.strictEqual(res.status, 0, res.stderr);
+  const zips = Object.fromEntries(JSON.parse(res.stdout).zips.map(z => [path.basename(z.zip), z]));
+  assert.deepStrictEqual([zips['combined.zip'].status, zips['arts.zip'].status], ['written', 'written']);
+  assert.strictEqual(viewerData(path.join(out, 'combined', 'claude-takeout-z')).artifacts.length, 1);
+  assert.strictEqual(viewerData(path.join(out, 'arts', 'claude-takeout-artifacts-z')).artifacts.length, 1);
 });
 
 // A pre-1.17 archive whose chat is named "Artifacts" or "artifacts" is an ordinary archive.
 for (const name of ['Artifacts', 'artifacts']) {
-  test(`build_viewer does not refuse an old archive with a chat folder ${name}/`, () => {
+  test(`build_viewer: an old archive with a chat folder ${name}/ is an ordinary archive`, () => {
     const root = tmpRoot();
     put(root, 'index.md', '# all');
     put(root, `${name}/original.json`, chatJson('a1'));
@@ -2179,7 +2520,7 @@ for (const name of ['Artifacts', 'artifacts']) {
     assert.ok(fs.existsSync(path.join(root, 'viewer.html')));
   });
 
-  test(`build_viewer does not refuse an old ZIP with a chat folder ${name}/`, async () => {
+  test(`build_viewer: an old ZIP with a chat folder ${name}/ is an ordinary archive`, async () => {
     const JSZip = require('../jszip.min.js');
     const tmp = tmpRoot();
     const zip = new JSZip();
@@ -2194,7 +2535,7 @@ for (const name of ['Artifacts', 'artifacts']) {
   });
 }
 
-test('hasArtifacts: a combined archive with artifacts/index.md is still refused; a chat named artifacts is not', () => {
+test('hasArtifacts (merge_archives): a combined archive with artifacts/index.md counts; a chat named artifacts does not', () => {
   const { hasArtifacts } = require('../tools/archive-lib.js');
   const combined = tmpRoot();
   put(combined, 'index.md', '# all');

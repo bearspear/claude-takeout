@@ -3304,13 +3304,6 @@ function publishedSavedNames(paths, reserved = []) {
   return { names, renames };
 }
 
-// The file a version opens with: index.html, else the first .html, else the first file.
-function publishedStart(files) {
-  return files.find((f) => f.path === 'index.html') || files.find((f) => /\.html?$/i.test(f.path)) || files[0] || null;
-}
-
-const isPublishedText = (f) => isTextFile(f.path) || /^text\//i.test(f.contentType || '');
-const publishedNeedsRuntime = (text) => typeof text === 'string' && /artifact-type\/|\/_f\//.test(text);
 const encodePath = (p) => String(p).split('/').map(encodeURIComponent).join('/');
 
 // A version's label and place: v1, v2, ... by its index in the page's history (oldest first); 'current'
@@ -3435,21 +3428,6 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   };
 }
 
-// Preview files for Export Artifacts' viewer: 'text' for pages, styles, scripts, SVG and Markdown, an image's MIME
-// type for PNG, JPEG, GIF, WebP, AVIF, BMP and ICO (by extension), null for anything else. Agrees with
-// artifactFileKind: every 'image' kind is collected.
-const PREVIEW_ITEM_MAX = 2 * 1024 * 1024;   // one text or image (TEXT_EMBED_LIMIT)
-const PREVIEW_TOTAL_MAX = 8 * 1024 * 1024;  // texts in all, and images in all, of one artifact
-const PREVIEW_IMAGE_TYPES = {
-  png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon',
-};
-function previewKind(p) {
-  const ext = (/\.([a-z0-9]+)$/i.exec(String(p)) || [])[1];
-  if (!ext) return null;
-  const e = ext.toLowerCase();
-  if (['html', 'htm', 'css', 'js', 'mjs', 'svg', 'md', 'markdown'].includes(e)) return 'text';
-  return Object.prototype.hasOwnProperty.call(PREVIEW_IMAGE_TYPES, e) ? PREVIEW_IMAGE_TYPES[e] : null;
-}
 
 // File entries (for published.json or artifact.json) of files saved unchecked: sha256 and size of the saved
 // bytes and verified: false.
@@ -5091,9 +5069,8 @@ async function bulkExportZip(options = {}) {
     // versionOrder: artifact.json's version keys in claude.ai's order, which the object's own key order loses for a
     // numeric-looking id.
     const storeRecords = store.records().filter((rec) => store.written(rec)).map((rec) => {
-      const list = storeVersionList(rec);
-      const noId = storeNoIdKey(list);
-      return { ...artifactJsonV2(rec), dir: `${store.prefix}${rec.dir}`, versionOrder: list.map(([ver]) => ver || noId) };
+      const json = artifactJsonV2(rec);
+      return { ...json, dir: `${store.prefix}${rec.dir}`, versionOrder: json.order.slice() };
     });
     const viewerOpts = step
       // Every part the artifact step numbered, even one an error kept from being counted in partCount.
@@ -5194,16 +5171,12 @@ async function bulkExportZip(options = {}) {
 // errors.txt when needed. Export All uses the same store under artifacts/, shared with the pages its chats published.
 // Claude Docs are listed, not fetched: their text is in no file. The export record is never read or written.
 
-const CLAUDE_DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
 const DOCS_ARTIFACT_NOTE = "Claude Docs text isn't available as a file; export the chat that made it to get the document.";
 // Root names an artifact folder may not take, matched without case.
 const ARTIFACT_ROOT_NAMES = ['index.md', 'index.html', 'export-manifest.json', 'errors.txt', 'write-errors.txt', 'viewer.html', 'viewer-check.gif', 'viewer-files'];
 
 // A string from claude.ai's list, safe to write: anything shaped like a frame URL or its token is dropped.
 const artifactText = (v) => String(typeof v === 'string' ? v : '').replace(/\S*(?:claudeusercontent\.com|__frame_t)\S*/gi, '[link removed]').slice(0, 500);
-const isClaudeDocsArtifact = (a) => a.typeSlug === CLAUDE_DOCS_TYPE || (!a.typeSlug && a.typeTitle === 'Docs');
-// Shared with you: claude.ai says so with a rel other than 'mine'; an empty rel says nothing.
-const isSharedArtifact = (rel) => typeof rel === 'string' && rel !== '' && rel !== 'mine';
 const artifactCount = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 // text cut to at most max bytes of UTF-8, at a code point boundary.
@@ -5227,54 +5200,12 @@ function claimArtifactFolder(base, usedFolders) {
 }
 const ARTIFACT_UNEXPECTED_NOTE = 'not exported: unexpected error (see errors.txt)';
 
-// A file's kind for the artifacts viewer, from its name.
-function artifactFileKind(p) {
-  const ext = ((/\.([a-z0-9]+)$/i.exec(String(p || '')) || [])[1] || '').toLowerCase();
-  if (ext === 'html' || ext === 'htm') return 'html';
-  if (ext === 'svg') return 'svg';
-  if (ext === 'md' || ext === 'markdown') return 'md';
-  if (previewKind(p) && /^image\//.test(previewKind(p))) return 'image';
-  if (ext === 'jsx' || ext === 'tsx') return 'react';
-  if (ext === 'mmd' || ext === 'mermaid') return 'mermaid';
-  if (ext === 'css') return 'css';
-  if (ext === 'js' || ext === 'mjs' || ext === 'cjs') return 'js';
-  return 'other';
-}
-const artifactStartKind = (p) => {
-  if (p == null) return null;
-  const kind = artifactFileKind(p);
-  return kind === 'css' || kind === 'js' ? 'other' : kind;
-};
-
 // Bytes to base64, a piece at a time.
 function bytesToBase64(bytes) {
   let binary = '';
   const CHUNK = 0x8000;
   for (let i = 0; i < bytes.length; i += CHUNK) binary += String.fromCharCode.apply(null, bytes.subarray(i, i + CHUNK));
   return btoa(binary);
-}
-
-// An artifact's record for the artifacts viewer (ArtifactView, without part and key). o: { uuid, shortId, url,
-// title, typeSlug, typeTitle, shared, public, docs, createdAt, updatedAt, folder, files (artifact.json's), missing,
-// start, startSaved, startSize, needsRuntime, notExported, note, inPayload (the start's text or image is in the
-// preview payload) }. Files lists those saved; missingCount counts the listed ones not saved. A start file a preview
-// could show but whose text or image is not in the payload is tooLarge when over PREVIEW_ITEM_MAX, otherwise
-// startMissing (the export loop sets startMissing too when the payload gets no part).
-function artifactView(o) {
-  const missing = new Set(o.missing || []);
-  const startSize = Number.isFinite(o.startSize) ? o.startSize : null;
-  const tooLarge = !!o.start && startSize != null && startSize > PREVIEW_ITEM_MAX;
-  return {
-    id: o.shortId || o.uuid, title: o.title, kind: o.typeTitle || 'Page', typed: o.typeSlug !== '', docs: !!o.docs,
-    shared: !!o.shared, public: o.public === true, createdAt: o.createdAt, updatedAt: o.updatedAt, folder: o.folder,
-    start: o.start || null, startSaved: o.start ? o.startSaved || null : null, startKind: artifactStartKind(o.start || null),
-    startSize: o.start ? startSize : null, tooLarge,
-    startMissing: !!o.start && !tooLarge && !!previewKind(o.start) && !o.inPayload, missingCount: missing.size,
-    files: (o.files || []).filter((f) => !missing.has(f.path)).map((f) => ({ path: f.path, savedAs: f.savedAs, kind: artifactFileKind(f.path), verified: f.verified !== false })),
-    needsRuntime: !!o.needsRuntime, notExported: !!o.notExported, note: o.note || '', url: o.url, thumb: null,
-    // Files the chats saved: startSaved and each file's savedAs are then root-relative paths, not folder-relative.
-    ...(o.reused ? { reused: true } : {}),
-  };
 }
 
 // A preview payload ({ texts: [[path, text]], images: [[path, dataUri]] }) from fetchPublishedFiles' texts and
@@ -5452,7 +5383,8 @@ function artifactStore(root, { prefix = '' } = {}) {
 }
 
 // artifact.json, format 2, from a store record: claude.ai's metadata, listed (claude.ai's list had it), current
-// (the current version id, or null), and every version saved or recorded: { folder (inside the artifact folder;
+// (the current version id, or null), order (the versions' keys in claude.ai's order, storeVersionList's: JSON keeps
+// no key order for a numeric-looking id), and every version saved or recorded: { folder (inside the artifact folder;
 // null when no copy was saved), files: [{ path, savedAs, size, contentType, sha256, verified }], start, startSaved,
 // incomplete, missing, saved, sameAs? ({ <published path>: <root-relative chat file> }, only for a version not
 // copied because a chat wrote it the same), publishedIn: [{ chat, messageUuid, toolUseId, same, writtenAs }] }.
@@ -5485,6 +5417,7 @@ function artifactJsonV2(rec) {
     start: meta.start || null, needsRuntime: !!meta.needsRuntime, note: str(meta.note),
     ...(typeof meta.thumb === 'string' && meta.thumb ? { thumb: meta.thumb } : {}),
     ...(rec.incomplete ? { incomplete: true } : {}),
+    order: list.map(([ver]) => ver || noId),
     versions,
   };
 }
