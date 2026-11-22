@@ -3904,14 +3904,30 @@ test('an artifact published by a chat is not fetched again', async () => {
   assert.ok(Object.entries(files).some(([n, t]) => /^viewer-files\/part-/.test(n) && t.includes('PUBLISHED-PAGE')), 'the preview has the text');
 });
 
-test('a published version saved incomplete or unverified is fetched for the artifact', async () => {
+test('a published version saved whole but unchecked (no checksum from claude.ai) is reused and stays marked unchecked', async () => {
+  // Cowork and Artifact-tool pages come without claude.ai's checksum; fetching them again would be no better checked.
   const chat = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
-  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v1', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'P', unverified: true } } } } } });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v1', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'UNCHECKED-PAGE', unverified: true } } } } } });
   const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
   const files = await zipFiles(zip);
-  assert.strictEqual(fetcher.count('publishedPageFile', PUB_U), 2);
+  assert.strictEqual(fetcher.count('publishedPageFile', PUB_U), 1);
+  const f = artFolder('Guide', PUB_U);
+  assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`artifacts/${f}/`)), [`artifacts/${f}/artifact.json`]);
+  const meta = JSON.parse(files[`artifacts/${f}/artifact.json`]);
+  assert.deepStrictEqual(meta.savedIn, { 'index.html': 'published/Guide_Short1/v1/index.html' });
+  assert.ok(meta.note.includes("files not checked against claude.ai's checksum"), meta.note);
+  assert.ok(files['artifacts/index.md'].includes("files not checked against claude.ai's checksum"));
+  assert.ok(Object.entries(files).some(([n, t]) => /^viewer-files\/part-/.test(n) && t.includes('UNCHECKED-PAGE')), 'the preview has the text');
+});
+
+test('a published version saved incomplete is fetched for the artifact', async () => {
+  const chat = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', [...guideAs, { as: 'b.css', path: '/home/claude/b.css' }]))]), { uuid: 'a', name: 'Chat a' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v1', history: ['v1'], versions: { v1: { files: { 'index.html': 'P', 'b.css': { body: 'x', error: { error: 'HTTP 500', status: 500 } } } } } } });
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
+  const files = await zipFiles(zip);
   const meta = JSON.parse(files[`artifacts/${artFolder('Guide', PUB_U)}/artifact.json`]);
   assert.ok(!meta.savedIn);
+  assert.ok(fetcher.count('publishedPageFile', PUB_U) > 2);
 });
 
 test('a same version points at the chat\'s artefacts file', async () => {
