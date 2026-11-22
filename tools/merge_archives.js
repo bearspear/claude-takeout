@@ -93,9 +93,9 @@ function newestFirst(a, b) {
 }
 
 // Every source archive's artifacts in whichever layout it has (lib.readArtifactStore), newest first. Each: { store,
-// archive, order, index, exportedAt, decides (claude.ai's list in it decides listed: a full Export All whose artifact
-// step ran, or an Export Artifacts; Export Changes never), chatOf (its chats' folders -> their copies; '' for a single
-// chat), chatFolders (chat uuid -> folder), folders (a saved version's folder -> { uuid, ver, byFile: savedAs -> path }) }.
+// archive, order, index, exportedAt, decides (claude.ai's list in it decides listed, absence too: a full Export All
+// whose artifact step ran, or an Export Artifacts; an Export Changes can only list, in mergeRecords), chatOf (its
+// chats' folders -> their copies; '' for a single chat), chatFolders (chat uuid -> folder), folders (a saved version's folder -> { uuid, ver, byFile: savedAs -> path }) }.
 function readStores(sources, archivesOf, copies, report) {
   const out = [];
   for (const s of sources) {
@@ -142,11 +142,15 @@ function mergeOrder(lists) {
 
 // One record per artifact uuid from every store (newest first): its versions united, each taken whole from the newest
 // source that has a copy of it (else the newest that lists it), publishedIn united; folders: every source's saved
-// folder of it, newest first, for a sameAs version that can't stay one. listed, current, title and
-// claude.ai's card come from the newest store whose list decides (not listing it: listed false), else from the newest
-// store that has it. The card picture from the newest store that has one.
+// folder of it, newest first, for a sameAs version that can't stay one. listed, current, title and claude.ai's card
+// come from the newest store that lists it (listed true, an Export Changes too; not an earlier merge, whose
+// exported_at is when it was merged, not when claude.ai was asked), when that store is newer than the newest store
+// whose list decides; else from that deciding store (not listing it: listed false); else from the newest store that
+// has it. So a newer Export Changes can list an artifact and move its current version forward, never unlist it. The
+// card picture from the newest store that has one.
 function mergeRecords(stores) {
   const decider = stores.find(st => st.decides) || null;
+  const newer = (a, b) => stores.indexOf(a) < stores.indexOf(b);
   const byUuid = new Map();
   for (const st of stores) {
     for (const rec of st.store.records.values()) {
@@ -157,7 +161,9 @@ function mergeRecords(stores) {
   const merged = [];
   for (const [uuid, have] of byUuid) {
     const fromDecider = decider ? have.find(h => h.st === decider) : null;
-    const top = fromDecider || have[0];
+    const lister = have.find(h => h.rec.listed && h.st.store.kind !== 'merged') || null;
+    const listedLater = !!lister && (!decider || newer(lister.st, decider));
+    const top = listedLater ? lister : fromDecider || have[0];
     const versions = new Map();
     for (const { st, rec } of have) {
       for (const ver of rec.order) {
@@ -170,7 +176,7 @@ function mergeRecords(stores) {
         if (!hasCopy(had.v) && hasCopy(v)) Object.assign(had, { st, v });
       }
     }
-    const listed = decider ? !!(fromDecider && fromDecider.rec.listed) : !!top.rec.listed;
+    const listed = listedLater || (decider ? !!(fromDecider && fromDecider.rec.listed) : !!top.rec.listed);
     // A page no source holds a version of, and claude.ai doesn't list, has nothing to keep.
     if (!versions.size && !listed) continue;
     merged.push({
@@ -302,7 +308,7 @@ function writeArtifacts(merged, building, chosen, report) {
     // Its index row, as the extension builds one for a store record (export-core.js storeRecordRow): the record in
     // popup.js's store shape (version folders named inside the artifact folder, history its order).
     rows.push(core.storeRecordRow({
-      title: rec.title, dir, listed: rec.listed, current: rec.current, history: rec.order, incomplete: false,
+      title: rec.title, dir, listed: rec.listed, current: rec.current, history: rec.order, incomplete: !!rec.meta.incomplete,
       meta: { ...rec.meta, url: `https://claude.ai/artifact/${rec.shortId || rec.uuid}` },
       versions: new Map([...versions].map(([ver, v]) => [ver, { ...v, folder: v.folder ? v.folder.split('/').pop() : null }])),
     }));
@@ -613,12 +619,14 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
     }
     // Every source's artifacts and published pages, in one artifacts/ store; the chats' links follow them.
     const at = now.toISOString();
-    const decided = stores.some(st => st.decides);
+    // claude.ai's list is in the merged archive when it was in a source (its manifest says so: readArtifactStore's
+    // listFetched), an Export Changes too.
+    const hadList = stores.some(st => st.store.listFetched);
     let written = null;
     if (merged.length) {
       written = writeArtifacts(merged, building, chosen, report);
       // The indexes the extension writes (export-core.js); viewer.html is linked, as the merge writes one.
-      const indexOpts = { listed: decided ? written.listed : null, exportedAt: at, thumbs: written.thumbs, viewer: true, base: 'artifacts/' };
+      const indexOpts = { listed: hadList ? written.listed : null, exportedAt: at, thumbs: written.thumbs, viewer: true, base: 'artifacts/' };
       fs.writeFileSync(path.join(building, 'artifacts', 'index.md'), '\uFEFF' + core.artifactsIndexMd(written.rows, indexOpts), { flag: 'wx' });
       fs.writeFileSync(path.join(building, 'artifacts', 'index.html'), core.artifactsIndexHtml(written.rows, indexOpts), { flag: 'wx' });
     }
@@ -628,8 +636,8 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       format: 1, exported_at: at, kind: 'merged', since: null, listed: null,
       sources: sources.map(s => s.label),
       chats: chosen.map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updatedAt, folder: c.out, from: c.source })),
-      // claude.ai's list is in the merged archive when a source's list decided listed (readArtifactStore reads this key).
-      ...(written && decided ? { artifacts: { listed: written.listed, thumbs: written.thumbs } } : {}),
+      // readArtifactStore reads this key for listFetched.
+      ...(written && hadList ? { artifacts: { listed: written.listed, thumbs: written.thumbs } } : {}),
     }, null, 2), { flag: 'wx' });
     if (lstat(dest)) throw new Error(`${dest} appeared while merging, so it was left alone`);
     fs.renameSync(building, dest);

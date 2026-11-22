@@ -425,11 +425,12 @@ test('(c) Review Focus 4: a renamed chat folder (_2): sameAs and rewritten links
   const dest = path.join(out, 'm');
   const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8'));
   assert.deepStrictEqual(manifest.chats.map(c => [c.uuid, c.folder]), [['x2', 'Chat_x'], ['x1', 'Chat_x_2']]);
-  // The full export decides the title (so the folder); the changes export's link follows the page there.
-  const json = artifactJson(dest, `Guide_${SID}`);
-  assert.strictEqual(json.title, 'Guide');
+  // The newer Export Changes lists the page, so its title names the folder; the full export's sameAs follows it there.
+  assert.deepStrictEqual(fs.readdirSync(path.join(dest, 'artifacts')).filter(n => n.endsWith(SID)), [`Guide_2_${SID}`]);
+  const json = artifactJson(dest, `Guide_2_${SID}`);
+  assert.deepStrictEqual([json.title, json.current], ['Guide 2', 'v2']);
   assert.deepStrictEqual(json.versions.v1.sameAs, { 'index.html': 'Chat_x_2/artefacts/guide.html' });
-  assert.match(fs.readFileSync(path.join(dest, 'Chat_x/README.md'), 'utf8'), new RegExp(`\\(\\.\\./artifacts/Guide_${SID}/v2/index\\.html\\)`));
+  assert.match(fs.readFileSync(path.join(dest, 'Chat_x/README.md'), 'utf8'), new RegExp(`\\(\\.\\./artifacts/Guide_2_${SID}/v2/index\\.html\\)`));
   assertLinksResolve(dest);
   const data = viewerData(dest);
   const x1 = data.chats.find(c => c.id === 'x1');
@@ -472,32 +473,96 @@ test('(d) only Export Artifacts exports (flat 1.17 and 1.18): an Export All shap
   assert.deepStrictEqual(data.artifacts.map(v => v.title).sort(), ['Guide', 'Other']);
 });
 
-test('(e) an artifact a newer full export no longer lists is unlisted; a newer Export Changes doesn\'t decide', async () => {
+// An Export All with chat <name> and artifact folders: records [uuid, title, listed, ver = 'v1'], each holding that one version.
+function artifactsMega(tmp, name, at, kind, records) {
+  const root = path.join(tmp, name);
+  mega(root, at, { [`Chat_${name}`]: chatJson(name, at) });
+  put(root, 'export-manifest.json', manifestOf(at, kind));
+  for (const [uuid, title, listed, ver = 'v1'] of records) {
+    const dir = `${title.replace(/ /g, '_')}_${uuidToBase58(uuid)}`;
+    put(root, `artifacts/${dir}/artifact.json`, format2(uuid, title, { listed, current: ver, versions: { [ver]: v2(ver, `${title} ${ver}`) } }));
+    put(root, `artifacts/${dir}/${ver}/index.html`, `${title} ${ver}`);
+  }
+  return root;
+}
+
+test('(e) an artifact a newer full export no longer lists is unlisted; a newer Export Changes that doesn\'t list it doesn\'t list it again', async () => {
   const tmp = tmpRoot();
-  const make = (name, at, kind, records) => {
-    const root = path.join(tmp, name);
-    mega(root, at, { [`Chat_${name}`]: chatJson(name, at) });
-    put(root, 'export-manifest.json', manifestOf(at, kind));
-    for (const [uuid, title, listed] of records) {
-      const dir = `${title}_${uuidToBase58(uuid)}`;
-      put(root, `artifacts/${dir}/artifact.json`, format2(uuid, title, { listed, current: 'v1', versions: { v1: v2('v1', title) } }));
-      put(root, `artifacts/${dir}/v1/index.html`, title);
-    }
-    return root;
-  };
-  const older = make('o', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true], [OTHER, 'Other', true]]);
-  const newer = make('n', '2026-11-05T00:00:00Z', 'full', [[U, 'Guide', true]]);
-  const changes = make('c', '2026-11-07T00:00:00Z', 'changes', [[OTHER, 'Other', true]]);
+  const older = artifactsMega(tmp, 'o', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true], [OTHER, 'Other', true]]);
+  const newer = artifactsMega(tmp, 'n', '2026-11-05T00:00:00Z', 'full', [[U, 'Guide', true]]);
+  // The newest: an Export Changes where a chat published Other, which claude.ai's list doesn't have.
+  const changes = artifactsMega(tmp, 'c', '2026-11-07T00:00:00Z', 'changes', [[OTHER, 'Other', false]]);
   const out = path.join(tmp, 'out');
   const r = await merge([older, newer, changes], { out, name: 'm', now: NOW });
   assert.strictEqual(r.status, 'written', r.reason);
   const dest = path.join(out, 'm');
   assert.strictEqual(artifactJson(dest, `Guide_${SID}`).listed, true);
   assert.strictEqual(artifactJson(dest, `Other_${OID}`).listed, false, 'deleted on claude.ai: the newest full export doesn\'t list it');
-  assert.strictEqual(fs.readFileSync(path.join(dest, `artifacts/Other_${OID}/v1/index.html`), 'utf8'), 'Other', 'its version is kept');
+  assert.strictEqual(fs.readFileSync(path.join(dest, `artifacts/Other_${OID}/v1/index.html`), 'utf8'), 'Other v1', 'its version is kept');
   assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).artifacts, { listed: 1, thumbs: 0 });
   assert.match(fs.readFileSync(path.join(dest, 'artifacts/index.md'), 'utf8'), /\*\*Listed by claude\.ai:\*\* 1[\s\S]*Guide[\s\S]*## Published from chats, not in claude\.ai's list[\s\S]*Other/);
   assert.deepStrictEqual(viewerData(dest).artifacts.map(v => v.title), ['Guide']);
+});
+
+test('(e2) a newer Export Changes lists a new artifact and moves a changed one\'s current version; an older one doesn\'t outvote the full export', async () => {
+  const THIRD = '7a1b2c3d-1111-4222-8333-444455556666';
+  const tmp = tmpRoot();
+  // Older than the full export: listed Third, which the full export no longer lists.
+  const early = artifactsMega(tmp, 'e', '2026-10-25T00:00:00Z', 'changes', [[THIRD, 'Third', true]]);
+  const full = artifactsMega(tmp, 'f', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]);
+  const changes = artifactsMega(tmp, 'c', '2026-11-07T00:00:00Z', 'changes', [[U, 'Guide new', true, 'v2'], [OTHER, 'Other', true, 'w1']]);
+  // Other's record says some of its versions weren't saved: the merged index row says so too.
+  const otherJson = path.join(changes, `artifacts/Other_${OID}/artifact.json`);
+  fs.writeFileSync(otherJson, JSON.stringify({ ...JSON.parse(fs.readFileSync(otherJson, 'utf8')), incomplete: true }));
+  const out = path.join(tmp, 'out');
+  const r = await merge([early, full, changes], { out, name: 'm', now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  assert.ok(r.ok, JSON.stringify(r.warnings));
+  const dest = path.join(out, 'm');
+  const guide = artifactJson(dest, `Guide_new_${SID}`);
+  assert.deepStrictEqual([guide.listed, guide.current, guide.title, guide.order], [true, 'v2', 'Guide new', ['v1', 'v2']], 'the changed artifact: the newer current version');
+  const other = artifactJson(dest, `Other_${OID}`);
+  assert.deepStrictEqual([other.listed, other.current, other.incomplete], [true, 'w1', true], 'the new artifact is listed');
+  assert.match(fs.readFileSync(path.join(dest, 'artifacts/index.md'), 'utf8'), /Other[^\n]*some versions not saved/);
+  assert.strictEqual(artifactJson(dest, `Third_${uuidToBase58(THIRD)}`).listed, false, 'the full export is newer and doesn\'t list it');
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).artifacts, { listed: 2, thumbs: 0 });
+  assert.deepStrictEqual(viewerData(dest).artifacts.map(v => [v.title, v.ver]).sort(), [['Guide new', 'v2'], ['Other', 'w1']]);
+});
+
+test('(e4) an earlier merge doesn\'t list an artifact again that a full export older than the merge no longer lists', async () => {
+  const tmp = tmpRoot();
+  const old = artifactsMega(tmp, 'o', '2026-10-01T00:00:00Z', 'full', [[U, 'Guide', true], [OTHER, 'Other', true]]);
+  let r = await merge([old], { out: path.join(tmp, 'm1'), name: 'm', now: new Date('2026-11-20T00:00:00Z') });
+  assert.strictEqual(r.status, 'written', r.reason);
+  const earlier = path.join(tmp, 'm1', 'm');
+  assert.strictEqual(artifactJson(earlier, `Other_${OID}`).listed, true);
+  const full = artifactsMega(tmp, 'f', '2026-11-10T00:00:00Z', 'full', [[U, 'Guide', true]]);
+  r = await merge([earlier, full], { out: path.join(tmp, 'm2'), name: 'm', now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  const dest = path.join(tmp, 'm2', 'm');
+  assert.strictEqual(artifactJson(dest, `Guide_${SID}`).listed, true);
+  assert.strictEqual(artifactJson(dest, `Other_${OID}`).listed, false, 'the merge is newer by exported_at, but only the full export asked claude.ai');
+});
+
+test('(e3) only Export Changes sources: their list is in the merged archive; a 1.18 source with no list in its manifest adds none', async () => {
+  const tmp = tmpRoot();
+  const first = artifactsMega(tmp, 'c1', '2026-11-01T00:00:00Z', 'changes', [[U, 'Guide', true]]);
+  const second = artifactsMega(tmp, 'c2', '2026-11-05T00:00:00Z', 'changes', [[OTHER, 'Other', true, 'w1']]);
+  let r = await merge([first, second], { out: path.join(tmp, 'out'), name: 'm', now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  let dest = path.join(tmp, 'out', 'm');
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).artifacts, { listed: 2, thumbs: 0 });
+  let data = viewerData(dest);
+  assert.strictEqual(data.listFetched, true);
+  assert.deepStrictEqual(data.artifacts.map(v => v.title).sort(), ['Guide', 'Other']);
+  // A source whose manifest has no artifact step (its records still say listed): no list in the merge.
+  const bare = artifactsMega(tmp, 'b', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true]]);
+  put(bare, 'export-manifest.json', manifestOf('2026-11-01T00:00:00Z', 'full', false));
+  r = await merge([bare], { out: path.join(tmp, 'out2'), name: 'm', now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  dest = path.join(tmp, 'out2', 'm');
+  assert.ok(!('artifacts' in JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8'))));
+  assert.strictEqual(viewerData(dest).listFetched, false, 'the Artifacts screen says the list isn\'t in this export');
 });
 
 test('(f) a sameAs version whose chat copy in the merge differs: its bytes are copied into its version folder', async () => {
@@ -631,15 +696,19 @@ test('artifactJsonV2FromDisk writes what popup.js\'s artifactJsonV2 writes, key 
     incomplete: false, missing: [], saved: !!folder, publishedIn: [pin('c1', 't1', true, 'guide.html')], ...extra });
   const meta = { url: `https://claude.ai/artifact/${SID}`, typeTitle: 'App', sourceSurface: 'chat', rel: 'mine', public: true, createdAt: '2026-10-01T00:00:00Z',
     updatedAt: '2026-11-01T00:00:00Z', note: 'a note', start: 'index.html', needsRuntime: true };
+  // A version with no folder that still carries saved names (a fetch's, before a chat's file stood for it): written
+  // with none.
+  const unsaved = () => ver(null, { files: files.map(f => ({ ...f })), startSaved: 'index.html', saved: true, sameAs: { 'index.html': 'Chat/artefacts/guide.html' } });
   // Numeric-looking ids, so key order alone would put 10 first.
-  const popupRec = { uuid: U, shortId: SID, title: 'Guide', listed: true, current: '10', history: ['2', '10'], incomplete: true, meta: { ...meta, thumb: `viewer-files/thumbs/${SID}.png` },
-    versions: new Map([['2', ver(null, { sameAs: { 'index.html': 'Chat/artefacts/guide.html' } })], ['10', ver('10', { incomplete: true, missing: ['a/b.js'] })]]) };
-  const diskRec = { uuid: U, shortId: SID, title: 'Guide', listed: true, current: '10', meta: { ...meta, incomplete: true }, thumbRel: `viewer-files/thumbs/${SID}.png`, order: ['2', '10'],
-    versions: new Map([['2', ver(null, { sameAs: { 'index.html': 'Chat/artefacts/guide.html' } })], ['10', ver(`artifacts/Guide_${SID}/10`, { incomplete: true, missing: ['a/b.js'] })]]) };
+  const popupRec = { uuid: U, shortId: SID, title: 'Guide', listed: true, current: '10', history: ['1', '2', '10'], incomplete: true, meta: { ...meta, thumb: `viewer-files/thumbs/${SID}.png` },
+    versions: new Map([['1', unsaved()], ['2', ver(null, { sameAs: { 'index.html': 'Chat/artefacts/guide.html' } })], ['10', ver('10', { incomplete: true, missing: ['a/b.js'] })]]) };
+  const diskRec = { uuid: U, shortId: SID, title: 'Guide', listed: true, current: '10', meta: { ...meta, incomplete: true }, thumbRel: `viewer-files/thumbs/${SID}.png`, order: ['1', '2', '10'],
+    versions: new Map([['1', unsaved()], ['2', ver(null, { sameAs: { 'index.html': 'Chat/artefacts/guide.html' } })], ['10', ver(`artifacts/Guide_${SID}/10`, { incomplete: true, missing: ['a/b.js'] })]]) };
   const fromPopup = vm.runInContext('artifactJsonV2', sandbox)(popupRec);
   const fromDisk = require('../tools/archive-lib.js').artifactJsonV2FromDisk(diskRec);
   assert.strictEqual(JSON.stringify(fromDisk, null, 2), JSON.stringify(fromPopup, null, 2));
-  assert.deepStrictEqual(fromDisk.order, ['2', '10']);
+  assert.deepStrictEqual(fromDisk.order, ['1', '2', '10']);
+  assert.deepStrictEqual([fromPopup.versions['1'].files.map(f => f.savedAs), fromPopup.versions['1'].startSaved, fromPopup.versions['1'].saved], [[null, null], null, false]);
   // And with the optional keys left out.
   const plain = r => ({ ...r, incomplete: false, meta: { ...r.meta, thumb: undefined, incomplete: false }, thumbRel: null });
   assert.strictEqual(JSON.stringify(require('../tools/archive-lib.js').artifactJsonV2FromDisk(plain(diskRec))), JSON.stringify(vm.runInContext('artifactJsonV2', sandbox)(plain(popupRec))));
@@ -663,6 +732,13 @@ test('rewriteChatLinks maps links into published/ and artifacts/ only, and lists
     ['``[x](published/a) ` `` [y](published/b)', '``[x](published/a) ` `` [y](NEW:published/b)'],
     ['a ` lone [y](published/b)', 'a ` lone [y](NEW:published/b)'],
     ['```\n[x](published/a)\nnever closed', '```\n[x](published/a)\nnever closed'],
+    // A span never crosses a blank line: a stray backtick in one paragraph doesn't hide a link in the next.
+    ['Use the ` key.\n\n[saved copy](../published/G_x/v1/index.html)\n\nThen type ` again.', 'Use the ` key.\n\n[saved copy](NEW:../published/G_x/v1/index.html)\n\nThen type ` again.'],
+    ['Use the ` key.\n  \t\n[y](published/b) then ` again', 'Use the ` key.\n  \t\n[y](NEW:published/b) then ` again'],
+    ['a `span\nover two lines [x](published/a)` [y](published/b)', 'a `span\nover two lines [x](published/a)` [y](NEW:published/b)'],
+    // A backslash-escaped backtick opens no span; an escaped backslash before one doesn't escape it.
+    ['type \\` then [y](published/b) and \\` again', 'type \\` then [y](NEW:published/b) and \\` again'],
+    ['a \\\\`[x](published/a)` [y](published/b)', 'a \\\\`[x](published/a)` [y](NEW:published/b)'],
   ];
   for (const [input, want] of code) assert.strictEqual(rewriteChatLinks(input, map).text, want, input);
   assert.deepStrictEqual(rewriteChatLinks('`[x](published/a)`', () => null).unmapped, [], 'a link in code is not reported');

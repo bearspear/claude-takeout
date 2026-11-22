@@ -4560,3 +4560,50 @@ test('a sameAs version stays complete when a later chat\'s fetch of it fails', a
   const v = JSON.parse(files[`artifacts/${artFolder('Guide', PUB_U)}/artifact.json`]).versions.v1;
   assert.deepStrictEqual([v.folder, v.saved, v.incomplete, v.sameAs], [null, false, false, { 'index.html': 'Chat_a/artefacts/guide.html' }]);
 });
+
+test('a version an earlier chat failed to fetch, then a chat wrote the same: sameAs, complete, and the listed row and view open the chat\'s file', async () => {
+  const viewerData = (files) => JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(files['viewer.html'])[1].replace(/<\\\//g, '</'));
+  // Chat b (exported first) published v1 from a file it never wrote: not the same, and its fetch fails.
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U, 'v1', guideAs))]), { uuid: 'b', name: 'Chat b' });
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'SAME' }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs),
+  ])]), { uuid: 'a', name: 'Chat a' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'SAME', error: { error: 'HTTP 500', status: 500 } } } } } } });
+  const list = [listed('b', '2026-01-02T00:00:00Z'), listed('a', '2026-01-01T00:00:00Z')];
+  const { zip } = await runBulkZip({ list, chats: { a: chatA, b: chatB }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }), assets: true });
+  const files = await zipFiles(zip);
+  const f = artFolder('Guide', PUB_U);
+  const v = JSON.parse(files[`artifacts/${f}/artifact.json`]).versions.v1;
+  assert.deepStrictEqual(v.publishedIn.map((p) => [p.chat, p.same]), [['b', false], ['a', true]], 'chat b went first');
+  assert.deepStrictEqual([v.folder, v.saved, v.incomplete, v.missing, v.start, v.startSaved, v.sameAs],
+    [null, false, false, [], 'index.html', null, { 'index.html': 'Chat_a/artefacts/guide.html' }]);
+  assert.ok(files['artifacts/index.md'].includes('[Guide](../Chat_a/artefacts/guide.html)'), files['artifacts/index.md']);
+  const view = viewerData(files).artifacts[0];
+  assert.deepStrictEqual([view.reused, view.notExported, view.startSaved], [true, false, 'Chat_a/artefacts/guide.html']);
+});
+
+test('Review Focus 2 (mixed): a version one chat wrote the same and another didn\'t: one copy, both chats\' links resolve, in either order', async () => {
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'SAME-TEXT' }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs),
+  ])]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'OTHER-TEXT' }), result('w'), ...publish('q1', PUB_U, 'v1', guideAs),
+  ])]), { uuid: 'b', name: 'Chat b' });
+  const f = artFolder('Guide', PUB_U);
+  for (const order of [['a', 'b'], ['b', 'a']]) {
+    const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': 'SAME-TEXT' } } } } });
+    const list = order.map((id, i) => listed(id, `2026-01-0${2 - i}T00:00:00Z`));
+    const { zip } = await runBulkZip({ list, chats: { a: chatA, b: chatB }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
+    const files = await zipFiles(zip);
+    const v = JSON.parse(files[`artifacts/${f}/artifact.json`]).versions.v1;
+    assert.deepStrictEqual(v.publishedIn.map((p) => [p.chat, p.same]), order.map((id) => [id, id === 'a']), order.join());
+    // One copy: the version's own folder (chat b needed it), and no sameAs beside it.
+    assert.deepStrictEqual([v.folder, v.saved, v.incomplete, 'sameAs' in v], ['v1', true, false, false], order.join());
+    assert.deepStrictEqual(storeFiles(files, f), [`artifacts/${f}/artifact.json`, `artifacts/${f}/v1/index.html`], order.join());
+    assert.strictEqual(files[`artifacts/${f}/v1/index.html`], 'SAME-TEXT');
+    assert.ok(files['Chat_a/README.md'].includes('same as [guide.html](artefacts/guide.html)'), files['Chat_a/README.md']);
+    assert.ok(linkResolves(files, 'Chat_a', 'artefacts/guide.html'));
+    assert.ok(files['Chat_b/README.md'].includes(`(../artifacts/${f}/v1/index.html)`), files['Chat_b/README.md']);
+    assert.ok(linkResolves(files, 'Chat_b', `../artifacts/${f}/v1/index.html`));
+  }
+});

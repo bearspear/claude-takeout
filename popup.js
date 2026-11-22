@@ -3654,7 +3654,15 @@ async function savePublishedPages(folder, data, ctx = {}) {
     if (v.files.length === 1) {
       const f = v.files[0];
       const own = matched.get(f.path);
-      if (!v.sameAs && own && ctx.chatFolder) v.sameAs = { [f.path]: `${ctx.chatFolder}/artefacts/${own.name}` };
+      if (!v.sameAs && own && ctx.chatFolder) {
+        v.sameAs = { [f.path]: `${ctx.chatFolder}/artefacts/${own.name}` };
+        // An earlier chat's fetch of it failed: the version is now this chat's file, whole, not what that fetch left.
+        if (v.attempted) {
+          const ownText = typeof own.text === 'string' ? own.text : null;
+          Object.assign(v, { start: f.path, startSaved: v.names ? v.names.get(f.path) || null : null, missing: [], incomplete: false,
+            needsRuntime: publishedNeedsRuntime(ownText), text: ownText !== null && ownText.length <= limit ? ownText : null });
+        }
+      }
       if (!v.preview && wanted(rec.uuid, v.ver) && own && typeof own.text === 'string') {
         keepPreview(v, previewKind(f.path) === 'text' && own.text.length <= PREVIEW_ITEM_MAX ? { texts: [[f.path, own.text]], images: [] } : null);
       }
@@ -5379,14 +5387,16 @@ function artifactJsonV2(rec) {
   const list = storeVersionList(rec);
   const noId = storeNoIdKey(list);
   for (const [ver, v] of list) {
+    // A version with no folder has no saved names (a sameAs one names the chat's file in sameAs).
+    const folder = typeof v.folder === 'string' && v.folder ? v.folder : null;
     const out = {
-      folder: typeof v.folder === 'string' && v.folder ? v.folder : null,
+      folder,
       files: (Array.isArray(v.files) ? v.files : []).map((f) => ({
-        path: f.path, savedAs: typeof f.savedAs === 'string' ? f.savedAs : null, size: Number.isFinite(f.size) ? f.size : null,
+        path: f.path, savedAs: folder && typeof f.savedAs === 'string' ? f.savedAs : null, size: Number.isFinite(f.size) ? f.size : null,
         contentType: typeof f.contentType === 'string' ? f.contentType : null, sha256: typeof f.sha256 === 'string' ? f.sha256 : null, verified: f.verified !== false,
       })),
-      start: v.start || null, startSaved: v.startSaved || null, incomplete: !!v.incomplete,
-      missing: Array.isArray(v.missing) ? v.missing.slice() : [], saved: !!v.saved,
+      start: v.start || null, startSaved: (folder && v.startSaved) || null, incomplete: !!v.incomplete,
+      missing: Array.isArray(v.missing) ? v.missing.slice() : [], saved: !!folder && !!v.saved,
     };
     if (v.sameAs && typeof v.sameAs === 'object' && Object.keys(v.sameAs).length) out.sameAs = { ...v.sameAs };
     out.publishedIn = (Array.isArray(v.publishedIn) ? v.publishedIn : []).map((p) => ({

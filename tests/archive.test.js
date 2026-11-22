@@ -2586,3 +2586,40 @@ test('an Export Changes archive with only artifacts (no chat folders) is an arch
   put(noIndex, `artifacts/${AF}/artifact.json`, JSON.stringify(format2([['v2', G2]])));
   assert.deepStrictEqual(lib.findArchives(noIndex).archives, []);
 });
+
+test('chatFromDisk on a 1.18 Export All builds each artifact\'s page once per store, not once per chat', () => {
+  const root = tmpRoot();
+  put(root, 'index.md', '# all');
+  put(root, 'export-manifest.json', JSON.stringify(FULL));
+  const chat = (uuid, id) => JSON.stringify({ uuid, name: 'Chat ' + uuid, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
+    current_leaf_message_uuid: `${uuid}-m`, chat_messages: [amsg(`${uuid}-m`, null, publishBlocks(id, G_U, 'v2', G_ID))] });
+  for (const n of ['a', 'b', 'c']) put(root, `Chat_${n}/original.json`, chat(`c${n}`, `p${n}`));
+  put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(format2([['v1', G1], ['v2', G2]])));
+  put(root, `artifacts/${AF}/v1/index.html`, G1);
+  put(root, `artifacts/${AF}/v2/index.html`, G2);
+  const archive = findArchives(root).archives.find(a => a.root === root);
+  const store = lib.readArtifactStore(root);
+  // v18Page reads each version's start file size (fs.statSync) to judge whether it needs claude.ai to run.
+  const start = path.join(root, `artifacts/${AF}/v2/index.html`);
+  const statSync = fs.statSync;
+  let stats = 0;
+  fs.statSync = (p, ...rest) => { if (path.resolve(String(p)) === start) stats++; return statSync(p, ...rest); };
+  let got;
+  try { got = archive.chats.map(c => chatFromDisk(archive, c, store)); } finally { fs.statSync = statSync; }
+  assert.strictEqual(got.length, 3);
+  for (const g of got) assert.ok(Object.values(g.viewerChat.files).some(f => f.published), 'each chat links the page');
+  assert.strictEqual(stats, 1);
+});
+
+test('readArtifactStore: claude.ai\'s list is in the archive only when its manifest says so, not because a record is listed', () => {
+  const noStep = { ...FULL };
+  delete noStep.artifacts;
+  for (const [manifest, want] of [[FULL, true], [noStep, false], [null, false], [{ ...FULL, kind: 'changes' }, true]]) {
+    const root = megaWith(tmpRoot(), manifest);
+    put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(format2([['v1', G1]])));
+    put(root, `artifacts/${AF}/v1/index.html`, G1);
+    const store = lib.readArtifactStore(root);
+    assert.ok([...store.records.values()][0].listed, 'the record says listed');
+    assert.strictEqual(store.listFetched, want, JSON.stringify(manifest && { kind: manifest.kind, artifacts: !!manifest.artifacts }));
+  }
+});

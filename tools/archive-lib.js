@@ -380,8 +380,9 @@ const STORE_LINK = /^(\.\.\/)*published\/|^(\.\.\/)+artifacts\//;
 const MD_LINK = /\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g;
 
 // text split into [{ code, text }]: fenced code blocks (``` or ~~~, three or more, closed by a fence of the same
-// character at least as long, or the end) and inline code spans (a run of backticks closed by a run of the same length)
-// are code; the rest is prose. Joined again, the pieces are the text.
+// character at least as long, or the end) and inline code spans (a run of backticks closed by a run of the same length
+// in the same paragraph; a backslash-escaped backtick opens none) are code; the rest is prose. Joined again, the
+// pieces are the text.
 const FENCE = /^ {0,3}(`{3,}|~{3,})/;
 function markdownPieces(text) {
   const pieces = [];
@@ -391,12 +392,17 @@ function markdownPieces(text) {
     if (last && last.code === code) last.text += t;
     else pieces.push({ code, text: t });
   };
-  const prose = t => {
-    // Inline code spans, in prose only.
+  // Inline code spans, in prose only, each within one paragraph (a blank line ends any span).
+  const prose = t => { for (const para of t.split(/(?<=\n[ \t]*\n)/)) paragraph(para); };
+  const paragraph = t => {
     const runs = /`+/g;
     let at = 0;
     let m;
     while ((m = runs.exec(t))) {
+      // An odd number of backslashes before the run escapes its first backtick: the rest of the run may still open one.
+      let slashes = 0;
+      while (t[m.index - 1 - slashes] === '\\') slashes++;
+      if (slashes % 2) { runs.lastIndex = m.index + 1; continue; }
       const close = new RegExp(`(?<!\`)${m[0]}(?!\`)`, 'g');
       close.lastIndex = m.index + m[0].length;
       const end = close.exec(t);
@@ -475,6 +481,18 @@ function v18Page(store, rec) {
   return { uuid: rec.uuid, title: rec.title, url: rec.meta.url, versions };
 }
 
+// A 1.18 record's page and folder, built once per store (publishedOnDisk runs for every chat of an archive).
+const v18Pages = new WeakMap();
+function v18PageOnDisk(store, rec) {
+  if (!v18Pages.has(store)) v18Pages.set(store, new Map());
+  const cache = v18Pages.get(store);
+  if (!cache.has(rec.uuid)) {
+    const abs = realDirUnder(store.root, rec.dir);
+    cache.set(rec.uuid, abs ? { json: v18Page(store, rec), abs } : null);
+  }
+  return cache.get(rec.uuid);
+}
+
 // Every published page on disk this chat can reach, by page uuid: the chat's own published/ first, then, for a chat
 // in an Export All, the shared published/ at the archive root (pre-1.17 and 1.17), then the archive's artifacts/
 // (1.18). Each: { json (published.json's shape), dir (relative to the chat folder), abs }. store: readArtifactStore's.
@@ -488,8 +506,8 @@ function publishedOnDisk(archive, chat, store) {
   if (inMega) {
     for (const rec of store.records.values()) {
       if (rec.format !== 2 || rec.dir.split('/')[0] !== 'artifacts') continue;
-      const abs = realDirUnder(store.root, rec.dir);
-      if (abs) add(rec.uuid, { json: v18Page(store, rec), dir: `../${rec.dir}`, abs });
+      const page = v18PageOnDisk(store, rec);
+      if (page) add(rec.uuid, { json: page.json, dir: `../${rec.dir}`, abs: page.abs });
     }
   }
   return found;
@@ -771,7 +789,9 @@ function readArtifactStore(root, { warnings = [] } = {}) {
   else if (any) store.layout = 'published';
   const step = manifest.artifacts && typeof manifest.artifacts === 'object' && !Array.isArray(manifest.artifacts) ? manifest.artifacts : null;
   store.listed = standalone ? (Number.isFinite(manifest.listed) ? manifest.listed : null) : step && Number.isFinite(step.listed) ? step.listed : null;
-  store.listFetched = standalone || !!step || [...store.records.values()].some(r => r.listed);
+  // As the extension: claude.ai's list is in an Export Artifacts, and in an Export All whose manifest has the artifact
+  // step's block (a merge writes one when a source had the list); a record saying listed doesn't make it so.
+  store.listFetched = standalone || !!step;
   return store;
 }
 
