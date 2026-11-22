@@ -294,3 +294,24 @@ test('an Export Artifacts ZIP with a user file named original.json is not refuse
   const r = await merge([zipPath], { out: path.join(tmp, 'out'), name: 'all', now: NOW });
   assert.notStrictEqual(r.refused, true);
 });
+
+test('merge_archives does not refuse an old archive whose chat folder is named Artifacts', async () => {
+  const tmp = tmpRoot();
+  const a = path.join(tmp, 'a');
+  mega(a, '2026-10-01T00:00:00Z', { Artifacts: chatJson('a', '2026-10-01T00:00:00Z') });
+  const r = await merge([a], { out: path.join(tmp, 'out'), name: 'all', now: NOW });
+  assert.notStrictEqual(r.refused, true);
+  assert.strictEqual(r.status, 'written', r.reason);
+});
+
+test('merge_archives does not refuse an old ZIP whose chat folder is named artifacts', async () => {
+  const tmp = tmpRoot();
+  const zip = new JSZip();
+  zip.file('claude-takeout-z/index.md', '# all');
+  zip.file('claude-takeout-z/artifacts/original.json', chatJson('y', '2026-10-02T00:00:00Z'));
+  const zipPath = path.join(tmp, 'claude-takeout-z.zip');
+  fs.writeFileSync(zipPath, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  const r = await merge([zipPath], { out: path.join(tmp, 'out'), name: 'all', now: NOW });
+  assert.notStrictEqual(r.refused, true);
+  assert.strictEqual(r.status, 'written', r.reason);
+});

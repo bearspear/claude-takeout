@@ -135,8 +135,16 @@ function isArchiveRoot(dir) {
 
 // True when an archive includes artifacts (a combined export, Claude Takeout 1.17 or later): an artifacts/
 // folder, or an export-manifest.json with an artifacts key. The old-archive tools don't handle those.
+// The folder counts only under its exact-case name (macOS finds a chat folder "Artifacts" by any case), when
+// it is not itself a chat (no original.json) and holds index.md or a <folder>/artifact.json.
 function hasArtifacts(root) {
-  try { if (fs.lstatSync(path.join(root, 'artifacts')).isDirectory()) return true; } catch (e) { /* none */ }
+  let names = [];
+  try { names = fs.readdirSync(root); } catch (e) { /* unreadable */ }
+  const dir = path.join(root, 'artifacts');
+  if (names.includes('artifacts') && isRealDir(dir) && !isRealFile(path.join(dir, 'original.json'))) {
+    if (isRealFile(path.join(dir, 'index.md'))) return true;
+    try { if (subdirs(dir).some(n => isRealFile(path.join(dir, n, 'artifact.json')))) return true; } catch (e) { /* unreadable */ }
+  }
   try {
     const manifest = JSON.parse(stripBom(fs.readFileSync(path.join(root, 'export-manifest.json'), 'utf8')));
     return !!manifest && typeof manifest === 'object' && Object.prototype.hasOwnProperty.call(manifest, 'artifacts');

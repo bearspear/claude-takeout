@@ -153,10 +153,11 @@ async function zipEntryNames(zipPath, loaded = null) {
   return Object.values(zip.files).map(entry => entry.unsafeOriginalName || entry.name);
 }
 
-// True when a ZIP is an archive with chats whose root shows artifacts: an artifacts/ folder or an
-// export-manifest.json with an artifacts key. The root is the top level, or the one wrapping folder when it
-// holds index.md or export-manifest.json (the same root hasArtifacts checks on disk). A chat's own artifacts/
-// folder doesn't count, nor does an Export Artifacts export (no chats). Reads the manifest entry only.
+// True when a ZIP is an archive with chats whose root shows artifacts: an artifacts/ folder (exact case, not
+// a chat, holding index.md or a <folder>/artifact.json) or an export-manifest.json with an artifacts key. The
+// root is the top level, or the one wrapping folder when it holds index.md or export-manifest.json (the same
+// root hasArtifacts checks on disk). A chat's own artifacts/ folder doesn't count, nor does an Export
+// Artifacts export (no chats). Reads the manifest entry only.
 async function zipHasArtifacts(zipPath, loaded = null) {
   const { zip } = loaded || await loadZip(zipPath);
   const names = await zipEntryNames(zipPath, loaded || { zip });
@@ -180,7 +181,10 @@ async function zipHasArtifacts(zipPath, loaded = null) {
   // A chat is an original.json at the root (a single chat) or in a folder directly under it.
   const hasChat = roots.some(r => names.some(n => n.startsWith(r) && /^([^/]+\/)?original\.json$/.test(n.slice(r.length))));
   if (!hasChat) return false;
-  if (names.some(n => roots.some(r => n.startsWith(r + 'artifacts/')))) return true;
+  // The exact-case artifacts/ folder, not a chat itself, holding index.md or a <folder>/artifact.json.
+  const isArtifactsRoot = r => !names.includes(r + 'artifacts/original.json')
+    && names.some(n => n === r + 'artifacts/index.md' || (n.startsWith(r + 'artifacts/') && /^[^/]+\/artifact\.json$/.test(n.slice(r.length + 10))));
+  if (roots.some(isArtifactsRoot)) return true;
   return roots.some(r => manifests.has(r) && Object.prototype.hasOwnProperty.call(manifests.get(r), 'artifacts'));
 }
 

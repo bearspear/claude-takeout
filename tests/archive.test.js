@@ -2163,3 +2163,61 @@ test('build_viewer refuses a ZIP with artifacts before extracting it', async () 
   assert.deepStrictEqual(fs.readdirSync(out), []);
   assert.match(res.stderr, /build_viewer doesn't support/);
 });
+
+// A pre-1.17 archive whose chat is named "Artifacts" or "artifacts" is an ordinary archive.
+for (const name of ['Artifacts', 'artifacts']) {
+  test(`build_viewer does not refuse an old archive with a chat folder ${name}/`, () => {
+    const root = tmpRoot();
+    put(root, 'index.md', '# all');
+    put(root, `${name}/original.json`, chatJson('a1'));
+    put(root, 'Chat_b/original.json', chatJson('b1'));
+    const res = cli(root, '--json');
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.ok(!JSON.parse(res.stdout).archives.some(a => a.refused));
+    assert.ok(fs.existsSync(path.join(root, 'viewer.html')));
+  });
+
+  test(`build_viewer does not refuse an old ZIP with a chat folder ${name}/`, async () => {
+    const JSZip = require('../jszip.min.js');
+    const tmp = tmpRoot();
+    const zip = new JSZip();
+    zip.file('claude-takeout-z/index.md', '# all');
+    zip.file(`claude-takeout-z/${name}/original.json`, chatJson('a1'));
+    zip.file('claude-takeout-z/Chat_b/original.json', chatJson('b1'));
+    fs.writeFileSync(path.join(tmp, 'z.zip'), await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+    const out = path.join(tmp, 'out');
+    const res = cli(tmp, '--out', out, '--json');
+    assert.strictEqual(res.status, 0, res.stderr);
+    assert.ok(!JSON.parse(res.stdout).zips.some(z => z.refused));
+  });
+}
+
+test('hasArtifacts: a combined archive with artifacts/index.md is still refused; a chat named artifacts is not', () => {
+  const { hasArtifacts } = require('../tools/archive-lib.js');
+  const combined = tmpRoot();
+  put(combined, 'index.md', '# all');
+  put(combined, 'Chat_a/original.json', chatJson('a1'));
+  put(combined, 'artifacts/index.md', '# artifacts');
+  assert.strictEqual(hasArtifacts(combined), true);
+  const old = tmpRoot();
+  put(old, 'index.md', '# all');
+  put(old, 'artifacts/original.json', chatJson('a1'));
+  put(old, 'artifacts/artefacts/x/artifact.json', '{}');
+  assert.strictEqual(hasArtifacts(old), false);
+});
+
+test('zipHasArtifacts: exact-case artifacts/ with index.md counts; Artifacts/ and a chat artifacts/ do not', async () => {
+  const JSZip = require('../jszip.min.js');
+  const { zipHasArtifacts } = require('../tools/archive-zip.js');
+  const tmp = tmpRoot();
+  const make = async (files) => {
+    const zip = new JSZip();
+    for (const [n, t] of Object.entries(files)) zip.file(n, t);
+    const p = path.join(tmp, Math.random().toString(36).slice(2) + '.zip');
+    fs.writeFileSync(p, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+    return p;
+  };
+  assert.strictEqual(await zipHasArtifacts(await make({ 'r/index.md': '#', 'r/Chat_a/original.json': chatJson('a'), 'r/artifacts/index.md': '#' })), true);
+  assert.strictEqual(await zipHasArtifacts(await make({ 'r/index.md': '#', 'r/Artifacts/original.json': chatJson('a'), 'r/Artifacts/index.md': '#' })), false);
+  assert.strictEqual(await zipHasArtifacts(await make({ 'r/index.md': '#', 'r/artifacts/original.json': chatJson('a'), 'r/artifacts/x/artifact.json': '{}' })), false);
+});
