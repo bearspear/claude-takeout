@@ -398,6 +398,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.20.3
+
+- **Older versions show their own files** - On an artifact's page, picking an older version that has a preview of its own (a merged archive or a rebuilt viewer) showed the current version's file list against the older version's folder and preview data, so Open file and Download could open or save the wrong file under a name. Each version in the menu now carries its own files.
+
 ### v1.20.2
 
 - **Design canvas layout** - A board's title row (title, Open alone, badges) now sits above the board, as on claude.ai, instead of pushing the board down onto the notes below it. A heading note is as wide as claude.ai allows it (`maxW`), so it no longer wraps into a narrow column.
