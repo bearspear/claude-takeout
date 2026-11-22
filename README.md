@@ -171,7 +171,7 @@ claude-takeout-2026-01-01.zip
 
 Each conversation folder has the identical structure to individual ZIP exports, except that pages Claude published are saved once, in the shared `artifacts/` folder at the root, and each chat's README links there.
 
-`artifacts/` holds one folder per artifact, `<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version (the current version and each older version a chat published), plus `index.html`, `index.md` and, if something failed, `errors.txt`. Every page a chat published gets a folder, also with **Include artifacts in Export All** off; with it on (the default), the artifacts claude.ai lists are added, and the index lists pages claude.ai no longer lists under "Published from chats, not in claude.ai's list". Export All writes no `published/` folder. `artifacts` is a reserved name (and `published` stays one), so no chat folder takes it. One `viewer.html` at the root covers the chats and the artifacts.
+`artifacts/` holds one folder per artifact, `<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version (the current version and each older version a chat published; the current version also as `<version>.zip` when it has two or more files), plus `index.html`, `index.md` and, if something failed, `errors.txt`. Every page a chat published gets a folder, also with **Include artifacts in Export All** off; with it on (the default), the artifacts claude.ai lists are added, and the index lists pages claude.ai no longer lists under "Published from chats, not in claude.ai's list". Export All writes no `published/` folder. `artifacts` is a reserved name (and `published` stays one), so no chat folder takes it. One `viewer.html` at the root covers the chats and the artifacts.
 
 ## Keyboard Shortcuts
 
@@ -400,7 +400,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.19.0
 
-- **Download in the viewer** - Popups and the file panel have a **Download** button beside Copy, and an artifact's page has one for its start file and for each file in its list. It saves the file the viewer holds (text, and preview images on the Artifacts screen) under its own name, HTML and SVG included: the file is saved, not opened, so nothing runs. A large upload gets the button once its text has loaded. Images, PDFs and other files the viewer only links to keep **Open file**, since a page opened from disk can't read them.
+- **Download in the viewer** - Popups and the file panel have a **Download** button beside Copy, and an artifact's page has one for its start file and for each file in its list that the viewer holds. It saves the file the viewer holds (text, and preview images on the Artifacts screen) under its own name, HTML and SVG included: the file is saved, not opened, so nothing runs. A large upload gets the button once its text has loaded. Images, PDFs and other files the viewer only links to keep **Open file**, since a page opened from disk can't read them.
 - **A ZIP per artifact** - Export All and Export Artifacts write `<version>.zip` beside an artifact's current version folder when that version has two or more files, and `artifact.json` names it (`zip`). The artifact's page shows **Download ZIP** ("some files missing" when the version is incomplete). `merge_archives.js` copies the ZIP of the merged current version, and `build_viewer.js` links it when it is there.
 
 ### v1.18.0

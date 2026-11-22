@@ -64,7 +64,7 @@ So: per-file **Download** from bytes the viewer holds, and for an artifact with 
 
 ## Constraints
 - `manifest.json` 1.19.0; README changelog; USAGE (viewer: Download, Download ZIP; layout: `<ver>.zip`); TECHNICAL; CLAUDE.md (§7 layout and `artifact.json` fields).
-- `tests/fixtures/export-baseline.json` refreshed for the new ZIP.
+- `tests/fixtures/export-baseline.json` unchanged: it pins the single-chat export, which writes no ZIP (*my call*, at the build).
 - The viewer page's CSP must allow the `blob:` download link (check; adjust only if needed, and say so).
 
 ## Left to the builder
