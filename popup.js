@@ -3331,73 +3331,8 @@ function publishedJson(rec) {
   return { format: 1, title: rec.title, url: rec.url, shortId: rec.shortId, uuid: rec.uuid, versions };
 }
 
-// Export All: each page's published.json, once, at the export root, after every chat added to it.
-function writeSharedPublished(shared) {
-  if (!shared || !shared.published) return;
-  for (const rec of shared.published.values()) {
-    if ([...rec.versions.values()].some((v) => v.ver)) shared.root.file(`published/${rec.dir}/published.json`, JSON.stringify(publishedJson(rec), null, 2));
-  }
-}
-
-// Export All's artifact step: what the chats already saved of an artifact's listed version (shared.published, filled
-// by savePublishedPages), so it isn't fetched or stored twice. chatFolders: chat uuid -> its folder in this export.
-// Returns reuse(uuid, ver) for runArtifactStep: { files: { <published path>: <root-relative file> }, texts, images }
-// or null to fetch. A version saved in published/ is reused only when saved whole and every file was checked
-// against claude.ai's checksum; one the chat wrote the same (not copied into published/) points at that chat's
-// artefacts/ file, for a one-file version. Only previews already in memory are used (a saved version's preview
-// texts and images, start file first; a same version's written text): a start file the preview shows that isn't
-// there means fetch.
-function publishedReuse(shared, chatFolders) {
-  const pages = shared && shared.published && typeof shared.published.get === 'function' ? shared.published : null;
-  const folders = chatFolders instanceof Map ? chatFolders : new Map();
-  const pageOf = (uuid) => pages.get(uuid) || [...pages.values()].find((r) => String(r.uuid).toLowerCase() === uuid) || null;
-  // [[path, text]] for the start file, [] when the preview has nothing to show of it, null when its text is missing.
-  const startTexts = (path, text) => {
-    const kind = path ? previewKind(path) : null;
-    if (!kind) return [];
-    return kind === 'text' && typeof text === 'string' ? [[path, text]] : null;
-  };
-  return (uuid, ver) => {
-    if (!pages || !ver) return null;
-    const rec = pageOf(String(uuid).toLowerCase());
-    if (!rec || !rec.versions) return null;
-    const versions = [...rec.versions.values()].filter((v) => v && v.ver === ver && Array.isArray(v.files) && v.files.length);
-    for (const v of versions) {
-      if (!v.saved || v.incomplete || (v.missing && v.missing.length)) continue;
-      // A file claude.ai gave no checksum for (Cowork and Artifact-tool pages) is reused too: fetching it again would be no
-      // better checked. It stays marked unchecked (unverified).
-      if (v.files.some((f) => typeof f.savedAs !== 'string' || !f.savedAs || (f.verified !== false && !f.sha256))) continue;
-      const preview = v.preview && typeof v.preview === 'object' ? v.preview : { texts: [], images: [] };
-      const start = (list) => [...list.filter((t) => t[0] === v.start), ...list.filter((t) => t[0] !== v.start)];
-      let texts = start(preview.texts || []);
-      const images = start(preview.images || []);
-      // The start file the preview shows must be there: from the preview, else the text the record kept.
-      const kind = v.start ? previewKind(v.start) : null;
-      if (kind === 'text' && !texts.some((t) => t[0] === v.start)) {
-        if (typeof v.text !== 'string') continue;
-        texts = [[v.start, v.text], ...texts];
-      } else if (kind && kind !== 'text' && !images.some((t) => t[0] === v.start)) continue;
-      const files = {};
-      for (const f of v.files) files[f.path] = `published/${rec.dir}/${v.folderName}/${f.savedAs}`;
-      const unverified = v.files.filter((f) => f.verified === false).map((f) => f.path);
-      return { files, texts, images, ...(unverified.length ? { unverified } : {}) };
-    }
-    for (const v of versions) {
-      if (v.files.length !== 1 || !Array.isArray(v.publishedIn)) continue;
-      const path = v.files[0].path;
-      for (const p of v.publishedIn) {
-        if (!p || !p.same || typeof p.writtenAs !== 'string' || !p.writtenAs || !folders.has(p.chat)) continue;
-        const texts = startTexts(path, p.text);
-        if (!texts) continue;
-        return { files: { [path]: `${folders.get(p.chat)}/artefacts/${p.writtenAs}` }, texts, images: [] };
-      }
-    }
-    return null;
-  };
-}
-
 // Export All: whether a published version's preview is worth keeping in memory for the artifact step, i.e. it is
-// the listed live version of an artifact the step will save and may reuse (plain, non-Docs; see saveArtifact).
+// the listed live version of an artifact the step will save and need not fetch again (plain, non-Docs; see saveArtifact).
 // artifacts: the included list; empty when the step won't run, so nothing is kept.
 function publishedPreviewWanted(artifacts) {
   const wanted = new Set();
@@ -3523,18 +3458,35 @@ function markUnverified(files, unverified) {
   }
 }
 
+// Export All: the store record (artifactStore) of a page a chat published. A page in claude.ai's list
+// (shared.listedArtifacts: uuid -> artifactsFromList entry) is named and described from the list; any other by the
+// publish's title, until page info renames it (artifactStore's retitle).
+function publishedStoreRecord(shared, first) {
+  const key = String(first.uuid).toLowerCase();
+  const item = shared.listedArtifacts instanceof Map ? shared.listedArtifacts.get(key) : null;
+  const rec = shared.store.record(key, { title: item ? item.title : first.title });
+  if (item && !rec.listed) listedArtifactRecord(rec, item);
+  return rec;
+}
+
 // Save the pages a chat published. ctx: { errorCollector, artifacts (the text as on disk, inlined), artifactIndex,
 // attached (extractAttachedFiles entries saved by this export), fetchPublished(message) -> Promise<response>,
-// shared (Export All: the shared object with published: Map, root, previewWanted), chatFolder }. Returns one
-// PublishedEntry per page: { uuid, shortId, title, url, current, dir (relative to the chat folder), versions:
-// [{ ver, folderName, label, order, start, startSaved, same, writtenAs, incomplete, needsRuntime, text, publishes }] }.
+// shared (Export All: the shared object with store (artifactStore, prefix artifacts/), listedArtifacts, root,
+// previewWanted), chatFolder (the chat's folder in Export All) }. In a chat export, each page goes to published/<dir>/
+// with published.json. In Export All, each version goes into the store, in its record's version folder, with the
+// publish in its publishedIn; a version the chat wrote the same is not fetched: one file is pointed at (sameAs, from
+// the first chat), several are copied from the chat's text. Returns one PublishedEntry per page: { uuid, shortId,
+// title, url, current, dir (relative to the chat folder), versions: [{ ver, folderName, label, order, start,
+// startSaved, same, writtenAs, incomplete, needsRuntime, text, publishes }] }.
 async function savePublishedPages(folder, data, ctx = {}) {
   const { errorCollector = null, artifacts = {}, artifactIndex = {}, attached = [], fetchPublished = null, shared = null } = ctx;
   const found = publishedPagesOf(data);
   if (!found.length) return [];
-  const exportAll = !!(shared && shared.published && typeof shared.published.get === 'function');
-  const pages = exportAll ? shared.published : new Map();
-  const dirs = exportAll ? (shared.publishedDirs || (shared.publishedDirs = new Set())) : new Set();
+  const exportAll = !!(shared && shared.store);
+  const store = exportAll ? shared.store : null;
+  // Export All: page records (infos, history) kept across chats; their versions are the store record's.
+  const pages = exportAll ? (shared.pages || (shared.pages = new Map())) : new Map();
+  const dirs = new Set();
   const state = exportAll ? shared : {};  // publishedSignedOut: one 401 stops fetching for the whole export
   const target = exportAll ? shared.root : folder;
   // Export All: (uuid, ver) -> keep that version's preview for the artifact step (publishedPreviewWanted).
@@ -3562,15 +3514,16 @@ async function savePublishedPages(folder, data, ctx = {}) {
   const pageRecord = (first) => {
     if (pages.has(first.uuid)) return pages.get(first.uuid);
     const shortId = /^[A-Za-z0-9_-]{1,64}$/.test(first.shortId || '') ? first.shortId : '';
+    const kept = exportAll ? publishedStoreRecord(shared, first) : null;
     const rec = {
       uuid: first.uuid, shortId, url: shortId ? `https://claude.ai/artifact/${shortId}` : '', title: String(first.title || ''),
-      dir: pageDir(first.title, shortId || first.uuid), titleFromFile: !!first.titleFromFile,
-      history: [], infos: new Map(), versions: new Map(), folders: new Set(['published.json']),
+      dir: kept ? kept.dir : pageDir(first.title, shortId || first.uuid), titleFromFile: !!first.titleFromFile && !(kept && kept.listed),
+      history: [], infos: new Map(), versions: kept ? kept.versions : new Map(), folders: new Set(['published.json']), store: kept,
     };
     pages.set(first.uuid, rec);
     return rec;
   };
-  const dirOf = (rec) => `${exportAll ? '../' : ''}published/${rec.dir}`;
+  const dirOf = (rec) => (exportAll ? `../${store.prefix}${rec.store.dir}` : `published/${rec.dir}`);
 
   if (typeof fetchPublished !== 'function') {
     const links = [...byUuid.values()].map((g) => pageRecord(g[0]).url).filter(Boolean);
@@ -3613,22 +3566,39 @@ async function savePublishedPages(folder, data, ctx = {}) {
       // is written before the first page info, so the folder can still be renamed.
       if (info.title && rec.titleFromFile) {
         rec.titleFromFile = false;
-        dirs.delete(rec.dir.toLowerCase());
-        rec.dir = pageDir(info.title, rec.shortId || rec.uuid);
+        if (exportAll) {
+          store.retitle(rec.store, info.title);
+          rec.dir = rec.store.dir;
+        } else {
+          dirs.delete(rec.dir.toLowerCase());
+          rec.dir = pageDir(info.title, rec.shortId || rec.uuid);
+        }
+      }
+      if (exportAll) {
+        // The list's title stays for a listed page; any other takes claude.ai's.
+        if (info.title && !rec.store.listed) rec.store.title = artifactText(info.title);
+        if (info.history.length >= rec.store.history.length) rec.store.history = info.history;
       }
     }
     return info;
   };
 
+  // A version's record. In Export All it is the store record's version (key: its id), and its folder the store's.
   const folderFor = (rec, key) => {
     if (rec.versions.has(key)) return rec.versions.get(key);
-    const want = key === '' ? 'current' : publishedSegment(key);
-    let name = want;
-    for (let n = 2; rec.folders.has(name.toLowerCase()); n++) name = `${want}_${n}`;
-    rec.folders.add(name.toLowerCase());
+    let name;
+    if (exportAll) {
+      name = store.folderName(rec.store, key);
+    } else {
+      const want = key === '' ? 'current' : publishedSegment(key);
+      name = want;
+      for (let n = 2; rec.folders.has(name.toLowerCase()); n++) name = `${want}_${n}`;
+      rec.folders.add(name.toLowerCase());
+    }
     const v = {
       key, folderName: name, ver: null, files: [], names: null, renames: [], rejected: [], saved: false, attempted: false,
       start: null, startSaved: null, incomplete: false, needsRuntime: false, missing: [], text: null, publishedIn: [],
+      ...(exportAll ? { folder: null } : {}),
     };
     rec.versions.set(key, v);
     return v;
@@ -3677,16 +3647,22 @@ async function savePublishedPages(folder, data, ctx = {}) {
     return null;
   };
 
+  // Export All: the version's preview texts and images, for the artifact step (a version the store has whole is not
+  // fetched again), only for an included artifact's listed version; not part of artifact.json.
+  const keepPreview = (v, payload) => Object.defineProperty(v, 'preview', { value: payload, writable: true, configurable: true });
   const fetchVersion = async (rec, v) => {
     v.attempted = true;
     const got = await fetchPublishedFiles({
-      target, prefix: `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
+      target, prefix: exportAll ? store.versionFolder(rec.store, v.key) : `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
       state, onSignedOut: markSignedOut, fetchPublished, collect: wanted(rec.uuid, v.ver),
     });
-    // Export All: the version's preview texts and images, for the artifact step (publishedReuse), only for an
-    // included artifact's listed version; not part of published.json.
-    if (wanted(rec.uuid, v.ver)) Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
+    if (wanted(rec.uuid, v.ver)) keepPreview(v, artifactPayload(got));
     v.saved = got.saved;
+    if (exportAll) {
+      v.folder = got.saved ? v.folderName : null;
+      // A copy saved: the version no longer points at a chat's file.
+      if (got.saved) delete v.sameAs;
+    }
     markUnverified(v.files, got.unverified);
     v.missing = got.missing;
     v.incomplete = got.incomplete;
@@ -3697,6 +3673,33 @@ async function savePublishedPages(folder, data, ctx = {}) {
     if (got.problems.length) {
       noted.add(rec.uuid);
       warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): ${got.problems.length} file${got.problems.length === 1 ? '' : 's'} could not be saved: ${got.problems.join(', ')}.`, openNote(rec));
+    }
+  };
+
+  // Export All: a version this chat wrote the same (matched: path -> { name, text }) that the store has no copy of.
+  // One file: the store points at this chat's file (sameAs), unless another chat's already is. Several: the chat's
+  // texts are copied into its version folder; claude.ai's checksums matched them, so nothing is fetched.
+  const keepSame = (rec, v, matched) => {
+    if (v.saved) return;
+    if (v.files.length === 1) {
+      const f = v.files[0];
+      const own = matched.get(f.path);
+      if (!v.sameAs && own && ctx.chatFolder) v.sameAs = { [f.path]: `${ctx.chatFolder}/artefacts/${own.name}` };
+      if (!v.preview && wanted(rec.uuid, v.ver) && own && typeof own.text === 'string') {
+        keepPreview(v, previewKind(f.path) === 'text' && own.text.length <= PREVIEW_ITEM_MAX ? { texts: [[f.path, own.text]], images: [] } : null);
+      }
+      return;
+    }
+    const at = store.versionFolder(rec.store, v.key);
+    for (const f of v.files) target.file(`${at}${v.names.get(f.path)}`, matched.get(f.path).text);
+    Object.assign(v, { saved: true, attempted: true, folder: v.folderName, missing: [], incomplete: false });
+    const startText = v.start && matched.has(v.start) ? matched.get(v.start).text : null;
+    v.needsRuntime = publishedNeedsRuntime(startText);
+    v.text = typeof startText === 'string' && startText.length <= limit ? startText : null;
+    if (wanted(rec.uuid, v.ver)) {
+      const texts = v.files.filter((f) => previewKind(f.path) === 'text').map((f) => [f.path, matched.get(f.path).text]);
+      const ordered = [...texts.filter((t) => t[0] === v.start), ...texts.filter((t) => t[0] !== v.start)];
+      keepPreview(v, ordered.length ? { texts: ordered, images: [] } : null);
     }
   };
 
@@ -3718,6 +3721,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
     for (const m of mine.values()) {
       const { info } = m;
       if (info.error) {
+        if (exportAll) rec.store.incomplete = true;
         if (!info.skipped || signedOutHere) noted.add(rec.uuid);
         if (!info.skipped && !warned.has(`${uuid} ${info.error}`)) {
           warned.add(`${uuid} ${info.error}`);
@@ -3729,7 +3733,8 @@ async function savePublishedPages(folder, data, ctx = {}) {
         });
         continue;
       }
-      const v = folderFor(rec, m.key);
+      // In Export All a publish that named no version is kept as the version it is (no version stored twice).
+      const v = folderFor(rec, exportAll ? m.key || info.ver : m.key);
       if (!v.ver) {
         v.ver = info.ver;
         const { names, renames } = publishedSavedNames(info.files.map((f) => f.path));
@@ -3748,20 +3753,19 @@ async function savePublishedPages(folder, data, ctx = {}) {
       }
       const matched = await judge(v.files, m.publishes, m.sources);
       const same = !!matched;
+      if (same && exportAll) keepSame(rec, v, matched);
       if (!same && !v.attempted && !state.publishedSignedOut) await fetchVersion(rec, v);
       if (!same && !v.saved) v.incomplete = true;
       const startFile = publishedStart(v.files);
       const own = same && startFile ? matched.get(startFile.path) : null;
       for (const pub of m.publishes) {
-        const where = { chat: data.uuid, messageUuid: pub.messageUuid, toolUseId: pub.toolUseId, same, writtenAs: own ? own.name : null };
-        // The written text, for Export All's artifact step (publishedReuse); not part of published.json.
-        if (wanted(rec.uuid, v.ver) && own && typeof own.text === 'string' && own.text.length <= limit) Object.defineProperty(where, 'text', { value: own.text });
-        v.publishedIn.push(where);
+        v.publishedIn.push({ chat: data.uuid, messageUuid: pub.messageUuid, toolUseId: pub.toolUseId, same, writtenAs: own ? own.name : null });
       }
       if (same && !v.saved && !v.attempted) v.needsRuntime = v.needsRuntime || publishedNeedsRuntime(own && own.text);
       const usable = same || v.saved;
       versions.push({
-        ver: v.ver, folderName: v.folderName, ...publishedLabel(rec, v),
+        // Its label: current for a publish that named no version, else by its place in the page's history.
+        ver: v.ver, folderName: v.folderName, ...(m.key === '' ? { label: 'current', order: rec.history.length + 1 } : publishedLabel(rec, v)),
         start: same ? (startFile ? startFile.path : null) : (usable ? v.start : null),
         startSaved: same ? (startFile ? v.names.get(startFile.path) : null) : (usable ? v.startSaved : null),
         same, writtenAs: own ? own.name : null,
@@ -4878,10 +4882,17 @@ async function bulkExportZip(options = {}) {
     let totalFileErrors = 0;  // File-level errors across all conversations
     let totalFileWarnings = 0;  // File-level warnings across all conversations
     let incomplete = 0;  // chats whose data looks incomplete (export_health)
-    // `projects` and `published` hold the files chats share, and `artifacts` claude.ai's artifacts, so no chat may take those names.
+    // `projects` holds the files chats share, and `artifacts` the pages they published and claude.ai's artifacts, so no
+    // chat may take those names; `published` stays reserved, as it was the shared pages' folder before v1.18.
     const usedFolderNames = new Set(['projects', 'published', 'artifacts']);
-    // previewWanted: only an included artifact's listed version keeps its preview in memory for the artifact step.
-    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), published: new Map(), previewWanted: publishedPreviewWanted(includedArtifacts) };
+    // One store for every page the chats publish and every artifact claude.ai lists: artifacts/<Title>_<id>/<ver>/.
+    // A listed artifact is named from the list (listedArtifacts) from the first chat that publishes it. previewWanted:
+    // only an included artifact's listed version keeps its preview in memory for the artifact step.
+    const store = artifactStore(megaZip, { prefix: 'artifacts/' });
+    const listedArtifacts = new Map((artifactList ? artifactList.artifacts : []).map((a) => [String(a.slug).toLowerCase(), a]));
+    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), store, listedArtifacts, previewWanted: publishedPreviewWanted(includedArtifacts) };
+    // A Claude Docs artifact's uuid -> the chat in this export that rebuilt its text (the latest), for its artifact.json note.
+    const docChats = new Map();
     const viewerChats = [];
     const exportedChats = [];  // { uuid, name, updated_at (as listed), folder }, for the manifest and the record
 
@@ -4915,6 +4926,13 @@ async function bulkExportZip(options = {}) {
         // Use shared helper to populate the folder (same structure as individual zip)
         const folderResult = await populateConversationFolder(folder, data, null, orgId, sharedProjects, folderName, fetchPublished);
         if (folderResult.viewerChat) viewerChats.push(folderResult.viewerChat);
+        try {
+          const at = String(data.updated_at || '');
+          for (const link of artifactLinksOf(data)) {
+            if (link.how !== 'made' || (docChats.has(link.uuid) && docChats.get(link.uuid).at > at)) continue;
+            docChats.set(link.uuid, { at, title: artifactText(data.name || '') || 'Untitled' });
+          }
+        } catch (e) { /* the note stays the general one */ }
 
         // Track file-level errors/warnings
         if (folderResult.errorCollector) {
@@ -4949,10 +4967,7 @@ async function bulkExportZip(options = {}) {
       await new Promise(r => setTimeout(r, 200));
     }
 
-    // Each published page's published.json, now that every chat has added to it.
-    writeSharedPublished(sharedProjects);
-
-    // claude.ai's artifacts into artifacts/, after the chats, reusing what they saved of the same version. Card
+    // claude.ai's artifacts into the store, after the chats: a version a chat saved is not fetched again. Card
     // pictures only when the optional permission is already there: Export All never asks. The step never throws,
     // and its warnings go to artifacts/errors.txt.
     let step = null;
@@ -4967,13 +4982,23 @@ async function bulkExportZip(options = {}) {
         parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
       } catch (e) { /* no previews; the export goes on */ }
       step = await runArtifactStep(megaZip, {
-        prefix: 'artifacts/', artifacts: includedArtifacts, full: artifactList.full, listed: artifactList.listed, fetchPublished, picturesAllowed,
-        reuse: publishedReuse(sharedProjects, new Map(exportedChats.map((c) => [c.uuid, c.folder]))), parts, run: !!run,
+        store, artifacts: includedArtifacts, full: artifactList.full, listed: artifactList.listed, fetchPublished, picturesAllowed,
+        docChats: new Map([...docChats].map(([uuid, d]) => [uuid, d.title])), parts, run: !!run,
         collector: new ExportErrorCollector(null, null, { label: 'Export Artifacts' }),
         onProgress: (done, n) => showProgress(done, n, `${done} / ${n}`),
       });
       writeFailures.push(...step.writeFailures);
     }
+    // artifact.json of every other page the chats saved something of (the step wrote its own), and their index rows.
+    const chatRows = [];
+    for (const rec of store.records()) {
+      if (store.written(rec) || !rec.versions.size) continue;
+      try {
+        store.write(rec);
+        chatRows.push(storeRecordRow(rec));
+      } catch (e) { /* the chats' links and errors.txt still say what was saved */ }
+    }
+    const artifactRows = [...(step ? step.rows : []), ...chatRows];
     const artifactWarnings = step ? step.collector.warnings.length + step.collector.errors.length : 0;
     const artifactNote = `${listNote}${artifactWarnings ? ' See artifacts/errors.txt.' : ''}`;
     const savedArtifacts = step ? step.views.filter((v) => !v.notExported).length : 0;
@@ -5031,9 +5056,14 @@ async function bulkExportZip(options = {}) {
       } else {
         if (since) indexLines.push(artifactsChangedLine(since, includedArtifacts.length, artifactList.listed), '');
         indexLines.push(`- Listed by claude.ai: ${artifactList.listed}`, `- Saved: ${step ? step.views.filter((v) => !v.notExported).length : 0}`);
-        if (step) indexLines.push('- Index: [artifacts/index.md](artifacts/index.md)');
         if (artifactWarnings) indexLines.push(`- Issues: ${artifactCount(artifactWarnings, 'warning')} (see artifacts/errors.txt)`);
       }
+    } else if (artifactRows.length) {
+      indexLines.push('', '## Artifacts', '');
+    }
+    if (artifactRows.length) {
+      if (chatRows.length) indexLines.push(`- Published from chats only: ${chatRows.length}`);
+      indexLines.push('- Index: [artifacts/index.md](artifacts/index.md)');
     }
 
     addFileWithBOM(megaZip, 'index.md', indexLines.join('\n'));
@@ -5048,10 +5078,13 @@ async function bulkExportZip(options = {}) {
     // The combined viewer also needs each artifact's current version (to tell it from older ones chats published)
     // and where claude.ai says it was made (its card's source line); views, entries and rows are one per artifact.
     const combinedViews = step ? step.views.map((v, i) => ({ ...v, ver: (step.entries[i] && step.entries[i].ver) || '', sourceSurface: (step.rows[i] && step.rows[i].sourceSurface) || '' })) : [];
+    // records (every artifact.json written) and listFetched (whether claude.ai's list is in this export) are for the
+    // viewer's artifact screens.
+    const storeRecords = store.records().filter((rec) => store.written(rec)).map((rec) => artifactJsonV2(rec));
     const viewerOpts = step
       // Every part the artifact step numbered, even one an error kept from being counted in partCount.
-      ? { artifacts: { views: combinedViews, listed: artifactList.listed, exported: startedAt, since }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }
-      : {};
+      ? { artifacts: { views: combinedViews, listed: artifactList.listed, exported: startedAt, since, listFetched: true, records: storeRecords }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }
+      : { artifacts: { views: [], listed: artifactList ? artifactList.listed : null, exported: startedAt, since, listFetched: !!artifactList, records: storeRecords } };
     // Chats or artifacts to show: an Export Changes run where only artifacts changed still gets a viewer.
     const viewerWanted = exported > 0 || !!(viewerOpts.artifacts && viewerOpts.artifacts.views.length);
     const viewerWritten = viewerWanted && await writeViewer(megaZip, viewerChats, viewerOpts);
@@ -5059,15 +5092,15 @@ async function bulkExportZip(options = {}) {
     viewerChats.length = 0;  // viewer.html holds them now, and compressing needs the memory
     const viewerNote = viewerBuilt ? '' : ' viewer.html could not be built.';
 
-    if (step) {
+    if (artifactRows.length) {
       const indexOpts = {
-        listed: artifactList.listed, exportedAt: startedAt, warnings: artifactWarnings, thumbs: step.thumbs, viewer: viewerWritten,
+        listed: artifactList ? artifactList.listed : null, exportedAt: startedAt, warnings: artifactWarnings, thumbs: step ? step.thumbs : 0, viewer: viewerWritten,
         thumbsNeedPermission: !picturesAllowed, base: 'artifacts/', since,
       };
-      addFileWithBOM(megaZip, 'artifacts/index.md', artifactsIndexMd(step.rows, indexOpts));
-      megaZip.file('artifacts/index.html', artifactsIndexHtml(step.rows, indexOpts));
-      if (step.collector.hasAny()) megaZip.file('artifacts/errors.txt', step.collector.generateErrorReport());
+      addFileWithBOM(megaZip, 'artifacts/index.md', artifactsIndexMd(artifactRows, indexOpts));
+      megaZip.file('artifacts/index.html', artifactsIndexHtml(artifactRows, indexOpts));
     }
+    if (step && step.collector.hasAny()) megaZip.file('artifacts/errors.txt', step.collector.generateErrorReport());
 
     if (run) {
       writeFailures.push(...await megaZip.flush());
@@ -5144,7 +5177,7 @@ async function bulkExportZip(options = {}) {
 // content.js lists them (listArtifacts) and fetches their files (publishedPageInfo, publishedPageFile); the
 // asset token never reaches the popup. Each artifact gets <title>_<shortId>/ with artifact.json (format 2) and
 // one folder per version saved, <ver>/ (artifactStore); the root has index.md, index.html, export-manifest.json and
-// errors.txt when needed. (Export All's artifact step, without a store, still writes v1.17's flat layout.)
+// errors.txt when needed. Export All uses the same store under artifacts/, shared with the pages its chats published.
 // Claude Docs are listed, not fetched: their text is in no file. The export record is never read or written.
 
 const CLAUDE_DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
@@ -5340,11 +5373,13 @@ async function writeArtifactsViewer(root, views, opts = {}) {
 // a root name (ARTIFACT_ROOT_NAMES). A record: { uuid, shortId, dir, title, listed, current, meta: { url, typeTitle,
 // sourceSurface, rel, public, createdAt, updatedAt, note, start, needsRuntime, thumb? }, versions: Map<ver, VersionRec> }
 // where VersionRec is artifact.json's per-version object (see artifactJsonV2), with the preview payload kept as a
-// non-enumerable preview. The version with no id ('') is saved in current/.
+// non-enumerable preview. The version with no id ('') is saved in current/. A record also keeps history (claude.ai's
+// version ids, oldest first, when known: the order of its versions) and incomplete (a fetch of it failed).
 function artifactStore(root, { prefix = '' } = {}) {
   const used = new Set(ARTIFACT_ROOT_NAMES);
   const recs = new Map();
   const folders = new Map();  // rec -> Map<ver, folder name>
+  const written = new Set();  // records whose artifact.json was written
   // record(uuid, { title }): the record, made on first use. Its folder is <Title>_<shortId>, or artifact_<shortId>
   // without a title; the first caller names it.
   const record = (uuid, init = {}) => {
@@ -5355,7 +5390,7 @@ function artifactStore(root, { prefix = '' } = {}) {
     const title = artifactText(init.title);
     const dir = claimArtifactFolder(`${capUtf8(safeFileTitle(title), 200) || 'artifact'}_${shortId || key}`, used);
     const rec = {
-      uuid: key, shortId, dir, title, listed: false, current: null,
+      uuid: key, shortId, dir, title, listed: false, current: null, history: [], incomplete: false,
       meta: { url: `https://claude.ai/artifact/${shortId || key}`, typeTitle: '', sourceSurface: '', rel: '', public: false, createdAt: '', updatedAt: '', note: '', start: null, needsRuntime: false },
       versions: new Map(),
     };
@@ -5376,16 +5411,28 @@ function artifactStore(root, { prefix = '' } = {}) {
     names.set(v, name);
     return name;
   };
+  // A new title names the folder again, only while nothing of the record has a place yet (no version folder named,
+  // no artifact.json written): the v1.16.1 rule for a page named after its file.
+  const retitle = (rec, title) => {
+    const t = artifactText(title);
+    if (!t || folders.get(rec).size || written.has(rec)) return false;
+    used.delete(rec.dir.toLowerCase());
+    rec.dir = claimArtifactFolder(`${capUtf8(safeFileTitle(t), 200) || 'artifact'}_${rec.shortId || rec.uuid}`, used);
+    rec.title = t;
+    return true;
+  };
   return {
     prefix,
     record,
+    retitle,
     has: (uuid, ver) => {
       const rec = recs.get(String(uuid).toLowerCase());
       return !!rec && rec.versions.has(ver || '');
     },
     folderName,
     versionFolder: (rec, ver) => `${prefix}${rec.dir}/${folderName(rec, ver)}/`,
-    write: (rec) => root.file(`${prefix}${rec.dir}/artifact.json`, JSON.stringify(artifactJsonV2(rec), null, 2)),
+    write: (rec) => { written.add(rec); root.file(`${prefix}${rec.dir}/artifact.json`, JSON.stringify(artifactJsonV2(rec), null, 2)); },
+    written: (rec) => written.has(rec),
     records: () => [...recs.values()],
   };
 }
@@ -5399,7 +5446,8 @@ function artifactJsonV2(rec) {
   const meta = rec.meta || {};
   const str = (v) => (typeof v === 'string' ? v : '');
   const versions = {};
-  const list = rec.versions && typeof rec.versions.entries === 'function' ? [...rec.versions.entries()] : Object.entries(rec.versions || {});
+  const list = storeVersionList(rec);
+  const noId = storeNoIdKey(list);
   for (const [ver, v] of list) {
     const out = {
       folder: typeof v.folder === 'string' && v.folder ? v.folder : null,
@@ -5414,7 +5462,7 @@ function artifactJsonV2(rec) {
     out.publishedIn = (Array.isArray(v.publishedIn) ? v.publishedIn : []).map((p) => ({
       chat: p.chat, messageUuid: p.messageUuid, toolUseId: p.toolUseId, same: !!p.same, writtenAs: typeof p.writtenAs === 'string' ? p.writtenAs : null,
     }));
-    versions[ver || 'current'] = out;
+    versions[ver || noId] = out;
   }
   return {
     format: 2, uuid: rec.uuid, shortId: rec.shortId, url: str(meta.url), title: str(rec.title), typeTitle: str(meta.typeTitle),
@@ -5422,8 +5470,26 @@ function artifactJsonV2(rec) {
     listed: rec.listed === true, current: typeof rec.current === 'string' && rec.current ? rec.current : null,
     start: meta.start || null, needsRuntime: !!meta.needsRuntime, note: str(meta.note),
     ...(typeof meta.thumb === 'string' && meta.thumb ? { thumb: meta.thumb } : {}),
+    ...(rec.incomplete ? { incomplete: true } : {}),
     versions,
   };
+}
+
+// A record's versions as [ver, VersionRec], in claude.ai's order (its history, oldest first) when known; versions
+// not in the history after those, as they were added, and the one with no id last.
+function storeVersionList(rec) {
+  const list = rec.versions && typeof rec.versions.entries === 'function' ? [...rec.versions.entries()] : Object.entries(rec.versions || {});
+  const history = Array.isArray(rec.history) ? rec.history : [];
+  const place = (ver) => (ver === '' ? history.length + 1 : history.indexOf(ver) >= 0 ? history.indexOf(ver) : history.length);
+  return list.map((e, i) => ({ e, i })).sort((a, b) => place(a.e[0]) - place(b.e[0]) || a.i - b.i).map((x) => x.e);
+}
+
+// The name the version with no id goes by in artifact.json and the indexes: current, or current_2, ... when a
+// version has that id. list: storeVersionList's.
+function storeNoIdKey(list) {
+  let key = 'current';
+  for (let n = 2; list.some(([ver]) => ver === key); n++) key = `current_${n}`;
+  return key;
 }
 
 // A store version that can stand for the current version without a fetch: saved in its folder, nothing missing,
@@ -5431,109 +5497,92 @@ function artifactJsonV2(rec) {
 const storeVersionWhole = (v) => !!(v && v.folder && v.saved && !v.incomplete && !(v.missing && v.missing.length)
   && Array.isArray(v.files) && v.files.length && v.files.every((f) => typeof f.savedAs === 'string' && f.savedAs));
 
-// Save one listed artifact (from artifactsFromList) into root at its own folder. ctx: { fetchPublished, state
-// (publishedSignedOut: one 401 stops fetching the rest), warn(filename, message, note), usedFolders (lowercased,
-// relative to prefix), prefix ('' or 'artifacts/': where the folders go in root), reuse(uuid, ver) -> null or what
-// the chats already saved: { files: { <published path>: <root-relative file> }, texts, images }, so nothing is
-// fetched or written twice (only plain, non-Docs artifacts are asked), store (artifactStore, optional) }.
-// With a store, the artifact's record holds it: the current version goes into its version folder (a whole version
-// the store already has is not fetched again), and artifact.json is left to the caller (store.write); usedFolders,
-// prefix and reuse are then not used. Without one, its files go at the top of its folder with a format 1 artifact.json.
-// Returns { row (for the indexes), entry (for export-manifest.json) }.
-async function saveArtifact(root, a, ctx) {
-  const { fetchPublished, state, warn, usedFolders } = ctx;
-  const prefix = ctx.store ? ctx.store.prefix : ctx.prefix || '';
-  const uuid = String(a.slug).toLowerCase();
-  const shortId = uuidToBase58(uuid);
-  const url = `https://claude.ai/artifact/${shortId || uuid}`;
-  const title = artifactText(a.title);
-  const typeSlug = artifactText(a.typeSlug);
-  const typeTitle = artifactText(a.typeTitle);
+// claude.ai's list entry on a store record: listed, its title, current version and the rest of its card.
+function listedArtifactRecord(rec, a) {
   const rel = artifactText(a.rel);
+  rec.title = artifactText(a.title);
+  rec.listed = true;
+  rec.current = typeof a.live === 'string' && PUBLISHED_VER_RE.test(a.live) ? a.live : null;
+  Object.assign(rec.meta, {
+    url: `https://claude.ai/artifact/${rec.shortId || rec.uuid}`, typeTitle: artifactText(a.typeTitle), sourceSurface: artifactText(a.sourceSurface), rel,
+    public: a.public === true, createdAt: artifactText(a.createdAt), updatedAt: artifactText(a.updatedAt),
+  });
+  if (!rec.meta.note && isSharedArtifact(rel)) rec.meta.note = 'shared with you';
+  return rec;
+}
+
+// A store version not copied because a chat wrote its one file the same: sameAs names that chat's file.
+const storeVersionSame = (v) => !!(v && !v.folder && v.sameAs && typeof v.sameAs === 'object' && Array.isArray(v.files) && v.files.length === 1
+  && typeof v.sameAs[v.files[0].path] === 'string' && v.sameAs[v.files[0].path]);
+
+// Save one listed artifact (from artifactsFromList) into its store record. ctx: { fetchPublished, state
+// (publishedSignedOut: one 401 stops fetching the rest), warn(filename, message, note), store (artifactStore), docChats
+// (optional Map: a Claude Docs artifact's uuid -> the title of the chat in this export that rebuilt its text) }. The
+// current version goes into its version folder, unless the store has it already: whole in its folder, or (one file)
+// the same as a file a chat wrote (sameAs); either way only when the viewer's preview of its start file is at hand.
+// artifact.json is left to the caller (store.write). Returns { row (for the indexes), entry (for
+// export-manifest.json), meta ({ incomplete, missing }), view, payload }.
+async function saveArtifact(root, a, ctx) {
+  const { fetchPublished, state, warn, store } = ctx;
+  const prefix = store.prefix;
+  const uuid = String(a.slug).toLowerCase();
+  const typeSlug = artifactText(a.typeSlug);
+  const rec = listedArtifactRecord(store.record(uuid, { title: artifactText(a.title) }), a);
+  const { shortId, title, dir: folder } = rec;
+  const { url, typeTitle, rel, sourceSurface, createdAt, updatedAt } = rec.meta;
   const shared = isSharedArtifact(rel);
-  const store = ctx.store || null;
-  const rec = store ? store.record(uuid, { title }) : null;
-  const folder = rec ? rec.dir : claimArtifactFolder(`${capUtf8(safeFileTitle(title), 200) || 'artifact'}_${shortId || uuid}`, usedFolders);
+  const docs = isClaudeDocsArtifact(a);
   const name = title || folder;
   const openNote = `Open it on claude.ai: ${url}`;
 
-  const meta = {
-    format: 1, uuid, shortId, url, title, typeTitle, sourceSurface: artifactText(a.sourceSurface), rel,
-    ver: typeof a.live === 'string' && PUBLISHED_VER_RE.test(a.live) ? a.live : '',
-    createdAt: artifactText(a.createdAt), updatedAt: artifactText(a.updatedAt),
-    files: [], missing: [], incomplete: false, needsRuntime: false, note: '',
-  };
+  const meta = { ver: rec.current || '', files: [], missing: [], incomplete: false, needsRuntime: false };
   const notes = [];
   let startSaved = null;
   let got = null;
   let failed = false;
-  let reusedInfo = null;
   const signOut = () => {
     if (state.publishedSignedOut) return;
     state.publishedSignedOut = true;
     warn('artifacts', `Artifacts not exported: claude.ai answered HTTP 401, as if you were signed out. "${name}" and the artifacts after it were not saved.`,
       'Sign in to claude.ai in this tab and run Export Artifacts again.');
   };
-  const notExported = (why) => { meta.incomplete = true; failed = true; notes.push(`not exported: ${why}`); };
-  if (rec) {
-    rec.title = title;
-    rec.listed = true;
-    rec.current = meta.ver || null;
-    Object.assign(rec.meta, { url, typeTitle, sourceSurface: meta.sourceSurface, rel, public: a.public === true, createdAt: meta.createdAt, updatedAt: meta.updatedAt });
-  }
-  // The version folder (inside the artifact folder) the current version is in, with a store.
+  const notExported = (why) => { meta.incomplete = true; failed = true; rec.incomplete = true; notes.push(`not exported: ${why}`); };
+  // The version folder (inside the artifact folder) the current version is in.
   let verFolder = null;
 
-  // A whole version the store already has (plain, non-Docs only): no fetch. Its preview must hold the start file
-  // when the viewer would show it; otherwise it is fetched again into the same folder.
+  // A version the store already has (plain, non-Docs only): no fetch. Its preview must hold the start file when the
+  // viewer would show it; otherwise it is fetched again, into its own folder.
   let kept = null;
-  if (rec && !isClaudeDocsArtifact(a) && meta.ver && typeSlug === '' && store.has(uuid, meta.ver)) {
+  let same = null;
+  if (!docs && meta.ver && typeSlug === '' && store.has(uuid, meta.ver)) {
     const v = rec.versions.get(meta.ver);
     const preview = v && v.preview && typeof v.preview === 'object' ? v.preview : null;
     const kind = v && v.start ? previewKind(v.start) : null;
     const inPreview = (list) => !!(preview && Array.isArray(list) && list.some((t) => t[0] === v.start));
-    if (storeVersionWhole(v) && (!kind || inPreview(kind === 'text' ? preview && preview.texts : preview && preview.images))) kept = v;
+    const shown = !kind || inPreview(kind === 'text' ? preview && preview.texts : preview && preview.images);
+    if (shown && storeVersionWhole(v)) kept = v;
+    else if (shown && storeVersionSame(v)) same = v;
   }
-
-  // What the chats saved of this version, when the caller knows: no fetch. A bad answer or a throw means fetch.
-  let reused = null;
-  if (!rec && typeof ctx.reuse === 'function' && !isClaudeDocsArtifact(a) && meta.ver && typeSlug === '') {
-    try {
-      const r = ctx.reuse(uuid, meta.ver);
-      const paths = r && r.files && typeof r.files === 'object' ? Object.keys(r.files) : [];
-      if (paths.length && paths.every((k) => typeof r.files[k] === 'string' && r.files[k])) {
-        reused = { files: { ...r.files }, texts: Array.isArray(r.texts) ? r.texts : [], images: Array.isArray(r.images) ? r.images : [],
-          unverified: Array.isArray(r.unverified) ? r.unverified.filter((k) => paths.includes(k)) : [] };
-      }
-    } catch (e) { reused = null; }
-  }
+  const startTextOf = (v) => {
+    const t = v.preview && Array.isArray(v.preview.texts) ? v.preview.texts.find((x) => x[0] === v.start) : null;
+    return t ? t[1] : null;
+  };
 
   if (kept) {
     verFolder = kept.folder;
     meta.files = kept.files;
-    meta.missing = [];
     startSaved = kept.startSaved;
-    const startText = kept.preview && Array.isArray(kept.preview.texts) ? kept.preview.texts.find((t) => t[0] === kept.start) : null;
-    meta.needsRuntime = publishedNeedsRuntime(startText ? startText[1] : null);
+    meta.needsRuntime = publishedNeedsRuntime(startTextOf(kept));
     if (kept.files.some((f) => f.verified === false)) notes.push("files not checked against claude.ai's checksum");
-  } else if (reused) {
-    const paths = Object.keys(reused.files);
-    const first = publishedStart(paths.map((path) => ({ path })));
-    const startPath = first ? first.path : null;
-    const startText = reused.texts.find((t) => t[0] === startPath);
-    const startImage = reused.images.find((t) => t[0] === startPath);
-    meta.savedIn = reused.files;
-    meta.needsRuntime = publishedNeedsRuntime(startText ? startText[1] : null);
+  } else if (same) {
+    // startSaved and the file's savedAs are root-relative: the chat's own file.
+    meta.files = same.files.map((f) => ({ ...f, savedAs: same.sameAs[f.path] }));
+    startSaved = same.start ? same.sameAs[same.start] || null : null;
+    meta.needsRuntime = publishedNeedsRuntime(startTextOf(same));
     notes.push('files saved with the chats');
-    if (reused.unverified.length) notes.push("files not checked against claude.ai's checksum");
-    reusedInfo = {
-      start: startPath, startSaved: startPath ? reused.files[startPath] : null,
-      startSize: startText ? new TextEncoder().encode(startText[1]).length : startImage ? Math.floor(String(startImage[1]).replace(/^[^,]*,/, '').length * 3 / 4) : null,
-      files: paths.map((path) => ({ path, savedAs: reused.files[path], ...(reused.unverified.includes(path) ? { verified: false } : {}) })),
-      payload: reused.texts.length || reused.images.length ? { texts: reused.texts, images: reused.images } : null,
-    };
-  } else if (isClaudeDocsArtifact(a)) {
-    notes.push(DOCS_ARTIFACT_NOTE);
+  } else if (docs) {
+    const madeBy = ctx.docChats instanceof Map ? ctx.docChats.get(uuid) : null;
+    notes.push(madeBy ? `Text rebuilt from the chat ${madeBy}.` : DOCS_ARTIFACT_NOTE);
   } else if (!meta.ver) {
     notes.push('no published version');
   } else if (state.publishedSignedOut) {
@@ -5548,8 +5597,10 @@ async function saveArtifact(root, a, ctx) {
       warn(name, `Artifact "${name}" could not be fetched: ${info.error}.`, openNote);
     } else {
       meta.ver = info.ver;
-      // In a version folder no saved name can meet artifact.json; at the top of the artifact folder it is reserved.
-      const { names, renames } = publishedSavedNames(info.files.map((f) => f.path), rec ? [] : ['artifact.json']);
+      rec.current = info.ver;
+      if (info.history.length >= rec.history.length) rec.history = info.history;
+      // In a version folder no saved name can meet artifact.json.
+      const { names, renames } = publishedSavedNames(info.files.map((f) => f.path));
       const files = info.files.map((f) => ({ path: f.path, savedAs: names.get(f.path), size: f.size, contentType: f.contentType, sha256: f.sha256 }));
       meta.files = files;
       // Rejected paths are only counted: they come from claude.ai and may hold anything.
@@ -5559,25 +5610,23 @@ async function saveArtifact(root, a, ctx) {
         if (info.rejected.length) parts.push(`${artifactCount(info.rejected.length, 'file')} with unsafe paths not fetched`);
         warn(name, `Artifact "${name}": file names changed to stay inside its folder: ${parts.join('; ')}.`, openNote);
       }
-      const target = rec ? store.versionFolder(rec, info.ver) : `${prefix}${folder}/`;
-      got = await fetchPublishedFiles({ target: root, prefix: target, uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished, collect: true });
+      got = await fetchPublishedFiles({ target: root, prefix: store.versionFolder(rec, info.ver), uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished, collect: true });
       meta.missing = got.missing;
       meta.incomplete = got.incomplete;
       markUnverified(files, got.unverified);
       startSaved = got.startSaved;
-      if (rec) {
-        rec.current = info.ver;
-        if (files.length) {
-          // Publishes the chats recorded for this version stay with it.
-          const prev = rec.versions.get(info.ver);
-          const v = {
-            folder: got.saved ? store.folderName(rec, info.ver) : null, files, start: got.start, startSaved: got.startSaved,
-            incomplete: got.incomplete, missing: got.missing, saved: got.saved, publishedIn: prev && Array.isArray(prev.publishedIn) ? prev.publishedIn : [],
-          };
-          Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
-          rec.versions.set(info.ver, v);
-          verFolder = v.folder;
-        }
+      if (files.length) {
+        // Publishes the chats recorded for this version stay with it.
+        const prev = rec.versions.get(info.ver);
+        const v = {
+          folder: got.saved ? store.folderName(rec, info.ver) : null, files, start: got.start, startSaved: got.startSaved,
+          incomplete: got.incomplete, missing: got.missing, saved: got.saved, publishedIn: prev && Array.isArray(prev.publishedIn) ? prev.publishedIn : [],
+        };
+        // A copy that didn't save keeps pointing at the chat's file.
+        if (!got.saved && prev && prev.sameAs) v.sameAs = prev.sameAs;
+        Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
+        rec.versions.set(info.ver, v);
+        verFolder = v.folder;
       }
       meta.needsRuntime = info.runtimeSkipped > 0 || typeSlug !== '' || got.needsRuntime;
       if (!files.length) notes.push(typeSlug || info.runtimeSkipped > 0 ? 'open on claude.ai' : 'no files; open on claude.ai');
@@ -5592,48 +5641,40 @@ async function saveArtifact(root, a, ctx) {
     warn(name, `Artifact "${name}" could not be exported: unexpected error.`, openNote);
     notes.splice(0, notes.length, ARTIFACT_UNEXPECTED_NOTE);
     Object.assign(meta, { ver: '', files: [], missing: [], incomplete: true, needsRuntime: false });
+    rec.incomplete = true;
     startSaved = null;
     got = null;
     failed = true;
   }
-  meta.note = [...(shared ? ['shared with you'] : []), ...notes].join('; ');
-  const start = kept ? kept.start : reusedInfo ? reusedInfo.start : got ? got.start : null;
-  if (reusedInfo) startSaved = reusedInfo.startSaved;
-  meta.start = start;
-  meta.public = a.public === true;
-  if (rec) {
-    Object.assign(rec.meta, { note: meta.note, start, needsRuntime: meta.needsRuntime });
-  } else {
-    try {
-      root.file(`${prefix}${folder}/artifact.json`, JSON.stringify(meta, null, 2));
-    } catch (e) { /* the row and errors.txt still say what happened */ }
-  }
-  // Where the current version's files are, relative to prefix: its version folder with a store.
+  const note = [...(shared ? ['shared with you'] : []), ...notes].join('; ');
+  const start = kept ? kept.start : same ? same.start || null : got ? got.start : null;
+  Object.assign(rec.meta, { note, start, needsRuntime: meta.needsRuntime });
+  // Where the current version's files are, relative to prefix.
   const filesAt = verFolder ? `${folder}/${verFolder}` : folder;
   // The indexes link the current version's start file, else the newest version saved with one.
   let rowAt = filesAt;
   let rowStart = startSaved;
-  if (rec && !rowStart) {
+  let rowReused = !!same;
+  if (!rowStart) {
     const older = artifactRowVersions(rec).filter((v) => v.startSaved).pop();
-    if (older) { rowAt = older.folder; rowStart = older.startSaved; }
+    if (older) { rowAt = older.folder || folder; rowStart = older.startSaved; rowReused = !!older.reused; }
   }
-  const payload = kept ? kept.preview || null : reusedInfo ? reusedInfo.payload : got && !failed ? artifactPayload(got) : null;
+  const payload = kept ? kept.preview || null : same ? same.preview || null : got && !failed ? artifactPayload(got) : null;
   const view = artifactView({
-    uuid, shortId, url, title, typeSlug, typeTitle, shared, public: a.public === true, docs: isClaudeDocsArtifact(a),
-    createdAt: meta.createdAt, updatedAt: meta.updatedAt, folder: `${prefix}${filesAt}`, files: reusedInfo ? reusedInfo.files : meta.files, missing: meta.missing,
-    start, startSaved, startSize: kept ? keptStartSize(kept) : reusedInfo ? reusedInfo.startSize : got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
-    inPayload: kept || reusedInfo ? !!(start && payload && (payload.texts.some((t) => t[0] === start) || payload.images.some((t) => t[0] === start)))
+    uuid, shortId, url, title, typeSlug, typeTitle, shared, public: a.public === true, docs,
+    createdAt, updatedAt, folder: `${prefix}${filesAt}`, files: meta.files, missing: meta.missing,
+    start, startSaved, startSize: kept || same ? keptStartSize(kept || same) : got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
+    inPayload: kept || same ? !!(start && payload && (payload.texts.some((t) => t[0] === start) || payload.images.some((t) => t[0] === start)))
       : !!(got && !failed && start && (got.texts.has(start) || got.images.has(start))),
-    reused: !!reusedInfo,
+    reused: !!same,
   });
   return {
     row: {
-      title, typeTitle, sourceSurface: meta.sourceSurface, rel, folder: rowAt, startSaved: rowStart, url, note: notes.join('; '),
-      needsRuntime: meta.needsRuntime, fileCount: reusedInfo ? reusedInfo.files.length : meta.files.length - meta.missing.length, missingCount: meta.missing.length,
-      ...(reusedInfo ? { reused: true } : {}),
-      ...(rec ? { versions: artifactRowVersions(rec) } : {}),
+      title, typeTitle, sourceSurface, rel, folder: rowAt, startSaved: rowStart, url, note: notes.join('; '),
+      needsRuntime: meta.needsRuntime, fileCount: meta.files.length - meta.missing.length, missingCount: meta.missing.length,
+      ...(rowReused ? { reused: true } : {}), listed: true, versions: artifactRowVersions(rec),
     },
-    entry: { uuid, title, folder, ver: meta.ver, ...(reusedInfo ? { reused: true } : {}) },
+    entry: { uuid, title, folder, ver: meta.ver },
     meta, view, payload,
   };
 }
@@ -5644,17 +5685,40 @@ function keptStartSize(v) {
   return f && Number.isFinite(f.size) ? f.size : null;
 }
 
-// A store record's versions for the indexes, in the record's order: { label (the version id, or current), folder
-// (relative to the store's prefix; null when no copy was saved), startSaved, current }.
+// A store record's versions for the indexes, in claude.ai's order (storeVersionList): { label (the version id, or
+// current), folder (relative to the store's prefix; null when no copy was saved), startSaved, current, reused (only
+// for a version the same as a chat's file: startSaved is then that root-relative file) }.
 function artifactRowVersions(rec) {
-  return [...rec.versions.entries()].map(([ver, v]) => ({
-    label: ver || 'current', folder: v.folder ? `${rec.dir}/${v.folder}` : null, startSaved: v.folder ? v.startSaved || null : null,
-    current: !!ver && ver === rec.current,
-  }));
+  const list = storeVersionList(rec);
+  const noId = storeNoIdKey(list);
+  return list.map(([ver, v]) => {
+    const same = storeVersionSame(v) ? v.sameAs[v.start || v.files[0].path] || null : null;
+    return {
+      label: ver || noId, folder: v.folder ? `${rec.dir}/${v.folder}` : null, startSaved: v.folder ? v.startSaved || null : same,
+      current: !!ver && ver === rec.current, ...(same ? { reused: true } : {}),
+    };
+  });
 }
 
-// An artifact whose saveArtifact threw before it could say so itself: a row, a manifest entry, a warning and,
-// when it can be written, artifact.json, all naming it not exported.
+// An index row for a store record the artifact step didn't save (a page only chats published, or a listed artifact an
+// Export Changes run left out): linked to its newest saved version (artifactRowVersions).
+function storeRecordRow(rec) {
+  const versions = artifactRowVersions(rec);
+  const newest = versions.filter((v) => v.startSaved).pop() || null;
+  const latest = storeVersionList(rec).filter(([, v]) => v.saved || storeVersionSame(v)).pop();
+  const v = latest ? latest[1] : null;
+  const missing = v && Array.isArray(v.missing) ? v.missing.length : 0;
+  const notes = [rec.meta.note, ...(rec.incomplete ? ['some versions not saved (see the chats\' errors.txt)'] : [])].filter(Boolean);
+  return {
+    title: rec.title, typeTitle: rec.meta.typeTitle, sourceSurface: rec.meta.sourceSurface, rel: rec.meta.rel,
+    folder: newest ? newest.folder || rec.dir : rec.dir, startSaved: newest ? newest.startSaved : null, url: rec.meta.url, note: notes.join('; '),
+    needsRuntime: !!(v && v.needsRuntime), fileCount: v ? v.files.length - missing : 0, missingCount: missing,
+    ...(newest && newest.reused ? { reused: true } : {}), listed: rec.listed === true, versions,
+  };
+}
+
+// An artifact whose saveArtifact threw before it could say so itself: a row, a manifest entry and a warning, all
+// naming it not exported; its store record (artifact.json) says so too.
 function unexpectedArtifactRow(root, a, ctx) {
   const uuid = String(a.slug).toLowerCase();
   const title = artifactText(a.title);
@@ -5662,31 +5726,24 @@ function unexpectedArtifactRow(root, a, ctx) {
   let shortId = '';
   try { shortId = uuidToBase58(uuid); } catch (e) { /* the uuid names it instead */ }
   const url = `https://claude.ai/artifact/${shortId || uuid}`;
-  // With a store, the record saveArtifact may have made already, else a new one named artifact_<id>.
-  const rec = ctx.store ? ctx.store.record(uuid, { title: '' }) : null;
-  const folder = rec ? rec.dir : claimArtifactFolder(`artifact_${shortId || uuid}`, ctx.usedFolders);
+  // The record saveArtifact may have made already, else a new one named artifact_<id>.
+  const rec = ctx.store.record(uuid, { title: '' });
+  const folder = rec.dir;
   ctx.warn(title || folder, `Artifact "${title || folder}" could not be exported: unexpected error.`, `Open it on claude.ai: ${url}`);
-  const meta = {
-    format: 1, uuid, shortId, url, title, typeTitle: artifactText(a.typeTitle), sourceSurface: artifactText(a.sourceSurface), rel,
-    ver: '', createdAt: artifactText(a.createdAt), updatedAt: artifactText(a.updatedAt),
-    files: [], missing: [], incomplete: true, needsRuntime: false,
-    note: [...(isSharedArtifact(rel) ? ['shared with you'] : []), ARTIFACT_UNEXPECTED_NOTE].join('; '),
-    start: null, public: a.public === true,
-  };
-  const prefix = rec ? ctx.store.prefix : ctx.prefix || '';
-  if (rec) {
-    rec.listed = true;
-    rec.current = typeof a.live === 'string' && PUBLISHED_VER_RE.test(a.live) ? a.live : null;
-    Object.assign(rec.meta, { url, typeTitle: meta.typeTitle, sourceSurface: meta.sourceSurface, rel, public: a.public === true, createdAt: meta.createdAt, updatedAt: meta.updatedAt, note: meta.note, start: null, needsRuntime: false });
-    if (!rec.title) rec.title = title;
-  } else {
-    try { root.file(`${prefix}${folder}/artifact.json`, JSON.stringify(meta, null, 2)); } catch (e) { /* best effort */ }
-  }
+  const typeTitle = artifactText(a.typeTitle);
+  const sourceSurface = artifactText(a.sourceSurface);
+  const note = [...(isSharedArtifact(rel) ? ['shared with you'] : []), ARTIFACT_UNEXPECTED_NOTE].join('; ');
+  rec.listed = true;
+  rec.incomplete = true;
+  rec.current = typeof a.live === 'string' && PUBLISHED_VER_RE.test(a.live) ? a.live : null;
+  Object.assign(rec.meta, { url, typeTitle, sourceSurface, rel, public: a.public === true, createdAt: artifactText(a.createdAt), updatedAt: artifactText(a.updatedAt), note, start: null, needsRuntime: false });
+  if (!rec.title) rec.title = title;
+  const prefix = ctx.store.prefix;
   let view;
   try {
     view = artifactView({
-      uuid, shortId, url, title, typeSlug: artifactText(a.typeSlug), typeTitle: meta.typeTitle, shared: isSharedArtifact(rel), public: a.public === true,
-      docs: isClaudeDocsArtifact(a), createdAt: meta.createdAt, updatedAt: meta.updatedAt, folder: `${prefix}${folder}`, files: [], missing: [], start: null,
+      uuid, shortId, url, title, typeSlug: artifactText(a.typeSlug), typeTitle, shared: isSharedArtifact(rel), public: a.public === true,
+      docs: isClaudeDocsArtifact(a), createdAt: rec.meta.createdAt, updatedAt: rec.meta.updatedAt, folder: `${prefix}${folder}`, files: [], missing: [], start: null,
       startSaved: null, startSize: null, needsRuntime: false, notExported: true, note: ARTIFACT_UNEXPECTED_NOTE,
     });
   } catch (e) {
@@ -5694,9 +5751,9 @@ function unexpectedArtifactRow(root, a, ctx) {
       startSaved: null, startKind: null, startSize: null, tooLarge: false, startMissing: false, missingCount: 0, files: [], needsRuntime: false, notExported: true, note: ARTIFACT_UNEXPECTED_NOTE, url, thumb: null };
   }
   return {
-    row: { title, typeTitle: meta.typeTitle, sourceSurface: meta.sourceSurface, rel, folder, startSaved: null, url, note: ARTIFACT_UNEXPECTED_NOTE, needsRuntime: false, fileCount: 0, missingCount: 0 },
+    row: { title, typeTitle, sourceSurface, rel, folder, startSaved: null, url, note: ARTIFACT_UNEXPECTED_NOTE, needsRuntime: false, fileCount: 0, missingCount: 0, listed: true },
     entry: { uuid, title, folder, ver: '' },
-    meta, view, payload: null,
+    meta: { incomplete: true, missing: [] }, view, payload: null,
   };
 }
 
@@ -5725,7 +5782,8 @@ const artifactLocal = (r, base = '') => {
 };
 // A row's versions (rows from a store have them): [{ label, local (as artifactLocal), current }].
 const artifactVersionLinks = (r, base = '') => (Array.isArray(r.versions) ? r.versions : []).map((v) => ({
-  label: v.label, current: !!v.current, local: v.folder ? artifactLocal({ rel: r.rel, folder: v.folder, startSaved: v.startSaved }, base) : null,
+  label: v.label, current: !!v.current,
+  local: v.folder || v.reused ? artifactLocal({ rel: r.rel, folder: v.folder, startSaved: v.startSaved, reused: !!v.reused }, base) : null,
 }));
 
 // index.md: one table row per artifact, by title. opts: { listed, exportedAt, warnings, thumbs (card pictures saved) }.
@@ -5736,30 +5794,45 @@ const artifactsChangedLine = (since, included, listed) => `Changed since ${forma
 function artifactThumbsLine(thumbs, listed, needPermission) {
   return `${Number(thumbs) || 0} of ${Number(listed) || 0}${needPermission ? ' (needs the web images permission: Settings, Save web images and artifact card pictures)' : ''}`;
 }
+// Rows not in claude.ai's list (listed: false, pages only chats published) go in their own table under this heading.
+const ARTIFACTS_UNLISTED_HEADING = "Published from chats, not in claude.ai's list";
+// What the indexes say for "Listed by claude.ai" when the export has no list (the setting off, or the list failed).
+const ARTIFACTS_NO_LIST = "claude.ai's list isn't in this export";
+const splitListedRows = (rows) => [sortArtifactRows(rows.filter((r) => r.listed !== false)), sortArtifactRows(rows.filter((r) => r.listed === false))];
+// listed: claude.ai's count, or null when the export has no list.
 function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, thumbsNeedPermission = false, base = '', since = null } = {}) {
   const cell = (t) => mdLinkText(String(t || '')).replace(/[<>|*_`#]/g, '\\$&');
+  const noList = listed == null;
   const lines = [
     '# Claude Takeout - Artifacts',
     '',
-    ...(since ? [artifactsChangedLine(since, rows.length, listed), ''] : []),
+    ...(since && !noList ? [artifactsChangedLine(since, rows.filter((r) => r.listed !== false).length, listed), ''] : []),
     `**Exported:** ${formatTimestamp(exportedAt)}`,
-    `**Listed by claude.ai:** ${listed}`,
+    `**Listed by claude.ai:** ${noList ? ARTIFACTS_NO_LIST : listed}`,
     `**Saved with files:** ${rows.filter((r) => r.fileCount > 0).length}`,
-    `**Card pictures:** ${artifactThumbsLine(thumbs, since ? rows.length : listed, thumbsNeedPermission)}`,
+    ...(noList ? [] : [`**Card pictures:** ${artifactThumbsLine(thumbs, since ? rows.filter((r) => r.listed !== false).length : listed, thumbsNeedPermission)}`]),
   ];
   if (warnings) lines.push(`**Issues:** ${artifactCount(warnings, 'warning')} (see errors.txt)`);
   // A Versions column when the rows come from a store (one folder per version).
   const withVersions = rows.some((r) => Array.isArray(r.versions));
   const target = (local) => local.replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29'));
-  lines.push('', `| # | Artifact | Kind | Source | Files |${withVersions ? ' Versions |' : ''} Notes |`, `|---|----------|------|--------|-------|${withVersions ? '----------|' : ''}-------|`);
-  sortArtifactRows(rows).forEach((r, i) => {
-    const local = artifactLocal(r, base);
-    const remote = artifactUrl(r);
-    const name = cell(r.title || 'Untitled');
-    const link = local ? `[${name}](${target(local)})` : name;
-    const versions = withVersions ? ` ${artifactVersionLinks(r, base).map((v) => `${v.local ? `[${cell(v.label)}](${target(v.local)})` : cell(v.label)}${v.current ? ' (current)' : ''}`).join(', ')} |` : '';
-    lines.push(`| ${i + 1} | ${link}${remote ? ` · [claude.ai](${remote})` : ''} | ${cell(r.typeTitle || 'Page')} | ${cell(artifactSource(r))} | ${r.fileCount}${r.missingCount ? ` (${r.missingCount} missing)` : ''} |${versions} ${cell(artifactRowNotes(r))} |`);
-  });
+  const table = (list) => {
+    lines.push('', `| # | Artifact | Kind | Source | Files |${withVersions ? ' Versions |' : ''} Notes |`, `|---|----------|------|--------|-------|${withVersions ? '----------|' : ''}-------|`);
+    list.forEach((r, i) => {
+      const local = artifactLocal(r, base);
+      const remote = artifactUrl(r);
+      const name = cell(r.title || 'Untitled');
+      const link = local ? `[${name}](${target(local)})` : name;
+      const versions = withVersions ? ` ${artifactVersionLinks(r, base).map((v) => `${v.local ? `[${cell(v.label)}](${target(v.local)})` : cell(v.label)}${v.current ? ' (current)' : ''}`).join(', ')} |` : '';
+      lines.push(`| ${i + 1} | ${link}${remote ? ` · [claude.ai](${remote})` : ''} | ${cell(r.typeTitle || 'Page')} | ${cell(artifactSource(r))} | ${r.fileCount}${r.missingCount ? ` (${r.missingCount} missing)` : ''} |${versions} ${cell(artifactRowNotes(r))} |`);
+    });
+  };
+  const [inList, unlisted] = splitListedRows(rows);
+  if (inList.length || !unlisted.length) table(inList);
+  if (unlisted.length) {
+    lines.push('', `## ${ARTIFACTS_UNLISTED_HEADING}`);
+    table(unlisted);
+  }
   return lines.join('\n') + '\n';
 }
 
@@ -5769,7 +5842,9 @@ function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date(
   const esc = (t) => escapeHtmlText(String(t == null ? '' : t)).replace(/'/g, '&#39;');
   const up = '../'.repeat(String(base).split('/').filter(Boolean).length);
   const withVersions = rows.some((r) => Array.isArray(r.versions));
-  const body = sortArtifactRows(rows).map((r) => {
+  const noList = listed == null;
+  const inList = rows.filter((r) => r.listed !== false);
+  const row = (r) => {
     const local = artifactLocal(r, base);
     const remote = artifactUrl(r);
     const name = esc(r.title || 'Untitled');
@@ -5777,7 +5852,22 @@ function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date(
     return `<tr><td>${local ? `<a href="${esc(local)}">${name}</a>` : name}${remote ? ` <a class="remote" href="${esc(remote)}" rel="noopener noreferrer">claude.ai</a>` : ''}</td>`
       + `<td>${esc(r.typeTitle || 'Page')}</td><td>${esc(artifactSource(r))}</td>`
       + `<td>${r.fileCount}${r.missingCount ? ` (${r.missingCount} missing)` : ''}</td>${versions}<td>${esc(artifactRowNotes(r))}</td></tr>`;
-  }).join('\n');
+  };
+  const table = (list) => `<div class="wrap">
+<table>
+<thead><tr><th>Artifact</th><th>Kind</th><th>Source</th><th>Files</th>${withVersions ? '<th>Versions</th>' : ''}<th>Notes</th></tr></thead>
+<tbody>
+${list.map(row).join('\n')}
+</tbody>
+</table>
+</div>`;
+  const [listedRows, unlisted] = splitListedRows(rows);
+  const tables = [
+    ...(listedRows.length || !unlisted.length ? [table(listedRows)] : []),
+    ...(unlisted.length ? [`<h2>${esc(ARTIFACTS_UNLISTED_HEADING)}</h2>\n${table(unlisted)}`] : []),
+  ].join('\n');
+  const listedLine = noList ? `Listed by claude.ai: ${esc(ARTIFACTS_NO_LIST)}`
+    : `Listed by claude.ai: ${Number(listed) || 0} · Card pictures: ${esc(artifactThumbsLine(thumbs, since ? inList.length : listed, thumbsNeedPermission))}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -5792,6 +5882,7 @@ function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date(
 body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
 main { max-width: 1100px; margin: 0 auto; }
 h1 { font-size: 1.5rem; margin: 0 0 4px; }
+h2 { font-size: 1.1rem; margin: 28px 0 8px; }
 .meta { color: var(--muted); margin: 0 0 20px; }
 .wrap { overflow-x: auto; }
 table { border-collapse: collapse; width: 100%; }
@@ -5804,39 +5895,30 @@ a.remote { font-size: 0.85em; margin-left: 6px; }
 <body>
 <main>
 <h1>Claude Artifacts</h1>
-${since ? `<p class="meta">${esc(artifactsChangedLine(since, rows.length, listed))}</p>\n` : ''}<p class="meta">Exported ${esc(formatTimestamp(exportedAt))} · Listed by claude.ai: ${Number(listed) || 0} · Card pictures: ${esc(artifactThumbsLine(thumbs, since ? rows.length : listed, thumbsNeedPermission))}${warnings ? ` · ${artifactCount(warnings, 'warning')} (see errors.txt)` : ''}</p>
-${viewer ? `<p class="viewer"><a href="${up}viewer.html">Open the artifacts viewer</a></p>\n` : ''}<div class="wrap">
-<table>
-<thead><tr><th>Artifact</th><th>Kind</th><th>Source</th><th>Files</th>${withVersions ? '<th>Versions</th>' : ''}<th>Notes</th></tr></thead>
-<tbody>
-${body}
-</tbody>
-</table>
-</div>
+${since && !noList ? `<p class="meta">${esc(artifactsChangedLine(since, inList.length, listed))}</p>\n` : ''}<p class="meta">Exported ${esc(formatTimestamp(exportedAt))} · ${listedLine}${warnings ? ` · ${artifactCount(warnings, 'warning')} (see errors.txt)` : ''}</p>
+${viewer ? `<p class="viewer"><a href="${up}viewer.html">Open the artifacts viewer</a></p>\n` : ''}${tables}
 </main>
 </body>
 </html>
 `;
 }
 
-// The Export Artifacts loop: saves every listed artifact (artifactsFromList) under prefix ('' or 'artifacts/') in
-// root and returns what the indexes, manifest and viewer are built from. Folder, artifact.json and view paths carry
-// the prefix, so a viewer at the root finds them; card pictures and preview parts stay in the root's viewer-files/.
-// opts: { prefix, artifacts, full, listed, fetchPublished, picturesAllowed, reuse(uuid, ver) (see saveArtifact; null
-// for none), parts (CTViewer.artifactViewParts or null), onProgress(done, total), run (truthy on disk: flush per
-// artifact), collector (optional; otherwise one labelled 'Export Artifacts'), store (artifactStore, optional: its
-// prefix is used, each artifact is kept in its record and version folders, and its artifact.json is written through
-// store.write once, after its picture) }. Never throws.
+// The Export Artifacts loop: saves every listed artifact (artifactsFromList) into a store (artifactStore, its prefix
+// '' or 'artifacts/') in root and returns what the indexes, manifest and viewer are built from. Folder, artifact.json
+// and view paths carry the prefix, so a viewer at the root finds them; card pictures and preview parts stay in the
+// root's viewer-files/. opts: { store (optional: a new one at opts.prefix otherwise), artifacts, full, listed,
+// fetchPublished, picturesAllowed, docChats (see saveArtifact), parts (CTViewer.artifactViewParts or null),
+// onProgress(done, total), run (truthy on disk: flush per artifact), collector (optional; otherwise one labelled
+// 'Export Artifacts') }. Each artifact's artifact.json is written through store.write once, after its picture. Never throws.
 // Returns { views, rows, entries, whole (per artifact: saved with nothing missing), thumbs, collector, writeFailures, partCount, signedOut }; rows and entries name
 // folders relative to prefix.
 async function runArtifactStep(root, opts = {}) {
-  const { artifacts = [], full = false, listed = artifacts.length, fetchPublished, picturesAllowed = false, reuse = null, parts = null, onProgress = null, run = false } = opts;
-  const store = opts.store || null;
-  const prefix = store ? store.prefix : opts.prefix || '';
+  const { artifacts = [], full = false, listed = artifacts.length, fetchPublished, picturesAllowed = false, parts = null, onProgress = null, run = false } = opts;
+  const store = opts.store || artifactStore(root, { prefix: opts.prefix || '' });
   const collector = opts.collector || new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
   const warn = (filename, message, note = null) => collector.addWarning('artifact_export', filename, message, { note });
   const state = {};
-  const ctx = { fetchPublished, state, warn, usedFolders: new Set(ARTIFACT_ROOT_NAMES), prefix, reuse, store };
+  const ctx = { fetchPublished, state, warn, store, docChats: opts.docChats instanceof Map ? opts.docChats : null };
   const rows = [];
   const entries = [];
   const views = [];
@@ -5871,14 +5953,11 @@ async function runArtifactStep(root, opts = {}) {
           if (thumb) {
             view.thumb = thumb;
             thumbs++;
-            if (store) store.record(uuid).meta.thumb = thumb;
-            else root.file(`${view.folder}/artifact.json`, JSON.stringify({ ...saved.meta, thumb }, null, 2));
+            store.record(uuid).meta.thumb = thumb;
           }
         }
       } catch (e) { /* no picture */ }
-      if (store) {
-        try { store.write(store.record(artifacts[i].slug)); } catch (e) { /* the row and errors.txt still say what happened */ }
-      }
+      try { store.write(store.record(artifacts[i].slug)); } catch (e) { /* the row and errors.txt still say what happened */ }
       try {
         if (parts) {
           view = parts.add(view, saved.payload);

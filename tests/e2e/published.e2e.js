@@ -1,7 +1,7 @@
 // Published pages over file:// in Chromium: one card per publish_files call, in place of the "Published on
 // claude.ai" line and of the copy claude.ai attached to the message, with one claude.ai link; the card opens the
 // page in the side panel; a version that is the file Claude wrote says so; an Export All layout links the
-// root published/ folder. No network requests, no page errors.
+// root artifacts/ store. No network requests, no page errors.
 const { chromium } = require(process.env.PW);
 const fs = require('fs'), os = require('os'), path = require('path');
 const { buildHtml } = require('./make-viewer.js');
@@ -54,10 +54,12 @@ const ctxOf = (folder, dir, needsRuntime) => c => {
   fs.writeFileSync(path.join(dir, VIEWER_CHECK_FILE), Buffer.from(VIEWER_CHECK_BASE64, 'base64'));
   fs.mkdirSync(path.join(dir, 'published', 'Guide_ShortA', 'v2'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'published', 'Guide_ShortA', 'v2', 'index.html'), '<p>v2 page</p>');
+  fs.mkdirSync(path.join(dir, 'artifacts', 'Guide_ShortA', 'v2'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'artifacts', 'Guide_ShortA', 'v2', 'index.html'), '<p>v2 page</p>');
   const single = path.join(dir, 'viewer.html');
   fs.writeFileSync(single, buildHtml([chat], '2026-11-16T12:00:00Z', ctxOf('', 'published/Guide_ShortA', false)));
   const mega = path.join(dir, 'mega.html');
-  fs.writeFileSync(mega, buildHtml([chat], '2026-11-16T12:00:00Z', ctxOf('chatA', '../published/Guide_ShortA', true)));
+  fs.writeFileSync(mega, buildHtml([chat], '2026-11-16T12:00:00Z', ctxOf('chatA', '../artifacts/Guide_ShortA', true)));
 
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
@@ -108,7 +110,7 @@ const ctxOf = (folder, dir, needsRuntime) => c => {
   check('mega layout: the card opens', (await page.locator('#panel iframe.preview').getAttribute('srcdoc')).includes('v2 page'));
   const megaData = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(fs.readFileSync(mega, 'utf8'))[1]);
   const href = Object.values(megaData.chats[0].files).find(f => f.published).versions[1].href;
-  check('mega layout: the version links published/ at the root', href === 'published/Guide_ShortA/v2/index.html', href);
+  check('mega layout: the version links artifacts/ at the root', href === 'artifacts/Guide_ShortA/v2/index.html', href);
   check('no network requests', requests.length === 0, requests.join());
   check('no page errors', errors.length === 0, errors.join(' | '));
 

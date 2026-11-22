@@ -2,7 +2,7 @@
 // The sidebar's Artifacts entry with its count; the screen in place of the chat, with the grid and its tabs; a card
 // opens #a=<id> with the sandboxed preview, inside its guard frame; Back and the home button return to the grid; a
 // chat in the sidebar still opens, and history goes back and forth; / searches the artifacts on their screen; a
-// reused page links its file in published/. The In chats tab: a card per file Claude made (not the one a chat
+// reused page links the chat's own file. The In chats tab: a card per file Claude made (not the one a chat
 // published as an artifact), kind chips with counts, search by name, a file page at #ac=<chat>.<file> previewed in the
 // guard frame with only its own chat's stylesheet and scripts, Made in opening the chat, and the version menu; a file
 // that may not match says so. Links: the All cards' source line and "also in chat", an artifact page's Made in /
@@ -97,7 +97,7 @@ const makeChat = {
 // The publishing chat also writes a script, which the other chat's page names but must never get.
 pubChat.chat_messages[1].content.splice(2, 0, ...write('wo', 'other.js', "window.OTHER = 1; console.log('OTHER CHAT LOADED');"));
 // A chat that publishes Guide page (U(1)) twice, at older versions than its current one: first exactly the file it
-// wrote (same), then a file claude.ai served differently (saved in published/); and edits the page.
+// wrote (same), then a file claude.ai served differently (saved in artifacts/<Title>_<id>/<ver>/); and edits the page.
 const OLDA = '<!doctype html><h1>Old A</h1><!--OLDA-->';
 const OLDB = '<!doctype html><h1>Old B served</h1><!--OLDB-->';
 const editChat = {
@@ -416,7 +416,7 @@ const navs = dir => [
   check('v1 opens the saved copy (the file the chat wrote)', (await (await previewOf(v)).$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--OLDA-->'));
   await verMenu.selectOption({ label: 'v2' });
   const v2Guard = await previewOf(v);
-  check('v2 opens the saved copy in published/', (await v2Guard.$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--OLDB-->') && await v2Guard.evaluate(() => document.querySelector('meta[http-equiv]').content === "frame-src 'none'"));
+  check('v2 opens the saved copy in artifacts/', (await v2Guard.$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--OLDB-->') && await v2Guard.evaluate(() => document.querySelector('meta[http-equiv]').content === "frame-src 'none'"));
   check('an older version has no claude.ai badge mix-up: its Open on claude.ai stays', await page.locator('#artifacts-screen #page-links a.open-claude').count() === 1);
   await verMenu.selectOption('current');
   check('Current goes back to the artifact', (await (await previewOf(v)).$eval('iframe', f => f.getAttribute('srcdoc'))).includes('Guide page body'));
