@@ -3393,6 +3393,19 @@ function publishedReuse(shared, chatFolders) {
   };
 }
 
+// Export All: whether a published version's preview is worth keeping in memory for the artifact step, i.e. it is
+// the listed live version of an artifact the step will save and may reuse (plain, non-Docs; see saveArtifact).
+// artifacts: the included list; empty when the step won't run, so nothing is kept.
+function publishedPreviewWanted(artifacts) {
+  const wanted = new Set();
+  for (const a of Array.isArray(artifacts) ? artifacts : []) {
+    if (!a || artifactText(a.typeSlug) !== '' || isClaudeDocsArtifact(a)) continue;
+    if (typeof a.live !== 'string' || !PUBLISHED_VER_RE.test(a.live)) continue;
+    wanted.add(`${String(a.slug).toLowerCase()} ${a.live}`);
+  }
+  return (uuid, ver) => wanted.has(`${String(uuid).toLowerCase()} ${ver}`);
+}
+
 const publishedSignedOutReply = (r) => !!(r && (r.status === 401 || r.error === 'HTTP 401'));
 
 // Fetch one page version's files (from cleanPublishedInfo) through content.js and write each to
@@ -3509,9 +3522,9 @@ function markUnverified(files, unverified) {
 
 // Save the pages a chat published. ctx: { errorCollector, artifacts (the text as on disk, inlined), artifactIndex,
 // attached (extractAttachedFiles entries saved by this export), fetchPublished(message) -> Promise<response>,
-// shared (Export All: the shared object with published: Map, root), chatFolder }. Returns one PublishedEntry per
-// page: { uuid, shortId, title, url, current, dir (relative to the chat folder), versions: [{ ver, folderName,
-// label, order, start, startSaved, same, writtenAs, incomplete, needsRuntime, text, publishes }] }.
+// shared (Export All: the shared object with published: Map, root, previewWanted), chatFolder }. Returns one
+// PublishedEntry per page: { uuid, shortId, title, url, current, dir (relative to the chat folder), versions:
+// [{ ver, folderName, label, order, start, startSaved, same, writtenAs, incomplete, needsRuntime, text, publishes }] }.
 async function savePublishedPages(folder, data, ctx = {}) {
   const { errorCollector = null, artifacts = {}, artifactIndex = {}, attached = [], fetchPublished = null, shared = null } = ctx;
   const found = publishedPagesOf(data);
@@ -3521,6 +3534,8 @@ async function savePublishedPages(folder, data, ctx = {}) {
   const dirs = exportAll ? (shared.publishedDirs || (shared.publishedDirs = new Set())) : new Set();
   const state = exportAll ? shared : {};  // publishedSignedOut: one 401 stops fetching for the whole export
   const target = exportAll ? shared.root : folder;
+  // Export All: (uuid, ver) -> keep that version's preview for the artifact step (publishedPreviewWanted).
+  const wanted = exportAll && typeof shared.previewWanted === 'function' ? shared.previewWanted : () => false;
   const chain = getMessageChain(data);
   const has = (o, k) => o != null && Object.prototype.hasOwnProperty.call(o, k);
   const limit = typeof CTViewer !== 'undefined' && CTViewer.TEXT_EMBED_LIMIT ? CTViewer.TEXT_EMBED_LIMIT : 2 * 1024 * 1024;
@@ -3663,10 +3678,11 @@ async function savePublishedPages(folder, data, ctx = {}) {
     v.attempted = true;
     const got = await fetchPublishedFiles({
       target, prefix: `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
-      state, onSignedOut: markSignedOut, fetchPublished, collect: exportAll,
+      state, onSignedOut: markSignedOut, fetchPublished, collect: wanted(rec.uuid, v.ver),
     });
-    // Export All: the version's preview texts and images, for the artifact step (publishedReuse); not part of published.json.
-    if (exportAll) Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
+    // Export All: the version's preview texts and images, for the artifact step (publishedReuse), only for an
+    // included artifact's listed version; not part of published.json.
+    if (wanted(rec.uuid, v.ver)) Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
     v.saved = got.saved;
     markUnverified(v.files, got.unverified);
     v.missing = got.missing;
@@ -3736,7 +3752,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
       for (const pub of m.publishes) {
         const where = { chat: data.uuid, messageUuid: pub.messageUuid, toolUseId: pub.toolUseId, same, writtenAs: own ? own.name : null };
         // The written text, for Export All's artifact step (publishedReuse); not part of published.json.
-        if (exportAll && own && typeof own.text === 'string' && own.text.length <= limit) Object.defineProperty(where, 'text', { value: own.text });
+        if (wanted(rec.uuid, v.ver) && own && typeof own.text === 'string' && own.text.length <= limit) Object.defineProperty(where, 'text', { value: own.text });
         v.publishedIn.push(where);
       }
       if (same && !v.saved && !v.attempted) v.needsRuntime = v.needsRuntime || publishedNeedsRuntime(own && own.text);
@@ -4861,7 +4877,8 @@ async function bulkExportZip(options = {}) {
     let incomplete = 0;  // chats whose data looks incomplete (export_health)
     // `projects` and `published` hold the files chats share, and `artifacts` claude.ai's artifacts, so no chat may take those names.
     const usedFolderNames = new Set(['projects', 'published', 'artifacts']);
-    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), published: new Map() };
+    // previewWanted: only an included artifact's listed version keeps its preview in memory for the artifact step.
+    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), published: new Map(), previewWanted: publishedPreviewWanted(includedArtifacts) };
     const viewerChats = [];
     const exportedChats = [];  // { uuid, name, updated_at (as listed), folder }, for the manifest and the record
 
@@ -5676,6 +5693,7 @@ async function runArtifactStep(root, opts = {}) {
     } catch (e) { /* the parts written so far stay */ }
   } catch (e) {
     console.error('Artifact step stopped early:', e);
+    warn('artifacts', 'Artifact step stopped early: unexpected error. Artifacts after this one were not exported.');
   }
   return { views, rows, entries, whole, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true };
 }

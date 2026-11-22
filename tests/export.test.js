@@ -4055,3 +4055,108 @@ test('a multi-file page reused from published/ previews with all its files', asy
   assert.ok(part[1].indexOf('PAGE-HTML') < part[1].indexOf('PAGE-CSS'), 'start file first');
   assert.ok(!out['published/Guide_Short1/published.json'].includes('PAGE-'), 'previews stay out of published.json');
 });
+
+// Export All keeps a published version's preview in memory only for the artifact step's listed live version.
+const recordCollect = (calls) => (sb) => {
+  const orig = vm.runInContext('fetchPublishedFiles', sb);
+  sb.__origFetchFiles = orig;
+  sb.__collectCalls = calls;
+  vm.runInContext('fetchPublishedFiles = (o) => { __collectCalls.push([o.uuid, o.ver, !!o.collect]); return __origFetchFiles(o); }', sb);
+};
+const twoVersionChat = () => Object.assign(pubChat([
+  pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs)),
+  pubMsg('m2', 'm1', publish('p2', PUB_U, 'v2', guideAs)),
+]), { uuid: 'a', name: 'Chat a' });
+const twoVersionPage = () => publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v2', history: ['v1', 'v2'], versions: { v1: { files: { 'index.html': 'PAGE-ONE' } }, v2: { files: { 'index.html': 'PAGE-TWO' } } } } });
+
+test('Export All with artifacts off collects no published previews', async () => {
+  const calls = [];
+  const fetcher = twoVersionPage();
+  const setup = (sb) => { bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v2' })], fetcher, off: true })(sb); recordCollect(calls)(sb); };
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: twoVersionChat() }, setup });
+  const files = await zipFiles(zip);
+  assert.strictEqual(files['published/Guide_Short1/v2/index.html'], 'PAGE-TWO');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(calls)), [[PUB_U, 'v1', false], [PUB_U, 'v2', false]]);
+});
+
+test('Export All collects a published preview only for the listed live version, and reuse still previews', async () => {
+  const calls = [];
+  const fetcher = twoVersionPage();
+  const setup = (sb) => { bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v2' })], fetcher })(sb); recordCollect(calls)(sb); };
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: twoVersionChat() }, setup });
+  const files = await zipFiles(zip);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(calls)), [[PUB_U, 'v1', false], [PUB_U, 'v2', true]]);
+  assert.strictEqual(fetcher.count('publishedPageFile', PUB_U), 2, 'v2 reused, not fetched again');
+  assert.deepStrictEqual(JSON.parse(files[`artifacts/${artFolder('Guide', PUB_U)}/artifact.json`]).savedIn, { 'index.html': 'published/Guide_Short1/v2/index.html' });
+  const parts = Object.entries(files).filter(([n]) => /^viewer-files\/part-/.test(n)).map(([, t]) => t).join('');
+  assert.ok(parts.includes('PAGE-TWO'), 'the reused version previews');
+  assert.ok(!parts.includes('PAGE-ONE'), 'the other version was not kept for a preview');
+});
+
+test('publishedPreviewWanted takes plain artifacts at their listed live version only', () => {
+  const sb = exportPopup().sandbox;
+  sb.__arts = [art(U(1), 'a'), art(U(2), 'b', { live: 'v2' }), art(U(3), 'Doc', { typeSlug: 'claude-docs' }), art(U(4), 'd', { live: null })];
+  const wanted = vm.runInContext('publishedPreviewWanted(__arts)', sb);
+  assert.strictEqual(wanted(U(1).toUpperCase(), LIVE), true);
+  assert.strictEqual(wanted(U(2), 'v2'), true);
+  assert.strictEqual(wanted(U(2), 'v1'), false);
+  assert.strictEqual(wanted(U(3), LIVE), false);
+  assert.strictEqual(wanted(U(4), ''), false);
+  assert.strictEqual(vm.runInContext('publishedPreviewWanted([])', sb)(U(1), LIVE), false);
+});
+
+test('runArtifactStep says in its collector when it stops early on an unexpected error', async () => {
+  const popup = exportPopup();
+  const sb = popup.sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: livePage('One', { 'index.html': '1' }), [U(2)]: livePage('Two', { 'index.html': '2' }) });
+  sb.setTimeout = (f) => setTimeout(f, 0);
+  sb.__root = zipStub();
+  sb.__fetch = fetcher.fetch;
+  sb.__arts = [art(U(1), 'One'), art(U(2), 'Two')];
+  sb.__progress = () => { throw new Error('boom'); };
+  const origError = sb.console.error;
+  sb.console.error = () => {};
+  const out = await vm.runInContext(`runArtifactStep(__root, { prefix: 'artifacts/', artifacts: __arts, full: false, listed: 2, fetchPublished: __fetch, picturesAllowed: false, reuse: null, parts: null, onProgress: __progress, run: false })`, sb);
+  sb.console.error = origError;
+  assert.strictEqual(out.views.length, 1, 'stopped after the first');
+  const w = out.collector.warnings.find((x) => x.type === 'artifact_export' && /stopped early/.test(x.error));
+  assert.ok(w, JSON.stringify(out.collector.warnings));
+  assert.strictEqual(w.error, 'Artifact step stopped early: unexpected error. Artifacts after this one were not exported.');
+  assert.match(out.collector.generateErrorReport(), /Artifact step stopped early/);
+});
+
+test('a combined Export All writes no frame URL, asset token or picture URL into any file, status or console', async () => {
+  const TOKEN = 'SECRET-ASSET-TOKEN-42';
+  const thumbUrl = (uuid) => `https://${uuid}.frame.claudeusercontent.com/_f/V/_thumb.img?__frame_t=${TOKEN}`;
+  const chat = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  const fetcher = publishedFetcher({
+    [PUB_U]: { title: 'Guide', live: 'v1', history: ['v1'], versions: { v1: { files: { 'index.html': 'PUBLISHED-PAGE' } } } },
+    [U(1)]: livePage('One', { 'index.html': '<p>one</p>', 'a.png': { body: PNG, type: 'image/png' } }),
+  });
+  const frames = [art(PUB_U, 'Guide', { live: 'v1' }), art(U(1), 'One'), art(U(2), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' })];
+  const thumbFetches = [];
+  const consoleCalls = [];
+  const setup = (sb) => {
+    bulkWithArtifacts({ frames, fetcher, granted: true })(sb);
+    const send = sb.chrome.tabs.sendMessage;
+    sb.chrome.tabs.sendMessage = (id, msg, cb) => (msg.action === 'artifactThumbUrl' ? cb({ url: thumbUrl(msg.uuid) }) : send(id, msg, cb));
+    const fetchOrig = sb.fetch;
+    sb.fetch = async (url, opts) => {
+      if (/_thumb\.img/.test(String(url))) {
+        thumbFetches.push(String(url));
+        return { ok: true, status: 200, headers: { get: () => 'image/png' }, arrayBuffer: async () => new Uint8Array(PNG).buffer };
+      }
+      return fetchOrig(url, opts);
+    };
+    sb.console = Object.fromEntries(['log', 'warn', 'error', 'info', 'debug'].map((k) => [k, (...a) => consoleCalls.push(a.map(String).join(' '))]));
+  };
+  const { zip, status } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup, assets: true });
+  assert.ok(thumbFetches.length >= 1, 'the picture URL was used');
+  const files = await zipFiles(zip);
+  assert.ok(files['viewer.html'] && files['artifacts/index.md'] && files['published/Guide_Short1/v1/index.html'], Object.keys(files).join());
+  assert.ok(Object.keys(files).some((n) => /^viewer-files\/thumbs\//.test(n)), 'a card picture was saved');
+  const all = { ...files, status: status.textContent + status.className, console: consoleCalls.join('\n') };
+  for (const [name, text] of Object.entries(all)) {
+    for (const bad of ['__frame_t', 'claudeusercontent', '_thumb.img', TOKEN, thumbUrl(U(1))]) assert.ok(!name.includes(bad) && !text.includes(bad), `${name} holds ${bad}`);
+  }
+});
