@@ -135,6 +135,14 @@ const GAME = '<!doctype html><link rel="stylesheet" href="app.css"><h1>Game</h1>
   got = await download(ap, zipLink);
   const zipFile = fs.readFileSync(path.join(adir, folder(1), `${LIVE}.zip`));
   check('Download ZIP saves the ZIP the export wrote', got.name === `${LIVE}.zip` && got.bytes.equals(zipFile) && got.stayed, got.name);
+  // A ZIP gone from disk: the viewer stays where it was (the link opens in a tab of its own).
+  fs.renameSync(path.join(adir, folder(1), `${LIVE}.zip`), path.join(adir, 'moved.zip'));
+  const hereBefore = ap.url();
+  await zipLink.click();
+  await ap.waitForTimeout(500);
+  check('a missing ZIP leaves the viewer in place', ap.url() === hereBefore && (await ap.locator('#page-links a.download-zip').count()) === 1, ap.url());
+  for (const p of av.context.pages()) if (p !== ap) await p.close();
+  av.seen.popups = 0;
 
   await ap.evaluate(id => { location.hash = `#a=${id}`; }, uuidToBase58(U(2)));
   await ap.waitForSelector('#page-links button.download', { timeout: 4000 });

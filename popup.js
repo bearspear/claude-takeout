@@ -3410,7 +3410,9 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   for (const [f, bytes] of candidates) if (f === start) keep(f, bytes);
   for (const [f, bytes] of candidates) if (f !== start) keep(f, bytes);
   const startOk = !!start && !missing.includes(start.path);
-  const wroteZip = zip ? await writeVersionZip(target, prefix, zipped, zip.date) : false;
+  // zip.whole: only a version saved whole (a chat's fetch in Export All, which the artifact step fetches again when
+  // it isn't, so a ZIP of a part would be left beside the step's own files).
+  const wroteZip = zip && !(zip.whole && missing.length) ? await writeVersionZip(target, prefix, zipped, zip.date) : false;
   return {
     saved: written > 0, zipped: wroteZip, missing, problems, incomplete: missing.length > 0,
     start: startOk ? start.path : null, startSaved: startOk ? names.get(start.path) : null, startSize: startOk ? startSize : null,
@@ -3648,7 +3650,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
     const got = await fetchPublishedFiles({
       target, prefix: exportAll ? store.versionFolder(rec.store, v.key) : `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
       state, onSignedOut: markSignedOut, fetchPublished, collect: wanted(rec.uuid, v.ver),
-      zip: exportAll && wanted(rec.uuid, v.ver) ? { date: rec.store.meta.updatedAt } : null,
+      zip: exportAll && wanted(rec.uuid, v.ver) ? { date: rec.store.meta.updatedAt, whole: true } : null,
     });
     // Export All: a version the store points at a chat's file for (sameAs) stays as it was when no copy was saved.
     const keptSame = exportAll && !got.saved && !!v.sameAs;

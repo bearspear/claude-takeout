@@ -456,6 +456,9 @@
       if (!href || !openableHref(href)) return null;
       const a = el('a', 'btn download-zip', v.missingCount > 0 ? 'Download ZIP (some files missing)' : 'Download ZIP');
       a.setAttribute('href', href);
+      // A tab of its own, as Open file: a ZIP gone from disk then can't take the viewer's tab to an error page.
+      a.setAttribute('target', '_blank');
+      a.setAttribute('rel', 'noopener');
       return a;
     }
     // A payload's holdings for a view, once loaded; the same promise for every caller.

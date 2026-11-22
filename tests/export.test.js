@@ -4727,3 +4727,27 @@ test('Export Changes writes no ZIP for an artifact it does not write', async () 
   const names = Object.keys(zip.files).filter((n) => n.endsWith('.zip'));
   assert.deepStrictEqual(names, [`artifacts/${artFolder('Two', U(2))}/${LIVE}.zip`]);
 });
+
+test('Export All leaves no stale ZIP when the artifact step refetches a version a chat saved in part', async () => {
+  const crypto = require('crypto');
+  const files = { 'index.html': 'A', 'b.js': 'B', 'c.css': 'C' };
+  // c.css always fails; b.js fails from the second fetch of it on (the artifact step's).
+  const seen = {};
+  const fetch = async (msg) => {
+    if (msg.action === 'publishedPageInfo') {
+      return { ver: 'v1', title: 'Guide', history: ['v1'], rejected: [],
+        files: Object.entries(files).map(([path, body]) => ({ path, size: body.length, contentType: 'text/plain', sha256: crypto.createHash('sha256').update(body).digest('hex') })) };
+    }
+    seen[msg.path] = (seen[msg.path] || 0) + 1;
+    if (msg.path === 'c.css' || (msg.path === 'b.js' && seen[msg.path] > 1)) return { error: 'HTTP 500', status: 500 };
+    return { base64: Buffer.from(files[msg.path]).toString('base64'), contentType: 'text/plain', size: files[msg.path].length };
+  };
+  const fetcher = { fetch };
+  const three = [{ as: 'index.html', path: '/home/claude/a.html' }, { as: 'b.js', path: '/home/claude/b.js' }, { as: 'c.css', path: '/home/claude/c.css' }];
+  const chat = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', three))]), { uuid: 'a', name: 'Chat a' });
+  const out = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
+  const f = artFolder('Guide', PUB_U);
+  assert.ok(seen['b.js'] >= 2, 'the step fetched the version again');
+  assert.deepStrictEqual(Object.keys(out.zip.files).filter((n) => n.endsWith('.zip')), [], 'no ZIP the record does not name');
+  assert.ok(!('zip' in JSON.parse(await out.zip.file(`artifacts/${f}/artifact.json`).async('string')).versions.v1));
+});
