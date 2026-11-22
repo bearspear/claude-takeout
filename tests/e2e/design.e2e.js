@@ -156,6 +156,8 @@ async function writeOut(zip) {
     await page.locator('.design-board', { hasText: 'Home A' }).locator('button.board-open').click();
     await page.locator('button.canvas-back').click();
     await canvas.waitFor({ timeout: 3000 }).catch(() => {});
+    const focused = await page.evaluate(() => { let a = document.activeElement; while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; return a ? a.getAttribute('aria-label') : null; });
+    check(`${label}: Back puts focus on the board it left`, focused === 'Open Home A alone', String(focused));
     const again = await page.locator('#page-badges .badge').allTextContents();
     check(`${label}: badges stay single after Back`, again.filter(b => b === 'Design canvas').length === 1 && again.filter(b => b === 'some boards need claude.ai').length === 1, again.join('|'));
 

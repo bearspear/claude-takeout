@@ -398,6 +398,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.20.1
+
+- **Design canvas fixes** - A board or note placed or sized far out of range (beyond 100,000 pixels from the origin, or wider or taller than 20,000) is left off the canvas and listed under it, so it can't shrink everything else to nothing; a very wide canvas is shown at no less than 10% and scrolls. **Back to the canvas** puts keyboard focus back on the board you opened.
+
 ### v1.20.0
 
 - **Design canvas** - A Design artifact's page on the Artifacts screen now shows its boards the way its canvas on claude.ai lays them out: each board at its place and with its title, notes as text, all scaled to fit, each board in the viewer's sandbox. **Open alone** shows one board at its size. A board that uses claude.ai's templates shows as saved, with its placeholders, and says so; uploaded images aren't in the export and the board says that too. Archives exported earlier get the canvas once their viewer is rebuilt with `build_viewer.js --force`.

@@ -2206,3 +2206,29 @@ test('noteFill', () => {
   for (const f of ['teal', 'orange', 'yellow', 'green', 'blue', 'pink', 'purple', 'red']) assert.strictEqual(noteFill(f), f);
   for (const f of ['magenta', null, undefined, 3, 'TEAL ']) assert.strictEqual(noteFill(f), 'grey', String(f));
 });
+
+// ---- v1.20.1: outliers don't collapse the canvas ----
+const { canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX } = require('../viewer/viewer-logic.js');
+
+test('designCanvas skips boards and notes placed or sized out of range', () => {
+  const c = designCanvas(JSON.stringify({
+    boards: {
+      'Main.dc.html': { x: 0, y: 0, w: 300, h: 200, title: 'ok' },
+      'Far.dc.html': { x: 1e9, y: 0, w: 300, h: 200, title: 'far' },
+      'Huge.dc.html': { x: 0, y: 0, w: 1e308, h: 1e308, title: 'huge' },
+      'Neg.dc.html': { x: -(DESIGN_COORD_MAX + 1), y: 0, w: 10, h: 10, title: 'neg' },
+    },
+    notes: { a: { text: 'near', x: 10, y: 10 }, b: { text: 'far', x: 0, y: 1e12 }, c: { text: 'wide', x: 0, y: 0, w: DESIGN_SIZE_MAX + 1 } },
+  }), () => true);
+  assert.deepStrictEqual(c.boards.map(b => b.name), ['Main.dc.html']);
+  assert.deepStrictEqual(c.skipped.map(s => s.title), ['far', 'huge', 'neg']);
+  assert.deepStrictEqual(c.notes.map(n => n.id), ['a']);
+  assert.ok(Number.isFinite(c.width) && Number.isFinite(c.height) && c.width === 330, JSON.stringify([c.width, c.height]));
+});
+
+test('canvasScale fits the width, never above 1 or below 0.1', () => {
+  assert.strictEqual(canvasScale(500, 1000), 1);
+  assert.strictEqual(canvasScale(2000, 1000), 0.5);
+  assert.strictEqual(canvasScale(1e6, 1000), 0.1);
+  for (const bad of [0, -1, NaN, Infinity]) assert.strictEqual(canvasScale(bad, 1000), 1, String(bad));
+});

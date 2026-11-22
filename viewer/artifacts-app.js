@@ -788,7 +788,12 @@
         canvasBadges(layout, texts);
         if (focus) {
           const at = pageBody.querySelector(`.design-board[data-name="${CSS.escape(focus)}"]`);
-          if (at) at.scrollIntoView({ block: 'center' });
+          if (at) {
+            at.scrollIntoView({ block: 'center' });
+            // Keyboard focus back where it was: the board's Open alone.
+            const open = at.querySelector('button.board-open');
+            if (open) open.focus({ preventScroll: true });
+          }
         }
       });
     }
@@ -809,7 +814,7 @@
     function canvasPage(v, layout, payload, texts) {
       const wrap = el('div', 'design-wrap');
       const avail = Math.max(320, (pageBody.clientWidth || 1000) - 48);
-      const scale = Math.min(1, avail / Math.max(1, layout.width));
+      const scale = canvasScale(layout.width, avail);
       const canvas = el('div', 'design-canvas');
       canvas.style.width = `${Math.ceil(layout.width * scale)}px`;
       canvas.style.height = `${Math.ceil(layout.height * scale)}px`;

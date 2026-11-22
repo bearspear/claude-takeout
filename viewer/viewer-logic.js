@@ -1404,6 +1404,17 @@ function saveBytes(name, data) {
 // ---- A Design artifact's canvas (v1.20): its boards and notes from project/canvas.json, drawn without claude.ai ----
 
 const DESIGN_BOARD_MAX = 60;
+// Places and sizes past these are skipped: one far-off board or note would shrink everything else to nothing.
+const DESIGN_COORD_MAX = 1e5;
+const DESIGN_SIZE_MAX = 2e4;
+const inPlace = v => v !== null && Math.abs(v) <= DESIGN_COORD_MAX;
+const inSize = v => v !== null && v > 0 && v <= DESIGN_SIZE_MAX;
+
+// The canvas's scale to fit avail pixels: at most 1 (never enlarged), at least 0.1 (a wider canvas scrolls instead).
+function canvasScale(width, avail) {
+  if (!(Number.isFinite(width) && width > 0 && Number.isFinite(avail) && avail > 0)) return 1;
+  return Math.min(1, Math.max(0.1, avail / width));
+}
 const NOTE_FILLS = new Set(['teal', 'orange', 'yellow', 'green', 'blue', 'pink', 'purple', 'red']);
 const BOARD_NAME = /^[^/\\]+\.dc\.html$/;
 const designOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -1440,7 +1451,7 @@ function designCanvas(text, held) {
     const b = json.boards[name];
     const title = designObject(b) && str(b.title) ? b.title : name;
     const [x, y, w, h] = designObject(b) ? [num(b.x), num(b.y), num(b.w), num(b.h)] : [null, null, null, null];
-    if (x === null || y === null || w === null || h === null || w <= 0 || h <= 0 || boards.length >= DESIGN_BOARD_MAX) { skipped.push({ name, title }); continue; }
+    if (!inPlace(x) || !inPlace(y) || !inSize(w) || !inSize(h) || boards.length >= DESIGN_BOARD_MAX) { skipped.push({ name, title }); continue; }
     const path = `project/${name}`;
     boards.push({ name, path, x, y, w, h, title, held: !!held(path) });
   }
@@ -1454,8 +1465,9 @@ function designCanvas(text, held) {
     if (!designObject(n)) continue;
     const x = num(n.x);
     const y = num(n.y);
-    if (x === null || y === null) continue;
+    if (!inPlace(x) || !inPlace(y)) continue;
     const w = num(n.w) !== null && n.w > 0 ? n.w : num(n.maxW) !== null && n.maxW > 0 ? n.maxW : 320;
+    if (!inSize(w)) continue;
     notes.push({ id, text: str(n.text), x, y, w, fill: noteFill(n.fill), heading: n.kind === 'title1' });
   }
   const minX = Math.min(...boards.map(b => b.x), ...notes.map(n => n.x));
@@ -1467,5 +1479,5 @@ function designCanvas(text, held) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX };
 }
