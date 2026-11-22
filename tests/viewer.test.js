@@ -2129,3 +2129,24 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
     assert.deepStrictEqual([...chatFileTexts(null)], []);
   });
 }
+
+// ---- Download (v1.19): a file's bytes the viewer holds, saved under a clean name ----
+const { downloadName, dataUrlBytes } = require('../viewer/viewer-logic.js');
+
+test('downloadName keeps the last path segment, cleaned', () => {
+  assert.strictEqual(downloadName('dir/a:b?.html'), 'a_b_.html');
+  assert.strictEqual(downloadName('report_v2.html'), 'report_v2.html');
+  assert.strictEqual(downloadName('a\\b\\c<d>|e*.txt'), 'c_d__e_.txt');
+  assert.strictEqual(downloadName('x\u0000y\u001f.md'), 'x_y_.md');
+  for (const bad of ['..', '.', '', '   ', 'dir/', null, undefined]) assert.strictEqual(downloadName(bad), 'download', String(bad));
+  assert.strictEqual(downloadName(' .hidden. '), 'hidden');
+  const long = downloadName(`${'a'.repeat(300)}.html`);
+  assert.ok(long.length <= 200 && long.endsWith('.html'), long);
+  assert.strictEqual(downloadName('Über café.svg'), 'Über café.svg');
+});
+
+test('dataUrlBytes decodes a base64 data URL, and nothing else', () => {
+  const bytes = dataUrlBytes('data:image/png;base64,iVBORw0KGgo=');
+  assert.deepStrictEqual([...bytes.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
+  for (const bad of ['https://x/y.png', 'data:image/png,plain', 'data:image/png;base64,***', '', null]) assert.strictEqual(dataUrlBytes(bad), null, String(bad));
+});

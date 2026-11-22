@@ -187,6 +187,20 @@ function mergeRecords(stores) {
   return merged;
 }
 
+// A file that starts as a ZIP does (PK\x03\x04).
+function isZip(file) {
+  let fd = null;
+  try {
+    fd = fs.openSync(file, 'r');
+    const head = Buffer.alloc(4);
+    return fs.readSync(fd, head, 0, 4, 0) === 4 && head.equals(Buffer.from([0x50, 0x4b, 0x03, 0x04]));
+  } catch (e) {
+    return false;
+  } finally {
+    if (fd !== null) fs.closeSync(fd);
+  }
+}
+
 // Copies a file to dir/<savedAs ('/'-separated)>, making its folders. false only when another file of the version
 // already took that name; any other failure throws, and the merge stops (a merge never loses files silently).
 function copyInto(src, dir, savedAs) {
@@ -254,8 +268,11 @@ function writeArtifacts(merged, building, chosen, report) {
         return name;
       };
       const label = `artifacts/${dir} ${ver}`;
+      // The source version whose folder was copied: its ZIP, if any, matches what was copied.
+      let copiedFrom = null;
       // A version's saved folder, copied file by file.
       const fromFolder = from => {
+        copiedFrom = from;
         const name = folderFor();
         const files = from.files.map(f => (f.abs && f.savedAs && copyInto(f.abs, path.join(base, dir, name), f.savedAs) ? f : { ...f, savedAs: null }));
         return copiedVersion(from, files, `artifacts/${dir}/${name}`, from.startSaved, report, label);
@@ -285,6 +302,17 @@ function writeArtifacts(merged, building, chosen, report) {
         }
       } else out = { ...v, folder: null, saved: false, sameAs: null };
       out.publishedIn = publishedIn;
+      // The ZIP (1.19): only the merged current version's, copied from the source whose folder it took; the tools write
+      // no ZIP of their own.
+      delete out.zip;
+      delete out.zipAbs;
+      if (ver === m.rec.current && out.folder && copiedFrom && copiedFrom.zipAbs) {
+        const name = `${out.folder.split('/').pop()}.zip`;
+        if (isZip(copiedFrom.zipAbs)) {
+          fs.copyFileSync(copiedFrom.zipAbs, path.join(base, dir, name), fs.constants.COPYFILE_EXCL);
+          out.zip = name;
+        } else report.warnings.push(`${label}: ZIP left out (not a ZIP)`);
+      }
       versions.set(ver, out);
       places.set(`${m.uuid}\n${ver}`, out.folder
         ? { dir, folder: out.folder.split('/').pop(), savedAs: new Map(out.files.filter(f => f.savedAs).map(f => [f.path, f.savedAs])) }

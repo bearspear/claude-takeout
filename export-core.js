@@ -1637,6 +1637,8 @@ function artifactView(o) {
     startMissing: !!o.start && !tooLarge && !!previewKind(o.start) && !o.inPayload, missingCount: missing.size,
     files: (o.files || []).filter((f) => !missing.has(f.path)).map((f) => ({ path: f.path, savedAs: f.savedAs, kind: artifactFileKind(f.path), verified: f.verified !== false })),
     needsRuntime: !!o.needsRuntime, notExported: !!o.notExported, note: o.note || '', url: o.url, thumb: null,
+    // The current version's ZIP, root-relative (a plain link: the viewer offers it as Download ZIP), or null.
+    zip: typeof o.zip === 'string' && o.zip ? o.zip : null,
     // Files the chats saved: startSaved and each file's savedAs are then root-relative paths, not folder-relative.
     ...(o.reused ? { reused: true } : {}),
   };

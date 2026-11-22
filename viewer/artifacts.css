@@ -156,3 +156,4 @@ button { font: inherit; color: inherit; }
   .sheet { padding: 24px 16px 48px; }
   .big-pic { height: 220px; padding: 20px 20px 0; }
 }
+.files .btn.download { font-size: 11px; padding: 1px 8px; flex: none; }

@@ -2623,3 +2623,36 @@ test('readArtifactStore: claude.ai\'s list is in the archive only when its manif
     assert.strictEqual(store.listFetched, want, JSON.stringify(manifest && { kind: manifest.kind, artifacts: !!manifest.artifacts }));
   }
 });
+
+// ---- A version's ZIP (v1.19): read only when artifact.json names <folder>.zip and it is a real file ----
+test('a version\'s zip passes through only for a real file named <folder>.zip', () => {
+  const PKZIP = Buffer.from([0x50, 0x4b, 0x03, 0x04, 0, 0]);
+  const viewsOf = (setup) => {
+    const root = tmpRoot();
+    put(root, 'export-manifest.json', JSON.stringify(STANDALONE));
+    const json = format2([['v1', G1], ['v2', G2]]);
+    json.versions.v2.zip = 'v2.zip';
+    put(root, `${AF}/v1/index.html`, G1);
+    put(root, `${AF}/v2/index.html`, G2);
+    setup(root, json);
+    put(root, `${AF}/artifact.json`, JSON.stringify(json));
+    const store = lib.readArtifactStore(root);
+    return { store, views: lib.artifactViewsFromDisk(store).views };
+  };
+  let r = viewsOf(root => fs.writeFileSync(path.join(root, AF, 'v2.zip'), PKZIP));
+  assert.strictEqual(r.views[0].zip, `${AF}/v2.zip`);
+  assert.strictEqual(lib.artifactJsonV2FromDisk([...r.store.records.values()][0]).versions.v2.zip, 'v2.zip');
+  r = viewsOf(() => {});
+  assert.strictEqual(r.views[0].zip, null, 'named but missing');
+  assert.ok(!('zip' in lib.artifactJsonV2FromDisk([...r.store.records.values()][0]).versions.v2));
+  r = viewsOf(root => {
+    const outside = path.join(tmpRoot(), 'secret.zip');
+    fs.writeFileSync(outside, PKZIP);
+    fs.symlinkSync(outside, path.join(root, AF, 'v2.zip'));
+  });
+  assert.strictEqual(r.views[0].zip, null, 'a link is never followed');
+  r = viewsOf((root, json) => { delete json.versions.v2.zip; fs.writeFileSync(path.join(root, AF, 'v2.zip'), PKZIP); });
+  assert.strictEqual(r.views[0].zip, null, 'a ZIP artifact.json does not name');
+  r = viewsOf((root, json) => { json.versions.v2.zip = '../v2.zip'; fs.writeFileSync(path.join(root, 'v2.zip'), PKZIP); });
+  assert.strictEqual(r.views[0].zip, null, 'only <folder>.zip beside the folder');
+});

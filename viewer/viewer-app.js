@@ -9,6 +9,7 @@ const FAST_BATCH_SIZE = 100; // messages a frame on the way to a search hit
 const ICON_PATHS = {
   chevron: 'm9 6 6 6-6 6',
   close: 'M6 6l12 12M18 6 6 18',
+  download: 'M12 4v11m-5-5 5 5 5-5M5 20h14',
   copy: 'M9 9h10a1 1 0 0 1 1 1v10a1 1 0 0 1-1 1H9a1 1 0 0 1-1-1V10a1 1 0 0 1 1-1ZM5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1',
   check: 'm5 12.5 4.5 4.5L19 7.5',
   file: 'M6 3h8l5 5v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1Zm8 0v5h5',
@@ -101,7 +102,22 @@ function wrapButton() {
   return button;
 }
 // The header tools for a file's text: Wrap and Copy.
-const fileTextTools = (name, text) => [wrapButton(), fileCopyButton(name, text)];
+// Download for a file's text the viewer holds: saved through a blob: link (saveBytes, viewer-logic.js), never a link
+// to the file on disk, so an .html or .svg is saved, not opened.
+function hrefName(href) {
+  const last = String(href).split('/').pop();
+  try { return decodeURIComponent(last); } catch (e) { return last; }
+}
+function fileDownloadButton(name, text) {
+  const button = el('button', 'copy download');
+  button.type = 'button';
+  button.setAttribute('aria-label', `Download ${name}`);
+  button.append(icon('download'), el('span', '', 'Download'));
+  button.addEventListener('click', () => saveBytes(name, text));
+  return button;
+}
+
+const fileTextTools = (name, text) => [wrapButton(), fileCopyButton(name, text), fileDownloadButton(name, text)];
 
 // A code block's frame: a header with its language and a Copy button. The caller adds the pre.
 function codeBlock(lang) {
@@ -1663,7 +1679,10 @@ function renderPanelHead(chat, id, file, at, shape) {
     if (back) back.focus({ preventScroll: true });
   });
   const version = file.versions[at];
-  const copy = !shape.missing && shape.views.length && version && typeof version.text === 'string' ? [fileCopyButton(file.name || 'Untitled', version.text)] : [];
+  // A version's own name (report_v2.html) from its link, else the file's.
+  const versionName = version && typeof version.href === 'string' && version.href ? hrefName(version.href) : '';
+  const copy = !shape.missing && shape.views.length && version && typeof version.text === 'string'
+    ? [fileCopyButton(file.name || 'Untitled', version.text), fileDownloadButton(versionName || file.name || 'Untitled', version.text)] : [];
   // Wrap only shows with the code view; Preview renders the file.
   if (copy.length && panelView !== 'preview') copy.unshift(wrapButton());
   head.replaceChildren(name, el('small', 'panel-kind', fileKindLabel(file)), ...tabs, row, ...copy, close);

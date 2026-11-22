@@ -1356,6 +1356,51 @@ function groupChats(chats) {
   return { recents, projects: [...groups.values()].sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
+// ---- Download: a file the viewer holds, saved through a blob: link (Chrome ignores download on a file: link and
+// opens the file instead, so the viewer never links a file on disk for this) ----
+
+// The name a download is saved under: the last path segment, with \ / : * ? " < > | and control characters made _,
+// no leading or trailing dots or spaces, at most 200 characters with the extension kept; nothing left: download.
+function downloadName(name) {
+  const last = String(name == null ? '' : name).split(/[\\/]/).pop();
+  let clean = last.replace(/[\u0000-\u001f\u007f:*?"<>|]/g, '_').replace(/^[.\s]+|[.\s]+$/g, '');
+  if (clean.length > 200) {
+    const ext = (/\.[^.]{1,16}$/.exec(clean) || [''])[0];
+    clean = clean.slice(0, 200 - ext.length).replace(/[.\s]+$/, '') + ext;
+  }
+  return clean || 'download';
+}
+
+// The bytes of a data:<type>;base64,<data> URL (the Artifacts screen's preview images), or null.
+function dataUrlBytes(url) {
+  const m = /^data:[^,;]*;base64,([A-Za-z0-9+/]*={0,2})$/.exec(typeof url === 'string' ? url : '');
+  if (!m) return null;
+  try {
+    const bin = atob(m[1]);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  } catch (e) {
+    return null;
+  }
+}
+
+// Saves text (as UTF-8) or bytes under downloadName(name). The Blob is application/octet-stream, so the browser
+// never shows or runs it on the way out.
+function saveBytes(name, data) {
+  if (typeof data !== 'string' && !(data instanceof Uint8Array)) return false;
+  const url = URL.createObjectURL(new Blob([data], { type: 'application/octet-stream' }));
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = downloadName(name);
+  a.hidden = true;
+  document.body.append(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return true;
+}
+
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes };
 }
