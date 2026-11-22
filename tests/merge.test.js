@@ -846,3 +846,71 @@ test('merge_archives does not refuse an old ZIP whose chat folder is named artif
   assert.notStrictEqual(r.refused, true);
   assert.strictEqual(r.status, 'written', r.reason);
 });
+
+// ---- The current version's ZIP (v1.19): copied with the version, never for an older one; the tools write no ZIP ----
+const PKZIP = (tag) => Buffer.concat([Buffer.from([0x50, 0x4b, 0x03, 0x04]), Buffer.from(tag)]);
+// artifactsMega, with a ZIP beside the current version's folder.
+function withZip(root, uuid, title, ver, bytes = PKZIP(`${title} ${ver}`)) {
+  const dir = `artifacts/${title.replace(/ /g, '_')}_${uuidToBase58(uuid)}`;
+  fs.writeFileSync(path.join(root, dir, `${ver}.zip`), bytes);
+  const file = path.join(root, dir, 'artifact.json');
+  const json = JSON.parse(fs.readFileSync(file, 'utf8'));
+  json.versions[ver].zip = `${ver}.zip`;
+  fs.writeFileSync(file, JSON.stringify(json));
+  return root;
+}
+
+test('the merged current version keeps its source\'s ZIP; an older version\'s ZIP is not copied', async () => {
+  const tmp = tmpRoot();
+  const older = withZip(artifactsMega(tmp, 'o', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]), U, 'Guide', 'v1');
+  const newer = withZip(artifactsMega(tmp, 'n', '2026-11-05T00:00:00Z', 'full', [[U, 'Guide', true, 'v2']]), U, 'Guide', 'v2');
+  const out = path.join(tmp, 'out');
+  const r = await merge([older, newer], { out, name: 'm', now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  assert.ok(r.ok, JSON.stringify(r.warnings));
+  const dest = path.join(out, 'm');
+  const dir = path.join(dest, 'artifacts', `Guide_${SID}`);
+  assert.deepStrictEqual(fs.readdirSync(dir).sort(), ['artifact.json', 'v1', 'v2', 'v2.zip']);
+  assert.ok(fs.readFileSync(path.join(dir, 'v2.zip')).equals(PKZIP('Guide v2')));
+  const json = artifactJson(dest, `Guide_${SID}`);
+  assert.deepStrictEqual([json.current, json.versions.v2.zip, 'zip' in json.versions.v1], ['v2', 'v2.zip', false]);
+  assert.strictEqual(viewerData(dest).artifacts[0].zip, `artifacts/Guide_${SID}/v2.zip`);
+});
+
+test('no ZIP when the merged current version\'s source has none, though another source has one for another version', async () => {
+  const tmp = tmpRoot();
+  const older = withZip(artifactsMega(tmp, 'o', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]), U, 'Guide', 'v1');
+  const newer = artifactsMega(tmp, 'n', '2026-11-05T00:00:00Z', 'full', [[U, 'Guide', true, 'v2']]);
+  const out = path.join(tmp, 'out');
+  const r = await merge([older, newer], { out, name: 'm', now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  const dest = path.join(out, 'm');
+  assert.ok(!fs.readdirSync(path.join(dest, 'artifacts', `Guide_${SID}`)).some(n => n.endsWith('.zip')));
+  const json = artifactJson(dest, `Guide_${SID}`);
+  assert.ok(!('zip' in json.versions.v1) && !('zip' in json.versions.v2));
+  assert.strictEqual(viewerData(dest).artifacts[0].zip, null);
+});
+
+test('a source ZIP that is not a ZIP is left out, with a report line', async () => {
+  const tmp = tmpRoot();
+  const only = withZip(artifactsMega(tmp, 'o', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]), U, 'Guide', 'v1', Buffer.from('<html>not a zip</html>'));
+  const out = path.join(tmp, 'out');
+  const r = await merge([only], { out, name: 'm', now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  const dest = path.join(out, 'm');
+  assert.ok(!fs.existsSync(path.join(dest, 'artifacts', `Guide_${SID}`, 'v1.zip')));
+  assert.ok(!('zip' in artifactJson(dest, `Guide_${SID}`).versions.v1));
+  assert.ok(r.warnings.some(w => w === `artifacts/Guide_${SID} v1: ZIP left out (not a ZIP)`), JSON.stringify(r.warnings));
+});
+
+test('artifactJsonV2FromDisk writes a version\'s zip as popup.js does', () => {
+  const { sandbox } = loadPopup();
+  const files = [{ path: 'index.html', savedAs: 'index.html', size: 3, contentType: 'text/html', sha256: sha('one'), verified: true }];
+  const ver = (folder) => ({ folder, files, start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, zip: 'v1.zip', publishedIn: [] });
+  const meta = { url: `https://claude.ai/artifact/${SID}`, typeTitle: '', sourceSurface: 'chat', rel: 'mine', public: false, createdAt: '', updatedAt: '', note: '', start: 'index.html', needsRuntime: false };
+  const popupRec = { uuid: U, shortId: SID, title: 'Guide', listed: true, current: 'v1', history: ['v1'], meta, versions: new Map([['v1', ver('v1')]]) };
+  const diskRec = { uuid: U, shortId: SID, title: 'Guide', listed: true, current: 'v1', meta, order: ['v1'], versions: new Map([['v1', ver(`artifacts/Guide_${SID}/v1`)]]) };
+  const fromPopup = vm.runInContext('artifactJsonV2', sandbox)(popupRec);
+  assert.strictEqual(fromPopup.versions.v1.zip, 'v1.zip');
+  assert.strictEqual(JSON.stringify(require('../tools/archive-lib.js').artifactJsonV2FromDisk(diskRec)), JSON.stringify(fromPopup));
+});
