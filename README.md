@@ -169,6 +169,8 @@ claude-takeout-2026-01-01.zip
 
 Each conversation folder has the identical structure to individual ZIP exports, except that pages Claude published are saved once, in a shared `published/` folder at the root, and each chat's README links there.
 
+With **Include artifacts in Export All** on (the default), the root also holds `artifacts/`: one folder per artifact, with `index.html`, `index.md` and, if something failed, `errors.txt`. `artifacts` is a reserved name, so no chat folder takes it. One `viewer.html` at the root covers the chats and the artifacts.
+
 ## Keyboard Shortcuts
 
 | Shortcut | Action |
@@ -393,6 +395,11 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.17.0
+
+- **Export All saves your artifacts too** - Export All also saves what claude.ai/artifacts lists into an `artifacts/` folder (the same files and `index.html` as Export Artifacts), and skips a second download of any page a chat already saved. Turn it off with **Include artifacts in Export All** in Settings. Export Changes takes only the artifacts whose version changed. The Export Artifacts button is unchanged. Export All never asks for the card-picture permission: without it, cards are tiles.
+- **One viewer for chats and artifacts** - An Export All's `viewer.html` has an Artifacts screen beside the chats, with tabs All, Yours, Shared with you and In chats (files Claude made inside the chats). A chat links to the artifacts it made or published, and an artifact links back to its chats. Older archives with an `artifacts/` folder are refused by `build_viewer.js` and `merge_archives.js`, since their viewer is already complete.
 
 ### v1.16.1
 

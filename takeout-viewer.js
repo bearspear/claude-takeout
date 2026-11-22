@@ -10,8 +10,14 @@
 //                                      (state key to { path, filename, versions, messages }). deliveries: file uuid to
 //                                      { filename, path }. heredocs(command): [{ path, text }], the files a Bash command
 //                                      writes with a heredoc; without it Bash blocks yield no cards.
-//   buildViewerData(chats, {exported}) { exported, chats, projects }, newest update first. A chat's project is an
-//                                      index into projects, where identical projects are kept once
+//   buildViewerData(chats, {exported, artifacts}) { exported, chats, projects }, newest update first. A chat's project is an
+//                                      index into projects, where identical projects are kept once. artifacts:
+//                                      { views, listed, exported, since } (Export All's artifact step); with views the data
+//                                      also has artifacts (each view plus links: [{ chat (index in chats), messageUuid, how }]
+//                                      and docFile: { chat, file } | null, the latest chat's rebuilt document), listed,
+//                                      exportedArtifacts, artifactsSince; a published:<uuid> file gets artifact: <view id>.
+//                                      A chat's links (artifactLinksOf) are a non-enumerable property of buildViewerChat's result.
+//                                      A GenFile Claude made has madeAt: the message of its last version.
 //   moveUploadText(data, {firstPart, inlineLimit, partLimit})  { data, parts: [{ name, body }] }: upload text over
 //                                      UPLOAD_INLINE_LIMIT bytes moves into viewer-files parts; the upload keeps
 //                                      { text: null, lines, part, key }. Keys are u0, u1, ... A generated file's
@@ -26,13 +32,16 @@
 //   relHref(...parts)                  URL-encoded relative link, or null when a part escapes upward
 //   joinPath(folder, rel)              folder + rel with '..' resolved; null if it climbs above the folder
 //   escapeJson(data)                   JSON that is safe inside a <script> tag
-//   assembleViewer({template, css, marked, katex, highlight, logic, app, data, fileScripts, fileMedia})  one HTML string.
+//   assembleViewer({template, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data, fileScripts,
+//                  fileMedia})          one HTML string. artifactsApp and artifactsCss (viewer/artifacts-app.js and
+//                                      viewer/artifacts.css) fill ARTIFACTS_APP_JS and ARTIFACTS_CSS ('' when left out).
 //                                      fileScripts adds file: to the page's script-src and media-src, for viewer-files/
 //                                      beside it and added audio and video. fileMedia adds it to media-src alone, for a
 //                                      viewer with no parts. Exports set fileScripts only when moveUploadText made parts
 //   kindFor(filename, mime, hasText)   a GenFile's kind
-//   VIEWER_ASSETS                      paths of the seven viewer files
-//   ARTIFACTS_VIEWER_ASSETS            Export Artifacts' viewer: template, logic, app and marked, in that order
+//   VIEWER_ASSETS                      paths of the nine viewer files: template, logic, app, marked, katex, KaTeX CSS,
+//                                      highlight, the artifacts app and its CSS (the Artifacts screen), in that order
+//   ARTIFACTS_VIEWER_ASSETS            Export Artifacts' viewer: template, logic, app, marked and CSS, in that order
 //   TOOL_TEXT_LIMIT                    longest tool result text kept
 //   TEXT_EMBED_LIMIT                   longest upload or project text a caller should pass in ctx
 //   VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64  a 1x1 GIF beside viewer.html: if it won't load, the ZIP wasn't unzipped
@@ -50,7 +59,8 @@
 //                folder. Each publish_files call gets a card for the version its toolUseId is in, one GenFile per page
 //                (key published:<uuid>, on or off the active branch) with published: { url, current, needsRuntime } and
 //                versions in `order`, each { label, text, href, same }: a same version links the file Claude wrote, any
-//                other its start file under dir, and one with nothing saved has no link. The card replaces the
+//                other its start file under dir, and one with nothing saved has no link; ver: claude.ai's version id,
+//                when known (the Artifacts screen matches it with an artifact's current version). The card replaces the
 //                tool's "Published on claude.ai" line, and an upload claude.ai attached to that message under the
 //                name of one of the page's sources is dropped, so the page shows once.
 (function (root) {
@@ -67,10 +77,11 @@
 
   const VIEWER_ASSETS = [
     'viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js',
-    'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js'
+    'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js',
+    'viewer/artifacts-app.js', 'viewer/artifacts.css'
   ];
-  // Export Artifacts' viewer.html: template, logic, app, marked (no KaTeX or highlight.js).
-  const ARTIFACTS_VIEWER_ASSETS = ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js'];
+  // Export Artifacts' viewer.html: template, logic, app, marked, CSS (no KaTeX or highlight.js).
+  const ARTIFACTS_VIEWER_ASSETS = ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js', 'viewer/artifacts.css'];
 
   function cut(text) {
     const s = String(text == null ? '' : text);
@@ -315,11 +326,13 @@
     const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
     const textOf = fn => (hasOwn(arts, fn) && typeof arts[fn] === 'string' && arts[fn] !== '' ? arts[fn] : null);
     const hrefOf = fn => relHref(folder, 'artefacts', fn);
-    const entryFile = (name, fns, mime) => {
+    // madeAt: the message that made the file's last version, for files Claude made (the viewer's In chats order).
+    const entryFile = (name, fns, mime, madeAt) => {
       fns = Array.from(fns);
       const versions = fns.map((fn, i) => ({ label: fns.length > 1 ? 'v' + (i + 1) : '', text: textOf(fn), href: hrefOf(fn) }));
-      return { name, kind: kindFor(name, mime, versions.some(v => v.text !== null)), versions };
+      return { name, kind: kindFor(name, mime, versions.some(v => v.text !== null)), versions, ...(typeof madeAt === 'string' && madeAt ? { madeAt } : {}) };
     };
+    const madeBy = entry => (entry && Array.isArray(entry.messages) ? entry.messages[entry.messages.length - 1] : undefined);
 
     // The active chain, resolved like getMessageChain: no usable leaf means every message.
     const byUuid = new Map(source.map(m => [m.uuid, m]));
@@ -362,11 +375,13 @@
 
     // Every delivered version of a path, in chain order, for the uuids the caller knows.
     const deliveredUuids = new Map();
+    const deliveredAt = new Map(); // file uuid -> the message that delivered it
     for (const m of chain) for (const b of Array.isArray(m.content) ? m.content : []) {
       for (const d of (b && Array.isArray(b.file_deliveries) ? b.file_deliveries : [])) {
         if (!d || !d.file_uuid || !d.path || !hasOwn(deliveries, d.file_uuid)) continue;
         if (!deliveredUuids.has(d.path)) deliveredUuids.set(d.path, []);
         if (!deliveredUuids.get(d.path).includes(d.file_uuid)) deliveredUuids.get(d.path).push(d.file_uuid);
+        if (!deliveredAt.has(d.file_uuid)) deliveredAt.set(d.file_uuid, m.uuid);
       }
     }
 
@@ -395,7 +410,7 @@
           let href = null;
           if (v.same && v.writtenAs) href = hrefOf(v.writtenAs);
           else if (v.startSaved && pageDir !== null) href = relHref(pageDir, v.folderName, v.startSaved);
-          return { label: String(v.label || ''), text, href, same: !!v.same };
+          return { label: String(v.label || ''), text, href, same: !!v.same, ...(typeof v.ver === 'string' && v.ver ? { ver: v.ver } : {}) };
         });
         const named = versions.map(v => v.startSaved || v.writtenAs).find(Boolean) || '';
         const hasText = out.some(v => v.text !== null);
@@ -424,7 +439,7 @@
       const touch = (after, fileKey, build, version) => { touches.delete(fileKey); touches.set(fileKey, { after, build, version }); };
       const offKey = (k, build) => { if (k.startsWith('x:')) offBranch.set(k.slice(k.indexOf(':', 2) + 1), { key: k, build }); };
       const contentKey = (after, k, name, text, mime) => {
-        const build = () => ({ name, kind: kindFor(name, mime, true), versions: [{ label: '', text, href: null }] });
+        const build = () => ({ name, kind: kindFor(name, mime, true), versions: [{ label: '', text, href: null }], madeAt: m.uuid });
         offKey(k, build);
         touch(after, k, build, 0);
       };
@@ -469,7 +484,7 @@
           if (active) {
             const entry = hasOwn(index, key) ? index[key] : null;
             const v = entry ? versionAsOf(entry, chain, m.uuid) : -1;
-            if (entry && v >= 0) touch(after, key, () => entryFile(entry.filename, entry.versions, mime), v);
+            if (entry && v >= 0) touch(after, key, () => entryFile(entry.filename, entry.versions, mime, madeBy(entry)), v);
           } else if (edit) {
             missingKey(after, 'x:' + m.uuid + ':' + key, baseName(key));
           } else {
@@ -480,7 +495,7 @@
             if (active) {
               const entry = hasOwn(index, p) ? index[p] : null;
               const v = entry ? versionAsOf(entry, chain, m.uuid) : -1;
-              if (entry && v >= 0) touch(after, p, () => entryFile(entry.filename, entry.versions, null), v);
+              if (entry && v >= 0) touch(after, p, () => entryFile(entry.filename, entry.versions, null, madeBy(entry)), v);
             } else if (body) {
               contentKey(after, 'x:' + m.uuid + ':' + p, baseName(p), String(body), null);
             }
@@ -504,7 +519,7 @@
             if (entry) {
               const v = Math.max(versionAsOf(entry, chain, whereId), 0);
               sharedKeys.add(entry.path);
-              touch(after, entry.path, () => entryFile(entry.filename, entry.versions, null), v);
+              touch(after, entry.path, () => entryFile(entry.filename, entry.versions, null, madeBy(entry)), v);
             } else if (hasOwn(arts, base)) {
               touch(after, 'name:' + base, () => entryFile(base, [base], null), 0);
             } else {
@@ -525,7 +540,7 @@
             const written = hasOwn(index, d.path) ? index[d.path] : null;
             if (written) {
               sharedKeys.add(written.path);
-              touch(after, written.path, () => entryFile(written.filename, written.versions, null), Math.max(versionAsOf(written, chain, m.uuid), 0));
+              touch(after, written.path, () => entryFile(written.filename, written.versions, null, madeBy(written)), Math.max(versionAsOf(written, chain, m.uuid), 0));
               continue;
             }
             const uuids = deliveredUuids.get(d.path) || [];
@@ -535,7 +550,7 @@
               const fns = uuids.map(u => deliveries[u].filename || baseName(d.path));
               // Several copies are named <base>_v1<ext> ...; the file itself is <base><ext>.
               const name = fns.length > 1 ? fns[0].replace(/_v1(?=(\.[^./]*)?$)/, '') : fns[0];
-              return entryFile(name, fns, null);
+              return entryFile(name, fns, null, deliveredAt.get(uuids[uuids.length - 1]));
             }, v);
           }
         }
@@ -562,6 +577,8 @@
       message.blocks = out;
     });
     for (const [fileKey, id] of ids) files[id].shared = sharedKeys.has(fileKey) || isShared(fileKey);
+    // file key ('doc:<node id>', 'published:<uuid>', ...) to file id; not enumerable, so it never reaches the data.
+    Object.defineProperty(files, 'fileKeys', { value: ids, enumerable: false });
     return files;
   }
 
@@ -656,11 +673,16 @@
     const flags = c.flags && typeof c.flags === 'object' ? c.flags : {};
     for (const f of Object.values(files)) if (f && Object.prototype.hasOwnProperty.call(flags, f.name)) f.flag = String(flags[f.name]);
 
-    return {
+    const chat = {
       id: data.uuid, title: data.name || '', model: c.model || data.model || '',
       created: data.created_at, updated: data.updated_at, leaf: data.current_leaf_message_uuid || null,
       messages, files, project: buildProject(c.project, c.folder)
     };
+    // For buildViewerData, which joins chats and artifacts; not enumerable, so the chat's own data is unchanged.
+    let links = [];
+    try { links = core('artifactLinksOf')({ chat_messages: source }); } catch (e) { /* odd data links nothing */ }
+    Object.defineProperty(chat, 'links', { value: links, enumerable: false });
+    return chat;
   }
 
   // The viewer's own model name ("Opus 4.8"); meta.md keeps getModelName's wording. Unknown ids get the fallback.
@@ -692,9 +714,46 @@
     return JSON.stringify([p.name, typeof p.instructions === 'string' ? p.instructions.length : null, docs, files, Object.keys(p).sort()]);
   }
 
-  function buildViewerData(chats, { exported } = {}) {
+  // artifacts: { views, listed, exported, since } from Export All's artifact step. With views, the data gains
+  // artifacts (each view plus links: [{ chat, messageUuid, how }] and docFile: { chat, file } | null), listed,
+  // exportedArtifacts and artifactsSince; a chat's published-page file gets artifact: <id> when that page is one.
+  function buildViewerData(chats, { exported, artifacts } = {}) {
     const projects = [], byKey = new Map();
-    const sorted = chats.slice().sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+    let sorted = chats.slice().sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+    const views = artifacts && Array.isArray(artifacts.views) ? artifacts.views.filter(v => v && typeof v === 'object') : [];
+    const linked = new Map(); // view id -> { view, links, doc: { at, chat, file } | null }
+    for (const view of views) linked.set(String(view.id), { view, links: [], doc: null });
+    const viewOf = uuid => {
+      let short = '';
+      try { short = core('uuidToBase58')(uuid) || ''; } catch (e) { /* the uuid itself may be the id */ }
+      return linked.get(short) || linked.get(uuid) || null;
+    };
+    if (views.length) {
+      sorted = sorted.map((chat, ci) => {
+        const links = Array.isArray(chat.links) ? chat.links : [];
+        const fileKeys = chat.files && chat.files.fileKeys instanceof Map ? chat.files.fileKeys : new Map();
+        let files = chat.files;
+        for (const link of links) {
+          const hit = viewOf(link.uuid);
+          if (!hit) continue;
+          hit.links.push({ chat: ci, messageUuid: link.messageUuid, how: link.how });
+          // The latest chat (ties: the later one in the data) holding the rebuilt document.
+          if (link.how === 'made' && link.docKey && fileKeys.has(link.docKey)) {
+            const at = String(chat.updated || '');
+            if (!hit.doc || at >= hit.doc.at) hit.doc = { at, chat: ci, file: fileKeys.get(link.docKey) };
+          }
+        }
+        // A published page's card names its artifact when that artifact is in the export.
+        for (const [key, id] of fileKeys) {
+          if (!key.startsWith('published:') || !chat.files[id]) continue;
+          const hit = viewOf(key.slice('published:'.length));
+          if (!hit) continue;
+          if (files === chat.files) files = { ...chat.files };
+          files[id] = { ...chat.files[id], artifact: String(hit.view.id) };
+        }
+        return files === chat.files ? chat : Object.assign({}, chat, { files });
+      });
+    }
     const out = sorted.map(chat => {
       if (!chat.project || typeof chat.project !== 'object') return chat;
       const key = projectKey(chat.project);
@@ -707,7 +766,17 @@
       }
       return { ...chat, project: index };
     });
-    return { exported, chats: out, projects };
+    const data = { exported, chats: out, projects };
+    if (views.length) {
+      data.artifacts = views.map(view => {
+        const { links, doc } = linked.get(String(view.id));
+        return { ...view, links, docFile: doc ? { chat: doc.chat, file: doc.file } : null };
+      });
+      data.listed = artifacts.listed == null ? null : artifacts.listed;
+      data.exportedArtifacts = artifacts.exported || null;
+      data.artifactsSince = artifacts.since || null;
+    }
+    return data;
   }
 
   // Large upload text, and large text of files Claude made, leaves the page for viewer-files/part-NNNN.js,
@@ -852,11 +921,14 @@
   // One pass with function replacers: '$&' or a placeholder inside a value stays literal.
   // data: object (escaped here) or an already-escaped JSON string.
   // fileScripts: the page may load viewer-files/ scripts and media from disk. fileMedia: only media.
-  function assembleViewer({ template, css, marked, katex, highlight, logic, app, data, fileScripts, fileMedia }) {
+  function assembleViewer({ template, css, marked, katex, highlight, logic, app, artifactsApp = '', artifactsCss = '', data, fileScripts, fileMedia }) {
     // \x21 rather than \!, which a regular expression with the u flag rejects.
     const script = code => String(code).replace(/<\/script/gi, '<\\/script').replace(/<!--/g, () => '<\\x21--');
+    const style = text => String(text).replace(/<\/style/gi, '<\\/style');
     const values = {
-      KATEX_CSS: () => String(css).replace(/<\/style/gi, '<\\/style'),
+      KATEX_CSS: () => style(css),
+      ARTIFACTS_CSS: () => style(artifactsCss),
+      ARTIFACTS_APP_JS: () => script(artifactsApp),
       DATA_JSON: () => (typeof data === 'string' ? data : escapeJson(data)),
       MARKED_JS: () => script(marked),
       KATEX_JS: () => script(katex),
@@ -869,7 +941,7 @@
     let page = String(template);
     if (fileScripts) page = allow(page, 'script-src');
     if (fileScripts || fileMedia) page = allow(page, 'media-src');
-    return page.replace(/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|APP_JS)\*\//g, (m, k) => values[k]());
+    return page.replace(/\/\*(KATEX_CSS|ARTIFACTS_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|ARTIFACTS_APP_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
   const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, ARTIFACTS_VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT, artifactViewParts, ARTIFACT_PARTS_BUDGET };

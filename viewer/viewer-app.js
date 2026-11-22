@@ -337,15 +337,25 @@ function renderPublished(page) {
   return box;
 }
 
-// The claude.ai link under a published page's card: the one place the message links the page.
+// The links under a published page's card: Open artifact, when the page is one of the export's artifacts (its page
+// on the Artifacts screen), and the claude.ai link, the one place the message links the page.
 const PAGE_URL = /^https:\/\/claude\.ai\/artifact\/[A-Za-z0-9_-]{1,64}$/;
 function pageLink(file) {
-  const url = file && file.published ? String(file.published.url || '') : '';
-  if (!PAGE_URL.test(url)) return null;
+  if (!file || !file.published) return null;
+  const url = String(file.published.url || '');
+  const artifact = artifactsApp && typeof file.artifact === 'string' && parseArtifactHash('#a=' + file.artifact) ? file.artifact : null;
+  if (!PAGE_URL.test(url) && !artifact) return null;
   const box = el('div', 'page-link');
-  const link = el('a', '', 'Open on claude.ai');
-  link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
-  box.append(icon('globe'), link);
+  if (artifact) {
+    const open = el('a', 'open-artifact', 'Open artifact');
+    open.href = '#a=' + artifact;
+    box.append(open);
+  }
+  if (PAGE_URL.test(url)) {
+    const link = el('a', '', 'Open on claude.ai');
+    link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    box.append(icon('globe'), link);
+  }
   return box;
 }
 
@@ -922,17 +932,20 @@ function addedBox(chat, added) {
 
 // A part's text arrives through window.__archivePart, called by viewer-files/part-NNNN.js. Page code can't read files.
 const partsListed = new Set(); // the part numbers the data names
-const partsLoaded = new Map(); // n -> Promise<object|null>, the most recently used last
+const partsLoaded = new Map(); // n -> the part's object, the most recently used last
 const PARTS_KEPT = 2; // a part is about 4 MB; older ones are dropped and load again if needed
 const partsWaiting = new Map(); // n -> resolve, only while its script is loading
+const partsInFlight = new Map(); // n -> Promise<object|null>, only while loading; never evicted
 
-// Parts hold the text of added files and of large uploads.
+// Parts hold the text of added files and of large uploads, and the Artifacts screen's texts and images (one numbering,
+// one loader: the artifacts app is handed loadPart).
 function setupParts(data) {
   allAdded = Array.isArray(data.added) ? data.added : [];
   addedIds = new Map(allAdded.map((entry, i) => [entry, `x${i}`]));
   const uploads = (data.chats || []).flatMap(chat => (chat.messages || []).flatMap(m => m.uploads || []));
   const versions = (data.chats || []).flatMap(chat => Object.values(chat.files || {}).flatMap(f => (f && f.versions) || []));
-  for (const entry of [...allAdded, ...uploads, ...versions]) if (entry && Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
+  const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
+  for (const entry of [...allAdded, ...uploads, ...versions, ...artifacts]) if (entry && Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
   if (!partsListed.size) return;
   Object.defineProperty(window, '__archivePart', {
     value(n, data) {
@@ -945,14 +958,17 @@ function setupParts(data) {
 }
 
 // The part's { key: text }, or null when it can't be loaded. Only a number from the data ever becomes a src.
+// Loaded parts are kept (the PARTS_KEPT most recently used); one still loading is shared through partsInFlight,
+// which nothing evicts, so a second load of it waits on the same script instead of replacing its resolver.
 function loadPart(n) {
   if (!partsListed.has(n)) return Promise.resolve(null);
   if (partsLoaded.has(n)) {
-    const cached = partsLoaded.get(n);
+    const kept = partsLoaded.get(n);
     partsLoaded.delete(n);
-    partsLoaded.set(n, cached);
-    return cached;
+    partsLoaded.set(n, kept);
+    return Promise.resolve(kept);
   }
+  if (partsInFlight.has(n)) return partsInFlight.get(n);
   const loading = new Promise(resolve => {
     partsWaiting.set(n, resolve);
     const script = el('script');
@@ -961,26 +977,26 @@ function loadPart(n) {
       const done = partsWaiting.get(n);
       if (!done) return; // the part called in, and this was its load event
       partsWaiting.delete(n);
-      partsLoaded.delete(n); // so opening the file later tries again
       done(null);
     };
     script.addEventListener('load', finish);
     script.addEventListener('error', finish);
     script.src = `viewer-files/part-${String(n).padStart(4, '0')}.js`;
     document.head.append(script);
+  }).then(part => {
+    partsInFlight.delete(n);
+    // A part that failed isn't kept, so opening the file later tries again.
+    if (part) {
+      partsLoaded.set(n, part);
+      while (partsLoaded.size > PARTS_KEPT) partsLoaded.delete(partsLoaded.keys().next().value);
+    }
+    return part;
   });
-  partsLoaded.set(n, loading);
-  while (partsLoaded.size > PARTS_KEPT) partsLoaded.delete(partsLoaded.keys().next().value);
+  partsInFlight.set(n, loading);
   return loading;
 }
 
-// What a file's flag means, for its badge and the panel note.
-const FLAG_NOTES = {
-  script: "Claude changed this file with a command the export can't replay, so it may not match what Claude made. replay_bash.py beside the extension can rebuild it from the chat folder.",
-  edit: "An edit Claude made to this file couldn't be replayed, so it may not match what Claude made.",
-  doc: 'Some edits to this document couldn\'t be rebuilt from the chat. The live document on claude.ai is the current one.',
-};
-const flagNote = file => (file && file.flag ? FLAG_NOTES[file.flag] || FLAG_NOTES.edit : '');
+// FLAG_NOTES and flagNote (what a file's flag means) are in viewer-logic.js.
 
 function renderCard(block, chat) {
   const file = resolveFile(chat.files, block.file, block.version) && chat.files[block.file];
@@ -1515,11 +1531,7 @@ let panelView = null;
 
 // Siblings are found by name, newest text of the last file with that name.
 function siblingLookup(chat) {
-  const texts = new Map();
-  for (const file of Object.values(chat.files || {})) {
-    const text = (file.versions || []).map(v => v.text).filter(t => t != null).pop();
-    if (text != null) texts.set(file.name, text);
-  }
+  const texts = chatFileTexts(chat);
   return name => (texts.has(name) ? texts.get(name) : null);
 }
 
@@ -1727,6 +1739,8 @@ let drawn = ''; // the chat and leaf in the column, which a change of file leave
 // The only way to change chat, leaf or file. Writes the hash, then renders. options.replace edits the
 // current history entry; options.anchor keeps a message in place; options.fromHash means the hash is already set.
 function navigate(state, options = {}) {
+  const fromArtifacts = artifactsOn;
+  showArtifacts(false);
   const known = chatsById.get(state.chat);
   const chat = known || allChats[0];
   if (!chat) return;
@@ -1742,6 +1756,7 @@ function navigate(state, options = {}) {
     else location.hash = hash;
   } else if (options.fromHash && hash !== location.hash) history.replaceState(null, '', hash);
   shown = hash;
+  if (fromArtifacts) document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
   if (stepper && stepper.chat !== chat.id) closeStepper();
   showPanel(chat, open);
   const column = `${chat.id}\n${leaf}`;
@@ -1751,8 +1766,78 @@ function navigate(state, options = {}) {
 }
 
 function onHashChange() {
-  if (location.hash === shown) return;
+  if (routeArtifacts(location.hash)) return;
+  if (location.hash === shown && !artifactsOn) return;
+  // An archive with artifacts and no chats has nothing else to show.
+  if (!allChats.length && artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); return; }
   navigate(parseHash(location.hash), { fromHash: true });
+}
+
+// ---- The Artifacts screen: the artifacts app (artifacts-app.js) in #artifacts-screen, in place of the chat ----
+// #artifacts is its grid, #a=<id> an artifact and #ac=<chat>.<file> an In chats file; every other hash is the chat viewer's.
+let artifactsApp = null; // the mounted app, only when the data has artifacts
+let artifactsOn = false;
+let titlesBefore = null; // the chat's page and top bar titles, put back when the screen closes
+
+function setupArtifacts(data) {
+  const views = Array.isArray(data.artifacts) ? data.artifacts.filter(v => v && typeof v === 'object') : [];
+  if (!views.length || !window.CTArtifactsApp) return;
+  const nav = document.getElementById('artifacts-nav');
+  nav.querySelector('.n').textContent = String(views.length);
+  nav.setAttribute('aria-label', `Artifacts, ${views.length}`);
+  nav.hidden = false;
+  nav.addEventListener('click', () => {
+    setDrawer(false);
+    if (location.hash !== '#artifacts') location.hash = '#artifacts';
+    else routeArtifacts('#artifacts');
+  });
+  artifactsApp = window.CTArtifactsApp.mount(document.getElementById('artifacts-screen'), { data, loadPart, onOpenChat: openChatAt });
+}
+
+// Shows the screen when hash is one of its own; returns whether it was.
+function routeArtifacts(hash) {
+  if (!artifactsApp) return false;
+  // Taken before the app sets the page's title to the artifact's.
+  const titles = artifactsOn ? null : { page: document.title, top: document.getElementById('title').textContent };
+  if (!artifactsApp.route(hash)) return false;
+  shown = hash;
+  showArtifacts(true, titles);
+  return true;
+}
+
+// titles: what to put back when the screen closes (opening only).
+function showArtifacts(on, titles = null) {
+  if (on === artifactsOn) return;
+  if (!on && artifactsApp) artifactsApp.route(''); // lets go of an open artifact, whose page would keep running
+  artifactsOn = on;
+  document.body.classList.toggle('artifacts-on', on);
+  document.getElementById('artifacts-screen').hidden = !on;
+  document.getElementById('artifacts-nav').setAttribute('aria-current', String(on));
+  const title = document.getElementById('title');
+  if (on) {
+    closeStepper();
+    closeFilesMenu(false);
+    titlesBefore = titles;
+    title.textContent = 'Artifacts';
+    document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
+  } else {
+    if (titlesBefore) { document.title = titlesBefore.page; title.textContent = titlesBefore.top; }
+    titlesBefore = null;
+  }
+}
+
+// The artifacts app's way into a chat: chat is an index into the data's chats; the message, when it's there, is
+// opened on its branch and scrolled to.
+function openChatAt(index, messageUuid) {
+  const chat = Number.isInteger(index) ? allChats[index] : null;
+  if (!chat) return;
+  closeStepper();
+  if (!chat.messages.some(m => m.id === messageUuid)) { navigate({ chat: chat.id }); return; }
+  find = { msg: messageUuid, terms: [], gen: null };
+  navigate({ chat: chat.id, leaf: leafUnder(chat.messages, messageUuid) });
+  if (!find) return;
+  find.gen = renderGeneration;
+  tryFind();
 }
 
 function switchTo(button) {
@@ -2212,7 +2297,7 @@ function setupSearch() {
   });
   // / anywhere outside a text field puts the cursor in the search box.
   document.addEventListener('keydown', e => {
-    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented) return;
+    if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || artifactsOn) return;
     const t = e.target;
     if (t && (t.closest('input, textarea, select, [contenteditable]') || popup)) return;
     e.preventDefault();
@@ -2243,6 +2328,7 @@ function start() {
   const data = JSON.parse(holder.textContent);
   holder.remove();
   setupParts(data);
+  setupArtifacts(data);
   setupFilesMenu();
   setupStepper();
   allChats = linkProjects(data);
@@ -2265,8 +2351,10 @@ function start() {
     if (arrow && !arrow.disabled) switchTo(arrow);
   });
   window.addEventListener('hashchange', onHashChange);
+  if (!data.chats.length) document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
+  if (routeArtifacts(location.hash)) return;
   if (data.chats.length) navigate(parseHash(location.hash), { replace: true });
-  else document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
+  else if (artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); }
 }
 
 start();

@@ -233,6 +233,11 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
   const temps = [];
   try {
     await stopPoint();
+    if (lib.hasArtifacts(archive.root)) {
+      report.refused = true;
+      report.message = lib.artifactsRefusal('build_viewer');
+      return finish('failed', report.message);
+    }
     for (const name of fs.readdirSync(archive.root)) {
       if (lib.LEFTOVER_NAME.test(name)) report.notices.push(`Left alone, from an interrupted run: ${name}`);
     }
@@ -309,6 +314,11 @@ async function processZip(zip, { outDir, force, dryRun, claims }) {
     const names = await zipLib.zipEntryNames(zip, loaded);
     entry.chats = names.filter(n => /(^|\/)original\.json$/.test(n)).length;
     if (!entry.chats) return finish('skipped', 'no Claude chat in it');
+    if (await zipLib.zipHasArtifacts(zip, loaded)) {
+      entry.refused = true;
+      entry.message = lib.artifactsRefusal('build_viewer');
+      return finish('failed', entry.message);
+    }
 
     // Every ZIP with a chat in it holds its name, on every run, so a clash shows even once the folder exists.
     // Case folds, as it does on a Mac.
@@ -488,6 +498,9 @@ async function main(argv) {
   try {
     const report = await run(args.positionals[0], { out, force: !!force, dryRun: !!dryRun });
     console.log(json ? JSON.stringify(report) : formatReport(report));
+    for (const r of [...report.archives, ...report.zips, ...report.zips.flatMap(z => z.archives)]) {
+      if (r.refused) console.error(`${r.root || r.zip}: ${r.message}`);
+    }
     return report.ok ? 0 : 1;
   } catch (e) {
     return fail(e.message);

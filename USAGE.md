@@ -86,6 +86,8 @@ For exporting your whole history:
 
 **Only new or changed chats.** Set **Mega-Zip exports** in Settings to **Only new or changed**, and the Mega-Zip button becomes **Export Changes (Mega-Zip)**. It makes a `claude-takeout-<your name>-changes-<YYYY-MM-DD>_<HHMM>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold. The default is **All chats**.
 
+**Artifacts in the same export.** With **Include artifacts in Export All** on in Settings (the default), Export All also saves what claude.ai/artifacts lists, after the chats, into `artifacts/` in the same folder or ZIP: a folder per artifact, `index.html`, `index.md` and, only with warnings, `errors.txt`. Pages a chat already saved are reused, not fetched again. A failed artifact step never removes or delays the chats. One `viewer.html` at the root holds both (see [The combined viewer](#the-combined-viewer)). Export All never asks for the card-picture permission, so without it cards are tiles. With **Only new or changed**, only artifacts whose version changed are included, and `index.md` says "Changed since <date>: N of M listed". An artifact saved only in part, with a file missing, is tried again next time. Export Artifacts, the separate button, works as before.
+
 Progress shows below the buttons as `X / Y`. There's a 200–300 ms pause between conversations to be polite to Claude's API. 100 conversations takes about 30 seconds; 1000 will take under 10 minutes.
 
 If a single conversation fails (deleted, server hiccup, rate limit), the bulk export continues with the rest and reports the failures at the end.
@@ -441,6 +443,7 @@ node tools/build_viewer.js ~/Downloads/claude-takeout-2026-11-07 --force
 
 - **What it works on.** A single-chat export, a mega-ZIP or a folder holding many of either, as long as they are unzipped. For ZIPs, see [Adding a viewer to older archives](#adding-a-viewer-to-older-archives): they are extracted under `--out` first.
 - **What it changes.** Only `viewer.html`, `viewer-check.gif` and `viewer-files/`. Your chat files, Markdown, downloads and anything you added stay as they are.
+- **Archives with artifacts.** It refuses an archive that includes artifacts (an Export All made with Claude Takeout 1.17 or later, with an `artifacts/` folder) and writes nothing to it: that archive's `viewer.html` is already complete.
 - **What it can't change.** The rebuilt viewer reads what the export already has on disk. Fixes to the export itself, such as a better Markdown file or a download that used to fail, need a fresh export from claude.ai.
 - **Which releases.** The changelog in `README.md` says "Older exports get this when their viewer is rebuilt with `--force`" on each viewer change.
 
@@ -459,6 +462,7 @@ node tools/merge_archives.js ~/Downloads/claude-takeout-Mika-2026-11-01.zip ~/Do
 - **Sources.** Any number of Mega-Zips, single-chat exports, or folders holding them, as ZIPs or unzipped. ZIPs are extracted into a hidden temporary folder under `--out` and removed afterwards.
 - **Which copy wins.** The one with the latest `updated_at` in its `original.json`. On a tie, the later export (from `export-manifest.json`), then the source named later. Shared project folders come from the newest source.
 - **What it writes.** One new folder under `--out` (`claude-takeout-merged-<date>`, or `--name <name>`), built under a hidden temporary name and renamed when complete. It holds the chat folders, `projects/`, a new `index.md`, an `export-manifest.json` with `kind: "merged"` that names the source of each chat, and a new viewer. Your source archives are only read. An existing folder of that name stops the run.
+- **Archives with artifacts.** If any source includes artifacts (Claude Takeout 1.17 or later), the run is refused before anything is written, ZIPs included; its `viewer.html` is already complete.
 - **Deleted chats.** A chat you deleted on claude.ai stays in the merged archive if an older source has it.
 
 ---
@@ -513,6 +517,14 @@ Avoid `--all` across a whole archive: you'd be running every command from every 
 
 To keep that archive current without downloading everything again, set **Mega-Zip exports** to **Only new or changed**, export now and then, and combine the archives with [`tools/merge_archives.js`](#combining-archives).
 
+#### The combined viewer
+
+An Export All with artifacts has one `viewer.html`, with an Artifacts screen beside the chats. Its tabs are **All**, **Yours**, **Shared with you** and **In chats**. In chats lists the files Claude made inside your chats (files, diagrams, documents), each with the chat it came from and its versions. A chat links to the artifacts it made or published, and an artifact page links back to those chats.
+
+Previews follow the same rules as in the artifacts viewer above, with two additions. Artifact and In chats previews run inside a guard frame that blocks navigation, so a page can't send the preview to a file on disk. An In chats preview sees only its own chat's files.
+
+The old-archive tools refuse an archive with an `artifacts/` folder (see [Adding a viewer to older archives](#adding-a-viewer-to-older-archives)): its viewer is already complete.
+
 ---
 
 ## Settings and keyboard shortcuts
@@ -525,6 +537,7 @@ Click the gear icon in the popup to open the settings drawer.
 | **Include thinking blocks** | Whether to include Claude's `<thinking>` content in the Markdown exports and in a ZIP's `full_chat.md` and `integrated_chat.md`. The `responses/*.full.md` files always include it. |
 | **Export All and Export Artifacts save as** | **Folder** (the default) or **ZIP**: whether Export All and Export Artifacts write into a folder you choose or download one ZIP. |
 | **Export All exports** | **All chats** (the default) or **Only new or changed**: what Export All exports. With **Only new or changed**, it takes only the chats that are new or changed since the last mega-ZIP from this browser, and the button reads **Export Changes (Mega-Zip)**. |
+| **Include artifacts in Export All** | On by default. Export All also saves claude.ai's artifacts into `artifacts/`. Off: chats only, as before. |
 | **Show shortcuts** | Show keyboard shortcut hints next to buttons. |
 | **Open as sidebar by default** | Use Chrome's side panel instead of the popup, so the export UI stays open while you browse conversations. |
 

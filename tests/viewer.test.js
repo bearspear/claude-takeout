@@ -206,18 +206,18 @@ test('assembleViewer keeps hostile data inert and fills every placeholder', () =
   const html = assembleViewer({ ...assets, data: buildViewerData([{ ...chat, title: hostile }], { exported: 'x' }) });
   const raw = /<script id="data"[^>]*>([\s\S]*?)<\/script>/.exec(html)[1];
   assert.strictEqual(JSON.parse(raw).chats[0].title, hostile);
-  assert.strictEqual((html.match(/<\/script>/g) || []).length, 6);
-  assert.ok(!/\/\*(KATEX_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|APP_JS)\*\//.test(html.replace(raw, '')));
+  assert.strictEqual((html.match(/<\/script>/g) || []).length, 7);
+  assert.ok(!/\/\*(KATEX_CSS|ARTIFACTS_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|ARTIFACTS_APP_JS|APP_JS)\*\//.test(html.replace(raw, '')));
   for (const s of ['var marked=1;', 'var katex=1;', 'var hljs=1;', 'var logic=1;', 'var app=1;', '.k{}']) assert.ok(html.includes(s));
   assert.strictEqual(escapeJson({ a: '</x' }), '{"a":"<\\/x"}');
 });
 
-test('VIEWER_ASSETS lists the seven viewer files', () => {
-  assert.deepStrictEqual(VIEWER_ASSETS, ['viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js', 'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js']);
+test('VIEWER_ASSETS lists the nine viewer files', () => {
+  assert.deepStrictEqual(VIEWER_ASSETS, ['viewer/viewer-template.html', 'viewer/viewer-logic.js', 'viewer/viewer-app.js', 'viewer/marked.min.js', 'viewer/katex.min.js', 'viewer/katex-inline.css', 'viewer/highlight.min.js', 'viewer/artifacts-app.js', 'viewer/artifacts.css']);
 });
 
-test('ARTIFACTS_VIEWER_ASSETS lists the artifacts viewer\'s four files, and each exists', () => {
-  assert.deepStrictEqual(V.ARTIFACTS_VIEWER_ASSETS, ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js']);
+test('ARTIFACTS_VIEWER_ASSETS lists the artifacts viewer\'s five files, and each exists', () => {
+  assert.deepStrictEqual(V.ARTIFACTS_VIEWER_ASSETS, ['viewer/artifacts-template.html', 'viewer/viewer-logic.js', 'viewer/artifacts-app.js', 'viewer/marked.min.js', 'viewer/artifacts.css']);
   for (const f of V.ARTIFACTS_VIEWER_ASSETS) assert.ok(fs.existsSync(path.join(__dirname, '..', f)), f);
 });
 
@@ -226,11 +226,40 @@ test('the artifacts template keeps the chat viewer\'s policy, with no frames', (
   const policy = (t) => /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(t)[1];
   assert.strictEqual(policy(art), policy(template).replace("frame-src file:", "frame-src 'none'"));
   assert.ok(art.includes('<meta name="generator" content="Claude Takeout">'));
-  for (const p of ['DATA_JSON', 'MARKED_JS', 'LOGIC_JS', 'APP_JS']) assert.strictEqual(art.split(`/*${p}*/`).length, 2, p);
-  for (const f of ['viewer/artifacts-template.html', 'viewer/artifacts-app.js']) {
+  for (const p of ['ARTIFACTS_CSS', 'DATA_JSON', 'MARKED_JS', 'LOGIC_JS', 'APP_JS']) assert.strictEqual(art.split(`/*${p}*/`).length, 2, p);
+  for (const f of ['viewer/artifacts-template.html', 'viewer/artifacts-app.js', 'viewer/artifacts.css']) {
     const text = fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
     for (const s of ['claudeusercontent', '__frame_t', '_thumb']) assert.ok(!text.includes(s), `${f}: ${s}`);
   }
+});
+
+// The chat viewer carries the artifacts app (the Artifacts screen) and its CSS, once each; the CSS sits in an inert
+// <template>, so it styles only the screen's shadow root. The standalone artifacts viewer gets the same CSS as its page style.
+test('the combined viewer includes the artifacts app and CSS once', () => {
+  const read = f => fs.readFileSync(path.join(__dirname, '..', f), 'utf8');
+  const [tpl, logic, app, marked, katex, css, highlight, artifactsApp, artifactsCss] = VIEWER_ASSETS.map(read);
+  const views = [{ id: 'Abc', uuid: 'u-1', title: 'Guide', kind: 'Page', folder: 'artifacts/Guide_Abc', start: 'index.html', startSaved: 'index.html', startKind: 'html', files: [], part: 1, key: 'a0' }];
+  const data = buildViewerData([buildViewerChat(fixture, {})], { exported: 'x', artifacts: { views, listed: 1, exported: 'x' } });
+  const html = assembleViewer({ template: tpl, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data });
+  const count = (text, s) => text.split(s).length - 1;
+  assert.strictEqual(count(html, 'window.CTArtifactsApp = '), 1);
+  assert.strictEqual(count(artifactsApp, 'window.CTArtifactsApp = '), 1);
+  const sample = '#grid { display: grid;';
+  assert.strictEqual(count(artifactsCss, sample), 1);
+  assert.strictEqual(count(html, sample), 1);
+  assert.ok(/<template id="artifacts-style"><style>:root \{/.test(html), 'the CSS is in the inert template');
+  assert.ok(html.indexOf('window.CTArtifactsApp = ') < html.indexOf('function setupArtifacts('), 'the app is defined before the chat viewer mounts it');
+  for (const s of ['claudeusercontent', '__frame_t', '_thumb']) assert.ok(!html.includes(s), s);
+  // The chat viewer's policy is as before: file: frames for PDFs (the screen's previews have their own guard frame).
+  assert.match(html, /frame-src file:;/);
+  // The standalone viewer: the same CSS as its page style, mounted on the body.
+  const [aTpl, aLogic, aApp, aMarked, aCss] = V.ARTIFACTS_VIEWER_ASSETS.map(read);
+  const standalone = assembleViewer({ template: aTpl, css: '', artifactsCss: aCss, marked: aMarked, katex: '', highlight: '', logic: aLogic, app: aApp, data: { artifacts: views } });
+  assert.strictEqual(count(standalone, sample), 1);
+  assert.ok(standalone.includes('<style>:root {'));
+  assert.ok(standalone.includes('<script>CTArtifactsApp.mount(document.body);</script>'));
+  assert.match(standalone, /frame-src 'none';/);
+  assert.ok(!/\/\*[A-Z_]+_(JS|CSS)\*\//.test(standalone));
 });
 
 const Logic = require('../viewer/viewer-logic.js');
@@ -1593,7 +1622,7 @@ test('a same version links the written file', () => {
   const data = pubChain(1);
   const chat = buildViewerChat(data, ctxFor(data, { published: [pageEntry([pubVersion(0, { same: true, writtenAs: 'guide_v1.html', text: 'G1' })])] }));
   const [file] = Object.values(chat.files);
-  assert.deepStrictEqual(file.versions, [{ label: 'v1', text: 'G1', href: 'artefacts/guide_v1.html', same: true }]);
+  assert.deepStrictEqual(file.versions, [{ label: 'v1', text: 'G1', href: 'artefacts/guide_v1.html', same: true, ver: 'ver0' }]);
 });
 
 test('an Export All card links published/ at the export root', () => {
@@ -1627,7 +1656,7 @@ test('an incomplete version has no link', () => {
   const entry = pageEntry([pubVersion(0, { incomplete: true, start: null, startSaved: null, text: null }), pubVersion(1, { needsRuntime: true })]);
   const chat = buildViewerChat(data, ctxFor(data, { published: [entry] }));
   const [file] = Object.values(chat.files);
-  assert.deepStrictEqual(file.versions[0], { label: 'v1', text: null, href: null, same: false });
+  assert.deepStrictEqual(file.versions[0], { label: 'v1', text: null, href: null, same: false, ver: 'ver0' });
   assert.strictEqual(file.published.needsRuntime, true);
   // A page with nothing in the export is a missing file.
   const none = buildViewerChat(pubChain(1), ctxFor(pubChain(1), { published: [pageEntry([pubVersion(0, { incomplete: true, start: null, startSaved: null, text: null })])] }));
@@ -1806,3 +1835,251 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
   // The chat viewer's inliner keeps taking the value as written.
   assert.strictEqual(inlineSiblings('<script src="R&amp;D.js"></script>', n => (n === 'R&D.js' ? 'rd()' : null)), '<script src="R&amp;D.js"></script>');
 });
+
+// ---- Combined viewer data: artifacts and their links to chats ----
+{
+  const { docTools, DOC_U } = require('./helpers');
+  const view = (id, extra = {}) => ({ id, title: id, kind: 'Page', typed: false, docs: false, shared: false, public: false, createdAt: '', updatedAt: '', folder: 'artifacts/' + id, start: null, files: [], ...extra });
+  const docChat = (id, updated) => {
+    const t = docTools('mcp__Claude_Docs__', { realShape: true });
+    return { uuid: id, name: id, updated_at: updated, current_leaf_message_uuid: id + 'a', chat_messages: [
+      { uuid: id + 'h', parent_message_uuid: null, sender: 'human', created_at: updated, content: [{ type: 'text', text: 'go' }] },
+      { uuid: id + 'a', parent_message_uuid: id + 'h', sender: 'assistant', created_at: updated, content: [t.batch, t.batchResult, t.update('u1', 'sess.10', '## Alpha'), t.result('u1', '{}')] },
+    ] };
+  };
+  const pubChat = () => Object.assign(pubChain(1), { updated_at: '2026-02-01T00:00:00Z' });
+  const built = (data, extra = {}) => buildViewerChat(data, ctxFor(data, extra));
+  const shortOf = uuid => popup.fn('uuidToBase58')(uuid);
+  const pubView = view(shortOf(PAGE_U)), docView = view(shortOf(DOC_U));
+  const withUpdated = (chat, updated) => Object.assign(chat, { updated });
+
+  test('artifacts and their links join the chats\' viewer data', () => {
+    const pub = withUpdated(built(pubChat(), { published: [pageEntry([pubVersion(0)])] }), '2026-02-01T00:00:00Z');
+    const doc = withUpdated(built(docChat('d', '2026-01-01T00:00:00Z')), '2026-01-01T00:00:00Z');
+    // The newest chat is first in the data: the publishing chat is 0, the document's is 1.
+    const data = buildViewerData([doc, pub], { exported: 'x', artifacts: { views: [pubView, docView], listed: 7, exported: '2026-03-01T00:00:00Z', since: null } });
+    assert.deepStrictEqual(data.chats.map(c => c.id), ['c', 'd']);
+    const [p, d] = data.artifacts;
+    assert.deepStrictEqual(p.links, [{ chat: 0, messageUuid: 'm0', how: 'published' }]);
+    assert.strictEqual(p.docFile, null);
+    assert.deepStrictEqual(d.links, [{ chat: 1, messageUuid: 'da', how: 'made' }]);
+    const fileId = Object.keys(data.chats[1].files).find(k => data.chats[1].files[k].name === 'Lorber_Notes.md');
+    assert.deepStrictEqual(d.docFile, { chat: 1, file: fileId });
+    assert.deepStrictEqual([data.listed, data.exportedArtifacts, data.artifactsSince], [7, '2026-03-01T00:00:00Z', null]);
+    assert.strictEqual(buildViewerData([doc], { artifacts: { views: [docView], listed: 1, exported: 'e', since: '2026-01-01T00:00:00Z' } }).artifactsSince, '2026-01-01T00:00:00Z');
+  });
+
+  test('docFile names the latest chat that rebuilt the document; a tie goes to the later chat', () => {
+    const older = withUpdated(built(docChat('o', '2026-01-01T00:00:00Z')), '2026-01-01T00:00:00Z');
+    const newer = withUpdated(built(docChat('n', '2026-05-01T00:00:00Z')), '2026-05-01T00:00:00Z');
+    const data = buildViewerData([older, newer], { artifacts: { views: [docView], listed: 1, exported: 'e', since: null } });
+    assert.deepStrictEqual(data.chats.map(c => c.id), ['n', 'o']);
+    assert.strictEqual(data.artifacts[0].docFile.chat, 0);
+    assert.strictEqual(data.artifacts[0].links.length, 2);
+    const a = withUpdated(built(docChat('a', 'T')), 'T'), b = withUpdated(built(docChat('b', 'T')), 'T');
+    assert.strictEqual(buildViewerData([a, b], { artifacts: { views: [docView], listed: 1, exported: 'e', since: null } }).artifacts[0].docFile.chat, 1);
+  });
+
+  test('a published card names its artifact only when that artifact is in the export', () => {
+    const pub = () => built(pubChat(), { published: [pageEntry([pubVersion(0)])] });
+    const withArt = buildViewerData([pub()], { artifacts: { views: [pubView], listed: 1, exported: 'e', since: null } });
+    assert.deepStrictEqual(Object.values(withArt.chats[0].files).map(f => f.artifact), [shortOf(PAGE_U)]);
+    const other = buildViewerData([pub()], { artifacts: { views: [docView], listed: 1, exported: 'e', since: null } });
+    assert.ok(Object.values(other.chats[0].files).every(f => !('artifact' in f)));
+  });
+
+  test('no artifacts: the data has no artifacts key and chats are unchanged', () => {
+    const chat = built(pubChat(), { published: [pageEntry([pubVersion(0)])] });
+    const plain = buildViewerData([chat], { exported: 'x' });
+    assert.deepStrictEqual(Object.keys(plain), ['exported', 'chats', 'projects']);
+    assert.strictEqual(JSON.stringify(plain), JSON.stringify({ exported: 'x', chats: [JSON.parse(JSON.stringify(chat))], projects: [] }));
+    assert.deepStrictEqual(Object.keys(buildViewerData([chat], { exported: 'x', artifacts: { views: [], listed: 0, exported: 'e', since: null } })), ['exported', 'chats', 'projects']);
+    assert.ok(Object.values(plain.chats[0].files).every(f => !('artifact' in f)));
+  });
+
+  test('files Claude made carry madeAt, the message of their last version', () => {
+    const chat = buildViewerChat(fixture, ctxFor(fixture));
+    const report = Object.values(chat.files).find(f => f.name === 'report.html');
+    assert.strictEqual(report.madeAt, 'm06');
+    const doc = Object.values(built(docChat('d', 'T')).files)[0];
+    assert.strictEqual(doc.madeAt, 'da');
+    const pub = Object.values(built(pubChat(), { published: [pageEntry([pubVersion(0)])] }).files)[0];
+    assert.ok(!('madeAt' in pub), 'a published page card has none');
+  });
+
+  test('part numbers continue after the artifact parts', () => {
+    const big = 'x'.repeat(70 * 1024);
+    const chat = { id: 'c', title: 'c', updated: 'u', messages: [{ id: 'm', sender: 'human', blocks: [], uploads: [{ name: 'a.md', href: 'uploads/a.md', text: big }], attachments: [] }], files: {} };
+    const data = buildViewerData([chat], { artifacts: { views: [view('A', { part: 1, key: 'a0' })], listed: 1, exported: 'e', since: null } });
+    const { data: out, parts } = V.moveUploadText(data, { firstPart: 3 });
+    assert.deepStrictEqual(parts.map(p => p.name), ['part-0003.js']);
+    assert.strictEqual(out.chats[0].messages[0].uploads[0].part, 3);
+    assert.strictEqual(out.chats[0].messages[0].uploads[0].key, 'u0');
+    assert.deepStrictEqual(out.artifacts, data.artifacts);
+  });
+}
+
+// ---- In chats: the files Claude made, across the export's chats ----
+{
+  const { inChatsFiles, alsoInChat, fileKindGroup, parseInChatsHash, formatInChatsHash, chatFileTexts, artifactSourceLine, artifactLinkGroups, publishedVersionsOf, flagNote } = require('../viewer/viewer-logic.js');
+  const ver = (href, extra = {}) => ({ label: '', text: 'x', href, ...extra });
+  const msg = (id, at) => ({ id, parent: null, sender: 'assistant', at, blocks: [], uploads: [], attachments: [] });
+  const inChatsData = () => ({
+    chats: [
+      {
+        id: 'c0', title: 'Older chat', updated: '2026-05-02T00:00:00Z',
+        messages: [msg('m1', '2026-05-01T10:00:00Z'), msg('m2', '2026-05-01T11:00:00Z')],
+        files: {
+          a1: { name: 'early.html', kind: 'html', versions: [ver('C0/artefacts/early.html')], madeAt: 'm1' },
+          a2: { name: 'later.py', kind: 'code', versions: [ver('C0/artefacts/later.py')], madeAt: 'm2' },
+          a3: { name: 'gone.txt', kind: 'missing', versions: [{ label: '', text: null, href: null }] },
+          a4: { name: 'Guide', kind: 'html', published: { url: 'u', current: true }, artifact: 'Art1', versions: [ver('C0/artefacts/guide.html', { same: true, ver: 'G1' })] },
+          a5: { name: 'guide.html', kind: 'html', versions: [ver('C0/artefacts/guide.html')], madeAt: 'm2' },
+          a6: { name: 'attached.csv', kind: 'code', versions: [ver('C0/artefacts/attached.csv')] },
+        },
+      },
+      {
+        id: 'c1', title: 'Newer chat', updated: '2026-06-02T00:00:00Z',
+        messages: [msg('n1', '2026-06-01T10:00:00Z'), msg('n2', 'not a date')],
+        files: {
+          a1: { name: 'chart.svg', kind: 'svg', versions: [ver('C1/artefacts/chart_v1.svg'), ver('C1/artefacts/chart_v2.svg')], madeAt: 'n1' },
+          // A page published at v1 whose file changed afterwards: listed, with the artifact named.
+          a2: { name: 'deck.html', kind: 'html', versions: [ver('C1/artefacts/deck_v1.html'), ver('C1/artefacts/deck_v2.html')], madeAt: 'n1' },
+          a3: { name: 'Deck', kind: 'html', published: { url: 'u', current: true }, artifact: 'Art2', versions: [ver('C1/artefacts/deck_v1.html', { same: true, ver: 'D1' })] },
+          // The same source of a page that isn't in the export's artifacts: listed.
+          a4: { name: 'Solo', kind: 'html', published: { url: 'u', current: true }, versions: [ver('C1/artefacts/solo.html', { same: true })] },
+          a5: { name: 'solo.html', kind: 'html', versions: [ver('C1/artefacts/solo.html')], madeAt: 'n2' },
+          a6: { name: 'Flow', kind: 'html', widget: true, versions: [ver(null)], madeAt: 'n1' },
+          a7: { name: 'notes.md', kind: 'md', versions: [ver('C1/artefacts/notes.md')], madeAt: 'n1' },
+        },
+      },
+    ],
+    artifacts: [{ id: 'Art1', title: 'Guide', ver: 'G1' }, { id: 'Art2', title: 'Deck', ver: 'D2' }],
+  });
+
+  test('inChatsFiles: newest first by the message that made the last version, then the undated by chat order', () => {
+    const got = inChatsFiles(inChatsData());
+    // A message with no usable date stands in with its chat's update (2026-06-02), the newest time here; equal times go by name.
+    assert.deepStrictEqual(got.map(f => f.name), ['solo.html', 'chart.svg', 'deck.html', 'Flow', 'notes.md', 'later.py', 'early.html', 'attached.csv']);
+    const deck = got.find(f => f.name === 'deck.html');
+    assert.deepStrictEqual({ chat: deck.chat, file: deck.file, kind: deck.kind, madeAt: deck.madeAt, versions: deck.versions.length, alsoArtifact: deck.alsoArtifact },
+      { chat: 1, file: 'a2', kind: 'page', madeAt: 'n1', versions: 2, alsoArtifact: 'Art2' });
+    assert.strictEqual(got.find(f => f.name === 'solo.html').alsoArtifact, null);
+    assert.strictEqual(got.find(f => f.name === 'attached.csv').madeAt, null);
+  });
+
+  test('inChatsFiles leaves out missing files, published cards and the same source of a page in the artifacts', () => {
+    const names = inChatsFiles(inChatsData()).map(f => f.name);
+    for (const left of ['gone.txt', 'Guide', 'guide.html', 'Deck', 'Solo']) assert.ok(!names.includes(left), left);
+    assert.deepStrictEqual([...alsoInChat(inChatsData())], ['Art1']);
+    // Without that artifact in the export, the source is listed and nothing is "also in chat".
+    const data = inChatsData();
+    data.artifacts = data.artifacts.filter(v => v.id !== 'Art1');
+    assert.ok(inChatsFiles(data).some(f => f.name === 'guide.html'));
+    assert.deepStrictEqual([...alsoInChat(data)], []);
+  });
+
+  test("inChatsFiles hides a page's source only when the same publish is the artifact's current version", () => {
+    // Guide was published the same as guide.html at G1; the artifact is now at G2: the file is listed, naming it.
+    const data = inChatsData();
+    data.artifacts[0].ver = 'G2';
+    const guide = inChatsFiles(data).find(f => f.name === 'guide.html');
+    assert.ok(guide, 'listed');
+    assert.strictEqual(guide.alsoArtifact, 'Art1');
+    assert.deepStrictEqual([...alsoInChat(data)], []);
+    // A version with no ver, or an artifact with none, never counts as the current one.
+    const nover = inChatsData();
+    delete nover.chats[0].files.a4.versions[0].ver;
+    assert.ok(inChatsFiles(nover).some(f => f.name === 'guide.html'));
+    const noArtVer = inChatsData();
+    delete noArtVer.artifacts[0].ver;
+    assert.deepStrictEqual([...alsoInChat(noArtVer)], []);
+  });
+
+  test('inChatsFiles: uploads and pasted text are never listed, and odd data lists nothing', () => {
+    const data = inChatsData();
+    data.chats[0].messages[0].uploads = [{ name: 'up.pdf', href: 'C0/uploads/up.pdf', text: null }];
+    data.chats[0].messages[0].attachments = [{ name: 'paste.txt', text: 'pasted' }];
+    const names = inChatsFiles(data).map(f => f.name);
+    assert.ok(!names.includes('up.pdf') && !names.includes('paste.txt'));
+    assert.deepStrictEqual(inChatsFiles({}), []);
+    assert.deepStrictEqual(inChatsFiles({ chats: [null, { files: { a1: null, a2: { name: 'v.txt', versions: [] } } }] }), []);
+    assert.deepStrictEqual([...alsoInChat({ chats: [] })], []);
+  });
+
+  test('fileKindGroup', () => {
+    const cases = [
+      [['index.html', 'html'], 'page'], [['old.HTM', 'html'], 'page'],
+      [['notes.md', 'md'], 'doc'], [['Plan', 'md', 'doc:node-1'], 'doc'],
+      [['chart.svg', 'svg'], 'diagram'], [['Flow.html', 'html', 'widget:Flow'], 'diagram'], [['Flow.svg', 'svg', 'x:m:widget:Flow'], 'diagram'],
+      [['a.py', 'code'], 'code'], [['App.jsx', 'react'], 'code'], [['big.js', 'binary'], 'code'], [['data.csv', 'code'], 'code'],
+      [['photo.png', 'image'], 'other'], [['report.pdf', 'pdf'], 'other'], [['blob', 'binary'], 'other'], [['flow.mmd', 'mermaid'], 'other'],
+    ];
+    for (const [args, want] of cases) assert.strictEqual(fileKindGroup(...args), want, args.join(' '));
+  });
+
+  test('parseInChatsHash and formatInChatsHash', () => {
+    assert.deepStrictEqual(parseInChatsHash('#ac=3.a12'), { chat: 3, file: 'a12' });
+    assert.deepStrictEqual(parseInChatsHash('#ac=0.x:m_1-2'), { chat: 0, file: 'x:m_1-2' });
+    for (const h of ['#ac=', '#ac=1', '#ac=a.a1', '#ac=1234567.a1', '#ac=1.', '#ac=1.a/b', '#ac=1.' + 'a'.repeat(129), '#a=abc', '#chat=x&ac=1.a1', ' #ac=1.a1', null, undefined]) {
+      assert.strictEqual(parseInChatsHash(h), null, String(h));
+    }
+    assert.strictEqual(formatInChatsHash(3, 'a12'), '#ac=3.a12');
+    for (const [c, f] of [[-1, 'a1'], [1.5, 'a1'], ['1', 'a1'], [1, 'a<b'], [1, '']]) assert.strictEqual(formatInChatsHash(c, f), null, `${c} ${f}`);
+  });
+
+  test('artifactSourceLine: linked chats, else shared, else Cowork or Code', () => {
+    assert.strictEqual(artifactSourceLine({ links: [{ chat: 0, how: 'made' }] }), '💬 1 chat');
+    assert.strictEqual(artifactSourceLine({ links: [{ chat: 0, how: 'made' }, { chat: 0, how: 'edited' }, { chat: 2, how: 'published' }], shared: true }), '💬 2 chats');
+    assert.strictEqual(artifactSourceLine({ links: [], shared: true, sourceSurface: 'cowork' }), 'Shared with you');
+    assert.strictEqual(artifactSourceLine({ links: [], sourceSurface: 'cowork' }), 'Cowork');
+    assert.strictEqual(artifactSourceLine({ sourceSurface: 'code' }), 'Code');
+    assert.strictEqual(artifactSourceLine({ sourceSurface: 'chat' }), '');
+    assert.strictEqual(artifactSourceLine({ links: [{ chat: 'x' }, null] }), '');
+  });
+
+  test('artifactLinkGroups: Made in, Published in, Edited in; each chat once, at its first message; missing chats skipped', () => {
+    const chats = [{ title: 'A' }, { title: 'B' }];
+    const view = { links: [
+      { chat: 1, messageUuid: 'b1', how: 'edited' }, { chat: 0, messageUuid: 'a1', how: 'published' }, { chat: 0, messageUuid: 'a2', how: 'published' },
+      { chat: 1, messageUuid: 'b2', how: 'made' }, { chat: 0, messageUuid: 'a3', how: 'edited' }, { chat: 5, messageUuid: 'z', how: 'made' }, { chat: 0, how: 'opened' },
+    ] };
+    assert.deepStrictEqual(artifactLinkGroups(view, chats), [
+      { how: 'made', label: 'Made in', chats: [{ chat: 1, messageUuid: 'b2' }] },
+      { how: 'published', label: 'Published in', chats: [{ chat: 0, messageUuid: 'a1' }] },
+      { how: 'edited', label: 'Edited in', chats: [{ chat: 1, messageUuid: 'b1' }, { chat: 0, messageUuid: 'a3' }] },
+    ]);
+    assert.deepStrictEqual(artifactLinkGroups({}, chats), []);
+  });
+
+  test("publishedVersionsOf: the artifact's current version and each other version chats published, once", () => {
+    const page = (versions, artifact = 'Art') => ({ name: 'Page', kind: 'html', published: { url: 'u', current: true }, artifact, versions });
+    const data = { chats: [
+      { files: { p1: page([ver('published/P/v1/index.html', { label: 'v1', ver: 'A' }), ver('C0/artefacts/p.html', { label: 'v3', ver: 'C', same: true })]) } },
+      { files: {
+        p1: page([ver('published/P/v2/index.html', { label: 'v2', ver: 'B' }), ver('published/P/v1/index.html', { label: 'v1', ver: 'A' })]),
+        p2: page([ver('published/Q/v1/index.html', { label: 'v1', ver: 'Q' })], 'Other'),
+        p3: page([{ label: 'v9', ver: 'N', text: null, href: null }]),
+      } },
+    ] };
+    const got = publishedVersionsOf(data, { id: 'Art', ver: 'C' });
+    assert.strictEqual(got.current, 'v3');
+    assert.deepStrictEqual(got.others, [{ label: 'v1', chat: 0, file: 'p1', version: 0 }, { label: 'v2', chat: 1, file: 'p1', version: 0 }]);
+    // Nothing published but the current version: no others.
+    assert.deepStrictEqual(publishedVersionsOf({ chats: [{ files: { p1: page([ver('x', { label: 'v3', ver: 'C' })]) } }] }, { id: 'Art', ver: 'C' }), { current: 'v3', others: [] });
+    assert.deepStrictEqual(publishedVersionsOf({}, { id: 'Art', ver: 'C' }), { current: '', others: [] });
+  });
+
+  test("flagNote: the chat viewer's may-not-match wording", () => {
+    assert.ok(/may not match/.test(flagNote({ flag: 'script' })) && /replay_bash\.py/.test(flagNote({ flag: 'script' })));
+    assert.strictEqual(flagNote({ flag: 'odd' }), flagNote({ flag: 'edit' }));
+    assert.strictEqual(flagNote({}), '');
+    assert.strictEqual(flagNote(null), '');
+  });
+
+  test('chatFileTexts: the newest text of the last file with each name', () => {
+    const texts = chatFileTexts({ files: { a1: { name: 's.css', versions: [{ text: 'old' }, { text: 'new' }, { text: null }] }, a2: { name: 'b.js', versions: [{ text: null }] } } });
+    assert.deepStrictEqual([...texts], [['s.css', 'new']]);
+    assert.deepStrictEqual([...chatFileTexts(null)], []);
+  });
+}

@@ -75,6 +75,16 @@ svg.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor
 #results mark { background: none; color: var(--ink); font-weight: 600; }
 mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; padding: 0 1px; }
 .pill { font-size: 12px; color: var(--mute); padding: 11px 20px 13px; border-top: 1px solid var(--line); }
+#artifacts-nav { display: flex; align-items: center; gap: 9px; width: calc(100% - 20px); margin: 0 10px 6px; padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: var(--soft); font-size: 13.5px; text-align: left; cursor: pointer; }
+#artifacts-nav[hidden] { display: none; }
+#artifacts-nav:hover { background: var(--hover); }
+#artifacts-nav[aria-current="true"] { background: var(--active); color: var(--ink); }
+#artifacts-nav .n { margin-left: auto; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
+
+/* The Artifacts screen takes the chat's place: the artifacts app, in its own shadow root and styles */
+#artifacts-screen { flex: 1; min-height: 0; overflow: auto; }
+#artifacts-screen[hidden] { display: none; }
+body.artifacts-on #top, body.artifacts-on #project, body.artifacts-on #findbar, body.artifacts-on #scroll, body.artifacts-on #panel { display: none; }
 
 /* Top bar */
 #main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
@@ -316,6 +326,8 @@ body.wrap-code .file-code { white-space: pre-wrap; overflow-wrap: anywhere; widt
 .page-link { display: flex; align-items: center; gap: 7px; margin: -6px 0 12px; font-size: 13px; color: var(--mute); }
 .page-link svg { width: 14px; height: 14px; flex: none; }
 .page-link a { color: var(--ink); }
+.page-link a.open-artifact { padding: 2px 9px; border: 1px solid var(--line); border-radius: 7px; text-decoration: none; margin-right: 4px; }
+.page-link a.open-artifact:hover { background: var(--hover); }
 .step-text .prose { font-size: inherit; line-height: 1.55; font-family: var(--sans); }
 .step-text .prose > :first-child { margin-top: 0; }
 .step-text .prose > :last-child { margin-bottom: 0; }
@@ -451,6 +463,9 @@ button.chip:hover { border-color: var(--line-strong); }
   body.drawer #side { transform: none; box-shadow: 0 8px 40px rgba(0, 0, 0, .28); }
   body.drawer #scrim { display: block; }
   #menu { display: block; }
+  /* The menu button stays reachable over the Artifacts screen. */
+  body.artifacts-on #top { display: flex; }
+  body.artifacts-on #meta, body.artifacts-on #files-button, body.artifacts-on #files-menu { display: none; }
   #top { padding: 0 14px; gap: 8px; }
   #scroll { scrollbar-gutter: auto; }
   #panel { left: 0; border-left: 0; }
@@ -476,6 +491,7 @@ button.chip:hover { border-color: var(--line-strong); }
       <button class="clear" type="button" aria-label="Clear search" title="Clear search (Esc)" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </label>
     <label class="find-files" title="Also look in uploads and in files Claude made. Their text loads as you search, so this is slower on a large archive."><input type="checkbox" id="search-files"> Also search inside files</label>
+    <button id="artifacts-nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg><span>Artifacts</span><span class="n"></span></button>
     <div id="recents">
       <div class="lab">Recents</div>
       <div id="chat-list"></div>
@@ -503,6 +519,7 @@ button.chip:hover { border-color: var(--line-strong); }
       <button class="find-close" type="button" aria-label="Close" title="Close (Esc)"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </div>
     <div id="scroll"><div id="chat"></div></div>
+    <div id="artifacts-screen" role="region" aria-label="Artifacts" hidden></div>
   </main>
   <aside id="panel" aria-label="File" hidden>
     <div id="panel-head"></div>
@@ -510,10 +527,12 @@ button.chip:hover { border-color: var(--line-strong); }
   </aside>
 </div>
 <script id="data" type="application/json">/*DATA_JSON*/</script>
+<template id="artifacts-style"><style>/*ARTIFACTS_CSS*/</style></template>
 <script>/*MARKED_JS*/</script>
 <script>/*KATEX_JS*/</script>
 <script id="highlighter" type="text/plain">/*HIGHLIGHT_JS*/</script>
 <script>/*LOGIC_JS*/</script>
+<script>/*ARTIFACTS_APP_JS*/</script>
 <script>/*APP_JS*/</script>
 </body>
 </html>

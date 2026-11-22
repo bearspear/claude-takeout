@@ -198,6 +198,19 @@ const ctx = () => ({ folder: '', artifacts: { 'big.html': BIG_HTML }, artifactIn
   await page.waitForFunction(() => /No matches inside files/.test(document.querySelector('.file-hits')?.textContent || ''), null, { timeout: 3000 }).catch(() => {});
   check('a miss says so', /No matches inside files/.test(await page.textContent('#results')));
 
+  // More parts loading at once than are kept, and one of them asked for again while it still loads: every load
+  // settles, the repeat with the same part (it waits on the first script instead of replacing its resolver).
+  for (const n of [91, 92, 93]) fs.writeFileSync(path.join(dir, 'viewer-files', `part-00${n}.js`), `window.__archivePart(${n}, { k: 'part ${n}' });`);
+  const settled = await page.evaluate(async () => {
+    for (const n of [91, 92, 93]) partsListed.add(n);
+    const loads = [loadPart(91), loadPart(92), loadPart(93), loadPart(91)];
+    const timeout = new Promise(done => setTimeout(() => done('timed out'), 3000));
+    const got = await Promise.race([Promise.all(loads), timeout]);
+    return got === 'timed out' ? got : got.map(part => part && part.k);
+  });
+  check('parts loading together all settle, a repeat included', JSON.stringify(settled) === JSON.stringify(['part 91', 'part 92', 'part 93', 'part 91']), JSON.stringify(settled));
+  check('a part asked for twice while loading loads once', partLoads.filter(u => u.endsWith('/part-0091.js')).length === 1, partLoads.join(' '));
+
   check('zero console errors', errors.length === 0, errors.join(' | '));
   check('zero network requests', requests.length === 0, requests.join());
   await browser.close();

@@ -14,7 +14,7 @@ Needs Node 20+ and Python 3.10+, with no packages to install.
 | `test_replay_bash.py` | `replay_bash.py` replay order and containment |
 | `viewer.test.js` | Viewer tree, hash, Markdown steps and data building |
 | `archive.test.js` | Old-archive tool: finding archives (an Export Artifacts folder holds none), ZIP extraction, added files, `--force`, and that existing files stay unchanged, and that an Export Artifacts folder with a viewer still holds no archive |
-| `e2e/` | Real extension in Chromium against a mock claude.ai, and the viewer page over `file://` (`viewer.e2e.js`: rendering, previews, `sanitizeHtml`; `colors.e2e.js`: syntax colors; `parts.e2e.js`: upload and file text in `viewer-files/`; `navigation.e2e.js`: version switching by keyboard, search highlights, the phone panel header; `search.e2e.js`: sidebar search; `files.e2e.js`: the Files list; `stepper.e2e.js`: the match bar; `webimages.e2e.js`: web-search images, mosaic and gallery; `steps.e2e.js`: the step groups; `prompts.e2e.js`: long prompts; `cards.e2e.js`: product cards; `published.e2e.js`: published-page cards; `artifacts.e2e.js`: an Export Artifacts `index.html`; `artifacts-viewer.e2e.js`: the artifacts viewer, grid, tabs, routing, sandboxed previews, hostile pages) (optional, see below). `archive.e2e.js` opens a viewer the old-archive tool built |
+| `e2e/` | Real extension in Chromium against a mock claude.ai, and the viewer page over `file://` (`viewer.e2e.js`: rendering, previews, `sanitizeHtml`; `colors.e2e.js`: syntax colors; `parts.e2e.js`: upload and file text in `viewer-files/`; `navigation.e2e.js`: version switching by keyboard, search highlights, the phone panel header; `search.e2e.js`: sidebar search; `files.e2e.js`: the Files list; `stepper.e2e.js`: the match bar; `webimages.e2e.js`: web-search images, mosaic and gallery; `steps.e2e.js`: the step groups; `prompts.e2e.js`: long prompts; `cards.e2e.js`: product cards; `published.e2e.js`: published-page cards; `artifacts.e2e.js`: an Export Artifacts `index.html`; `artifacts-viewer.e2e.js`: the artifacts viewer, grid, tabs, routing, sandboxed previews, hostile pages; `combined.e2e.js`: an Export All viewer with artifacts, In chats, links, the guard frame) (optional, see below). `archive.e2e.js` opens a viewer the old-archive tool built |
 
 `test_replay_bash.py` makes real attempts to escape the sandbox, so its replay tests run only where `sandbox-exec` exists.
 
@@ -54,11 +54,14 @@ PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/published.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/artifacts.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/artifacts-viewer.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/combined.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/navigation.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/search.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/files.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/stepper.e2e.js
 ```
+
+`combined.e2e.js` covers an Export All's viewer with artifacts. It launches Chromium with `--disable-features=IsolateSandboxedIframes`: Chrome gives sandboxed frames processes of their own, and Playwright doesn't attach to a sandboxed frame inside another (the preview in its guard frame), so its console, requests and frame would go unseen. In one process they are seen; the sandbox, origin and policies are the same either way.
 
 `viewer.e2e.js` is the only coverage for `sanitizeHtml`, so run it after changing anything in the viewer.
 

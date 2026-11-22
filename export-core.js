@@ -462,6 +462,65 @@ function publishedPagesOf(data) {
   return pages;
 }
 
+// Which claude.ai artifacts a chat made, published or edited, as [{ uuid, messageUuid, how, docKey }] in chat
+// order over every message (any branch), one entry per (uuid, how, message). 'published': each publish in
+// publishedPagesOf. 'made': a Claude_Docs__batch whose result names the new artifact (created.minted, else
+// frame.url); docKey is its extractArtifacts key. 'edited': a Claude_Docs__* call on a project container id, or
+// an edit_version call with a slug. Mentions, opens and lists link nothing. A function declaration, so
+// takeout-viewer.js can reach it on window.
+function artifactLinksOf(data) {
+  const messages = (data && data.chat_messages) || [];
+  const failed = failedToolUseIds(messages);
+  const results = new Map();
+  for (const msg of messages) {
+    for (const b of Array.isArray(msg.content) ? msg.content : []) if (b && b.type === 'tool_result') results.set(b.tool_use_id, b);
+  }
+  const published = new Map();
+  for (const page of publishedPagesOf(data)) for (const p of page.publishes) published.set(p.toolUseId, page.uuid);
+  const out = [];
+  const seen = new Set();
+  const add = (uuid, messageUuid, how, docKey) => {
+    uuid = String(uuid || '').toLowerCase();
+    if (!PUBLISH_UUID_RE.test(uuid)) return;
+    const k = `${uuid} ${how} ${messageUuid}`;
+    if (seen.has(k)) return;
+    seen.add(k);
+    out.push({ uuid, messageUuid, how, docKey: docKey || null });
+  };
+  for (const msg of messages) {
+    for (const b of Array.isArray(msg.content) ? msg.content : []) {
+      if (!b || b.type !== 'tool_use') continue;
+      if (published.has(b.id)) { add(published.get(b.id), msg.uuid, 'published', null); continue; }
+      const input = b.input && typeof b.input === 'object' ? b.input : {};
+      const action = claudeDocsAction(b.name);
+      if (action) {
+        if (failed.has(b.id)) continue;
+        if (action === 'batch') {
+          const r = results.get(b.id);
+          const info = r ? leadingJson(resultText(r)) : null;
+          if (info && typeof info === 'object') {
+            let uuid = info.created && typeof info.created === 'object' ? String(info.created.minted || '').toLowerCase() : '';
+            if (!PUBLISH_UUID_RE.test(uuid)) {
+              const url = info.frame && typeof info.frame === 'object' && typeof info.frame.url === 'string' ? info.frame.url : '';
+              const m = /^https:\/\/claude\.ai\/artifact\/([A-Za-z0-9]+)/.exec(url);
+              uuid = m ? base58ToUuid(m[1]) : '';
+            }
+            if (uuid) add(uuid, msg.uuid, 'made', claudeDocKey(b, r));
+          }
+        }
+        const c = input.container;
+        if (c && typeof c === 'object' && c.kind === 'project' && typeof c.id === 'string') add(c.id, msg.uuid, 'edited', null);
+        continue;
+      }
+      if (/(^|__|:)edit_version$/.test(String(b.name || '')) && typeof input.slug === 'string') {
+        const r = results.get(b.id);
+        if (r && !r.is_error) add(input.slug, msg.uuid, 'edited', null);
+      }
+    }
+  }
+  return out;
+}
+
 // The index in entry.versions (extractArtifacts' index entry) of the version an artifact had as of a message:
 // the last of entry.messages at or before it on chain. messageUuid null or undefined: the last version made on
 // chain. -1 when there is none yet, or when the message is not on chain.
@@ -1509,7 +1568,7 @@ function openableName(name) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
   };
