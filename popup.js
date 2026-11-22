@@ -3407,11 +3407,8 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
     if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
     if (collect && previewKind(f.path) && bytes.length <= PREVIEW_ITEM_MAX) candidates.push([f, bytes]);
   }
-  // The start file first, then a Design canvas's layout (project/canvas.json), then the rest.
-  const canvas = (f) => f !== start && f.path === DESIGN_CANVAS_PATH;
-  for (const [f, bytes] of candidates) if (f === start) keep(f, bytes);
-  for (const [f, bytes] of candidates) if (canvas(f)) keep(f, bytes);
-  for (const [f, bytes] of candidates) if (f !== start && !canvas(f)) keep(f, bytes);
+  // The start file first, then a Design canvas's layout (project/canvas.json) and its boards, then the rest.
+  for (const [f, bytes] of candidates.slice().sort((a, b) => previewRank(a[0].path, start && start.path) - previewRank(b[0].path, start && start.path))) keep(f, bytes);
   const startOk = !!start && !missing.includes(start.path);
   // zip.whole: only a version saved whole (a chat's fetch in Export All, which the artifact step fetches again when
   // it isn't, so a ZIP of a part would be left beside the step's own files).

@@ -4788,3 +4788,16 @@ test('a served copy with only the preamble is not labelled', async () => {
   const { files } = await runArtifacts({ frames, pages: { [U(1)]: livePage('Served', { 'index.html': PREAMBLE_PAGE }) } });
   assert.strictEqual(JSON.parse(files[`${artFolder('Served', U(1))}/artifact.json`]).needsRuntime, false);
 });
+
+test('a Design artifact\'s boards are kept ahead of its other files in the preview budget', async () => {
+  const big = (n) => JSON.stringify({ n, pad: 'x'.repeat(1900 * 1024) });
+  const files = { 'index.html': '<script src="artifact-type/app.js"></script>', 'project/canvas.json': '{"v":3,"boards":{"Main.dc.html":{"x":0,"y":0,"w":10,"h":10}}}' };
+  for (const n of ['a', 'b', 'c', 'd', 'e']) files[`project/${n}.json`] = big(n);
+  files['project/Main.dc.html'] = '<p>main</p>';
+  const frames = [art(U(1), 'Mock', { typeSlug: DESIGN_TYPE, typeTitle: 'Design' })];
+  const { files: out, views } = await runArtifacts({ frames, pages: { [U(1)]: livePage('Mock', files) } });
+  let held = null;
+  vm.runInNewContext(out[`viewer-files/part-${String(views[0].part).padStart(4, '0')}.js`], { window: { __archivePart: (n, o) => { held = o; } } });
+  const kept = [...held[views[0].key].texts.map((t) => t[0])];
+  assert.deepStrictEqual(kept.slice(0, 3), ['index.html', 'project/canvas.json', 'project/Main.dc.html'], kept.join());
+});

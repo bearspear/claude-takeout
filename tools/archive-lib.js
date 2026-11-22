@@ -813,9 +813,8 @@ function payloadFromDisk(files, start) {
   let textBytes = 0;
   let imageBytes = 0;
   const decoder = new TextDecoder();
-  // The start file first, then a Design canvas's layout (project/canvas.json), then the rest.
-  const canvas = x => x.path !== start && x.path === core.DESIGN_CANVAS_PATH;
-  for (const f of [...files.filter(x => x.path === start), ...files.filter(canvas), ...files.filter(x => x.path !== start && !canvas(x))]) {
+  // The start file first, then a Design canvas's layout (project/canvas.json) and its boards, then the rest.
+  for (const f of files.slice().sort((a, b) => core.previewRank(a.path, start) - core.previewRank(b.path, start))) {
     const kind = core.previewKind(f.path);
     if (!kind || !f.abs) continue;
     let bytes;

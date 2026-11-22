@@ -153,6 +153,11 @@ async function writeOut(zip) {
     await page.locator('button.canvas-back').click();
     await canvas.waitFor({ timeout: 3000 }).catch(() => {});
     check(`${label}: Back to the canvas`, await page.locator('.design-canvas').count() === 1);
+    await page.locator('.design-board', { hasText: 'Home A' }).locator('button.board-open').click();
+    await page.locator('button.canvas-back').click();
+    await canvas.waitFor({ timeout: 3000 }).catch(() => {});
+    const again = await page.locator('#page-badges .badge').allTextContents();
+    check(`${label}: badges stay single after Back`, again.filter(b => b === 'Design canvas').length === 1 && again.filter(b => b === 'some boards need claude.ai').length === 1, again.join('|'));
 
     // A Design artifact with no canvas.json keeps the poster page.
     await page.evaluate(id => { location.hash = `#a=${id}`; }, uuidToBase58(U(2)));

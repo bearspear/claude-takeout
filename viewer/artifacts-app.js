@@ -796,7 +796,8 @@
 
     // In place of "needs claude.ai to run": Design canvas, and whether some boards need claude.ai's templates.
     function canvasBadges(layout, texts) {
-      const keep = [...pageBadges.children].filter(b => b.textContent !== 'needs claude.ai to run');
+      const ours = new Set(['needs claude.ai to run', 'Design canvas', 'some boards need claude.ai']);
+      const keep = [...pageBadges.children].filter(b => !ours.has(b.textContent));
       const templated = layout.boards.some(b => b.held && boardFlags(texts.get(b.path)).templated);
       pageBadges.replaceChildren(badge('Design canvas'), ...(templated ? [badge('some boards need claude.ai')] : []), ...keep);
     }
