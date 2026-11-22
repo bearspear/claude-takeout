@@ -1,4 +1,5 @@
-// Gives older Claude Takeout archives the offline viewer.
+// Gives older Claude Takeout archives the offline viewer: chat archives, Export All archives with their Artifacts
+// screen (any artifacts layout an export wrote: tools/archive-lib.js readArtifactStore), and Export Artifacts exports.
 //   node tools/build_viewer.js <folder> [--out <folder>] [--force] [--dry-run] [--json]
 // Exit code 0 when clean, 1 if anything failed. Writes only viewer.html, viewer-check.gif and viewer-files/
 // beside an archive, and new folders under --out. Every other file is the owner's and is never changed:
@@ -113,11 +114,20 @@ function startsLikePart(file) {
   } finally { fs.closeSync(fd); }
 }
 
-// --force deletes this folder, so a name alone isn't enough: a part has to be one by content too.
+// Card pictures of artifacts, as exports save them: viewer-files/thumbs/<id>.<png|jpg|webp>.
+const THUMB_NAME = /^[A-Za-z0-9_-]{1,64}\.(png|jpg|webp)$/;
+const THUMBS_DIR = 'thumbs';
+
+// --force deletes this folder, so a name alone isn't enough: a part has to be one by content too. Its thumbs/ holds
+// only card pictures by name.
 function isOurParts(dir, stat) {
   if (!stat.isDirectory()) return false;
-  return fs.readdirSync(dir, { withFileTypes: true }).every(e => e.isFile() && (SYSTEM_JUNK.includes(e.name) ||
-    (/^part-\d{4,}\.js$/.test(e.name) && startsLikePart(path.join(dir, e.name)))));
+  return fs.readdirSync(dir, { withFileTypes: true }).every(e => {
+    if (e.isDirectory() && e.name === THUMBS_DIR) {
+      return fs.readdirSync(path.join(dir, e.name), { withFileTypes: true }).every(t => t.isFile() && (SYSTEM_JUNK.includes(t.name) || THUMB_NAME.test(t.name)));
+    }
+    return e.isFile() && (SYSTEM_JUNK.includes(e.name) || (/^part-\d{4,}\.js$/.test(e.name) && startsLikePart(path.join(dir, e.name))));
+  });
 }
 
 // { stop, reason } when this archive gets no viewer, otherwise what may be replaced: { viewer, gif, parts }.
@@ -149,15 +159,17 @@ function inspectRoot(root, force) {
 // Writing one archive
 // ===================================================================
 
-async function collectChats(archive, report) {
+async function collectChats(archive, report, store) {
   const chats = [];
   const idByDir = new Map();
+  const chatFolders = new Map(); // chat uuid -> its folder, archive-relative
   for (const chat of archive.chats) {
     await stopPoint();
     try {
-      const built = lib.chatFromDisk(archive, chat);
+      const built = lib.chatFromDisk(archive, chat, store);
       chats.push(built.viewerChat);
       idByDir.set(chat.relDir, built.viewerChat.id);
+      chatFolders.set(built.viewerChat.id, chat.relDir === '.' ? '' : chat.relDir);
       for (const file of built.missing) report.missing.push({ chat: chat.relDir, file });
       for (const w of built.warnings) report.warnings.push(`${chat.relDir}: ${w}`);
     } catch (e) {
@@ -165,14 +177,59 @@ async function collectChats(archive, report) {
       else report.failedChats.push({ chat: chat.relDir, reason: e.message });
     }
   }
-  return { chats, idByDir };
+  return { chats, idByDir, chatFolders };
 }
 
 let assets = null;
 function viewerHtml(data, policy) {
   assets = assets || CTViewer.VIEWER_ASSETS.map(a => fs.readFileSync(path.join(__dirname, '..', a), 'utf8'));
-  const [template, logic, app, marked, katex, css, highlight] = assets;
-  return CTViewer.assembleViewer({ template, css, marked, katex, highlight, logic, app, data, ...policy });
+  const [template, logic, app, marked, katex, css, highlight, artifactsApp, artifactsCss] = assets;
+  return CTViewer.assembleViewer({ template, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data, ...policy });
+}
+
+// Export Artifacts' own page (writeArtifactsViewer in popup.js): the artifacts alone.
+let artifactsAssets = null;
+function artifactsViewerHtml(data, policy) {
+  artifactsAssets = artifactsAssets || CTViewer.ARTIFACTS_VIEWER_ASSETS.map(a => fs.readFileSync(path.join(__dirname, '..', a), 'utf8'));
+  const [template, logic, app, marked, artifactsCss] = artifactsAssets;
+  return CTViewer.assembleViewer({ template, css: '', artifactsCss, marked, katex: '', highlight: '', logic, app, data, ...policy });
+}
+
+// ===================================================================
+// Artifacts
+// ===================================================================
+
+// The Artifacts screen's input from the archive's store (lib.readArtifactStore): views with their previews in parts
+// (CTViewer.artifactViewParts, numbered from firstPart; each handed to onPart), and records whose older versions have
+// previews of their own (versionPlaces part and key). chatFolders: chat uuid -> its folder. Returns { views, records,
+// partCount, thumbs: [{ rel, abs }] (the card pictures the views name) }.
+async function artifactsInput(store, { chatFolders, firstPart, onPart, versions = true }) {
+  const fromDisk = lib.artifactViewsFromDisk(store, chatFolders);
+  const parts = CTViewer.artifactViewParts({ partLimit: PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET, firstPart });
+  const views = [];
+  for (const [i, view] of fromDisk.views.entries()) {
+    await stopPoint();
+    let v = parts.add(view, fromDisk.payloads[i]);
+    // A start file the preview would show that ended up in no part.
+    if (v.part == null && v.start && !v.tooLarge && core.previewKind(v.start)) v = { ...v, startMissing: true };
+    views.push(v);
+    parts.drain().forEach(onPart);
+  }
+  const byUuid = new Map(fromDisk.records.map(r => [r.uuid, r]));
+  if (versions) {
+    for (const { uuid, ver, payload, startKind } of fromDisk.versionPayloads) {
+      await stopPoint();
+      const got = parts.add({}, payload);
+      if (got.part != null) Object.assign(byUuid.get(uuid).versionPlaces, { [ver]: { ...byUuid.get(uuid).versionPlaces[ver], part: got.part, key: got.key, startKind } });
+      parts.drain().forEach(onPart);
+    }
+  }
+  parts.flush().forEach(onPart);
+  const thumbs = new Map();
+  for (const rec of store.records.values()) {
+    if (rec.thumb && !thumbs.has(rec.thumbRel) && views.some(v => v.thumb === rec.thumbRel)) thumbs.set(rec.thumbRel, { rel: rec.thumbRel, abs: rec.thumb });
+  }
+  return { views, records: fromDisk.records, partCount: parts.count, thumbs: [...thumbs.values()] };
 }
 
 // Exclusive, so a name that is already there is never written to or claimed. temps lists what this run made.
@@ -228,16 +285,11 @@ function install(root, tmp, old, report) {
 
 // Never rejects: a bad archive is a report, and the run goes on.
 async function writeViewer(archive, { force = false, dryRun = false } = {}) {
-  const report = { root: archive.root, kind: archive.kind, status: 'failed', reason: '', chats: 0, failedChats: [], skippedChats: [], missing: [], added: 0, notices: [], warnings: [], dryRun };
+  const report = { root: archive.root, kind: archive.kind, status: 'failed', reason: '', chats: 0, artifacts: 0, failedChats: [], skippedChats: [], missing: [], added: 0, notices: [], warnings: [], dryRun };
   const finish = (status, reason = '') => Object.assign(report, { status, reason });
   const temps = [];
   try {
     await stopPoint();
-    if (lib.hasArtifacts(archive.root)) {
-      report.refused = true;
-      report.message = lib.artifactsRefusal('build_viewer');
-      return finish('failed', report.message);
-    }
     for (const name of fs.readdirSync(archive.root)) {
       if (lib.LEFTOVER_NAME.test(name)) report.notices.push(`Left alone, from an interrupted run: ${name}`);
     }
@@ -253,18 +305,32 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
 
     const old = inspectRoot(archive.root, force);
     if (old.stop) return finish(old.stop, old.reason);
-    if (!archive.chats.length) return finish('skipped', 'no Claude chats in it');
+    const standalone = archive.kind === 'artifacts';
+    // An Export All with artifacts and no chats (findArchives finds one by its artifacts/) is read as one with chats.
+    if (!archive.chats.length && !standalone && archive.kind !== 'mega') return finish('skipped', 'no Claude chats in it');
 
-    const { chats, idByDir } = await collectChats(archive, report);
+    // Artifacts in any layout an export wrote: read once, for the chats' published pages and the Artifacts screen.
+    const store = lib.readArtifactStore(archive.root);
+    report.warnings.push(...store.warnings);
+    // Only an Export All or Export Artifacts viewer has the artifacts (a chat ZIP's published pages stay on its cards).
+    const withArtifacts = standalone || (archive.kind === 'mega' && store.layout !== 'none');
+    if (withArtifacts) report.artifacts = store.records.size;
+    if (standalone && !store.records.size) return finish('skipped', 'no artifacts in it');
+    if (!archive.chats.length && !standalone && !store.records.size) return finish('skipped', 'no Claude chats in it');
+
+    const { chats, idByDir, chatFolders } = await collectChats(archive, report, store);
     report.chats = chats.length;
-    if (!chats.length && report.skippedChats.length && !report.failedChats.length) return finish('skipped', 'no Claude chats in it');
-    if (!chats.length) return finish('failed', 'no chat could be read, so no viewer was written');
+    if (!standalone && archive.chats.length) {
+      if (!chats.length && report.skippedChats.length && !report.failedChats.length) return finish('skipped', 'no Claude chats in it');
+      if (!chats.length) return finish('failed', 'no chat could be read, so no viewer was written');
+    }
 
     if (dryRun) return finish('written', old.viewer ? 'would replace the viewer' : '');
 
     const name = base => path.join(archive.root, `${base}.tmp-${process.pid}`);
     const tmp = { parts: null, gif: null, viewer: name(VIEWER_FILE) };
     const added = scan.files.map(f => ({ path: f.path, size: f.size, chat: idByDir.get(f.chatDir) }));
+    // A part into the new viewer-files/, made on first use (part null: only make it).
     const writePart = part => {
       if (!tmp.parts) {
         const dir = name(PARTS_DIR);
@@ -272,18 +338,46 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
         temps.push(dir);
         tmp.parts = dir;
       }
-      writeNew(path.join(tmp.parts, part.name), part.body, temps);
+      if (part) writeNew(path.join(tmp.parts, part.name), part.body, temps);
     };
-    const built = await buildParts(added, { root: archive.root, onPart: writePart });
-    report.warnings.push(...built.warnings);
+    // Card pictures stay where the views name them: viewer-files/thumbs/, copied into the new viewer-files/.
+    const copyThumbs = list => {
+      if (!list.length) return;
+      writePart(null);
+      const dir = path.join(tmp.parts, THUMBS_DIR);
+      fs.mkdirSync(dir);
+      for (const t of list) fs.copyFileSync(t.abs, path.join(dir, path.posix.basename(t.rel)), fs.constants.COPYFILE_EXCL);
+    };
 
-    // Large upload text goes in parts numbered after the added files' parts.
-    const moved = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString() }), { firstPart: built.partCount + 1 });
-    moved.parts.forEach(writePart);
-    const data = moved.data;
-    if (built.entries.length) data.added = built.entries;
-    const fileScripts = built.partCount + moved.parts.length > 0;
-    writeNew(tmp.viewer, viewerHtml(data, { fileScripts, fileMedia: built.entries.length > 0 }), temps);
+    if (standalone) {
+      // The Export Artifacts page: the artifacts alone, as the extension wrote it.
+      const input = await artifactsInput(store, { chatFolders, firstPart: 1, onPart: writePart, versions: false });
+      copyThumbs(input.thumbs);
+      const data = { exported: store.exportedAt, listed: store.listed, artifacts: input.views };
+      writeNew(tmp.viewer, artifactsViewerHtml(data, { fileScripts: input.partCount > 0 }), temps);
+    } else {
+      const built = await buildParts(added, { root: archive.root, onPart: writePart });
+      report.warnings.push(...built.warnings);
+
+      // An Export All's artifacts (any layout): the Artifacts screen, its parts numbered after the added files'.
+      let artifacts = null;
+      let artifactParts = 0;
+      if (withArtifacts) {
+        const input = await artifactsInput(store, { chatFolders, firstPart: built.partCount + 1, onPart: writePart });
+        copyThumbs(input.thumbs);
+        artifactParts = input.partCount;
+        artifacts = { views: input.views, records: input.records, listed: store.listed, exported: store.exportedAt, since: store.since, listFetched: store.listFetched };
+      }
+
+      // Large upload text goes in parts numbered after those.
+      const firstPart = built.partCount + artifactParts + 1;
+      const moved = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString(), ...(artifacts ? { artifacts } : {}) }), { firstPart });
+      moved.parts.forEach(writePart);
+      const data = moved.data;
+      if (built.entries.length) data.added = built.entries;
+      const fileScripts = firstPart - 1 + moved.parts.length > 0;
+      writeNew(tmp.viewer, viewerHtml(data, { fileScripts, fileMedia: built.entries.length > 0 }), temps);
+    }
     if (!old.gif) {
       tmp.gif = name(CTViewer.VIEWER_CHECK_FILE);
       writeNew(tmp.gif, checkGif(), temps);
@@ -313,12 +407,9 @@ async function processZip(zip, { outDir, force, dryRun, claims }) {
     let loaded = await zipLib.loadZip(zip);  // read once, for every step below
     const names = await zipLib.zipEntryNames(zip, loaded);
     entry.chats = names.filter(n => /(^|\/)original\.json$/.test(n)).length;
-    if (!entry.chats) return finish('skipped', 'no Claude chat in it');
-    if (await zipLib.zipHasArtifacts(zip, loaded)) {
-      entry.refused = true;
-      entry.message = lib.artifactsRefusal('build_viewer');
-      return finish('failed', entry.message);
-    }
+    // An Export Artifacts ZIP has no chats: its manifest and an artifact.json tell it.
+    const artifactsOnly = names.some(n => /^([^/]+\/)?export-manifest\.json$/.test(n)) && names.some(n => /(^|\/)artifact\.json$/.test(n));
+    if (!entry.chats && !artifactsOnly) return finish('skipped', 'no Claude chat in it');
 
     // Every ZIP with a chat in it holds its name, on every run, so a clash shows even once the folder exists.
     // Case folds, as it does on a Mac.
@@ -345,7 +436,7 @@ async function processZip(zip, { outDir, force, dryRun, claims }) {
     entry.skipped.push(...entry.archives.flatMap(a => a.skippedChats));
     if (stop.requested) return finish('failed', `stopped by a signal, after it was extracted to ${entry.dest}. To finish, run the tool on that folder.`);
     if (entry.archives.some(a => a.status === 'failed')) return finish('failed', 'a viewer could not be written');
-    return entry.archives.length ? finish('written') : finish('skipped', 'extracted, but no Claude chat was found');
+    return entry.archives.length ? finish('written') : finish('skipped', 'extracted, but no Claude chat or artifacts were found');
   } catch (e) {
     return finish('failed', e.message);
   }
@@ -420,6 +511,7 @@ function archiveLine(a) {
   const label = a.status === 'written' && a.dryRun ? 'would write' : a.status;
   const facts = [];
   if (a.chats) facts.push(plural(a.chats, 'chat'));
+  if (a.artifacts) facts.push(plural(a.artifacts, 'artifact'));
   if (a.failedChats.length) facts.push(`${a.failedChats.length} failed`);
   if (a.added) facts.push(`${a.added} added`);
   if (a.missing.length) facts.push(`${a.missing.length} missing`);
@@ -498,9 +590,6 @@ async function main(argv) {
   try {
     const report = await run(args.positionals[0], { out, force: !!force, dryRun: !!dryRun });
     console.log(json ? JSON.stringify(report) : formatReport(report));
-    for (const r of [...report.archives, ...report.zips, ...report.zips.flatMap(z => z.archives)]) {
-      if (r.refused) console.error(`${r.root || r.zip}: ${r.message}`);
-    }
     return report.ok ? 0 : 1;
   } catch (e) {
     return fail(e.message);

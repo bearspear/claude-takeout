@@ -88,7 +88,7 @@ Creates a comprehensive archive:
 │   ├── script.py
 │   ├── wiring_diagram.svg
 │   └── ...
-├── published/                   # Pages Claude published on claude.ai (only when the chat published some)
+├── published/                   # Pages Claude published on claude.ai (only when the chat published some; a single-chat ZIP only, Export All uses artifacts/)
 │   └── Dining_room_guide_LkJG.../
 │       ├── published.json           # Versions, files and which are the same as an artefact
 │       └── v1/index.html            # A version's files, when they are not already in artefacts/
@@ -131,8 +131,9 @@ claude-takeout-artifacts-<your name>-2026-11-16_1530/
 ├── export-manifest.json             # kind: "artifacts", every artifact's uuid, title, folder and version
 ├── errors.txt                       # Only when something went wrong
 └── <Title>_<id>/                    # One folder per artifact
-    ├── artifact.json                # Title, kind, source, version, files with SHA-256, notes
-    └── <the artifact's files>       # Its current version
+    ├── artifact.json                # Format 2: title, kind, source, every version with its files and SHA-256, notes
+    └── <version>/                   # One folder per version saved (the current one)
+        └── <the version's files>
 ```
 
 A Claude Docs document is listed with a link, not saved: its text isn't available as a file. Open `viewer.html` in Chrome, from the unzipped folder.
@@ -167,9 +168,9 @@ claude-takeout-2026-01-01.zip
 └── ...
 ```
 
-Each conversation folder has the identical structure to individual ZIP exports, except that pages Claude published are saved once, in a shared `published/` folder at the root, and each chat's README links there.
+Each conversation folder has the identical structure to individual ZIP exports, except that pages Claude published are saved once, in the shared `artifacts/` folder at the root, and each chat's README links there.
 
-With **Include artifacts in Export All** on (the default), the root also holds `artifacts/`: one folder per artifact, with `index.html`, `index.md` and, if something failed, `errors.txt`. `artifacts` is a reserved name, so no chat folder takes it. One `viewer.html` at the root covers the chats and the artifacts.
+`artifacts/` holds one folder per artifact, `<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version (the current version and each older version a chat published), plus `index.html`, `index.md` and, if something failed, `errors.txt`. Every page a chat published gets a folder, also with **Include artifacts in Export All** off; with it on (the default), the artifacts claude.ai lists are added, and the index lists pages claude.ai no longer lists under "Published from chats, not in claude.ai's list". Export All writes no `published/` folder. `artifacts` is a reserved name (and `published` stays one), so no chat folder takes it. One `viewer.html` at the root covers the chats and the artifacts.
 
 ## Keyboard Shortcuts
 
@@ -395,6 +396,11 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.18.0
+
+- **One folder per artifact** - Export All now keeps every artifact in one folder, `artifacts/<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version, the current one and each older version a chat published. `published/` is gone from Export All (a single chat's ZIP keeps it), so nothing is saved twice. Every page a chat published gets a folder, also pages claude.ai no longer lists and exports made with **Include artifacts in Export All** off; `artifacts/index.html` and `index.md` list those under "Published from chats, not in claude.ai's list". Export Artifacts uses the same per-version layout. The viewer reads it: an Artifacts entry shows for any artifact folder or any file Claude made in a chat, the version menu follows claude.ai's history order, and All, Yours and Shared with you say "claude.ai's list isn't in this export" when the list wasn't fetched. A Claude Docs row says "Text rebuilt from the chat <title>." when that chat is in the export.
+- **The old-archive tools handle artifacts** - `build_viewer.js` and `merge_archives.js` no longer refuse an archive with artifacts. They read every layout (chat archives with `published/`, 1.17 combined archives, 1.18 archives, standalone Export Artifacts exports). `merge_archives.js` always writes the new layout: one `artifacts/` store with each version taken whole from its newest source, and the links in the merged chats' Markdown rewritten from `published/` to it.
 
 ### v1.17.1
 

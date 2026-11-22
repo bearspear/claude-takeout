@@ -945,7 +945,9 @@ function setupParts(data) {
   const uploads = (data.chats || []).flatMap(chat => (chat.messages || []).flatMap(m => m.uploads || []));
   const versions = (data.chats || []).flatMap(chat => Object.values(chat.files || {}).flatMap(f => (f && f.versions) || []));
   const artifacts = Array.isArray(data.artifacts) ? data.artifacts : [];
-  for (const entry of [...allAdded, ...uploads, ...versions, ...artifacts]) if (entry && Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
+  // An artifact's older versions read from disk by the old-archive tool can have previews of their own.
+  const artifactVersions = artifacts.flatMap(a => (a && Array.isArray(a.versions) ? a.versions : []));
+  for (const entry of [...allAdded, ...uploads, ...versions, ...artifacts, ...artifactVersions]) if (entry && Number.isSafeInteger(entry.part) && entry.part > 0) partsListed.add(entry.part);
   if (!partsListed.size) return;
   Object.defineProperty(window, '__archivePart', {
     value(n, data) {
@@ -1779,12 +1781,13 @@ let artifactsApp = null; // the mounted app, only when the data has artifacts
 let artifactsOn = false;
 let titlesBefore = null; // the chat's page and top bar titles, put back when the screen closes
 
+// The entry shows when the screen has something (artifactsEntry): a listed artifact or a file made in a chat.
 function setupArtifacts(data) {
-  const views = Array.isArray(data.artifacts) ? data.artifacts.filter(v => v && typeof v === 'object') : [];
-  if (!views.length || !window.CTArtifactsApp) return;
+  const entry = artifactsEntry(data);
+  if (!entry.show || !window.CTArtifactsApp) return;
   const nav = document.getElementById('artifacts-nav');
-  nav.querySelector('.n').textContent = String(views.length);
-  nav.setAttribute('aria-label', `Artifacts, ${views.length}`);
+  nav.querySelector('.n').textContent = String(entry.count);
+  nav.setAttribute('aria-label', `Artifacts, ${entry.count}`);
   nav.hidden = false;
   nav.addEventListener('click', () => {
     setDrawer(false);

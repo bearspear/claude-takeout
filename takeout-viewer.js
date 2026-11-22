@@ -12,10 +12,16 @@
 //                                      writes with a heredoc; without it Bash blocks yield no cards.
 //   buildViewerData(chats, {exported, artifacts}) { exported, chats, projects }, newest update first. A chat's project is an
 //                                      index into projects, where identical projects are kept once. artifacts:
-//                                      { views, listed, exported, since } (Export All's artifact step); with views the data
-//                                      also has artifacts (each view plus links: [{ chat (index in chats), messageUuid, how }]
-//                                      and docFile: { chat, file } | null, the latest chat's rebuilt document), listed,
-//                                      exportedArtifacts, artifactsSince; a published:<uuid> file gets artifact: <view id>.
+//                                      { views, records, listed, exported, since, listFetched } (Export All; records: each
+//                                      artifact.json written, with dir, its folder from the root); with views, records or
+//                                      listFetched false the data also has storeCount (records.length), artifacts (each view plus links: [{ chat (index
+//                                      in chats), messageUuid, how }], docFile: { chat, file } | null, the latest chat's
+//                                      rebuilt document, listed (its record's) and versions: [{ ver, label, folder, start,
+//                                      startSaved, same, current, copy, and part, key, startKind for a version with
+//                                      its own preview: records from disk, versionPlaces }] from its record), listed,
+//                                      exportedArtifacts,
+//                                      artifactsSince, listFetched; a published:<uuid> file of a listed artifact gets
+//                                      artifact: <view id>.
 //                                      A chat's links (artifactLinksOf) are a non-enumerable property of buildViewerChat's result.
 //                                      A GenFile Claude made has madeAt: the message of its last version.
 //   moveUploadText(data, {firstPart, inlineLimit, partLimit})  { data, parts: [{ name, body }] }: upload text over
@@ -714,15 +720,64 @@
     return JSON.stringify([p.name, typeof p.instructions === 'string' ? p.instructions.length : null, docs, files, Object.keys(p).sort()]);
   }
 
-  // artifacts: { views, listed, exported, since } from Export All's artifact step. With views, the data gains
-  // artifacts (each view plus links: [{ chat, messageUuid, how }] and docFile: { chat, file } | null), listed,
-  // exportedArtifacts and artifactsSince; a chat's published-page file gets artifact: <id> when that page is one.
+  // A store record's versions for its view, in its versionOrder (claude.ai's; an object's keys put numeric-looking ids
+  // first), then any other key: { ver, label (v1, v2, ... in that order),
+  // folder (from the export root; null when no copy was saved), start, startSaved (in folder, or for a same version
+  // the root-relative file a chat wrote), same, current, copy: { chat, file, version } | null, the chat card's version
+  // that holds its text }. copies: 'ver' -> copy, from the chats' published cards of that page.
+  // A record read from disk (tools/archive-lib.js) may add versionPlaces: { <ver>: { folder, part, key, startKind } }:
+  // folder (from the export root) where that version's files are when not under dir (an older layout), and the
+  // version's own preview payload in viewer-files (part, key, as an ArtifactView's) with its start file's kind;
+  // the version then also has part, key and startKind.
+  function recordVersions(rec, copies) {
+    const dir = typeof rec.dir === 'string' ? rec.dir : '';
+    const versions = rec.versions && typeof rec.versions === 'object' ? rec.versions : {};
+    const own = ver => Object.prototype.hasOwnProperty.call(versions, ver) && versions[ver] && typeof versions[ver] === 'object';
+    const places = rec.versionPlaces && typeof rec.versionPlaces === 'object' ? rec.versionPlaces : {};
+    const order = Array.isArray(rec.versionOrder) ? rec.versionOrder.filter(k => typeof k === 'string' && own(k)) : [];
+    const keys = [...new Set([...order, ...Object.keys(versions).filter(own)])];
+    return keys.map((ver, i) => {
+      const v = versions[ver];
+      const place = Object.prototype.hasOwnProperty.call(places, ver) && places[ver] && typeof places[ver] === 'object' ? places[ver] : {};
+      const start = typeof v.start === 'string' && v.start ? v.start : null;
+      const files = Array.isArray(v.files) ? v.files.filter(f => f && typeof f.path === 'string') : [];
+      const folder = typeof place.folder === 'string' && place.folder ? place.folder
+        : typeof v.folder === 'string' && v.folder && dir ? `${dir}/${v.folder}` : null;
+      const sameAs = !folder && v.sameAs && typeof v.sameAs === 'object' ? v.sameAs : null;
+      const sameFile = sameAs ? sameAs[start || (files[0] && files[0].path)] : null;
+      const same = typeof sameFile === 'string' && sameFile !== '';
+      const preview = Number.isSafeInteger(place.part) && place.part > 0 && typeof place.key === 'string' && place.key
+        ? { part: place.part, key: place.key, startKind: typeof place.startKind === 'string' ? place.startKind : null } : {};
+      return {
+        ver, label: `v${i + 1}`, folder, start,
+        startSaved: same ? sameFile : folder && typeof v.startSaved === 'string' && v.startSaved ? v.startSaved : null,
+        same, current: typeof rec.current === 'string' && rec.current === ver, copy: copies.get(ver) || null, ...preview,
+      };
+    });
+  }
+
+  // artifacts: { views, records, listed, exported, since, listFetched } from Export All. records: each artifact.json
+  // written (format 2) with dir, its folder from the export root, and versionOrder, its version keys in order. With views, records or listFetched false, the data
+  // gains artifacts (each view plus links: [{ chat, messageUuid, how }], docFile: { chat, file } | null, listed (its
+  // record's; true without one) and versions (recordVersions)), listed, exportedArtifacts, artifactsSince and
+  // listFetched (whether claude.ai's list is in the export); a chat's published-page file gets artifact: <id> when
+  // that page is a listed one.
   function buildViewerData(chats, { exported, artifacts } = {}) {
     const projects = [], byKey = new Map();
     let sorted = chats.slice().sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
     const views = artifacts && Array.isArray(artifacts.views) ? artifacts.views.filter(v => v && typeof v === 'object') : [];
-    const linked = new Map(); // view id -> { view, links, doc: { at, chat, file } | null }
-    for (const view of views) linked.set(String(view.id), { view, links: [], doc: null });
+    const records = artifacts && Array.isArray(artifacts.records) ? artifacts.records.filter(r => r && typeof r === 'object' && typeof r.uuid === 'string') : [];
+    const listFetched = artifacts ? artifacts.listFetched !== false : true;
+    const recordOf = new Map(); // short id and uuid -> record
+    for (const rec of records) {
+      recordOf.set(rec.uuid.toLowerCase(), rec);
+      if (typeof rec.shortId === 'string' && rec.shortId) recordOf.set(rec.shortId, rec);
+    }
+    const linked = new Map(); // view id -> { view, rec, links, doc: { at, chat, file } | null, copies: ver -> copy }
+    for (const view of views) {
+      const rec = recordOf.get(String(view.id)) || null;
+      linked.set(String(view.id), { view, rec, listed: rec ? rec.listed === true : view.listed !== false, links: [], doc: null, copies: new Map() });
+    }
     const viewOf = uuid => {
       let short = '';
       try { short = core('uuidToBase58')(uuid) || ''; } catch (e) { /* the uuid itself may be the id */ }
@@ -743,11 +798,17 @@
             if (!hit.doc || at >= hit.doc.at) hit.doc = { at, chat: ci, file: fileKeys.get(link.docKey) };
           }
         }
-        // A published page's card names its artifact when that artifact is in the export.
+        // A published page's card names its artifact when that artifact is a listed one in the export, and its
+        // versions with text are the artifact's versions' copies (the first chat's, newest chat first).
         for (const [key, id] of fileKeys) {
           if (!key.startsWith('published:') || !chat.files[id]) continue;
           const hit = viewOf(key.slice('published:'.length));
           if (!hit) continue;
+          (Array.isArray(chat.files[id].versions) ? chat.files[id].versions : []).forEach((v, i) => {
+            const saved = v && (typeof v.text === 'string' || (Number.isSafeInteger(v.part) && v.part > 0));
+            if (saved && typeof v.ver === 'string' && v.ver && !hit.copies.has(v.ver)) hit.copies.set(v.ver, { chat: ci, file: id, version: i });
+          });
+          if (!hit.listed) continue;
           if (files === chat.files) files = { ...chat.files };
           files[id] = { ...chat.files[id], artifact: String(hit.view.id) };
         }
@@ -767,14 +828,17 @@
       return { ...chat, project: index };
     });
     const data = { exported, chats: out, projects };
-    if (views.length) {
+    if (views.length || records.length || !listFetched) {
+      // How many artifact folders the export has (listed or not): the Artifacts entry shows for any.
+      data.storeCount = records.length;
       data.artifacts = views.map(view => {
-        const { links, doc } = linked.get(String(view.id));
-        return { ...view, links, docFile: doc ? { chat: doc.chat, file: doc.file } : null };
+        const { rec, listed, links, doc, copies } = linked.get(String(view.id));
+        return { ...view, listed, links, docFile: doc ? { chat: doc.chat, file: doc.file } : null, versions: rec ? recordVersions(rec, copies) : [] };
       });
       data.listed = artifacts.listed == null ? null : artifacts.listed;
       data.exportedArtifacts = artifacts.exported || null;
       data.artifactsSince = artifacts.since || null;
+      data.listFetched = listFetched;
     }
     return data;
   }

@@ -2,16 +2,18 @@
 // The sidebar's Artifacts entry with its count; the screen in place of the chat, with the grid and its tabs; a card
 // opens #a=<id> with the sandboxed preview, inside its guard frame; Back and the home button return to the grid; a
 // chat in the sidebar still opens, and history goes back and forth; / searches the artifacts on their screen; a
-// reused page links its file in published/. The In chats tab: a card per file Claude made (not the one a chat
+// reused page links the chat's own file. The In chats tab: a card per file Claude made (not the one a chat
 // published as an artifact), kind chips with counts, search by name, a file page at #ac=<chat>.<file> previewed in the
 // guard frame with only its own chat's stylesheet and scripts, Made in opening the chat, and the version menu; a file
 // that may not match says so. Links: the All cards' source line and "also in chat", an artifact page's Made in /
-// Published in / Edited in (each opening its chat at the message, Back returning) and its menu of the versions chats
-// published, a Docs artifact's text rebuilt from its chat, Open artifact on a chat's published card, the heading of an
+// Published in / Edited in (each opening its chat at the message, Back returning) and its menu of versions, a Docs artifact's text rebuilt from its chat, Open artifact on a chat's published card, the heading of an
 // Export Changes run, and a run not unzipped (tiles, "unzip first"). A hostile shared artifact gets nothing out and can't reach the viewer,
 // and navigations to file: (an export file, an absolute path, a refresh, a link) are refused; data: and blob: are
-// refused by the guard frame's own frame-src 'none', which the page's policy doesn't have. An export with the
-// setting off has no Artifacts entry. No requests outside file:, no page errors.
+// refused by the guard frame's own frame-src 'none', which the page's policy doesn't have. The version menu lists every
+// version in the store, each opening from its own <ver>/ folder (or the chat's file it is the same as). A page not in
+// claude.ai's list is not on the screen, and its chat's card opens it with no Open artifact. An export with the
+// setting off has the entry for In chats, and All / Yours / Shared say claude.ai's list isn't in it. No requests
+// outside file:, no page errors.
 // Run: PW=<playwright-core> CHROME_EXE=<chrome> node tests/e2e/combined.e2e.js
 const { chromium } = require(process.env.PW);
 const fs = require('fs'), os = require('os'), path = require('path'), vm = require('vm');
@@ -97,7 +99,7 @@ const makeChat = {
 // The publishing chat also writes a script, which the other chat's page names but must never get.
 pubChat.chat_messages[1].content.splice(2, 0, ...write('wo', 'other.js', "window.OTHER = 1; console.log('OTHER CHAT LOADED');"));
 // A chat that publishes Guide page (U(1)) twice, at older versions than its current one: first exactly the file it
-// wrote (same), then a file claude.ai served differently (saved in published/); and edits the page.
+// wrote (same), then a file claude.ai served differently (saved in artifacts/<Title>_<id>/<ver>/); and edits the page.
 const OLDA = '<!doctype html><h1>Old A</h1><!--OLDA-->';
 const OLDB = '<!doctype html><h1>Old B served</h1><!--OLDB-->';
 const editChat = {
@@ -129,7 +131,21 @@ const docChat = {
     msg('da1', 'dh1', 'assistant', 21, [docT.batch, docT.batchResult, docT.update('du1', 'sess.10', '## Alpha\n\nAlpha text.'), docT.result('du1', '{}'), { type: 'text', text: 'Wrote the doc.' }]),
   ],
 };
-const chats = { [plainChat.uuid]: plainChat, [pubChat.uuid]: pubChat, [makeChat.uuid]: makeChat, [editChat.uuid]: editChat, [docChat.uuid]: docChat };
+// A chat that publishes a page claude.ai's list doesn't have (U(8)), from a file it never wrote: saved in artifacts/
+// from claude.ai, but no artifact of the Artifacts screen.
+const SIDE = '<!doctype html><h1>Side page</h1><!--SIDE-->';
+const sideChat = {
+  uuid: 'chat-side', name: 'Side publish', model: 'claude-x', created_at: at(23), updated_at: at(24), settings: {}, current_leaf_message_uuid: 'sa1',
+  chat_messages: [
+    msg('sh1', null, 'human', 23, [{ type: 'text', text: 'publish a side page' }]),
+    msg('sa1', 'sh1', 'assistant', 24, [
+      { type: 'tool_use', id: 'sp', name: PUB, input: { title: 'Side page', files: [{ as: 'index.html', path: '/home/claude/side.html' }] } },
+      { type: 'tool_result', tool_use_id: 'sp', name: PUB, content: [{ type: 'text', text: JSON.stringify({ slug: U(8), version: LIVE, url: `https://claude.ai/artifact/${p(8)}`, title: 'Side page' }) }] },
+      { type: 'text', text: 'Published the side page.' },
+    ]),
+  ],
+};
+const chats = { [plainChat.uuid]: plainChat, [pubChat.uuid]: pubChat, [makeChat.uuid]: makeChat, [editChat.uuid]: editChat, [docChat.uuid]: docChat, [sideChat.uuid]: sideChat };
 const list = Object.values(chats).map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updated_at }));
 
 // Export All through the popup, with its artifact step: a ZIP (megaFormat zip), unzipped into a new folder.
@@ -209,6 +225,7 @@ const navs = dir => [
     [U(9)]: live('Guide', { 'index.html': GUIDE }),
     [U(5)]: live('Cowork deck', { 'index.html': '<h1>Cowork</h1>' }),
     [U(6)]: live('Code dash', { 'index.html': '<h1>Code</h1>' }),
+    [U(8)]: live('Side page', { 'index.html': SIDE }),
   };
   pages[U(1)].versions[OLD1] = { files: { 'index.html': OLDA } };
   pages[U(1)].versions[OLD2] = { files: { 'index.html': OLDB } };
@@ -238,7 +255,17 @@ const navs = dir => [
   check('fixture: the viewer data has the artifacts', Array.isArray(data.artifacts) && data.artifacts.length === frames.length, JSON.stringify((data.artifacts || []).map(v => v.title)));
   const reused = (data.artifacts || []).find(v => v.id === p(9));
   check("fixture: the published page is reused from the chat's files", !!reused && reused.reused === true && reused.startSaved === 'Publishing/artefacts/guide.html', JSON.stringify(reused));
-  check('fixture: the setting off has no artifacts', !('artifacts' in offData));
+  check("fixture: the setting off has the screen's keys, no artifact and no list", JSON.stringify(offData.artifacts) === '[]' && offData.listFetched === false, JSON.stringify([offData.artifacts, offData.listFetched]));
+  check('fixture: the list is in the full export', data.listFetched === true);
+  const guideView = (data.artifacts || []).find(a => a.id === p(1)) || {};
+  const guideDir = fs.readdirSync(path.join(dir, 'artifacts')).find(n => n.endsWith(`_${p(1)}`));
+  check("fixture: Guide page's view has its three versions in claude.ai's order", JSON.stringify((guideView.versions || []).map(e => [e.ver, e.label, e.current])) === JSON.stringify([[OLD1, 'v1', false], [OLD2, 'v2', false], [LIVE, 'v3', true]]), JSON.stringify(guideView.versions));
+  // The unlisted page: no artifact, its versions in artifacts/, and its card not naming an artifact.
+  const sideIndex = data.chats.findIndex(c => c.title === 'Side publish');
+  const sideCard = Object.values((data.chats[sideIndex] || {}).files || {}).find(f => f.published) || {};
+  const sideHref = sideCard.versions && sideCard.versions[0] && sideCard.versions[0].href;
+  check('fixture: an unlisted page is no artifact of the screen', !(data.artifacts || []).some(a => a.id === p(8)) && !('artifact' in sideCard));
+  check('fixture: its card links its copy in artifacts/', typeof sideHref === 'string' && sideHref.startsWith('artifacts/') && fs.readFileSync(path.join(dir, decodeURIComponent(sideHref)), 'utf8') === SIDE, sideHref);
 
   const open = async (folder, hash = '', viewport = { width: 1300, height: 900 }) => {
     const context = await browser.newContext({ viewport });
@@ -411,15 +438,24 @@ const navs = dir => [
   const groups = page.locator('#artifacts-screen #page-from .link-group');
   check('the link line: Published in, then Edited in, each chat once', JSON.stringify(await groups.allTextContents()) === JSON.stringify(['Published in Editing', 'Edited in Editing, Plain talk']), JSON.stringify(await groups.allTextContents()));
   const verMenu = page.locator('#artifacts-screen #page-from select');
-  check('the version menu: the older published versions, then the current one, chosen', JSON.stringify(await verMenu.locator('option').allTextContents()) === JSON.stringify(['v1', 'v2', 'Current']) && await verMenu.inputValue() === 'current', JSON.stringify(await verMenu.locator('option').allTextContents()));
+  check('the version menu: every saved version, the current one chosen', JSON.stringify(await verMenu.locator('option').allTextContents()) === JSON.stringify(['v1', 'v2', 'v3 (current)']) && await verMenu.inputValue() === 'current', JSON.stringify(await verMenu.locator('option').allTextContents()));
+  // Each version's Open file is its start file: in its own <ver>/ folder, or the chat's file for one the same as it.
+  const openFile = async () => decodeURIComponent(await page.locator('#artifacts-screen #page-links a.open-file').getAttribute('href'));
+  const readHref = rel => fs.readFileSync(path.join(dir, rel), 'utf8');
+  const currentHref = await openFile();
+  check('v3 (current): its file in artifacts/<Title>_<id>/<ver>/', currentHref === `artifacts/${guideDir}/${LIVE}/index.html` && readHref(currentHref).includes('Guide page body'), currentHref);
   await verMenu.selectOption({ label: 'v1' });
   check('v1 opens the saved copy (the file the chat wrote)', (await (await previewOf(v)).$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--OLDA-->'));
+  const v1Href = await openFile();
+  check("v1's Open file: the chat's own file", v1Href === 'Editing/artefacts/old.html' && readHref(v1Href) === OLDA, v1Href);
   await verMenu.selectOption({ label: 'v2' });
   const v2Guard = await previewOf(v);
-  check('v2 opens the saved copy in published/', (await v2Guard.$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--OLDB-->') && await v2Guard.evaluate(() => document.querySelector('meta[http-equiv]').content === "frame-src 'none'"));
+  check('v2 opens the saved copy in artifacts/', (await v2Guard.$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--OLDB-->') && await v2Guard.evaluate(() => document.querySelector('meta[http-equiv]').content === "frame-src 'none'"));
+  const v2Href = await openFile();
+  check("v2's Open file: in its own <ver>/ folder", v2Href === `artifacts/${guideDir}/${OLD2}/index.html` && readHref(v2Href) === OLDB, v2Href);
   check('an older version has no claude.ai badge mix-up: its Open on claude.ai stays', await page.locator('#artifacts-screen #page-links a.open-claude').count() === 1);
   await verMenu.selectOption('current');
-  check('Current goes back to the artifact', (await (await previewOf(v)).$eval('iframe', f => f.getAttribute('srcdoc'))).includes('Guide page body'));
+  check('Current goes back to the artifact', (await (await previewOf(v)).$eval('iframe', f => f.getAttribute('srcdoc'))).includes('Guide page body') && await openFile() === currentHref);
   await groups.nth(0).locator('.chat-link').click();
   await page.waitForSelector('#chat .msg');
   check('Published in opens the chat at that message', (await page.locator('#title').textContent()) === 'Editing' && await page.locator('#chat .msg[data-id="ea1"]').count() === 1 && !(await shown(page, '#artifacts-screen')));
@@ -469,6 +505,14 @@ const navs = dir => [
   await page.goBack();
   await page.waitForSelector('#chat .msg');
   check('Back returns to the chat', (await page.locator('#title').textContent()) === 'Editing');
+  // ---- A page not in claude.ai's list: its chat's card opens it, with no Open artifact ----
+  await page.locator('#chat-list .item', { hasText: 'Side publish' }).click();
+  await page.waitForSelector('#chat .msg .art');
+  check('an unlisted page: its card, with no Open artifact', await page.locator('#chat .art', { hasText: 'Side page' }).count() === 1 && await page.locator('#chat .open-artifact').count() === 0);
+  await page.locator('#chat .art', { hasText: 'Side page' }).click();
+  await page.waitForSelector('#panel:not([hidden]) iframe.preview');
+  check('an unlisted page: the card opens its saved copy', (await page.locator('#panel iframe.preview').getAttribute('srcdoc')).includes('<!--SIDE-->'));
+  await page.keyboard.press('Escape');
 
   await page.locator('#artifacts-nav').click();
   await page.waitForSelector('#artifacts-screen #grid .card');
@@ -604,13 +648,27 @@ const navs = dir => [
     await nv.context.close();
   }
 
-  // ---- The setting off: no entry ----
+  // ---- The setting off: the entry for In chats; All / Yours / Shared say the list isn't in the export ----
   const off = await open(offDir);
   await off.page.waitForSelector('#chat .msg');
-  check('setting off: no Artifacts entry', await off.page.locator('#artifacts-nav').isHidden() && await off.page.locator('#artifacts-screen').isHidden());
-  await off.page.evaluate(() => { location.hash = '#artifacts'; });
-  await off.page.waitForTimeout(200);
-  check('setting off: #artifacts opens a chat', await shown(off.page, '#scroll') && await off.page.locator('#artifacts-screen').isHidden());
+  const offNav = off.page.locator('#artifacts-nav');
+  // With no artifacts, no file is set apart as an artifact's (the published guide.html, the Docs text): more In chats files.
+  const offCount = await offNav.locator('.n').textContent();
+  check('setting off: the Artifacts entry, counting the In chats files', await offNav.isVisible() && Number(offCount) > 10, await offNav.textContent());
+  await offNav.click();
+  await off.page.waitForSelector('#artifacts-screen #home:not([hidden])');
+  const offTabs = off.page.locator('#artifacts-screen [role=tablist] [role=tab]');
+  for (const n of [0, 1, 2]) {
+    await offTabs.nth(n).click();
+    check(`setting off: ${await offTabs.nth(n).textContent()} says the list isn't in the export`, await off.page.locator('#artifacts-screen #grid .card').count() === 0
+      && (await off.page.locator('#artifacts-screen #empty').textContent()) === "claude.ai's list isn't in this export" && await shown(off.page, '#artifacts-screen #empty'));
+  }
+  await offTabs.nth(3).click();
+  check('setting off: In chats has its files', String(await off.page.locator('#artifacts-screen #grid .card').count()) === offCount
+    && (await offTabs.nth(3).textContent()) === `In chats ${offCount}`);
+  await off.page.locator('#artifacts-screen #grid .card[aria-label^="notes.md,"]').click();
+  await off.page.waitForSelector('#artifacts-screen #page-body .prose');
+  check('setting off: an In chats file opens', (await off.page.locator('#artifacts-screen #page-title').textContent()) === 'notes.md');
   await off.page.locator('#chat-list .item', { hasText: 'Publishing' }).click();
   await off.page.waitForSelector('#chat .page-link');
   check('setting off: a published card has no Open artifact', await off.page.locator('#chat .open-artifact').count() === 0);

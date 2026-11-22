@@ -153,39 +153,4 @@ async function zipEntryNames(zipPath, loaded = null) {
   return Object.values(zip.files).map(entry => entry.unsafeOriginalName || entry.name);
 }
 
-// True when a ZIP is an archive with chats whose root shows artifacts: an artifacts/ folder (exact case, not
-// a chat, holding index.md or a <folder>/artifact.json) or an export-manifest.json with an artifacts key. The
-// root is the top level, or the one wrapping folder when it holds index.md or export-manifest.json (the same
-// root hasArtifacts checks on disk). A chat's own artifacts/ folder doesn't count, nor does an Export
-// Artifacts export (no chats). Reads the manifest entry only.
-async function zipHasArtifacts(zipPath, loaded = null) {
-  const { zip } = loaded || await loadZip(zipPath);
-  const names = await zipEntryNames(zipPath, loaded || { zip });
-  const wrappers = [];
-  for (const n of names) {
-    const m = /^([^/]+\/)(index\.md|export-manifest\.json)$/.exec(n);
-    if (m && !wrappers.includes(m[1])) wrappers.push(m[1]);
-  }
-  // Manifests at the possible roots; an Export Artifacts root (kind "artifacts") is not an archive root.
-  const manifests = new Map();
-  for (const entry of Object.values(zip.files)) {
-    const name = entry.unsafeOriginalName || entry.name;
-    const r = ['', ...wrappers].find(x => name === x + 'export-manifest.json');
-    if (r === undefined || entry.dir) continue;
-    try {
-      const m = JSON.parse((await entry.async('string')).replace(/^\uFEFF/, ''));
-      if (m && typeof m === 'object') manifests.set(r, m);
-    } catch (e) { /* not a manifest we can read */ }
-  }
-  const roots = ['', ...wrappers].filter(r => !(manifests.get(r) && manifests.get(r).kind === 'artifacts'));
-  // A chat is an original.json at the root (a single chat) or in a folder directly under it.
-  const hasChat = roots.some(r => names.some(n => n.startsWith(r) && /^([^/]+\/)?original\.json$/.test(n.slice(r.length))));
-  if (!hasChat) return false;
-  // The exact-case artifacts/ folder, not a chat itself, holding index.md or a <folder>/artifact.json.
-  const isArtifactsRoot = r => !names.includes(r + 'artifacts/original.json')
-    && names.some(n => n === r + 'artifacts/index.md' || (n.startsWith(r + 'artifacts/') && /^[^/]+\/artifact\.json$/.test(n.slice(r.length + 10))));
-  if (roots.some(isArtifactsRoot)) return true;
-  return roots.some(r => manifests.has(r) && Object.prototype.hasOwnProperty.call(manifests.get(r), 'artifacts'));
-}
-
-module.exports = { zipHasArtifacts, loadZip, extractZip, zipFreeSpaceOk, zipEntryNames, partialOf, MAX_ZIP_BYTES };
+module.exports = { loadZip, extractZip, zipFreeSpaceOk, zipEntryNames, partialOf, MAX_ZIP_BYTES };
