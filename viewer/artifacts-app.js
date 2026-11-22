@@ -756,6 +756,7 @@
 
     function fillBody(v) {
       if (v.docs) return chatDocPage(v) || pageBody.replaceChildren(docsPage(v));
+      if (isDesign(v)) return openCanvas(v);
       if (isPoster(v)) return pageBody.replaceChildren(posterPage(v));
       const shown = !v.notExported && v.start && !v.tooLarge && unzipped !== false;
       if (shown && PREVIEW_KINDS.has(v.startKind) && !v.startMissing) return openPreview(v);
@@ -765,6 +766,149 @@
     }
 
     function badge(text) { return el('span', 'badge', text); }
+
+    // ---- A Design artifact's canvas (v1.20): its boards from project/canvas.json, each in a preview frame of its own
+    // (the same sandbox, and guard frame when hosted, as an artifact page), drawn without claude.ai's editor ----
+    const isDesign = v => isPoster(v) && v.kind === 'Design' && !v.notExported && unzipped !== false;
+    const CANVAS_MARGIN = '600px';
+
+    // Loads the payload; a layout (designCanvas) shows the canvas, anything else the poster page.
+    function openCanvas(v, focus = null) {
+      const box = el('div', 'preview');
+      box.dataset.id = String(v.id);
+      box.append(el('p', 'loading', 'Loading…'));
+      pageBody.replaceChildren(box);
+      heldPayload(v).then(payload => {
+        if (!box.isConnected) return;
+        const texts = pathMap(payload && payload.texts, t => typeof t === 'string');
+        const text = texts.has(DESIGN_CANVAS_FILE) ? texts.get(DESIGN_CANVAS_FILE) : null;
+        const layout = text === null ? null : designCanvas(text, path => texts.has(path));
+        if (!layout) return pageBody.replaceChildren(posterPage(v));
+        pageBody.replaceChildren(canvasPage(v, layout, payload, texts));
+        canvasBadges(layout, texts);
+        if (focus) {
+          const at = pageBody.querySelector(`.design-board[data-name="${CSS.escape(focus)}"]`);
+          if (at) at.scrollIntoView({ block: 'center' });
+        }
+      });
+    }
+    const DESIGN_CANVAS_FILE = 'project/canvas.json';
+
+    // In place of "needs claude.ai to run": Design canvas, and whether some boards need claude.ai's templates.
+    function canvasBadges(layout, texts) {
+      const keep = [...pageBadges.children].filter(b => b.textContent !== 'needs claude.ai to run');
+      const templated = layout.boards.some(b => b.held && boardFlags(texts.get(b.path)).templated);
+      pageBadges.replaceChildren(badge('Design canvas'), ...(templated ? [badge('some boards need claude.ai')] : []), ...keep);
+    }
+
+    function boardDoc(b, payload, texts) {
+      return artifactPreviewDoc(texts.get(b.path), b.path, payload).srcdoc;
+    }
+
+    function canvasPage(v, layout, payload, texts) {
+      const wrap = el('div', 'design-wrap');
+      const avail = Math.max(320, (pageBody.clientWidth || 1000) - 48);
+      const scale = Math.min(1, avail / Math.max(1, layout.width));
+      const canvas = el('div', 'design-canvas');
+      canvas.style.width = `${Math.ceil(layout.width * scale)}px`;
+      canvas.style.height = `${Math.ceil(layout.height * scale)}px`;
+      const px = n => `${Math.round(n * scale)}px`;
+      for (const n of layout.notes) {
+        const note = el('div', n.heading ? 'design-note heading' : 'design-note');
+        note.dataset.fill = n.fill;
+        note.style.left = px(n.x);
+        note.style.top = px(n.y);
+        note.style.width = px(n.w);
+        note.style.fontSize = `${Math.max(9, Math.round((n.heading ? 28 : 14) * scale))}px`;
+        note.textContent = n.text;
+        canvas.append(note);
+      }
+      // Frames come and go as boards near the view, so only about a screenful runs at once.
+      const frameOf = new Map();
+      const observer = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
+        for (const e of entries) {
+          const b = frameOf.get(e.target);
+          if (!b) continue;
+          const holder = e.target.querySelector('.board-frame');
+          if (e.isIntersecting && !holder.firstChild) {
+            const frame = previewFrame({ title: b.title }, boardDoc(b, payload, texts));
+            frame.style.width = `${b.w}px`;
+            frame.style.height = `${b.h}px`;
+            holder.append(frame);
+          } else if (!e.isIntersecting && holder.firstChild) holder.replaceChildren();
+        }
+      }, { root: pageBody, rootMargin: CANVAS_MARGIN }) : null;
+      for (const b of layout.boards) {
+        const item = el('div', 'design-board');
+        item.dataset.name = b.name;
+        item.style.left = px(b.x);
+        item.style.top = px(b.y);
+        item.style.width = px(b.w);
+        const head = el('div', 'board-head');
+        head.append(el('span', 'board-title', b.title));
+        if (b.held) {
+          const open = el('button', 'board-open', 'Open alone');
+          open.type = 'button';
+          open.setAttribute('aria-label', `Open ${b.title} alone`);
+          open.addEventListener('click', () => openBoard(v, b, payload, texts));
+          head.append(open);
+        }
+        item.append(head);
+        const body = el('div', 'board-body');
+        body.style.height = px(b.h);
+        if (b.held) {
+          const flags = boardFlags(texts.get(b.path));
+          if (flags.templated) head.append(el('span', 'board-badge', "Uses claude.ai's templates; shown as saved"));
+          if (flags.blobs) head.append(el('span', 'board-badge', 'Images not in this export'));
+          const holder = el('div', 'board-frame');
+          holder.style.transform = `scale(${scale})`;
+          body.append(holder);
+          frameOf.set(item, b);
+        } else {
+          body.classList.add('missing');
+          body.append(el('span', '', "Not in the viewer's files"));
+        }
+        item.append(body);
+        canvas.append(item);
+      }
+      wrap.append(canvas);
+      if (layout.skipped.length) {
+        const more = el('div', 'design-skipped');
+        more.append(el('p', 'files-head', 'Not drawn on the canvas'));
+        const ul = el('ul', 'files');
+        for (const s of layout.skipped) {
+          const li = el('li');
+          li.append(el('span', 'path', s.title));
+          const path = `project/${s.name}`;
+          if (texts.has(path)) {
+            const open = el('button', 'btn board-open', 'Open alone');
+            open.type = 'button';
+            open.addEventListener('click', () => openBoard(v, { name: s.name, path, title: s.title }, payload, texts));
+            li.append(open);
+          }
+          ul.append(li);
+        }
+        more.append(ul);
+        wrap.append(more);
+      }
+      if (observer) queueMicrotask(() => { for (const item of frameOf.keys()) observer.observe(item); });
+      else for (const [item, b] of frameOf) item.querySelector('.board-frame').append(previewFrame({ title: b.title }, boardDoc(b, payload, texts)));
+      return wrap;
+    }
+
+    // One board alone, at its own size, with the way back to the canvas (no new hash: Back here, not in history).
+    function openBoard(v, b, payload, texts) {
+      const box = el('div', 'preview');
+      box.dataset.id = String(v.id);
+      const bar = el('p', 'canvas-bar');
+      const back = el('button', 'btn canvas-back', 'Back to the canvas');
+      back.type = 'button';
+      back.addEventListener('click', () => openCanvas(v, b.name));
+      bar.append(back, el('span', 'board-title', b.title));
+      box.append(bar, previewFrame({ title: b.title }, boardDoc(b, payload, texts)));
+      pageBody.replaceChildren(box);
+      pageBody.scrollTop = 0;
+    }
 
     function showPage(v) {
       const title = String(v.title || 'Untitled');
