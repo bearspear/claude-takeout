@@ -3364,7 +3364,9 @@ function publishedReuse(shared, chatFolders) {
     const versions = [...rec.versions.values()].filter((v) => v && v.ver === ver && Array.isArray(v.files) && v.files.length);
     for (const v of versions) {
       if (!v.saved || v.incomplete || (v.missing && v.missing.length)) continue;
-      if (v.files.some((f) => f.verified === false || !f.sha256 || typeof f.savedAs !== 'string' || !f.savedAs)) continue;
+      // A file claude.ai gave no checksum for (Cowork and Artifact-tool pages) is reused too: fetching it again would be no
+      // better checked. It stays marked unchecked (unverified).
+      if (v.files.some((f) => typeof f.savedAs !== 'string' || !f.savedAs || (f.verified !== false && !f.sha256))) continue;
       const preview = v.preview && typeof v.preview === 'object' ? v.preview : { texts: [], images: [] };
       const start = (list) => [...list.filter((t) => t[0] === v.start), ...list.filter((t) => t[0] !== v.start)];
       let texts = start(preview.texts || []);
@@ -3377,7 +3379,8 @@ function publishedReuse(shared, chatFolders) {
       } else if (kind && kind !== 'text' && !images.some((t) => t[0] === v.start)) continue;
       const files = {};
       for (const f of v.files) files[f.path] = `published/${rec.dir}/${v.folderName}/${f.savedAs}`;
-      return { files, texts, images };
+      const unverified = v.files.filter((f) => f.verified === false).map((f) => f.path);
+      return { files, texts, images, ...(unverified.length ? { unverified } : {}) };
     }
     for (const v of versions) {
       if (v.files.length !== 1 || !Array.isArray(v.publishedIn)) continue;
@@ -5377,7 +5380,8 @@ async function saveArtifact(root, a, ctx) {
       const r = ctx.reuse(uuid, meta.ver);
       const paths = r && r.files && typeof r.files === 'object' ? Object.keys(r.files) : [];
       if (paths.length && paths.every((k) => typeof r.files[k] === 'string' && r.files[k])) {
-        reused = { files: { ...r.files }, texts: Array.isArray(r.texts) ? r.texts : [], images: Array.isArray(r.images) ? r.images : [] };
+        reused = { files: { ...r.files }, texts: Array.isArray(r.texts) ? r.texts : [], images: Array.isArray(r.images) ? r.images : [],
+          unverified: Array.isArray(r.unverified) ? r.unverified.filter((k) => paths.includes(k)) : [] };
       }
     } catch (e) { reused = null; }
   }
@@ -5391,10 +5395,11 @@ async function saveArtifact(root, a, ctx) {
     meta.savedIn = reused.files;
     meta.needsRuntime = publishedNeedsRuntime(startText ? startText[1] : null);
     notes.push('files saved with the chats');
+    if (reused.unverified.length) notes.push("files not checked against claude.ai's checksum");
     reusedInfo = {
       start: startPath, startSaved: startPath ? reused.files[startPath] : null,
       startSize: startText ? new TextEncoder().encode(startText[1]).length : startImage ? Math.floor(String(startImage[1]).replace(/^[^,]*,/, '').length * 3 / 4) : null,
-      files: paths.map((path) => ({ path, savedAs: reused.files[path] })),
+      files: paths.map((path) => ({ path, savedAs: reused.files[path], ...(reused.unverified.includes(path) ? { verified: false } : {}) })),
       payload: reused.texts.length || reused.images.length ? { texts: reused.texts, images: reused.images } : null,
     };
   } else if (isClaudeDocsArtifact(a)) {

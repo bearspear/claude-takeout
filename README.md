@@ -396,6 +396,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.17.1
+
+- **Cowork pages aren't saved twice** - In Export All, a page a chat published that claude.ai gives no checksum for, such as Cowork pages and pages published with the `Artifact` tool, was saved once in `published/` and again in `artifacts/`. The artifact now points at the copy in `published/`, and its note says the files weren't checked against claude.ai's checksum, as before.
+
 ### v1.17.0
 
 - **Export All saves your artifacts too** - Export All also saves what claude.ai/artifacts lists into an `artifacts/` folder (the same files and `index.html` as Export Artifacts), and skips a second download of any page a chat already saved. Turn it off with **Include artifacts in Export All** in Settings. Export Changes takes only the artifacts whose version changed. The Export Artifacts button is unchanged. Export All never asks for the card-picture permission: without it, cards are tiles.
