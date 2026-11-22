@@ -1576,7 +1576,27 @@ function publishedStart(files) {
 }
 
 const isPublishedText = (f) => isTextFile(f.path) || /^text\//i.test(f.contentType || '');
-const publishedNeedsRuntime = (text) => typeof text === 'string' && /artifact-type\/|\/_f\//.test(text);
+// claude.ai's frame preamble: a copy served from /_f/<ver>/ starts with <!-- frame-runtime --> and two scripts
+// claude.ai adds (window.__FRAME_PREAMBLE = {...}, then its runtime, whose text names /_f/). They are left out of the
+// test, so a page that runs offline isn't labelled for claude.ai's own code; the page's own scripts still count.
+function withoutFramePreamble(text) {
+  if (text.indexOf('<!-- frame-runtime -->') === -1) return text;
+  const scripts = /<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi;
+  let out = '';
+  let at = 0;
+  let dropNext = false;
+  let m;
+  while ((m = scripts.exec(text))) {
+    const preamble = /^\s*window\.__FRAME_PREAMBLE\b/.test(m[1]);
+    if (preamble || dropNext) {
+      out += text.slice(at, m.index);
+      at = m.index + m[0].length;
+      dropNext = preamble;
+    } else dropNext = false;
+  }
+  return out + text.slice(at);
+}
+const publishedNeedsRuntime = (text) => typeof text === 'string' && /artifact-type\/|\/_f\//.test(withoutFramePreamble(text));
 
 // Preview files for Export Artifacts' viewer: 'text' for pages, styles, scripts, SVG and Markdown, an image's MIME
 // type for PNG, JPEG, GIF, WebP, AVIF, BMP and ICO (by extension), null for anything else. Agrees with
@@ -1586,11 +1606,22 @@ const PREVIEW_TOTAL_MAX = 8 * 1024 * 1024;  // texts in all, and images in all, 
 const PREVIEW_IMAGE_TYPES = {
   png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', avif: 'image/avif', bmp: 'image/bmp', ico: 'image/x-icon',
 };
+// A Design artifact's layout: its boards' places and titles, and its notes.
+const DESIGN_CANVAS_PATH = 'project/canvas.json';
+
+// The order an artifact's files go into its preview data, which has a budget: the start file, a Design canvas's
+// layout, its boards (project/<name>.dc.html), then everything else, each group in file order (the sort is stable).
+function previewRank(path, start) {
+  if (path === start) return 0;
+  if (path === DESIGN_CANVAS_PATH) return 1;
+  return /^project\/[^/]+\.dc\.html$/.test(String(path)) ? 2 : 3;
+}
+
 function previewKind(p) {
   const ext = (/\.([a-z0-9]+)$/i.exec(String(p)) || [])[1];
   if (!ext) return null;
   const e = ext.toLowerCase();
-  if (['html', 'htm', 'css', 'js', 'mjs', 'svg', 'md', 'markdown'].includes(e)) return 'text';
+  if (['html', 'htm', 'css', 'js', 'mjs', 'svg', 'md', 'markdown', 'json'].includes(e)) return 'text';
   return Object.prototype.hasOwnProperty.call(PREVIEW_IMAGE_TYPES, e) ? PREVIEW_IMAGE_TYPES[e] : null;
 }
 
@@ -1879,7 +1910,7 @@ if (typeof module !== 'undefined' && module.exports) {
     fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
-    publishedStart, isPublishedText, publishedNeedsRuntime, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact,
+    publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact,
     artifactFileKind, artifactStartKind, artifactView,
   };
 }

@@ -157,3 +157,23 @@ button { font: inherit; color: inherit; }
   .big-pic { height: 220px; padding: 20px 20px 0; }
 }
 .files .btn.download { font-size: 11px; padding: 1px 8px; flex: none; }
+/* A Design artifact's canvas (v1.20) */
+.design-wrap { padding: 24px; }
+.design-canvas { position: relative; margin: 0 auto; }
+.design-board { position: absolute; display: flex; flex-direction: column; gap: 4px; }
+.design-board .board-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 12px; color: var(--soft); min-height: 18px; }
+.design-board .board-title { font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.board-open { font-size: 11px; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 6px; padding: 1px 6px; cursor: pointer; }
+.board-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--pill); color: var(--soft); }
+.design-board .board-body { position: relative; overflow: hidden; border: 1px solid var(--line); border-radius: 4px; background: #fff; }
+.design-board .board-body.missing { display: flex; align-items: center; justify-content: center; background: var(--pic); color: var(--mute); font-size: 12px; }
+.design-board .board-frame { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+.design-board .board-frame iframe { display: block; border: 0; background: #fff; color-scheme: normal; }
+.design-note { position: absolute; box-sizing: border-box; padding: 8px 10px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; color: #1d2733; background: #eceff2; line-height: 1.35; }
+.design-note.heading { background: none; padding: 0; font-weight: 700; color: var(--ink); }
+.design-note[data-fill="teal"] { background: #cdeee9; } .design-note[data-fill="orange"] { background: #fde2c8; }
+.design-note[data-fill="yellow"] { background: #fdf3b9; } .design-note[data-fill="green"] { background: #d7f0d2; }
+.design-note[data-fill="blue"] { background: #d4e6fb; } .design-note[data-fill="pink"] { background: #fbd9e6; }
+.design-note[data-fill="purple"] { background: #e5dcfa; } .design-note[data-fill="red"] { background: #f9d3d0; }
+.design-skipped { margin-top: 24px; }
+.canvas-bar { display: flex; align-items: center; gap: 10px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); }

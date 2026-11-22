@@ -2150,3 +2150,59 @@ test('dataUrlBytes decodes a base64 data URL, and nothing else', () => {
   assert.deepStrictEqual([...bytes.slice(0, 4)], [0x89, 0x50, 0x4e, 0x47]);
   for (const bad of ['https://x/y.png', 'data:image/png,plain', 'data:image/png;base64,***', '', null]) assert.strictEqual(dataUrlBytes(bad), null, String(bad));
 });
+
+// ---- v1.20: a Design artifact's canvas from project/canvas.json ----
+const { designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX } = require('../viewer/viewer-logic.js');
+const SAMPLE_CANVAS = {
+  v: 3, title: 'Panel mockups',
+  boards: { 'Main.dc.html': { x: 0, y: 0, w: 380, h: 720, title: 'Home A' }, 'HomeB.dc.html': { x: 460, y: 0, w: 380, h: 720, title: 'Home B' } },
+  notes: { t: { kind: 'title1', text: 'Section heading', x: 0, y: -120, maxW: 2420 }, n1: { fill: 'teal', text: 'A sticky note.', x: 0, y: 900, w: 420 } },
+  noteOrder: ['t', 'n1'],
+};
+const heldAll = () => true;
+
+test('designCanvas lays out boards and notes', () => {
+  const c = designCanvas(JSON.stringify(SAMPLE_CANVAS), p => p !== 'project/HomeB.dc.html');
+  assert.strictEqual(c.title, 'Panel mockups');
+  assert.deepStrictEqual(c.boards.map(b => [b.name, b.path, b.x, b.y, b.w, b.h, b.title, b.held]),
+    [['Main.dc.html', 'project/Main.dc.html', 0, 120, 380, 720, 'Home A', true], ['HomeB.dc.html', 'project/HomeB.dc.html', 460, 120, 380, 720, 'Home B', false]]);
+  assert.deepStrictEqual(c.notes.map(n => [n.id, n.text, n.x, n.y, n.w, n.fill, n.heading]),
+    [['t', 'Section heading', 0, 0, 2420, 'grey', true], ['n1', 'A sticky note.', 0, 1020, 420, 'teal', false]]);
+  assert.strictEqual(c.width, 2420);
+  assert.strictEqual(c.height, 1020 + 200);
+  assert.deepStrictEqual(c.skipped, []);
+});
+
+test('designCanvas refuses bad input', () => {
+  for (const bad of ['not json', '[]', '{}', '{"boards":[]}', '{"boards":null}', JSON.stringify({ boards: { 'Main.dc.html': { x: 0, y: 0, w: 1, h: 1 } } }).replace('Main', '../Main')]) {
+    assert.strictEqual(designCanvas(bad, heldAll), null, bad);
+  }
+  assert.strictEqual(designCanvas(JSON.stringify(SAMPLE_CANVAS), () => false), null, 'no board held');
+  const odd = { boards: {
+    'Main.dc.html': { x: 0, y: 0, w: 10, h: 10, title: 'ok' }, '../x.dc.html': { x: 0, y: 0, w: 1, h: 1 }, 'a/b.dc.html': { x: 0, y: 0, w: 1, h: 1 },
+    'a\\b.dc.html': { x: 0, y: 0, w: 1, h: 1 }, 'x.html': { x: 0, y: 0, w: 1, h: 1 }, 'Bad.dc.html': { x: 'NaN', y: 0, w: 1, h: 1, title: 'Bad' },
+  } };
+  const text = JSON.stringify(odd).replace('"x.html"', '"__proto__":{"x":0,"y":0,"w":1,"h":1},"x.html"');
+  const c = designCanvas(text, heldAll);
+  assert.deepStrictEqual(c.boards.map(b => b.name), ['Main.dc.html']);
+  assert.deepStrictEqual(c.skipped, [{ name: 'Bad.dc.html', title: 'Bad' }]);
+  const many = { boards: Object.fromEntries(Array.from({ length: DESIGN_BOARD_MAX + 1 }, (_, i) => [`B${i}.dc.html`, { x: i * 10, y: 0, w: 5, h: 5, title: `B${i}` }])) };
+  const m = designCanvas(JSON.stringify(many), heldAll);
+  assert.deepStrictEqual([m.boards.length, m.skipped.map(s => s.name)], [60, [`B${DESIGN_BOARD_MAX}.dc.html`]]);
+  const notes = designCanvas(JSON.stringify({ boards: SAMPLE_CANVAS.boards, notes: { b: { text: 'B', x: 0, y: 0 }, a: { text: 'A', x: 0, y: 0 }, z: { text: 'Z', x: 'no', y: 0 } }, noteOrder: ['b'] }), heldAll);
+  assert.deepStrictEqual(notes.notes.map(n => [n.id, n.w]), [['b', 320], ['a', 320]]);
+});
+
+test('boardFlags', () => {
+  assert.deepStrictEqual(boardFlags('<p>{{a}}</p>'), { templated: true, blobs: false });
+  assert.deepStrictEqual(boardFlags('<sc-for each="x">'), { templated: true, blobs: false });
+  assert.deepStrictEqual(boardFlags('<dc-import src="a">'), { templated: true, blobs: false });
+  assert.deepStrictEqual(boardFlags('<img src="/_blob/1">'), { templated: false, blobs: true });
+  assert.deepStrictEqual(boardFlags('<p>plain</p>'), { templated: false, blobs: false });
+  assert.deepStrictEqual(boardFlags(null), { templated: false, blobs: false });
+});
+
+test('noteFill', () => {
+  for (const f of ['teal', 'orange', 'yellow', 'green', 'blue', 'pink', 'purple', 'red']) assert.strictEqual(noteFill(f), f);
+  for (const f of ['magenta', null, undefined, 3, 'TEAL ']) assert.strictEqual(noteFill(f), 'grey', String(f));
+});

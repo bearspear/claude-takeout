@@ -398,6 +398,12 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.20.0
+
+- **Design canvas** - A Design artifact's page on the Artifacts screen now shows its boards the way its canvas on claude.ai lays them out: each board at its place and with its title, notes as text, all scaled to fit, each board in the viewer's sandbox. **Open alone** shows one board at its size. A board that uses claude.ai's templates shows as saved, with its placeholders, and says so; uploaded images aren't in the export and the board says that too. Archives exported earlier get the canvas once their viewer is rebuilt with `build_viewer.js --force`.
+- **Fewer "needs claude.ai to run" labels** - A page claude.ai served with its frame code at the top (a public page shared with you) is no longer labelled for that code alone; its own scripts still decide. Applies to new exports.
+- **JSON files in artifact previews** - An artifact's `.json` files are kept in the viewer's preview data, so they get Download too.
+
 ### v1.19.0
 
 - **Download in the viewer** - Popups and the file panel have a **Download** button beside Copy, and an artifact's page has one for its start file and for each file in its list that the viewer holds. It saves the file the viewer holds (text, and preview images on the Artifacts screen) under its own name, HTML and SVG included: the file is saved, not opened, so nothing runs. A large upload gets the button once its text has loaded. Images, PDFs and other files the viewer only links to keep **Open file**, since a page opened from disk can't read them.
