@@ -34,6 +34,7 @@ const CANVAS = {
   notes: {
     t: { kind: 'title1', text: 'Section heading', x: 0, y: -120, maxW: 1100 },
     n1: { fill: 'teal', text: 'A sticky note <img src=x onerror="console.log(\'NOTE RAN\')">', x: 800, y: 400, w: 300 },
+    n2: { fill: 'yellow', text: 'Right below Home A', x: 0, y: 205, w: 300 },
   },
   noteOrder: ['t', 'n1'],
 };
@@ -136,6 +137,12 @@ async function writeOut(zip) {
     const note = page.locator('.design-note', { hasText: 'A sticky note' });
     check(`${label}: a note shows its text as text`, (await note.textContent()).includes('<img src=x onerror=') && (await note.locator('img').count()) === 0);
     check(`${label}: the heading note`, (await page.locator('.design-note.heading').textContent()) === 'Section heading');
+    // A note just below a board is not covered by it: the board's title sits above the board, not inside its place.
+    const below = await page.locator('.design-note', { hasText: 'Right below Home A' }).boundingBox();
+    const mainBody = await page.locator('.design-board', { hasText: 'Home A' }).locator('.board-body').boundingBox();
+    check(`${label}: a note just below a board is not covered`, below.y >= mainBody.y + mainBody.height - 0.5, JSON.stringify([below.y, mainBody.y + mainBody.height]));
+    const mainBox = await page.locator('.design-board', { hasText: 'Home A' }).boundingBox();
+    check(`${label}: a board's body starts at its place`, Math.abs(mainBody.y - mainBox.y) < 1, JSON.stringify([mainBody.y, mainBox.y]));
 
     // The hostile board.
     await page.locator('.design-board', { hasText: 'Hostile board' }).scrollIntoViewIfNeeded();

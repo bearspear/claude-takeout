@@ -2232,3 +2232,11 @@ test('canvasScale fits the width, never above 1 or below 0.1', () => {
   assert.strictEqual(canvasScale(1e6, 1000), 0.1);
   for (const bad of [0, -1, NaN, Infinity]) assert.strictEqual(canvasScale(bad, 1000), 1, String(bad));
 });
+
+test('a heading note takes its maxW, a sticky note its w', () => {
+  const c = designCanvas(JSON.stringify({ boards: SAMPLE_CANVAS.boards, notes: {
+    t: { kind: 'title1', text: 'Heading', x: 0, y: 0, w: 240, maxW: 2420 },
+    n: { text: 'Sticky', x: 0, y: 900, w: 420, maxW: 2000 },
+  } }), heldAll);
+  assert.deepStrictEqual(c.notes.map(n => [n.id, n.w]), [['t', 2420], ['n', 420]]);
+});

@@ -1466,7 +1466,10 @@ function designCanvas(text, held) {
     const x = num(n.x);
     const y = num(n.y);
     if (!inPlace(x) || !inPlace(y)) continue;
-    const w = num(n.w) !== null && n.w > 0 ? n.w : num(n.maxW) !== null && n.maxW > 0 ? n.maxW : 320;
+    // A heading (title1) is as wide as its maxW (its w is the editor's measure of the text, and wraps it); a sticky
+    // note is as wide as its w.
+    const width = v => (num(v) !== null && v > 0 ? v : null);
+    const w = (n.kind === 'title1' ? width(n.maxW) || width(n.w) : width(n.w) || width(n.maxW)) || 320;
     if (!inSize(w)) continue;
     notes.push({ id, text: str(n.text), x, y, w, fill: noteFill(n.fill), heading: n.kind === 'title1' });
   }
