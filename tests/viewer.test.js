@@ -1918,3 +1918,102 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
     assert.deepStrictEqual(out.artifacts, data.artifacts);
   });
 }
+
+// ---- In chats: the files Claude made, across the export's chats ----
+{
+  const { inChatsFiles, alsoInChat, fileKindGroup, parseInChatsHash, formatInChatsHash, chatFileTexts } = require('../viewer/viewer-logic.js');
+  const ver = (href, extra = {}) => ({ label: '', text: 'x', href, ...extra });
+  const msg = (id, at) => ({ id, parent: null, sender: 'assistant', at, blocks: [], uploads: [], attachments: [] });
+  const inChatsData = () => ({
+    chats: [
+      {
+        id: 'c0', title: 'Older chat', updated: '2026-05-02T00:00:00Z',
+        messages: [msg('m1', '2026-05-01T10:00:00Z'), msg('m2', '2026-05-01T11:00:00Z')],
+        files: {
+          a1: { name: 'early.html', kind: 'html', versions: [ver('C0/artefacts/early.html')], madeAt: 'm1' },
+          a2: { name: 'later.py', kind: 'code', versions: [ver('C0/artefacts/later.py')], madeAt: 'm2' },
+          a3: { name: 'gone.txt', kind: 'missing', versions: [{ label: '', text: null, href: null }] },
+          a4: { name: 'Guide', kind: 'html', published: { url: 'u', current: true }, artifact: 'Art1', versions: [ver('C0/artefacts/guide.html', { same: true })] },
+          a5: { name: 'guide.html', kind: 'html', versions: [ver('C0/artefacts/guide.html')], madeAt: 'm2' },
+          a6: { name: 'attached.csv', kind: 'code', versions: [ver('C0/artefacts/attached.csv')] },
+        },
+      },
+      {
+        id: 'c1', title: 'Newer chat', updated: '2026-06-02T00:00:00Z',
+        messages: [msg('n1', '2026-06-01T10:00:00Z'), msg('n2', 'not a date')],
+        files: {
+          a1: { name: 'chart.svg', kind: 'svg', versions: [ver('C1/artefacts/chart_v1.svg'), ver('C1/artefacts/chart_v2.svg')], madeAt: 'n1' },
+          // A page published at v1 whose file changed afterwards: listed, with the artifact named.
+          a2: { name: 'deck.html', kind: 'html', versions: [ver('C1/artefacts/deck_v1.html'), ver('C1/artefacts/deck_v2.html')], madeAt: 'n1' },
+          a3: { name: 'Deck', kind: 'html', published: { url: 'u', current: true }, artifact: 'Art2', versions: [ver('C1/artefacts/deck_v1.html', { same: true })] },
+          // The same source of a page that isn't in the export's artifacts: listed.
+          a4: { name: 'Solo', kind: 'html', published: { url: 'u', current: true }, versions: [ver('C1/artefacts/solo.html', { same: true })] },
+          a5: { name: 'solo.html', kind: 'html', versions: [ver('C1/artefacts/solo.html')], madeAt: 'n2' },
+          a6: { name: 'Flow', kind: 'html', widget: true, versions: [ver(null)], madeAt: 'n1' },
+          a7: { name: 'notes.md', kind: 'md', versions: [ver('C1/artefacts/notes.md')], madeAt: 'n1' },
+        },
+      },
+    ],
+    artifacts: [{ id: 'Art1', title: 'Guide' }, { id: 'Art2', title: 'Deck' }],
+  });
+
+  test('inChatsFiles: newest first by the message that made the last version, then the undated by chat order', () => {
+    const got = inChatsFiles(inChatsData());
+    // A message with no usable date stands in with its chat's update (2026-06-02), the newest time here; equal times go by name.
+    assert.deepStrictEqual(got.map(f => f.name), ['solo.html', 'chart.svg', 'deck.html', 'Flow', 'notes.md', 'later.py', 'early.html', 'attached.csv']);
+    const deck = got.find(f => f.name === 'deck.html');
+    assert.deepStrictEqual({ chat: deck.chat, file: deck.file, kind: deck.kind, madeAt: deck.madeAt, versions: deck.versions.length, alsoArtifact: deck.alsoArtifact },
+      { chat: 1, file: 'a2', kind: 'page', madeAt: 'n1', versions: 2, alsoArtifact: 'Art2' });
+    assert.strictEqual(got.find(f => f.name === 'solo.html').alsoArtifact, null);
+    assert.strictEqual(got.find(f => f.name === 'attached.csv').madeAt, null);
+  });
+
+  test('inChatsFiles leaves out missing files, published cards and the same source of a page in the artifacts', () => {
+    const names = inChatsFiles(inChatsData()).map(f => f.name);
+    for (const left of ['gone.txt', 'Guide', 'guide.html', 'Deck', 'Solo']) assert.ok(!names.includes(left), left);
+    assert.deepStrictEqual([...alsoInChat(inChatsData())], ['Art1']);
+    // Without that artifact in the export, the source is listed and nothing is "also in chat".
+    const data = inChatsData();
+    data.artifacts = data.artifacts.filter(v => v.id !== 'Art1');
+    assert.ok(inChatsFiles(data).some(f => f.name === 'guide.html'));
+    assert.deepStrictEqual([...alsoInChat(data)], []);
+  });
+
+  test('inChatsFiles: uploads and pasted text are never listed, and odd data lists nothing', () => {
+    const data = inChatsData();
+    data.chats[0].messages[0].uploads = [{ name: 'up.pdf', href: 'C0/uploads/up.pdf', text: null }];
+    data.chats[0].messages[0].attachments = [{ name: 'paste.txt', text: 'pasted' }];
+    const names = inChatsFiles(data).map(f => f.name);
+    assert.ok(!names.includes('up.pdf') && !names.includes('paste.txt'));
+    assert.deepStrictEqual(inChatsFiles({}), []);
+    assert.deepStrictEqual(inChatsFiles({ chats: [null, { files: { a1: null, a2: { name: 'v.txt', versions: [] } } }] }), []);
+    assert.deepStrictEqual([...alsoInChat({ chats: [] })], []);
+  });
+
+  test('fileKindGroup', () => {
+    const cases = [
+      [['index.html', 'html'], 'page'], [['old.HTM', 'html'], 'page'],
+      [['notes.md', 'md'], 'doc'], [['Plan', 'md', 'doc:node-1'], 'doc'],
+      [['chart.svg', 'svg'], 'diagram'], [['Flow.html', 'html', 'widget:Flow'], 'diagram'], [['Flow.svg', 'svg', 'x:m:widget:Flow'], 'diagram'],
+      [['a.py', 'code'], 'code'], [['App.jsx', 'react'], 'code'], [['big.js', 'binary'], 'code'], [['data.csv', 'code'], 'code'],
+      [['photo.png', 'image'], 'other'], [['report.pdf', 'pdf'], 'other'], [['blob', 'binary'], 'other'], [['flow.mmd', 'mermaid'], 'other'],
+    ];
+    for (const [args, want] of cases) assert.strictEqual(fileKindGroup(...args), want, args.join(' '));
+  });
+
+  test('parseInChatsHash and formatInChatsHash', () => {
+    assert.deepStrictEqual(parseInChatsHash('#ac=3.a12'), { chat: 3, file: 'a12' });
+    assert.deepStrictEqual(parseInChatsHash('#ac=0.x:m_1-2'), { chat: 0, file: 'x:m_1-2' });
+    for (const h of ['#ac=', '#ac=1', '#ac=a.a1', '#ac=1234567.a1', '#ac=1.', '#ac=1.a/b', '#ac=1.' + 'a'.repeat(129), '#a=abc', '#chat=x&ac=1.a1', ' #ac=1.a1', null, undefined]) {
+      assert.strictEqual(parseInChatsHash(h), null, String(h));
+    }
+    assert.strictEqual(formatInChatsHash(3, 'a12'), '#ac=3.a12');
+    for (const [c, f] of [[-1, 'a1'], [1.5, 'a1'], ['1', 'a1'], [1, 'a<b'], [1, '']]) assert.strictEqual(formatInChatsHash(c, f), null, `${c} ${f}`);
+  });
+
+  test('chatFileTexts: the newest text of the last file with each name', () => {
+    const texts = chatFileTexts({ files: { a1: { name: 's.css', versions: [{ text: 'old' }, { text: 'new' }, { text: null }] }, a2: { name: 'b.js', versions: [{ text: null }] } } });
+    assert.deepStrictEqual([...texts], [['s.css', 'new']]);
+    assert.deepStrictEqual([...chatFileTexts(null)], []);
+  });
+}

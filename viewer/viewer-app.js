@@ -1527,11 +1527,7 @@ let panelView = null;
 
 // Siblings are found by name, newest text of the last file with that name.
 function siblingLookup(chat) {
-  const texts = new Map();
-  for (const file of Object.values(chat.files || {})) {
-    const text = (file.versions || []).map(v => v.text).filter(t => t != null).pop();
-    if (text != null) texts.set(file.name, text);
-  }
+  const texts = chatFileTexts(chat);
   return name => (texts.has(name) ? texts.get(name) : null);
 }
 
@@ -1774,7 +1770,7 @@ function onHashChange() {
 }
 
 // ---- The Artifacts screen: the artifacts app (artifacts-app.js) in #artifacts-screen, in place of the chat ----
-// #artifacts is its grid and #a=<id> an artifact; every other hash is the chat viewer's.
+// #artifacts is its grid, #a=<id> an artifact and #ac=<chat>.<file> an In chats file; every other hash is the chat viewer's.
 let artifactsApp = null; // the mounted app, only when the data has artifacts
 let artifactsOn = false;
 let titlesBefore = null; // the chat's page and top bar titles, put back when the screen closes

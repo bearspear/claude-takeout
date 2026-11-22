@@ -2,7 +2,9 @@
 // The sidebar's Artifacts entry with its count; the screen in place of the chat, with the grid and its tabs; a card
 // opens #a=<id> with the sandboxed preview, inside its guard frame; Back and the home button return to the grid; a
 // chat in the sidebar still opens, and history goes back and forth; / searches the artifacts on their screen; a
-// reused page links its file in published/. A hostile shared artifact gets nothing out and can't reach the viewer,
+// reused page links its file in published/. The In chats tab: a card per file Claude made (not the one a chat
+// published as an artifact), kind chips with counts, search by name, a file page at #ac=<chat>.<file> previewed in the
+// guard frame with only its own chat's stylesheet and scripts, Made in opening the chat, and the version menu. A hostile shared artifact gets nothing out and can't reach the viewer,
 // and navigations to file: (an export file, an absolute path, a refresh, a link) are refused; data: and blob: are
 // refused by the guard frame's own frame-src 'none', which the page's policy doesn't have. An export with the
 // setting off has no Artifacts entry. No requests outside file:, no page errors.
@@ -43,7 +45,40 @@ const pubChat = {
     ]),
   ],
 };
-const chats = { [plainChat.uuid]: plainChat, [pubChat.uuid]: pubChat };
+// A chat that makes files of every kind the In chats tab shows: a page with its own stylesheet (and a script that
+// only another chat has), Markdown, a diagram in two versions, code, and Markdown too large for the page (a part).
+const PAGE = '<!doctype html><link rel="stylesheet" href="style.css"><script src="other.js"></script><h1 id="t">Made page</h1>'
+  + "<script>const say = () => console.log('MADE ' + [getComputedStyle(document.getElementById('t')).color, self.origin, typeof window.OTHER, document.querySelector('meta[http-equiv]').content.split(';')[0]].join(' | ')); say(); setTimeout(say, 120);</script>";
+const BIG = '# Big doc\n\n' + 'Long text. '.repeat(7000);
+const write = (id, name, content) => [
+  { type: 'tool_use', id, name: 'Write', input: { file_path: `/mnt/user-data/outputs/${name}`, content } },
+  { type: 'tool_result', tool_use_id: id, name: 'Write', content: [{ type: 'text', text: 'ok' }] },
+];
+const makeChat = {
+  uuid: 'chat-make', name: 'Making files', model: 'claude-x', created_at: at(7), updated_at: at(13), settings: {}, current_leaf_message_uuid: 'ma2',
+  chat_messages: [
+    msg('mh1', null, 'human', 7, [{ type: 'text', text: 'make files' }]),
+    msg('ma1', 'mh1', 'assistant', 8, [
+      ...write('w1', 'notes.md', '# Notes\n\nSome **bold** text.\n\n<script>console.log("MD SCRIPT")</script>'),
+      { type: 'tool_use', id: 'c1', name: 'create_file', input: { path: '/home/claude/chart.svg', file_text: '<svg xmlns="http://www.w3.org/2000/svg"><circle r="5"/><!--V1--></svg>' } },
+      { type: 'tool_result', tool_use_id: 'c1', name: 'create_file', content: [{ type: 'text', text: 'ok' }] },
+      ...write('w2', 'page.html', PAGE),
+      ...write('w3', 'style.css', 'h1#t { color: rgb(4, 5, 6); }'),
+      ...write('w4', 'tool.py', 'print("made in a chat")\n'),
+      { type: 'text', text: 'Made them.' },
+    ]),
+    msg('mh2', 'ma1', 'human', 9, [{ type: 'text', text: 'change the chart' }]),
+    msg('ma2', 'mh2', 'assistant', 10, [
+      { type: 'tool_use', id: 'e1', name: 'str_replace', input: { path: '/home/claude/chart.svg', old_str: '<!--V1-->', new_str: '<!--V2-->' } },
+      { type: 'tool_result', tool_use_id: 'e1', name: 'str_replace', content: [{ type: 'text', text: 'ok' }] },
+      ...write('w5', 'big.md', BIG),
+      { type: 'text', text: 'Changed it.' },
+    ]),
+  ],
+};
+// The publishing chat also writes a script, which the other chat's page names but must never get.
+pubChat.chat_messages[1].content.splice(2, 0, ...write('wo', 'other.js', "window.OTHER = 1; console.log('OTHER CHAT LOADED');"));
+const chats = { [plainChat.uuid]: plainChat, [pubChat.uuid]: pubChat, [makeChat.uuid]: makeChat };
 const list = Object.values(chats).map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updated_at }));
 
 // Export All through the popup, with its artifact step: a ZIP (megaFormat zip), unzipped into a new folder.
@@ -177,7 +212,7 @@ const navs = dir => [
   check('the grid hash', await page.evaluate(() => location.hash) === '#artifacts');
   check('the screen is the artifacts app, in its shadow root', await page.evaluate(() => { const s = document.getElementById('artifacts-screen'); return !!s.shadowRoot && !document.getElementById('grid'); }));
   const tabs = page.locator('#artifacts-screen [role=tablist] [role=tab]');
-  check('tabs All / Yours / Shared with you', JSON.stringify(await tabs.allTextContents()) === JSON.stringify(['All', 'Yours', 'Shared with you']));
+  check('tabs All / Yours / Shared with you / In chats with its count', JSON.stringify(await tabs.allTextContents()) === JSON.stringify(['All', 'Yours', 'Shared with you', 'In chats 7']), JSON.stringify(await tabs.allTextContents()));
   const titles = () => page.locator('#artifacts-screen #grid .card .title').allTextContents();
   check('cards, newest first', JSON.stringify(await titles()) === JSON.stringify(['Guide page', 'Hostile', 'Shared deck', 'Guide', ...navs(base).map(n => n[0]).sort()]), JSON.stringify(await titles()));
   await tabs.nth(1).click();
@@ -188,6 +223,79 @@ const navs = dir => [
   check('the screen keeps its own look (its CSS, not the chat viewer\'s)', await page.locator('#artifacts-screen #grid').evaluate(g => getComputedStyle(g).display) === 'grid'
     && await page.locator('#artifacts-screen .card').first().evaluate(c => getComputedStyle(c).borderRadius) === '10px');
   check('its CSS stays in it', await page.evaluate(() => getComputedStyle(document.querySelector('#chat-list .item')).borderRadius) === '8px');
+
+  // ---- In chats ----
+  const makeIndex = data.chats.findIndex(c => c.title === 'Making files');
+  const fileId = name => Object.entries(data.chats[makeIndex].files).find(([, f]) => f.name === name)[0];
+  check('kind filters only on In chats', await page.locator('#artifacts-screen #kinds').isHidden());
+  await tabs.nth(3).click();
+  check('In chats: one card per file Claude made, newest first; the published file is under All', JSON.stringify(await titles()) === JSON.stringify(['big.md', 'chart.svg', 'notes.md', 'page.html', 'style.css', 'tool.py', 'other.js']), JSON.stringify(await titles()));
+  const chips = page.locator('#artifacts-screen #kinds .chip');
+  check('In chats: kind chips with counts', JSON.stringify(await chips.allTextContents()) === JSON.stringify(['All kinds', 'Pages 1', 'Docs 2', 'Diagrams 1', 'Code 3', 'Other 0']), JSON.stringify(await chips.allTextContents()));
+  check('In chats: each card names its chat', JSON.stringify(await page.locator('#artifacts-screen #grid .card .from').allTextContents()) === JSON.stringify([...Array(6).fill('💬Making files'), '💬Publishing']), JSON.stringify(await page.locator('#artifacts-screen #grid .card .from').allTextContents()));
+  check('In chats: a file with versions says how many', (await page.locator('#artifacts-screen #grid .card', { hasText: 'chart.svg' }).locator('.versions').textContent()) === '2 versions');
+  await chips.nth(2).click();
+  check('a chip filters by kind', JSON.stringify(await titles()) === JSON.stringify(['big.md', 'notes.md']) && await chips.nth(2).getAttribute('aria-pressed') === 'true', JSON.stringify(await titles()));
+  await page.locator('#artifacts-screen #search').fill('note');
+  check('search and a kind together, the counts follow the search', JSON.stringify(await titles()) === JSON.stringify(['notes.md']) && JSON.stringify(await chips.allTextContents()) === JSON.stringify(['All kinds', 'Pages 0', 'Docs 1', 'Diagrams 0', 'Code 0', 'Other 0']), JSON.stringify(await chips.allTextContents()));
+  await chips.nth(0).click();
+  await page.locator('#artifacts-screen #search').fill('.py');
+  check('search filters by file name', JSON.stringify(await titles()) === JSON.stringify(['tool.py']), JSON.stringify(await titles()));
+  await page.locator('#artifacts-screen #search').fill('');
+
+  // A page: the guarded preview, with its own chat's stylesheet and not another chat's script.
+  await page.locator('#artifacts-screen #grid .card', { hasText: 'page.html' }).click();
+  await page.waitForSelector('#artifacts-screen #page:not([hidden])');
+  check('a file card opens #ac=<chat>.<file>', await page.evaluate(() => location.hash) === `#ac=${makeIndex}.${fileId('page.html')}`, await page.evaluate(() => location.hash));
+  check('its title and kind', (await page.locator('#artifacts-screen #page-title').textContent()) === 'page.html' && (await page.locator('#artifacts-screen #page-kind').textContent()) === 'Page' && await page.title() === 'page.html - Artifacts');
+  const fileGuard = await previewOf(v);
+  check('the file preview sits in the guard frame', await fileGuard.evaluate(() => document.querySelector('meta[http-equiv="Content-Security-Policy"]').content === "frame-src 'none'" && document.scripts.length === 0
+    && document.querySelector('iframe').getAttribute('sandbox') === 'allow-scripts allow-forms allow-modals'));
+  await waitLog(v, 'MADE ');
+  const made = v.seen.logs.find(l => l.startsWith('MADE ')) || '';
+  check("the page runs with its own chat's stylesheet, no origin, under the preview policy, without another chat's script", made === "MADE rgb(4, 5, 6) | null | undefined | default-src 'none'", made);
+  check("another chat's script never loads", !v.seen.logs.some(l => l.includes('OTHER CHAT LOADED')));
+  check('Made in names the chat', (await page.locator('#artifacts-screen #page-from').textContent()) === 'Made in Making files');
+  check('no version menu for one version', await page.locator('#artifacts-screen #page-from select').count() === 0);
+  await page.locator('#artifacts-screen #page-from .chat-link').click();
+  await page.waitForSelector('#chat .msg');
+  check('Made in opens the chat', await shown(page, '#scroll') && (await page.locator('#title').textContent()) === 'Making files' && !(await shown(page, '#artifacts-screen')));
+  check('the preview is gone with the screen (file)', await page.locator('#artifacts-screen #page-body iframe').count() === 0);
+  await page.goBack();
+  await page.waitForSelector('#artifacts-screen #page:not([hidden])');
+  check('Back returns to the file', await page.evaluate(() => location.hash) === `#ac=${makeIndex}.${fileId('page.html')}` && (await page.locator('#artifacts-screen #page-title').textContent()) === 'page.html');
+  await page.locator('#artifacts-screen #home-button').click();
+  check('home returns to the In chats grid', await page.locator('#artifacts-screen #tab-chats').getAttribute('aria-selected') === 'true' && (await titles()).length === 7);
+
+  // A diagram in two versions: the menu lists both, the latest first shown.
+  await page.locator('#artifacts-screen #grid .card', { hasText: 'chart.svg' }).click();
+  const svgGuard = await previewOf(v);
+  const options = page.locator('#artifacts-screen #page-from select option');
+  check('the version menu lists the versions, the latest chosen', JSON.stringify(await options.allTextContents()) === JSON.stringify(['v1', 'v2 (latest)']) && await page.locator('#artifacts-screen #page-from select').inputValue() === '1', JSON.stringify(await options.allTextContents()));
+  check('the latest version shows', (await svgGuard.$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--V2-->'));
+  await page.locator('#artifacts-screen #page-from select').selectOption('0');
+  const v1Guard = await previewOf(v);
+  check('choosing v1 shows v1', (await v1Guard.$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--V1-->'));
+  check('the diagram page', (await page.locator('#artifacts-screen #page-kind').textContent()) === 'Diagram');
+
+  // Markdown through the sanitizer; Markdown from a part; code as code.
+  await page.evaluate(h => { location.hash = h; }, `#ac=${makeIndex}.${fileId('notes.md')}`);
+  await page.waitForSelector('#artifacts-screen #page-body .prose h1');
+  check('Markdown renders, its script removed', (await page.locator('#artifacts-screen #page-body .prose h1').textContent()) === 'Notes'
+    && await page.locator('#artifacts-screen #page-body .prose strong').count() === 1 && await page.locator('#artifacts-screen #page-body script').count() === 0 && !v.seen.logs.includes('MD SCRIPT'));
+  check('Open file for Markdown', (await page.locator('#artifacts-screen #page-links a.open-file').getAttribute('href')) === `Making_files/artefacts/notes.md`, await page.locator('#artifacts-screen #page-links a.open-file').getAttribute('href'));
+  check('the big Markdown is in a part', !!Object.values(data.chats[makeIndex].files).find(f => f.name === 'big.md').versions[0].part);
+  await page.evaluate(h => { location.hash = h; }, `#ac=${makeIndex}.${fileId('big.md')}`);
+  await page.waitForSelector('#artifacts-screen #page-body .prose h1', { timeout: 3000 });
+  check('Markdown from a part renders', (await page.locator('#artifacts-screen #page-body .prose h1').textContent()) === 'Big doc');
+  await page.evaluate(h => { location.hash = h; }, `#ac=${makeIndex}.${fileId('tool.py')}`);
+  await page.waitForSelector('#artifacts-screen #page-body pre.code-view');
+  check('code shows as code', (await page.locator('#artifacts-screen #page-body pre.code-view').textContent()) === 'print("made in a chat")\n' && (await page.locator('#artifacts-screen #page-kind').textContent()) === 'Code');
+  check('no Open file for a script', await page.locator('#artifacts-screen #page-links a').count() === 0);
+  await page.evaluate(h => { location.hash = h; }, `#ac=${makeIndex}.nope`);
+  await page.waitForSelector('#artifacts-screen #home:not([hidden])');
+  check('an unknown file: the grid', await page.evaluate(() => location.hash) === '#artifacts');
+  await tabs.nth(0).click();
 
   // / searches the artifacts on their screen, not the chats.
   await page.locator('#artifacts-screen #home h1').click();
@@ -263,6 +371,15 @@ const navs = dir => [
   await direct.page.evaluate(() => { location.hash = '#a=NoSuchId'; });
   await direct.page.waitForSelector('#artifacts-screen #home:not([hidden])');
   check('an unknown id: the grid', await direct.page.evaluate(() => location.hash) === '#artifacts');
+  const pubIndex = data.chats.findIndex(c => c.title === 'Publishing');
+  const otherId = Object.entries(data.chats[pubIndex].files).find(([, f]) => f.name === 'other.js')[0];
+  await direct.page.evaluate(h => { location.hash = h; }, `#ac=${pubIndex}.${otherId}`);
+  await direct.page.waitForSelector('#artifacts-screen #page-from:not([hidden])');
+  check('opened at #ac=: the file, from its chat', (await direct.page.locator('#artifacts-screen #page-title').textContent()) === 'other.js' && (await direct.page.locator('#artifacts-screen #page-from').textContent()) === 'Made in Publishing');
+  const guideId = Object.entries(data.chats[pubIndex].files).find(([, f]) => f.name === 'guide.html')[0];
+  await direct.page.evaluate(h => { location.hash = h; }, `#ac=${pubIndex}.${guideId}`);
+  await direct.page.waitForSelector('#artifacts-screen #home:not([hidden])');
+  check('the published file has no In chats page', await direct.page.evaluate(() => location.hash) === '#artifacts');
   check('no requests, no errors (direct)', direct.seen.requests.length === 0 && direct.seen.errors.length === 0, JSON.stringify([direct.seen.requests, direct.seen.errors]));
   await direct.context.close();
 

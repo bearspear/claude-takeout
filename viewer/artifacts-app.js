@@ -7,9 +7,13 @@
 //     styled by the CSS in <template id="artifacts-style">; data is the chat viewer's ViewerData, with artifacts;
 //     loadPart(n) -> Promise<object|null> is the host's part loader (one __archivePart on the page);
 //     onOpenChat(chatIndex, messageUuid) opens a chat. The host calls route(hash) on each hash change: it returns
-//     whether the hash is the Artifacts screen's (#artifacts, #a=<id>), and on any other hash it lets go of an open
-//     artifact. show() shows the grid without touching the hash.
+//     whether the hash is the Artifacts screen's (#artifacts, #a=<id>, #ac=<chat>.<file>), and on any other hash it lets
+//     go of an open artifact. show() shows the grid without touching the hash.
 // The home page: a grid of cards like claude.ai/artifacts, with tabs (All / Yours / Shared with you) and a title search.
+// Hosted, a fourth tab, In chats, has a card per file Claude made in the chats (inChatsFiles), kind filters and a
+// search on file names; a card sets #ac=<chat index>.<file id>, which opens the file's page: "Made in" its chat
+// (onOpenChat), a version menu, and the file as an artifact's would show (an HTML or SVG file in the same guarded
+// sandbox, with only its own chat's scripts and stylesheets), Markdown, code, an image, or details.
 // Every text from the data goes in through textContent or attributes, never as markup.
 // Clicking a card sets #a=<id>, which opens that artifact's page: a top bar (home, title, kind, badges, Open file,
 // Open on claude.ai) above the artifact. What fills it (pageFor): a Docs page, a poster for Design and other typed
@@ -19,16 +23,19 @@
   'use strict';
 
   // The home page and the artifact page: constant markup, no data in it.
-  const shell = homeTag => `<${homeTag} id="home">
+  // Hosted, the grid has a fourth tab (In chats) with its kind filters, and a page a line under its top bar.
+  const shell = (homeTag, hosted) => `<${homeTag} id="home">
   <h1>Artifacts</h1>
   <div class="bar">
     <div role="tablist" aria-label="Which artifacts">
       <button type="button" role="tab" id="tab-all" data-tab="all" aria-controls="grid">All</button>
       <button type="button" role="tab" id="tab-yours" data-tab="yours" aria-controls="grid">Yours</button>
-      <button type="button" role="tab" id="tab-shared" data-tab="shared" aria-controls="grid">Shared with you</button>
+      <button type="button" role="tab" id="tab-shared" data-tab="shared" aria-controls="grid">Shared with you</button>${hosted ? `
+      <button type="button" role="tab" id="tab-chats" data-tab="chats" aria-controls="grid">In chats <span class="count"></span></button>` : ''}
     </div>
     <label class="search"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="7" cy="7" r="4.75"/><path d="m10.5 10.5 3.5 3.5" stroke-linecap="round"/></svg><input type="search" id="search" placeholder="Search artifacts" aria-label="Search artifacts" autocomplete="off" spellcheck="false"></label>
-  </div>
+  </div>${hosted ? `
+  <div id="kinds" role="group" aria-label="Kinds of file" hidden></div>` : ''}
   <div id="grid" role="tabpanel" aria-label="Artifacts"></div>
   <p id="empty" role="status" hidden></p>
 </${homeTag}>
@@ -40,7 +47,8 @@
     <span class="spacer"></span>
     <span id="page-badges"></span>
     <span id="page-links"></span>
-  </header>
+  </header>${hosted ? `
+  <div id="page-from" hidden></div>` : ''}
   <p id="page-note" role="note" hidden></p>
   <div id="page-body"></div>
 </section>
@@ -82,9 +90,9 @@
       const css = source ? (source.content ? source.content.textContent : source.textContent) : '';
       style.textContent = css.replace(/:root\b/g, ':host') + HOSTED_CSS;
       root.append(style);
-      root.append(document.createRange().createContextualFragment(shell('div')));
+      root.append(document.createRange().createContextualFragment(shell('div', true)));
     } else {
-      container.insertAdjacentHTML('afterbegin', shell('main'));
+      container.insertAdjacentHTML('afterbegin', shell('main', false));
     }
     const byIdIn = id => root.getElementById(id);
     // Relative times count from when the page was opened, as claude.ai's do.
@@ -210,12 +218,97 @@
 
     const EMPTY_TAB = { all: 'No artifacts', yours: 'Nothing of yours here', shared: 'Nothing shared with you' };
 
+    // ---- In chats (hosted only): one card per file Claude made in the export's chats (inChatsFiles) ----
+    const chats = hosted && Array.isArray(data.chats) ? data.chats : [];
+    const inChats = hosted ? inChatsFiles(data) : [];
+    const inChatsByHash = new Map();
+    for (const f of inChats) {
+      const hash = formatInChatsHash(f.chat, f.file);
+      if (hash) inChatsByHash.set(hash, f);
+    }
+    const KIND_NAMES = { page: 'Page', doc: 'Doc', diagram: 'Diagram', code: 'Code', other: 'Other' };
+    const KIND_CHIPS = [['', 'All kinds'], ['page', 'Pages'], ['doc', 'Docs'], ['diagram', 'Diagrams'], ['code', 'Code'], ['other', 'Other']];
+    const chatTitle = i => String((chats[i] && chats[i].title) || 'Untitled chat');
+    let kindFilter = '';
+
+    function fileCard(f, hash) {
+      const button = el('button', 'card file-card');
+      button.type = 'button';
+      button.dataset.id = hash;
+      const when = relativeTime(f.at, now);
+      const count = f.versions.length;
+      button.setAttribute('aria-label', `${f.name}, ${KIND_NAMES[f.kind]}${count > 1 ? `, ${count} versions` : ''}${when ? `, ${when}` : ''}, made in ${chatTitle(f.chat)}`);
+      const pic = el('span', 'pic');
+      const kindTile = el('span', `tile kind-${f.kind}`);
+      kindTile.append(el('span', 'word', KIND_NAMES[f.kind]));
+      pic.append(kindTile);
+      if (count > 1) pic.append(el('span', 'versions', `${count} versions`));
+      const info = el('span', 'info');
+      const name = el('span', 'title', f.name);
+      name.title = f.name;
+      const sub = el('span', 'sub');
+      const time = el('time', '', when);
+      const abs = absoluteTime(f.at);
+      if (abs) { time.title = abs; time.dateTime = new Date(Date.parse(f.at)).toISOString(); }
+      sub.append(time, el('span', 'dot', '·'), el('span', 'kind', KIND_NAMES[f.kind]));
+      const from = el('span', 'from');
+      from.append(el('span', 'chat-icon', '💬'), el('span', 'chat-name', chatTitle(f.chat)));
+      from.firstChild.setAttribute('aria-hidden', 'true');
+      from.title = chatTitle(f.chat);
+      info.append(name, sub, from);
+      button.append(pic, info);
+      button.addEventListener('click', () => { location.hash = hash; });
+      return button;
+    }
+
+    // Built the first time they show.
+    const fileCards = new Map(); // hash -> card
+    const fileCardFor = (hash, f) => {
+      if (!fileCards.has(hash)) fileCards.set(hash, fileCard(f, hash));
+      return fileCards.get(hash);
+    };
+
+    const kinds = byIdIn('kinds');
+    const chips = kinds ? KIND_CHIPS.map(([kind, label]) => {
+      const chip = el('button', 'chip');
+      chip.type = 'button';
+      chip.dataset.kind = kind;
+      chip.append(el('span', 'label', label));
+      if (kind) chip.append(document.createTextNode(' '), el('span', 'n'));
+      chip.addEventListener('click', () => { kindFilter = kind; render(); });
+      kinds.append(chip);
+      return chip;
+    }) : [];
+    const chatsCount = byIdIn('tab-chats');
+    if (chatsCount) chatsCount.querySelector('.count').textContent = String(inChatsByHash.size);
+
+    // The In chats grid: the search on file names, counted by kind, then the kind chosen.
+    function renderChats(query) {
+      const q = query.trim().toLowerCase();
+      const matching = [...inChatsByHash].filter(([, f]) => !q || f.name.toLowerCase().includes(q));
+      const counts = {};
+      for (const [, f] of matching) counts[f.kind] = (counts[f.kind] || 0) + 1;
+      for (const chip of chips) {
+        const kind = chip.dataset.kind;
+        if (kind) chip.querySelector('.n').textContent = String(counts[kind] || 0);
+        chip.setAttribute('aria-pressed', String(kind === kindFilter));
+      }
+      const shown = matching.filter(([, f]) => !kindFilter || f.kind === kindFilter);
+      grid.replaceChildren(...shown.map(([hash, f]) => fileCardFor(hash, f)));
+      empty.hidden = shown.length > 0;
+      empty.textContent = shown.length ? '' : q ? 'No files match' : kindFilter ? 'No files of this kind' : 'No files made in chats';
+    }
+
     function render() {
       const query = search.value;
-      const shown = artifactTabs(views, tab, query);
-      grid.replaceChildren(...shown.map(v => cards.get(v)));
-      empty.hidden = shown.length > 0;
-      empty.textContent = shown.length ? '' : query.trim() ? 'No artifacts match' : EMPTY_TAB[tab];
+      if (kinds) kinds.hidden = tab !== 'chats';
+      if (tab === 'chats') renderChats(query);
+      else {
+        const shown = artifactTabs(views, tab, query);
+        grid.replaceChildren(...shown.map(v => cards.get(v)));
+        empty.hidden = shown.length > 0;
+        empty.textContent = shown.length ? '' : query.trim() ? 'No artifacts match' : EMPTY_TAB[tab];
+      }
       for (const t of tabs) {
         const on = t.dataset.tab === tab;
         t.setAttribute('aria-selected', String(on));
@@ -588,11 +681,113 @@
       if (startHref) links.push(link('btn open-file', 'Open file', startHref, false));
       links.push(link('btn open-claude', 'Open on claude.ai', claudeUrl(v), true));
       pageLinks.replaceChildren(...links);
+      if (pageFrom) { pageFrom.hidden = true; pageFrom.replaceChildren(); }
       fillBody(v);
       pageBody.scrollTop = 0;
     }
 
-    let openId = null;
+    // ---- An In chats file's page (hosted): as an artifact's, with "Made in" its chat and a menu of its versions ----
+    const pageFrom = byIdIn('page-from');
+    const TEXT_KINDS = new Set(['html', 'svg', 'md', 'code', 'react', 'mermaid']);
+    // Only what a browser won't run as a page opens, as in the chat viewer; none inside a ZIP.
+    const fileHref = v => (unzipped !== false && typeof v.href === 'string' && openableHref(v.href) ? v.href : null);
+    const fileOf = f => chats[f.chat].files[f.file];
+
+    function fileDetails(f, v, partFailed) {
+      const box = sheet('details', partFailed ? "The text couldn't load, because viewer-files/ is missing or blocked." : `${f.name} can't be shown here.`, fileKindLabel(fileOf(f)));
+      const href = fileHref(v);
+      if (href) {
+        const row = el('p', 'actions');
+        row.append(link('btn', 'Open file', href, false));
+        box.append(row);
+      } else {
+        box.append(el('p', 'note', "This file can't open from the viewer. It's in the artefacts folder of this export."));
+      }
+      return box;
+    }
+
+    // text: the version's text, or null. A page or diagram runs in the same guarded sandbox as an artifact's, with
+    // only its own chat's scripts and stylesheets beside it; Markdown renders as the chat viewer's; an image by its link.
+    function fillFile(f, v, box, text, partFailed) {
+      const file = fileOf(f);
+      if ((file.kind === 'html' || file.kind === 'svg') && text !== null) {
+        const doc = artifactPreviewDoc(text, file.name, { texts: [...chatFileTexts(chats[f.chat])] });
+        if (doc.remote) { pageNote.textContent = PAGE_REMOTE_NOTE; pageNote.hidden = false; }
+        return box.replaceChildren(previewFrame({ title: f.name }, doc.srcdoc));
+      }
+      if (file.kind === 'md' && text !== null) return box.replaceChildren(markdownPage(text));
+      if (TEXT_KINDS.has(file.kind) && text !== null) return box.replaceChildren(el('pre', 'code-view', text));
+      if (file.kind === 'image' && fileHref(v)) {
+        const frame = el('div', 'image');
+        const img = document.createElement('img');
+        img.alt = f.name;
+        img.src = fileHref(v);
+        frame.append(img);
+        return box.replaceChildren(frame);
+      }
+      box.replaceChildren(fileDetails(f, v, partFailed));
+    }
+
+    // One version: its Open file link and the body. Text moved to a part loads from it.
+    function showFileVersion(f, at) {
+      const v = f.versions[at] || {};
+      const href = fileHref(v);
+      pageLinks.replaceChildren(...(href ? [link('btn open-file', 'Open file', href, false)] : []));
+      pageNote.hidden = true;
+      pageNote.textContent = '';
+      const box = el('div', 'preview');
+      box.dataset.id = formatInChatsHash(f.chat, f.file) || '';
+      pageBody.replaceChildren(box);
+      const kind = fileOf(f).kind;
+      if (typeof v.text === 'string' || !TEXT_KINDS.has(kind)) return fillFile(f, v, box, typeof v.text === 'string' ? v.text : null, false);
+      if (!(Number.isSafeInteger(v.part) && v.part > 0 && typeof v.key === 'string')) return fillFile(f, v, box, null, false);
+      box.append(el('p', 'loading', 'Loading…'));
+      Promise.resolve(options.loadPart(v.part)).then(part => {
+        const text = part && Object.prototype.hasOwnProperty.call(part, v.key) && typeof part[v.key] === 'string' ? part[v.key] : null;
+        // Another page or version took its place meanwhile.
+        if (box.isConnected) fillFile(f, v, box, text, text === null);
+      });
+    }
+
+    function showFilePage(f, at) {
+      const versions = f.versions.length;
+      const pick = Number.isInteger(at) && at >= 0 && at < versions ? at : versions - 1;
+      pageTitle.textContent = f.name;
+      pageTitle.title = f.name;
+      pageKind.textContent = KIND_NAMES[f.kind];
+      document.title = `${f.name} - Artifacts`;
+      pageBadges.replaceChildren();
+      const made = el('button', 'chat-link', chatTitle(f.chat));
+      made.type = 'button';
+      made.addEventListener('click', () => { if (typeof options.onOpenChat === 'function') options.onOpenChat(f.chat, f.madeAt || undefined); });
+      const madeIn = el('span', 'made-in');
+      madeIn.append(el('span', '', 'Made in '), made);
+      const row = [madeIn];
+      if (versions > 1) {
+        const label = el('label', 'version-menu');
+        const select = document.createElement('select');
+        f.versions.forEach((v, i) => {
+          const option = el('option', '', String((v && v.label) || `v${i + 1}`) + (i === versions - 1 ? ' (latest)' : ''));
+          option.value = String(i);
+          option.selected = i === pick;
+          select.append(option);
+        });
+        select.addEventListener('change', () => {
+          fileVersion = Number(select.value);
+          showFileVersion(f, fileVersion);
+        });
+        label.append(el('span', '', 'Version '), select);
+        row.push(label);
+      }
+      pageFrom.replaceChildren(...row);
+      pageFrom.hidden = false;
+      fileVersion = pick;
+      showFileVersion(f, pick);
+      pageBody.scrollTop = 0;
+    }
+
+    let openId = null; // an artifact's id, or an In chats file's hash
+    let fileVersion = -1; // the version an open In chats file shows
     let homeScroll = 0;
 
     // The scroll position of the grid: the window's standalone, the screen's hosted.
@@ -602,7 +797,8 @@
     // Standalone: any hash. Hosted: returns whether the hash is this screen's; on another, an open artifact is let go.
     function route(hash = location.hash) {
       const id = parseArtifactHash(hash);
-      if (hosted && id === null && hash !== HOME_HASH) {
+      const inChat = hosted ? parseInChatsHash(hash) : null;
+      if (hosted && id === null && inChat === null && hash !== HOME_HASH) {
         openId = null;
         page.hidden = true;
         home.hidden = false;
@@ -611,13 +807,21 @@
         return false;
       }
       const v = id != null && byId.has(id) ? byId.get(id) : null;
-      if (v) {
+      const fileHash = inChat ? formatInChatsHash(inChat.chat, inChat.file) : null;
+      const f = fileHash && inChatsByHash.has(fileHash) ? inChatsByHash.get(fileHash) : null;
+      if (v || f) {
         if (openId === null) homeScroll = scrollTop();
-        const changed = openId !== id;
-        openId = id;
+        const key = v ? id : fileHash;
+        const changed = openId !== key;
+        openId = key;
         home.hidden = true;
         page.hidden = false;
-        showPage(v);
+        if (v) showPage(v);
+        else {
+          // Back to the grid lands on its tab.
+          if (tab !== 'chats') { tab = 'chats'; render(); }
+          showFilePage(f, changed ? -1 : fileVersion);
+        }
         if (changed) pageTitle.focus({ preventScroll: true });
         return true;
       }
@@ -659,6 +863,7 @@
           if (img) img.replaceWith(tile(v));
         }
         if (openId !== null && byId.has(openId)) showPage(byId.get(openId));
+        else if (openId !== null && inChatsByHash.has(openId)) showFilePage(inChatsByHash.get(openId), fileVersion);
       };
       probe.src = 'viewer-check.gif';
     }

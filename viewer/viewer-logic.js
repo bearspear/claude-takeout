@@ -663,6 +663,108 @@ function parseArtifactHash(hash) {
   return m ? m[1] : null;
 }
 
+// ---- In chats: the files Claude made in the export's chats, the Artifacts screen's In chats tab ----
+
+// A chat's file texts by name: the newest text of the last file with that name (the siblings a page can inline).
+function chatFileTexts(chat) {
+  const texts = new Map();
+  for (const file of Object.values((chat && chat.files) || {})) {
+    if (!file || typeof file.name !== 'string') continue;
+    const text = (Array.isArray(file.versions) ? file.versions : []).map(v => v && v.text).filter(t => typeof t === 'string').pop();
+    if (text != null) texts.set(file.name, text);
+  }
+  return texts;
+}
+
+const CODE_EXTENSIONS = new Set(('js mjs cjs ts jsx tsx py rb go rs java kt swift c h cc cpp hpp cs php sh bash zsh ps1 sql r lua pl ' +
+  'scala dart css scss less json yaml yml toml xml ini').split(' '));
+
+// The In chats filter a file falls under. key: the export's file key when known ('doc:<node id>', 'widget:<title>',
+// either maybe off the branch as 'x:<message>:...'); in the viewer data a widget is marked by file.widget instead.
+function fileKindGroup(name, kind, key = '') {
+  const k = String(key || '');
+  if (/^(x:[^:]*:)?widget:/.test(k)) return 'diagram';
+  if (/^(x:[^:]*:)?doc:/.test(k)) return 'doc';
+  const ext = ((/\.([a-z0-9]+)$/i.exec(String(name || '')) || [])[1] || '').toLowerCase();
+  if (ext === 'html' || ext === 'htm') return 'page';
+  if (ext === 'md') return 'doc';
+  if (ext === 'svg') return 'diagram';
+  if (kind === 'code' || CODE_EXTENSIONS.has(ext)) return 'code';
+  return 'other';
+}
+
+// Both lists at once: the In chats entries, and the artifacts whose page a chat's file is, as that file now is.
+// A published page's version that is the same as the file Claude wrote links that file (same: true, the file's href);
+// when the page is one of the export's artifacts, the file whose last version that is isn't listed (the artifact's
+// card says "also in chat"), and a file with that page among its earlier versions names it in alsoArtifact.
+// Order: newest first by the message that made the file's last version (its time; a message with no usable time
+// stands in with its chat's update), then the chat's update, the message's place in the chat, the chat's place in
+// the data and the name. Files with no madeAt come after, by the chat's place in the data, then name.
+function inChatsSplit(data) {
+  const chats = data && Array.isArray(data.chats) ? data.chats : [];
+  const artifactIds = new Set((data && Array.isArray(data.artifacts) ? data.artifacts : []).filter(v => v && typeof v.id === 'string').map(v => v.id));
+  const time = iso => { const t = Date.parse(iso); return Number.isNaN(t) ? null : t; };
+  const files = [];
+  const also = new Set();
+  chats.forEach((chat, ci) => {
+    if (!chat || !chat.files || typeof chat.files !== 'object') return;
+    const entries = Object.entries(chat.files).filter(([, f]) => f && typeof f === 'object' && Array.isArray(f.versions) && f.versions.length);
+    const pageOfHref = new Map(); // href of a file Claude wrote -> the artifact published the same as it
+    for (const [, f] of entries) {
+      if (!f.published || !artifactIds.has(f.artifact)) continue;
+      for (const v of f.versions) if (v && v.same && typeof v.href === 'string') pageOfHref.set(v.href, f.artifact);
+    }
+    const messages = Array.isArray(chat.messages) ? chat.messages : [];
+    const place = new Map(messages.map((m, i) => [m && m.id, i]));
+    const chatTime = time(chat.updated);
+    for (const [id, f] of entries) {
+      if (f.published || f.kind === 'missing') continue;
+      const last = f.versions[f.versions.length - 1];
+      if (last && pageOfHref.has(last.href)) { also.add(pageOfHref.get(last.href)); continue; }
+      const earlier = f.versions.find(v => v && pageOfHref.has(v.href));
+      const madeAt = typeof f.madeAt === 'string' && f.madeAt ? f.madeAt : null;
+      const at = madeAt && place.has(madeAt) ? messages[place.get(madeAt)].at : null;
+      const name = String(f.name || 'Untitled');
+      files.push({
+        chat: ci, file: id, name, kind: fileKindGroup(name, f.kind, f.widget ? 'widget:' : ''), madeAt, versions: f.versions,
+        alsoArtifact: earlier ? pageOfHref.get(earlier.href) : null,
+        at: typeof at === 'string' ? at : null,
+        sort: { time: madeAt ? (time(at) ?? chatTime) : null, chatTime, place: madeAt && place.has(madeAt) ? place.get(madeAt) : -1 },
+      });
+    }
+  });
+  const desc = (x, y) => (x === y ? 0 : x === null ? 1 : y === null ? -1 : y - x);
+  files.sort((a, b) => {
+    if (!!a.madeAt !== !!b.madeAt) return a.madeAt ? -1 : 1;
+    if (a.madeAt) {
+      const c = desc(a.sort.time, b.sort.time) || desc(a.sort.chatTime, b.sort.chatTime) || (a.chat === b.chat ? b.sort.place - a.sort.place : 0);
+      if (c) return c;
+    }
+    return a.chat - b.chat || byName(a.name, b.name);
+  });
+  for (const f of files) delete f.sort;
+  return { files, also };
+}
+
+// [{ chat (index in data.chats), file (its id), name, kind ('page'|'doc'|'diagram'|'code'|'other'), madeAt, versions,
+//    alsoArtifact (an artifact id, or null), at (the madeAt message's time, or null) }], in the In chats order.
+function inChatsFiles(data) { return inChatsSplit(data).files; }
+
+// The ids of the artifacts whose page is, as it now is, a file a chat made: their card says "also in chat".
+function alsoInChat(data) { return inChatsSplit(data).also; }
+
+// #ac=<chat index>.<file id>: an In chats file.
+const IN_CHATS_HASH = /^#ac=(\d{1,6})\.([A-Za-z0-9_:-]{1,128})$/;
+function parseInChatsHash(hash) {
+  const m = IN_CHATS_HASH.exec(typeof hash === 'string' ? hash : '');
+  return m ? { chat: Number(m[1]), file: m[2] } : null;
+}
+function formatInChatsHash(chat, file) {
+  if (!Number.isInteger(chat) || chat < 0) return null;
+  const hash = `#ac=${chat}.${file}`;
+  return parseInChatsHash(hash) ? hash : null;
+}
+
 // The file and version a hash can really open, or null. A bad version means the latest.
 // added: ViewerData.added. An x id opens from any chat, since a hash can be shared.
 function resolveFile(files, id, version, added) {
@@ -1194,5 +1296,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
 }

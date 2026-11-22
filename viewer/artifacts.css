@@ -4,6 +4,7 @@
   --acc: #c96442; --err: #b53333; --hover: rgba(61, 57, 41, .06); --active: #e8e6dc;
   --pill: #eceae4; --pic: #f0eee8; --page-line: #e5e3dd; --tile-bg: #f5f4ef; --tile-ink: #8a887f;
   --docs-bg: #e3ecfb; --docs-ink: #2f6bd6; --design-bg: #ece5fb; --design-ink: #7650d8;
+  --page-bg: #e0eff2; --page-ink: #2b6f80; --code-bg: #e2f1e5; --code-ink: #2f7a45;
   --serif: Charter, "Bitstream Charter", "Sitka Text", Cambria, Georgia, "Times New Roman", serif;
   --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -16,6 +17,7 @@
     --acc: #d97757; --err: #e5806f; --hover: rgba(236, 233, 224, .06); --active: #141413;
     --pill: #3a3936; --pic: #262624; --page-line: #4a4945; --tile-bg: #353532; --tile-ink: #a3a198;
     --docs-bg: #233350; --docs-ink: #8fb4f5; --design-bg: #34284f; --design-ink: #b9a2f2;
+    --page-bg: #1f3a40; --page-ink: #8ccbd9; --code-bg: #223a2a; --code-ink: #8fd3a3;
     color-scheme: dark;
   }
 }
@@ -52,6 +54,30 @@ button { font: inherit; color: inherit; }
 .sub .dot { color: var(--faint); }
 .sub time:empty, .sub time:empty + .dot { display: none; }
 .globe { margin-left: auto; width: 13px; height: 13px; color: var(--mute); flex: none; }
+/* In chats (the chat viewer's Artifacts screen only): the tab's count, the kind filters, file cards. */
+[role=tab] .count { color: var(--faint); }
+#kinds { display: flex; flex-wrap: wrap; gap: 6px; margin: -8px 0 18px; }
+#kinds[hidden] { display: none; }
+.chip { font-size: 12px; line-height: 16px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--soft); cursor: pointer; }
+.chip:hover { border-color: var(--line-strong); }
+.chip[aria-pressed=true] { background: var(--pill); color: var(--ink); font-weight: 500; }
+.chip .n { color: var(--mute); }
+.file-card .pic { position: relative; }
+.file-card .versions { position: absolute; top: 8px; right: 8px; font-size: 11px; line-height: 16px; padding: 1px 7px; border-radius: 999px; background: rgba(0, 0, 0, .55); color: #fff; }
+.tile .word { font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; }
+.tile.kind-page { background: var(--page-bg); color: var(--page-ink); }
+.tile.kind-doc { background: var(--docs-bg); color: var(--docs-ink); }
+.tile.kind-diagram { background: var(--design-bg); color: var(--design-ink); }
+.tile.kind-code { background: var(--code-bg); color: var(--code-ink); }
+.from { display: flex; align-items: center; gap: 4px; margin-top: 3px; font-size: 11px; line-height: 16px; color: var(--soft); min-width: 0; }
+.from .chat-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#page-from { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 14px; padding: 6px 14px; font-size: 12px; line-height: 18px; color: var(--mute); background: var(--bg); border-bottom: 1px solid var(--line); flex: none; }
+#page-from[hidden] { display: none; }
+.chat-link { border: 0; padding: 0; background: none; color: var(--acc); font: inherit; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
+.chat-link:hover { text-decoration: underline; }
+.version-menu { margin-left: auto; }
+.version-menu select { font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1px 4px; }
+.code-view { flex: 1; min-height: 0; margin: 0; padding: 16px 20px; overflow: auto; font: 12px/1.55 var(--mono); white-space: pre; tab-size: 4; color: var(--ink); background: var(--bg); }
 #empty { color: var(--mute); font-size: 14px; text-align: center; padding: 64px 0; margin: 0; }
 /* One artifact open: a thin top bar, then the artifact edge to edge. */
 #page { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
