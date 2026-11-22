@@ -379,11 +379,65 @@ const STORE_LINK = /^(\.\.\/)*published\/|^(\.\.\/)+artifacts\//;
 // "page (1).html" keeps its parentheses through encodeURIComponent).
 const MD_LINK = /\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g;
 
+// text split into [{ code, text }]: fenced code blocks (``` or ~~~, three or more, closed by a fence of the same
+// character at least as long, or the end) and inline code spans (a run of backticks closed by a run of the same length)
+// are code; the rest is prose. Joined again, the pieces are the text.
+const FENCE = /^ {0,3}(`{3,}|~{3,})/;
+function markdownPieces(text) {
+  const pieces = [];
+  const push = (code, t) => {
+    if (!t) return;
+    const last = pieces[pieces.length - 1];
+    if (last && last.code === code) last.text += t;
+    else pieces.push({ code, text: t });
+  };
+  const prose = t => {
+    // Inline code spans, in prose only.
+    const runs = /`+/g;
+    let at = 0;
+    let m;
+    while ((m = runs.exec(t))) {
+      const close = new RegExp(`(?<!\`)${m[0]}(?!\`)`, 'g');
+      close.lastIndex = m.index + m[0].length;
+      const end = close.exec(t);
+      if (!end) continue;  // no closing run: the backticks are text
+      push(false, t.slice(at, m.index));
+      push(true, t.slice(m.index, end.index + end[0].length));
+      at = end.index + end[0].length;
+      runs.lastIndex = at;
+    }
+    push(false, t.slice(at));
+  };
+  const lines = String(text).split(/(?<=\n)/);
+  let fence = null;
+  let buffer = '';
+  for (const line of lines) {
+    if (fence) {
+      push(true, line);
+      const m = FENCE.exec(line);
+      if (m && m[1][0] === fence[0] && m[1].length >= fence.length && /^ {0,3}[`~]+\s*$/.test(line)) fence = null;
+      continue;
+    }
+    const m = FENCE.exec(line);
+    if (m && !(m[1][0] === '`' && line.slice(line.indexOf(m[1]) + m[1].length).includes('`'))) {
+      prose(buffer);
+      buffer = '';
+      fence = m[1];
+      push(true, line);
+      continue;
+    }
+    buffer += line;
+  }
+  prose(buffer);
+  return pieces;
+}
+
 // text with every Markdown link into a store (STORE_LINK) mapped: map(target) gives the new target, or null to leave
-// the link as it is. Returns { text, unmapped: [target, ...] } (each target once, in the order found).
+// the link as it is. Links in code (fenced blocks, inline code spans) are text, not links, and are left alone.
+// Returns { text, unmapped: [target, ...] } (each target once, in the order found).
 function rewriteChatLinks(text, map) {
   const unmapped = [];
-  const out = String(text).replace(MD_LINK, (whole, target) => {
+  const out = markdownPieces(text).map(piece => (piece.code ? piece.text : piece.text.replace(MD_LINK, (whole, target) => {
     if (!STORE_LINK.test(target)) return whole;
     const to = map(target);
     if (typeof to !== 'string' || !to) {
@@ -391,7 +445,7 @@ function rewriteChatLinks(text, map) {
       return whole;
     }
     return `](${to})`;
-  });
+  }))).join('');
   return { text: out, unmapped };
 }
 

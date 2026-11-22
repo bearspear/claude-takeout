@@ -321,7 +321,6 @@ async function addArtefactBlob(folder, artifacts, filename, blob) {
 // A Claude Docs document as one self-contained page to read, print or share. Raw HTML in the Markdown is
 // shown as text, and only web and mail links and https images are kept; the page's CSP allows no
 // script at all, so nothing in it can run.
-const escapeHtmlText = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 // marked hands some attribute values over already escaped (titles, alt text, autolinks) and others not,
 // so each is unescaped first and then escaped exactly once.
 const docAttr = (s) => escapeHtmlText(String(s).replace(/&(amp|lt|gt|quot|#39);/g, (m, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" })[e]));
@@ -2965,18 +2964,6 @@ async function createZipExport(data, onProgress = null, fetchPublished = null) {
 // Original functions (updated to use new helpers)
 // ============================================================================
 
-// Format timestamp
-function formatTimestamp(isoString) {
-  if (!isoString) return '';
-  const date = new Date(isoString);
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  const year = date.getFullYear();
-  const hours = String(date.getHours()).padStart(2, '0');
-  const minutes = String(date.getMinutes()).padStart(2, '0');
-  const seconds = String(date.getSeconds()).padStart(2, '0');
-  return `${month}/${day}/${year} ${hours}:${minutes}:${seconds}`;
-}
 
 // getModelName is in export-core.js
 
@@ -2988,8 +2975,7 @@ function formatTimestamp(isoString) {
 const isGuidanceTool = (name) => /(__|:)(read_me|guide|list_types)$/.test(String(name || ''));
 const isImageSearchTool = (name) => /(^|__|:)image_search$/.test(String(name || ''));
 const imagesOf = (result) => (Array.isArray(result && result.content) ? result.content : []).flatMap((c) => (c && Array.isArray(c.images) ? c.images.filter(Boolean) : []));
-// Text inside [...] of a Markdown link, and a URL for (...): brackets, parentheses and spaces escaped.
-const mdLinkText = (text) => String(text).replace(/[\\[\]]/g, '\\$&').replace(/\s+/g, ' ');
+// A URL for (...) of a Markdown link: parentheses, angle brackets and spaces escaped (mdLinkText, export-core.js, is its text).
 const mdUrl = (url) => String(url).replace(/[()<>]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`).replace(/\s/g, (ch) => encodeURIComponent(ch));
 
 // The file one show_widget call made in artefacts/ (the version it made, when there are several), or null.
@@ -3304,7 +3290,6 @@ function publishedSavedNames(paths, reserved = []) {
   return { names, renames };
 }
 
-const encodePath = (p) => String(p).split('/').map(encodeURIComponent).join('/');
 
 // A version's label and place: v1, v2, ... by its index in the page's history (oldest first); 'current'
 // for a publish that named no version, last.
@@ -5177,7 +5162,6 @@ const ARTIFACT_ROOT_NAMES = ['index.md', 'index.html', 'export-manifest.json', '
 
 // A string from claude.ai's list, safe to write: anything shaped like a frame URL or its token is dropped.
 const artifactText = (v) => String(typeof v === 'string' ? v : '').replace(/\S*(?:claudeusercontent\.com|__frame_t)\S*/gi, '[link removed]').slice(0, 500);
-const artifactCount = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 // text cut to at most max bytes of UTF-8, at a code point boundary.
 function capUtf8(text, max) {
@@ -5422,22 +5406,6 @@ function artifactJsonV2(rec) {
   };
 }
 
-// A record's versions as [ver, VersionRec], in claude.ai's order (its history, oldest first) when known; versions
-// not in the history after those, as they were added, and the one with no id last.
-function storeVersionList(rec) {
-  const list = rec.versions && typeof rec.versions.entries === 'function' ? [...rec.versions.entries()] : Object.entries(rec.versions || {});
-  const history = Array.isArray(rec.history) ? rec.history : [];
-  const place = (ver) => (ver === '' ? history.length + 1 : history.indexOf(ver) >= 0 ? history.indexOf(ver) : history.length);
-  return list.map((e, i) => ({ e, i })).sort((a, b) => place(a.e[0]) - place(b.e[0]) || a.i - b.i).map((x) => x.e);
-}
-
-// The name the version with no id goes by in artifact.json and the indexes: current, or current_2, ... when a
-// version has that id. list: storeVersionList's.
-function storeNoIdKey(list) {
-  let key = 'current';
-  for (let n = 2; list.some(([ver]) => ver === key); n++) key = `current_${n}`;
-  return key;
-}
 
 // A store version that can stand for the current version without a fetch: saved in its folder, nothing missing,
 // every file with a saved name.
@@ -5458,9 +5426,6 @@ function listedArtifactRecord(rec, a) {
   return rec;
 }
 
-// A store version not copied because a chat wrote its one file the same: sameAs names that chat's file.
-const storeVersionSame = (v) => !!(v && !v.folder && v.sameAs && typeof v.sameAs === 'object' && Array.isArray(v.files) && v.files.length === 1
-  && typeof v.sameAs[v.files[0].path] === 'string' && v.sameAs[v.files[0].path]);
 
 // Save one listed artifact (from artifactsFromList) into its store record. ctx: { fetchPublished, state
 // (publishedSignedOut: one 401 stops fetching the rest), warn(filename, message, note), store (artifactStore), docChats
@@ -5644,37 +5609,6 @@ function keptStartSize(v) {
   return f && Number.isFinite(f.size) ? f.size : null;
 }
 
-// A store record's versions for the indexes, in claude.ai's order (storeVersionList): { label (the version id, or
-// current), folder (relative to the store's prefix; null when no copy was saved), startSaved, current, reused (only
-// for a version the same as a chat's file: startSaved is then that root-relative file) }.
-function artifactRowVersions(rec) {
-  const list = storeVersionList(rec);
-  const noId = storeNoIdKey(list);
-  return list.map(([ver, v]) => {
-    const same = storeVersionSame(v) ? v.sameAs[v.start || v.files[0].path] || null : null;
-    return {
-      label: ver || noId, folder: v.folder ? `${rec.dir}/${v.folder}` : null, startSaved: v.folder ? v.startSaved || null : same,
-      current: !!ver && ver === rec.current, ...(same ? { reused: true } : {}),
-    };
-  });
-}
-
-// An index row for a store record the artifact step didn't save (a page only chats published, or a listed artifact an
-// Export Changes run left out): linked to its newest saved version (artifactRowVersions).
-function storeRecordRow(rec) {
-  const versions = artifactRowVersions(rec);
-  const newest = versions.filter((v) => v.startSaved).pop() || null;
-  const latest = storeVersionList(rec).filter(([, v]) => v.saved || storeVersionSame(v)).pop();
-  const v = latest ? latest[1] : null;
-  const missing = v && Array.isArray(v.missing) ? v.missing.length : 0;
-  const notes = [rec.meta.note, ...(rec.incomplete ? ['some versions not saved (see the chats\' errors.txt)'] : [])].filter(Boolean);
-  return {
-    title: rec.title, typeTitle: rec.meta.typeTitle, sourceSurface: rec.meta.sourceSurface, rel: rec.meta.rel,
-    folder: newest ? newest.folder || rec.dir : rec.dir, startSaved: newest ? newest.startSaved : null, url: rec.meta.url, note: notes.join('; '),
-    needsRuntime: !!(v && v.needsRuntime), fileCount: v ? v.files.length - missing : 0, missingCount: missing,
-    ...(newest && newest.reused ? { reused: true } : {}), listed: rec.listed === true, versions,
-  };
-}
 
 // An artifact whose saveArtifact threw before it could say so itself: a row, a manifest entry and a warning, all
 // naming it not exported; its store record (artifact.json) says so too.
@@ -5716,151 +5650,6 @@ function unexpectedArtifactRow(root, a, ctx) {
   };
 }
 
-const sortArtifactRows = (rows) => rows.slice().sort((a, b) => {
-  const x = String(a.title || '').toLowerCase();
-  const y = String(b.title || '').toLowerCase();
-  return x < y ? -1 : x > y ? 1 : (a.folder < b.folder ? -1 : a.folder > b.folder ? 1 : 0);
-});
-const artifactRowNotes = (r) => [r.note, r.needsRuntime ? 'needs claude.ai to run' : ''].filter(Boolean).join('; ');
-const artifactSource = (r) => [r.sourceSurface, isSharedArtifact(r.rel) ? 'shared with you' : ''].filter(Boolean).join(', ');
-// The claude.ai link, rebuilt from the short id so nothing else from the reply can become a link.
-const artifactUrl = (r) => {
-  const m = /^https:\/\/claude\.ai\/artifact\/([1-9A-HJ-NP-Za-km-z]+|[0-9a-f-]{36})$/.exec(String(r.url || ''));
-  return m ? `https://claude.ai/artifact/${m[1]}` : null;
-};
-// The local link of an artifact's start file. A shared artifact's only when the viewer would open its type
-// (openableName, export-core.js): anything else, HTML, SVG or XML among them, opened from disk could run
-// someone else's code with network access and the shared file:// storage.
-// base: the folder the index lives in, relative to the export root ('' or 'artifacts/'); a start file the chats
-// saved is a root-relative path, so it is reached from there.
-const artifactLocal = (r, base = '') => {
-  if (!r.startSaved) return null;
-  if (isSharedArtifact(r.rel) && !openableName(r.startSaved)) return null;
-  if (r.reused) return encodePath(`${'../'.repeat(String(base).split('/').filter(Boolean).length)}${r.startSaved}`);
-  return encodePath(`${r.folder}/${r.startSaved}`);
-};
-// A row's versions (rows from a store have them): [{ label, local (as artifactLocal), current }].
-const artifactVersionLinks = (r, base = '') => (Array.isArray(r.versions) ? r.versions : []).map((v) => ({
-  label: v.label, current: !!v.current,
-  local: v.folder || v.reused ? artifactLocal({ rel: r.rel, folder: v.folder, startSaved: v.startSaved, reused: !!v.reused }, base) : null,
-}));
-
-// index.md: one table row per artifact, by title. opts: { listed, exportedAt, warnings, thumbs (card pictures saved) }.
-// "Card pictures: N of M", with the note when they were skipped for want of the optional permission.
-const ARTIFACT_THUMB_PERMISSION_STATUS = 'Card pictures need the web images permission (Settings).';
-// An Export Changes run's header: "Changed since <date>: N of M listed".
-const artifactsChangedLine = (since, included, listed) => `Changed since ${formatTimestamp(since)}: ${Number(included) || 0} of ${Number(listed) || 0} listed`;
-function artifactThumbsLine(thumbs, listed, needPermission) {
-  return `${Number(thumbs) || 0} of ${Number(listed) || 0}${needPermission ? ' (needs the web images permission: Settings, Save web images and artifact card pictures)' : ''}`;
-}
-// Rows not in claude.ai's list (listed: false, pages only chats published) go in their own table under this heading.
-const ARTIFACTS_UNLISTED_HEADING = "Published from chats, not in claude.ai's list";
-// What the indexes say for "Listed by claude.ai" when the export has no list (the setting off, or the list failed).
-const ARTIFACTS_NO_LIST = "claude.ai's list isn't in this export";
-const splitListedRows = (rows) => [sortArtifactRows(rows.filter((r) => r.listed !== false)), sortArtifactRows(rows.filter((r) => r.listed === false))];
-// listed: claude.ai's count, or null when the export has no list.
-function artifactsIndexMd(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, thumbsNeedPermission = false, base = '', since = null } = {}) {
-  const cell = (t) => mdLinkText(String(t || '')).replace(/[<>|*_`#]/g, '\\$&');
-  const noList = listed == null;
-  const lines = [
-    '# Claude Takeout - Artifacts',
-    '',
-    ...(since && !noList ? [artifactsChangedLine(since, rows.filter((r) => r.listed !== false).length, listed), ''] : []),
-    `**Exported:** ${formatTimestamp(exportedAt)}`,
-    `**Listed by claude.ai:** ${noList ? ARTIFACTS_NO_LIST : listed}`,
-    `**Saved with files:** ${rows.filter((r) => r.fileCount > 0).length}`,
-    ...(noList ? [] : [`**Card pictures:** ${artifactThumbsLine(thumbs, since ? rows.filter((r) => r.listed !== false).length : listed, thumbsNeedPermission)}`]),
-  ];
-  if (warnings) lines.push(`**Issues:** ${artifactCount(warnings, 'warning')} (see errors.txt)`);
-  // A Versions column when the rows come from a store (one folder per version).
-  const withVersions = rows.some((r) => Array.isArray(r.versions));
-  const target = (local) => local.replace(/[()]/g, (c) => (c === '(' ? '%28' : '%29'));
-  const table = (list) => {
-    lines.push('', `| # | Artifact | Kind | Source | Files |${withVersions ? ' Versions |' : ''} Notes |`, `|---|----------|------|--------|-------|${withVersions ? '----------|' : ''}-------|`);
-    list.forEach((r, i) => {
-      const local = artifactLocal(r, base);
-      const remote = artifactUrl(r);
-      const name = cell(r.title || 'Untitled');
-      const link = local ? `[${name}](${target(local)})` : name;
-      const versions = withVersions ? ` ${artifactVersionLinks(r, base).map((v) => `${v.local ? `[${cell(v.label)}](${target(v.local)})` : cell(v.label)}${v.current ? ' (current)' : ''}`).join(', ')} |` : '';
-      lines.push(`| ${i + 1} | ${link}${remote ? ` · [claude.ai](${remote})` : ''} | ${cell(r.typeTitle || 'Page')} | ${cell(artifactSource(r))} | ${r.fileCount}${r.missingCount ? ` (${r.missingCount} missing)` : ''} |${versions} ${cell(artifactRowNotes(r))} |`);
-    });
-  };
-  const [inList, unlisted] = splitListedRows(rows);
-  if (inList.length || !unlisted.length) table(inList);
-  if (unlisted.length) {
-    lines.push('', `## ${ARTIFACTS_UNLISTED_HEADING}`);
-    table(unlisted);
-  }
-  return lines.join('\n') + '\n';
-}
-
-// index.html: a static page, no scripts; every value is escaped and the only links are each artifact's start
-// file in the export, its claude.ai page and, when it was built (opts.viewer), viewer.html. opts as artifactsIndexMd.
-function artifactsIndexHtml(rows, { listed = rows.length, exportedAt = new Date().toISOString(), warnings = 0, thumbs = 0, viewer = false, thumbsNeedPermission = false, base = '', since = null } = {}) {
-  const esc = (t) => escapeHtmlText(String(t == null ? '' : t)).replace(/'/g, '&#39;');
-  const up = '../'.repeat(String(base).split('/').filter(Boolean).length);
-  const withVersions = rows.some((r) => Array.isArray(r.versions));
-  const noList = listed == null;
-  const inList = rows.filter((r) => r.listed !== false);
-  const row = (r) => {
-    const local = artifactLocal(r, base);
-    const remote = artifactUrl(r);
-    const name = esc(r.title || 'Untitled');
-    const versions = withVersions ? `<td>${artifactVersionLinks(r, base).map((v) => `${v.local ? `<a href="${esc(v.local)}">${esc(v.label)}</a>` : esc(v.label)}${v.current ? ' (current)' : ''}`).join(', ')}</td>` : '';
-    return `<tr><td>${local ? `<a href="${esc(local)}">${name}</a>` : name}${remote ? ` <a class="remote" href="${esc(remote)}" rel="noopener noreferrer">claude.ai</a>` : ''}</td>`
-      + `<td>${esc(r.typeTitle || 'Page')}</td><td>${esc(artifactSource(r))}</td>`
-      + `<td>${r.fileCount}${r.missingCount ? ` (${r.missingCount} missing)` : ''}</td>${versions}<td>${esc(artifactRowNotes(r))}</td></tr>`;
-  };
-  const table = (list) => `<div class="wrap">
-<table>
-<thead><tr><th>Artifact</th><th>Kind</th><th>Source</th><th>Files</th>${withVersions ? '<th>Versions</th>' : ''}<th>Notes</th></tr></thead>
-<tbody>
-${list.map(row).join('\n')}
-</tbody>
-</table>
-</div>`;
-  const [listedRows, unlisted] = splitListedRows(rows);
-  const tables = [
-    ...(listedRows.length || !unlisted.length ? [table(listedRows)] : []),
-    ...(unlisted.length ? [`<h2>${esc(ARTIFACTS_UNLISTED_HEADING)}</h2>\n${table(unlisted)}`] : []),
-  ].join('\n');
-  const listedLine = noList ? `Listed by claude.ai: ${esc(ARTIFACTS_NO_LIST)}`
-    : `Listed by claude.ai: ${Number(listed) || 0} · Card pictures: ${esc(artifactThumbsLine(thumbs, since ? inList.length : listed, thumbsNeedPermission))}`;
-  return `<!doctype html>
-<html lang="en">
-<head>
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; base-uri 'none'; form-action 'none'">
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="referrer" content="no-referrer">
-<title>Claude Artifacts</title>
-<style>
-:root { color-scheme: light dark; --bg: #faf9f5; --fg: #1f1e1d; --muted: #6b6a68; --line: #e3e1da; --link: #a14a2c; }
-@media (prefers-color-scheme: dark) { :root { --bg: #1f1e1d; --fg: #eeece6; --muted: #a6a39b; --line: #3a3936; --link: #e08a6a; } }
-body { margin: 0; padding: 24px 16px; background: var(--bg); color: var(--fg); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
-main { max-width: 1100px; margin: 0 auto; }
-h1 { font-size: 1.5rem; margin: 0 0 4px; }
-h2 { font-size: 1.1rem; margin: 28px 0 8px; }
-.meta { color: var(--muted); margin: 0 0 20px; }
-.wrap { overflow-x: auto; }
-table { border-collapse: collapse; width: 100%; }
-th, td { text-align: left; vertical-align: top; padding: 8px 10px; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
-th { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
-a { color: var(--link); }
-a.remote { font-size: 0.85em; margin-left: 6px; }
-</style>
-</head>
-<body>
-<main>
-<h1>Claude Artifacts</h1>
-${since && !noList ? `<p class="meta">${esc(artifactsChangedLine(since, inList.length, listed))}</p>\n` : ''}<p class="meta">Exported ${esc(formatTimestamp(exportedAt))} · ${listedLine}${warnings ? ` · ${artifactCount(warnings, 'warning')} (see errors.txt)` : ''}</p>
-${viewer ? `<p class="viewer"><a href="${up}viewer.html">Open the artifacts viewer</a></p>\n` : ''}${tables}
-</main>
-</body>
-</html>
-`;
-}
 
 // The Export Artifacts loop: saves every listed artifact (artifactsFromList) into a store (artifactStore, its prefix
 // '' or 'artifacts/') in root and returns what the indexes, manifest and viewer are built from. Folder, artifact.json

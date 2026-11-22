@@ -219,6 +219,13 @@ function assertLinksResolve(dest) {
   }
   return links;
 }
+// As assertLinksResolve, but a link into a published/ folder the merge kept (no published.json) may stay.
+function assertLinksResolveAllowingKept(dest) {
+  for (const l of chatLinks(dest).filter(x => !/^[a-z]+:/i.test(x.target))) {
+    const abs = path.resolve(dest, l.chat, path.dirname(l.file), l.target.split('/').map(decodeURIComponent).join('/'));
+    assert.ok(abs.startsWith(dest + path.sep) && fs.statSync(abs, { throwIfNoEntry: false })?.isFile(), `${l.chat}/${l.file}: ${l.target} opens a file`);
+  }
+}
 const viewerData = dest => JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(fs.readFileSync(path.join(dest, 'viewer.html'), 'utf8'))[1]);
 const artifactJson = (dest, dir) => JSON.parse(fs.readFileSync(path.join(dest, 'artifacts', dir, 'artifact.json'), 'utf8'));
 const treeOf = dir => Object.keys(hashTree(dir)).sort();
@@ -251,12 +258,13 @@ test('merging two pre-1.17 archives that share a page keeps one artifact folder 
   assert.strictEqual(r.status, 'written', r.reason);
   assert.ok(r.ok, JSON.stringify(r.warnings));
   assert.deepStrictEqual(r.unmappedLinks, []);
+  assert.strictEqual(r.sameCopied, 0, 'v1 comes from the older source\'s saved folder, not from chat b\'s file');
   const dest = path.join(out, 'claude-takeout-merged-2026-11-09');
   assert.ok(!fs.existsSync(path.join(dest, 'published')), 'no published/ in the merged archive');
   // One folder for the page, named as its newest copy. v1 was chat b's own file in the newest source, but chat a
   // published it too and links it: v1 gets its own folder, with the bytes it was published with.
   assert.deepStrictEqual(treeOf(path.join(dest, 'artifacts')), ['Guide_2_ShortA', 'Guide_2_ShortA/artifact.json', 'Guide_2_ShortA/v1', 'Guide_2_ShortA/v1/index.html',
-    'Guide_2_ShortA/v2', 'Guide_2_ShortA/v2/index.html', 'index.md']);
+    'Guide_2_ShortA/v2', 'Guide_2_ShortA/v2/index.html', 'index.html', 'index.md']);
   const json = artifactJson(dest, 'Guide_2_ShortA');
   assert.strictEqual(json.format, 2);
   assert.strictEqual(json.uuid, U);
@@ -370,7 +378,7 @@ test('(b) Review Focus 1: a 1.17 combined archive and a newer 1.18 one of the sa
   assert.deepStrictEqual(r.unmappedLinks, []);
   const dest = path.join(out, 'm');
   assert.deepStrictEqual(treeOf(path.join(dest, 'artifacts')), [`Guide_${SID}`, `Guide_${SID}/artifact.json`, `Guide_${SID}/v1`, `Guide_${SID}/v1/index.html`,
-    `Guide_${SID}/v2`, `Guide_${SID}/v2/index.html`, `Guide_${SID}/v3`, `Guide_${SID}/v3/index.html`, 'index.md']);
+    `Guide_${SID}/v2`, `Guide_${SID}/v2/index.html`, `Guide_${SID}/v3`, `Guide_${SID}/v3/index.html`, 'index.html', 'index.md']);
   assert.deepStrictEqual(['v1', 'v2', 'v3'].map(v => fs.readFileSync(path.join(dest, `artifacts/Guide_${SID}/${v}/index.html`), 'utf8')), ['one', 'two', 'three']);
   const json = artifactJson(dest, `Guide_${SID}`);
   assert.deepStrictEqual([json.listed, json.current, json.order], [true, 'v3', ['v1', 'v2', 'v3']]);
@@ -454,7 +462,7 @@ test('(d) only Export Artifacts exports (flat 1.17 and 1.18): an Export All shap
   assert.deepStrictEqual(fs.readdirSync(out), ['m']);
   assert.deepStrictEqual(fs.readdirSync(dest).sort(), ['artifacts', 'export-manifest.json', 'index.md', 'viewer-check.gif', 'viewer-files', 'viewer.html']);
   assert.deepStrictEqual(treeOf(path.join(dest, 'artifacts')), [`Guide_${SID}`, `Guide_${SID}/artifact.json`, `Guide_${SID}/v1`, `Guide_${SID}/v1/index.html`,
-    `Guide_${SID}/v2`, `Guide_${SID}/v2/index.html`, `Other_${OID}`, `Other_${OID}/artifact.json`, `Other_${OID}/w1`, `Other_${OID}/w1/index.html`, 'index.md']);
+    `Guide_${SID}/v2`, `Guide_${SID}/v2/index.html`, `Other_${OID}`, `Other_${OID}/artifact.json`, `Other_${OID}/w1`, `Other_${OID}/w1/index.html`, 'index.html', 'index.md']);
   assert.deepStrictEqual(artifactJson(dest, `Guide_${SID}`).order, ['v1', 'v2']);
   assert.strictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).kind, 'merged');
   const found = require('../tools/archive-lib.js').findArchives(dest);
@@ -521,25 +529,82 @@ test('(f) a sameAs version whose chat copy in the merge differs: its bytes are c
   assert.strictEqual(fs.readFileSync(path.join(dest, 'Chat_a/artefacts/guide.html'), 'utf8'), 'one, edited', 'the chat\'s newer copy');
 });
 
-test('(g) a link the merge can\'t map is left as it is and reported, also with --json', async () => {
+test('(g) a link the merge can\'t map is left as it is and reported, broken or kept, also with --json', async () => {
   const tmp = tmpRoot();
   const a = path.join(tmp, 'a');
-  mega(a, '2026-11-01T00:00:00Z', { Chat_a: pubChat('a', '2026-10-01T00:00:00Z', pub('p1', 'v1')) }, {}, false);
-  put(a, 'Chat_a/README.md', '# a\n- [gone](../published/Gone_x/v1/index.html)\n- v1: [index.html](../published/Guide_ShortA/v1/index.html)\n');
+  mega(a, '2026-11-01T00:00:00Z', { Chat_a: pubChat('a', '2026-10-01T00:00:00Z', pub('p1', 'v1')) });
+  put(a, 'Chat_a/README.md', '# a\n- [gone](../published/Missing_y/v1/index.html)\n- [kept](../published/Gone_x/v1/index.html)\n- v1: [index.html](../published/Guide_ShortA/v1/index.html)\n');
   put(a, 'published/Guide_ShortA/published.json', pageJson({ v1: pubVersion('v1', 0, true, [pin('a', 'p1')], 'one') }));
   put(a, 'published/Guide_ShortA/v1/index.html', 'one');
   put(a, 'published/Gone_x/v1/index.html', 'no published.json beside it');
   const r = await merge([a], { out: path.join(tmp, 'out'), name: 'm', now: NOW });
   assert.strictEqual(r.status, 'written', r.reason);
-  assert.deepStrictEqual(r.unmappedLinks, [{ chat: 'Chat_a', file: 'README.md', target: '../published/Gone_x/v1/index.html' }]);
-  assert.ok(r.warnings.some(w => w.includes('../published/Gone_x/v1/index.html')));
+  assert.deepStrictEqual(r.unmappedLinks, [
+    { chat: 'Chat_a', file: 'README.md', target: '../published/Missing_y/v1/index.html', broken: true },
+    { chat: 'Chat_a', file: 'README.md', target: '../published/Gone_x/v1/index.html', broken: false },
+  ]);
+  assert.ok(r.warnings.some(w => w.includes('../published/Missing_y/v1/index.html') && /broken in the merged archive/.test(w)));
+  assert.ok(!r.warnings.some(w => w.includes('../published/Gone_x/v1/index.html')), 'a kept page\'s link works, so no warning');
   const readme = fs.readFileSync(path.join(tmp, 'out/m/Chat_a/README.md'), 'utf8');
-  assert.match(readme, /\[gone\]\(\.\.\/published\/Gone_x\/v1\/index\.html\)/);
+  assert.match(readme, /\[gone\]\(\.\.\/published\/Missing_y\/v1\/index\.html\)/);
   assert.match(readme, /\[index\.html\]\(\.\.\/artifacts\/Guide_ShortA\/v1\/index\.html\)/);
   const res = spawnSync(process.execPath, [TOOL, a, '--out', path.join(tmp, 'out2'), '--json'], { encoding: 'utf8' });
-  assert.deepStrictEqual(JSON.parse(res.stdout).unmappedLinks.map(l => l.target), ['../published/Gone_x/v1/index.html']);
+  assert.deepStrictEqual(JSON.parse(res.stdout).unmappedLinks.map(l => [l.target, l.broken]), [['../published/Missing_y/v1/index.html', true], ['../published/Gone_x/v1/index.html', false]]);
   const text = spawnSync(process.execPath, [TOOL, a, '--out', path.join(tmp, 'out3')], { encoding: 'utf8' });
-  assert.match(text.stdout, /1 link left as they were/);
+  assert.match(text.stdout, /2 links left as they were, 1 broken in the merged archive/);
+});
+
+test('published/ folders with no published.json are kept as they are, at the root and in a chat, and their links still open', async () => {
+  const tmp = tmpRoot();
+  // A chat ZIP: its own published/ holds a page it read (Guide) and a loose folder and file.
+  const single = path.join(tmp, 'Chat_x_claude-chat');
+  put(single, 'original.json', pubChat('x', '2026-10-05T00:00:00Z', pub('x1', 'v1')));
+  put(single, 'published/Guide_ShortA/published.json', pageJson({ v1: pubVersion('v1', 0, true, [pin('x', 'x1')], 'one') }));
+  put(single, 'published/Guide_ShortA/v1/index.html', 'one');
+  put(single, 'published/Loose/index.html', 'loose page');
+  put(single, 'published/notes.txt', 'loose file');
+  put(single, 'README.md', '# x\n- [v1](published/Guide_ShortA/v1/index.html)\n- [loose](published/Loose/index.html)\n- [notes](published/notes.txt)\n');
+  // An Export All: the same at the root; a later source with a loose folder of the same name keeps its own.
+  const all = path.join(tmp, 'all');
+  mega(all, '2026-11-01T00:00:00Z', { Chat_a: pubChat('a', '2026-10-01T00:00:00Z', pub('p1', 'v1')) });
+  put(all, 'Chat_a/README.md', '# a\n- [v1](../published/Guide_ShortA/v1/index.html)\n- [loose](../published/RootLoose/index.html)\n');
+  put(all, 'published/Guide_ShortA/published.json', pageJson({ v1: pubVersion('v1', 0, true, [pin('a', 'p1')], 'one') }));
+  put(all, 'published/Guide_ShortA/v1/index.html', 'one');
+  put(all, 'published/RootLoose/index.html', 'root loose page');
+  put(all, 'published/RootLoose/published.json', '{ not json');
+  const before = [hashTree(single), hashTree(all)];
+  const out = path.join(tmp, 'out');
+  const r = await merge([single, all], { out, name: 'm', now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  const dest = path.join(out, 'm');
+  assert.deepStrictEqual(r.keptPublished.map(k => k.to).sort(), ['Chat_x_claude-chat/published/Loose', 'Chat_x_claude-chat/published/notes.txt', 'published/RootLoose']);
+  assert.deepStrictEqual(treeOf(path.join(dest, 'Chat_x_claude-chat/published')), ['Loose', 'Loose/index.html', 'notes.txt']);
+  assert.deepStrictEqual(treeOf(path.join(dest, 'published')), ['RootLoose', 'RootLoose/index.html', 'RootLoose/published.json']);
+  assert.deepStrictEqual(r.unmappedLinks.filter(l => l.broken), []);
+  assertLinksResolveAllowingKept(dest);
+  assert.match(fs.readFileSync(path.join(dest, 'Chat_x_claude-chat/README.md'), 'utf8'), /\[v1\]\(\.\.\/artifacts\/Guide_ShortA\/v1\/index\.html\)/);
+  assert.ok(r.warnings.some(w => /kept in published\/RootLoose \(no published\.json\)/.test(w)));
+  assert.deepStrictEqual([hashTree(single), hashTree(all)], before, 'sources unchanged');
+});
+
+test('a file that can\'t be copied into artifacts/ stops the merge, and nothing is left under --out', async () => {
+  const tmp = tmpRoot();
+  const a = path.join(tmp, 'a');
+  mega(a, '2026-11-01T00:00:00Z', { Chat_a: chatJson('a', '2026-10-01T00:00:00Z') });
+  put(a, 'export-manifest.json', manifestOf('2026-11-01T00:00:00Z'));
+  put(a, `artifacts/Guide_${SID}/artifact.json`, format2(U, 'Guide', { current: 'v1', versions: { v1: v2('v1', 'one') } }));
+  put(a, `artifacts/Guide_${SID}/v1/index.html`, 'one');
+  const out = path.join(tmp, 'out');
+  const real = fs.copyFileSync;
+  fs.copyFileSync = (src, dest, mode) => {
+    if (dest.includes(`${path.sep}artifacts${path.sep}`)) throw Object.assign(new Error('EIO: i/o error'), { code: 'EIO' });
+    return real(src, dest, mode);
+  };
+  let r;
+  try { r = await merge([a], { out, name: 'm', now: NOW }); } finally { fs.copyFileSync = real; }
+  assert.strictEqual(r.status, 'failed');
+  assert.match(r.reason, /could not copy .*EIO/);
+  assert.deepStrictEqual(fs.readdirSync(out), [], 'the build folder is removed');
 });
 
 test('a dry run of a merge with artifacts writes nothing and leaves the sources alone', async () => {
@@ -586,6 +651,21 @@ test('rewriteChatLinks maps links into published/ and artifacts/ only, and lists
   const got = rewriteChatLinks(text, t => (t.startsWith('published/') ? null : `NEW:${t}`));
   assert.strictEqual(got.text, '[a](NEW:../published/P/v1/index%20(1).html) [b](artefacts/x.html) [c](published/P/v2/i.html) [d](NEW:../artifacts/A/v1/i.html) [e](https://claude.ai/x) [c2](published/P/v2/i.html)');
   assert.deepStrictEqual(got.unmapped, ['published/P/v2/i.html']);
+  // Code is text, not links: fenced blocks (``` and ~~~, a longer fence holding a shorter one, an unclosed one) and
+  // inline code spans are left alone.
+  const map = t => `NEW:${t}`;
+  const code = [
+    ['```\n[x](published/a)\n```\n[y](published/b)', '```\n[x](published/a)\n```\n[y](NEW:published/b)'],
+    ['````md\n```\n[x](published/a)\n```\n````\n[y](published/b)', '````md\n```\n[x](published/a)\n```\n````\n[y](NEW:published/b)'],
+    ['~~~\n[x](published/a)\n~~~\n[y](published/b)', '~~~\n[x](published/a)\n~~~\n[y](NEW:published/b)'],
+    ['  ```js\n[x](../published/a)\n  ```\n', '  ```js\n[x](../published/a)\n  ```\n'],
+    ['see `[x](published/a)` and [y](published/b)', 'see `[x](published/a)` and [y](NEW:published/b)'],
+    ['``[x](published/a) ` `` [y](published/b)', '``[x](published/a) ` `` [y](NEW:published/b)'],
+    ['a ` lone [y](published/b)', 'a ` lone [y](NEW:published/b)'],
+    ['```\n[x](published/a)\nnever closed', '```\n[x](published/a)\nnever closed'],
+  ];
+  for (const [input, want] of code) assert.strictEqual(rewriteChatLinks(input, map).text, want, input);
+  assert.deepStrictEqual(rewriteChatLinks('`[x](published/a)`', () => null).unmapped, [], 'a link in code is not reported');
 });
 
 test('a source that has only artifacts is accepted, not refused', async () => {
