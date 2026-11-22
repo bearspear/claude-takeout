@@ -306,7 +306,8 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
     const old = inspectRoot(archive.root, force);
     if (old.stop) return finish(old.stop, old.reason);
     const standalone = archive.kind === 'artifacts';
-    if (!archive.chats.length && !standalone) return finish('skipped', 'no Claude chats in it');
+    // An Export All with artifacts and no chats (findArchives finds one by its artifacts/) is read as one with chats.
+    if (!archive.chats.length && !standalone && archive.kind !== 'mega') return finish('skipped', 'no Claude chats in it');
 
     // Artifacts in any layout an export wrote: read once, for the chats' published pages and the Artifacts screen.
     const store = lib.readArtifactStore(archive.root);
@@ -315,10 +316,11 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
     const withArtifacts = standalone || (archive.kind === 'mega' && store.layout !== 'none');
     if (withArtifacts) report.artifacts = store.records.size;
     if (standalone && !store.records.size) return finish('skipped', 'no artifacts in it');
+    if (!archive.chats.length && !standalone && !store.records.size) return finish('skipped', 'no Claude chats in it');
 
     const { chats, idByDir, chatFolders } = await collectChats(archive, report, store);
     report.chats = chats.length;
-    if (!standalone) {
+    if (!standalone && archive.chats.length) {
       if (!chats.length && report.skippedChats.length && !report.failedChats.length) return finish('skipped', 'no Claude chats in it');
       if (!chats.length) return finish('failed', 'no chat could be read, so no viewer was written');
     }

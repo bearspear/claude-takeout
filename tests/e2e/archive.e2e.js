@@ -105,7 +105,7 @@ function viewerDataOf(file) {
   const check = (n, ok, x = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n} ${ok ? '' : x}`); };
 
   const open = async (target, options = {}) => {
-    const { delay, ...contextOptions } = options;
+    const { delay, ready = '.msg', ...contextOptions } = options;
     const context = await browser.newContext({ viewport: { width: 1360, height: 900 }, ...contextOptions });
     const page = await context.newPage();
     page.setDefaultTimeout(4000);
@@ -123,7 +123,7 @@ function viewerDataOf(file) {
     page.on('console', m => { seen.logs.push(m.text()); if (m.type() === 'error') seen.errors.push(m.text()); });
     page.on('pageerror', e => { seen.errors.push(e.message); seen.pageErrors.push(e.message); });
     await page.goto(target);
-    await page.waitForSelector('.msg');
+    await page.waitForSelector(ready);
     return { page, seen, context };
   };
   const clean = (name, seen) => {
@@ -748,6 +748,60 @@ function viewerDataOf(file) {
       check('combined: Current goes back', (await srcdoc()).includes('GUIDE-TWO'));
       clean('combined', cv.seen);
       await cv.context.close();
+
+      // ---- merge_archives: that 1.17 archive and a newer 1.18 one into one 1.18 store ----
+      // The 1.18 export has v2 and v3 (current); the merged viewer's menu has all three, each previewing from artifacts/.
+      const THREE = '<!doctype html><h1>GUIDE-THREE</h1>';
+      const neu = path.join(dir, 'newer-1.18');
+      put(neu, 'index.md', '# all');
+      put(neu, 'export-manifest.json', JSON.stringify({ format: 1, kind: 'full', exported_at: '2026-11-21T00:00:00Z', chats: [], artifacts: { listed: 1, thumbs: 0, items: [] } }));
+      put(neu, 'Chat_n/original.json', chatJson('n1', 'Newer chat', '2026-03-02T00:00:00Z'));
+      const v18 = (t, ver) => ({ folder: ver, files: files(t).map(f => ({ ...f, verified: true })), start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true,
+        publishedIn: [{ chat: 'n1', messageUuid: 'n1-2', toolUseId: `n${ver}`, same: false, writtenAs: null }] });
+      put(neu, `artifacts/Guide_${GID}/artifact.json`, JSON.stringify({ format: 2, uuid: GU, shortId: GID, url: `https://claude.ai/artifact/${GID}`, title: 'Guide', typeTitle: '',
+        sourceSurface: 'chat', rel: 'mine', public: false, createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-21T00:00:00Z', listed: true, current: 'v3', start: 'index.html',
+        needsRuntime: false, note: '', order: ['v2', 'v3'], versions: { v2: v18(TWO, 'v2'), v3: v18(THREE, 'v3') } }));
+      put(neu, `artifacts/Guide_${GID}/v2/index.html`, TWO);
+      put(neu, `artifacts/Guide_${GID}/v3/index.html`, THREE);
+      const mergedOut = path.join(dir, 'merged-out');
+      const merged = JSON.parse(execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'tools', 'merge_archives.js'), combined, neu, '--out', mergedOut, '--name', 'm', '--json'],
+        { encoding: 'utf8', maxBuffer: 1 << 26 }));
+      check('merged: the tool writes the archive with one artifact', merged.ok && merged.artifacts === 1, JSON.stringify(merged));
+      const mv = await open(`file://${path.join(mergedOut, 'm', 'viewer.html')}`);
+      check('merged: the Artifacts entry shows, with the count', (await mv.page.locator('#artifacts-nav .n').textContent()) === '1');
+      await mv.page.evaluate(h => { location.hash = h; }, `#a=${GID}`);
+      await mv.page.waitForSelector('#artifacts-screen #page:not([hidden])');
+      const mSrcdoc = async () => {
+        const guard = await (await mv.page.waitForSelector('#artifacts-screen #page-body .preview iframe', { timeout: 3000 })).contentFrame();
+        await guard.waitForSelector('iframe', { timeout: 3000 });
+        return guard.$eval('iframe', f => f.getAttribute('srcdoc'));
+      };
+      const mOpen = async () => decodeURIComponent(await mv.page.locator('#artifacts-screen #page-links a.open-file').getAttribute('href'));
+      check('merged: the current version (v3) previews from artifacts/', (await mSrcdoc()).includes('GUIDE-THREE') && await mOpen() === `artifacts/Guide_${GID}/v3/index.html`);
+      const mMenu = mv.page.locator('#artifacts-screen #page-from select');
+      check('merged: the version menu lists every version once', JSON.stringify(await mMenu.locator('option').allTextContents()) === JSON.stringify(['v1', 'v2', 'v3 (current)']),
+        JSON.stringify(await mMenu.locator('option').allTextContents()));
+      for (const [label, text] of [['v1', 'GUIDE-ONE'], ['v2', 'GUIDE-TWO']]) {
+        await mMenu.selectOption({ label });
+        check(`merged: ${label} previews from its folder in artifacts/`, (await mSrcdoc()).includes(text) && await mOpen() === `artifacts/Guide_${GID}/${label}/index.html`, await mOpen());
+      }
+      clean('merged', mv.seen);
+      await mv.context.close();
+
+      // Only artifacts: the merged archive of an artifacts-only source has no chats and opens on the Artifacts screen.
+      const onlyOut = path.join(dir, 'merged-only');
+      const onlySrc = path.join(dir, 'artifacts-only');
+      put(onlySrc, 'export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', exported_at: '2026-11-21T00:00:00Z', listed: 1, thumbs: 0, artifacts: [] }));
+      put(onlySrc, `Guide_${GID}/artifact.json`, fs.readFileSync(path.join(neu, `artifacts/Guide_${GID}/artifact.json`), 'utf8'));
+      put(onlySrc, `Guide_${GID}/v2/index.html`, TWO);
+      put(onlySrc, `Guide_${GID}/v3/index.html`, THREE);
+      const only = JSON.parse(execFileSync(process.execPath, [path.join(__dirname, '..', '..', 'tools', 'merge_archives.js'), onlySrc, '--out', onlyOut, '--name', 'm', '--json'], { encoding: 'utf8' }));
+      check('merged, artifacts only: written with no chats', only.ok && only.chats === 0 && only.artifacts === 1, JSON.stringify(only));
+      const ov = await open(`file://${path.join(onlyOut, 'm', 'viewer.html')}`, { ready: '#artifacts-screen:not([hidden])' });
+      check('merged, artifacts only: opens on the Artifacts screen with the card', await ov.page.locator('#artifacts-screen').isVisible() && ov.page.url().endsWith('#artifacts')
+        && (await ov.page.locator('#artifacts-nav .n').textContent()) === '1', ov.page.url());
+      clean('merged, artifacts only', ov.seen);
+      await ov.context.close();
     }
 
     const shots = process.env.SHOT_DIR;

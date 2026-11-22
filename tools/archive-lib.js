@@ -84,6 +84,19 @@ function isArtifactsExport(dir) {
   } catch (e) { return false; }
 }
 
+// An Export All (or Export Changes, or a merged archive) that holds artifacts and no chats: index.md, an
+// export-manifest.json of one of those kinds, and an artifacts/ folder (exact case) with a <folder>/artifact.json.
+const ALL_KINDS = ['full', 'changes', 'merged'];
+function isArtifactsOnlyAll(dir) {
+  if (!isRealFile(path.join(dir, 'index.md')) || !isRealFile(path.join(dir, 'export-manifest.json'))) return false;
+  try {
+    const m = JSON.parse(stripBom(fs.readFileSync(path.join(dir, 'export-manifest.json'), 'utf8')));
+    if (!m || typeof m !== 'object' || !ALL_KINDS.includes(m.kind) || !fs.readdirSync(dir).includes('artifacts')) return false;
+    const base = path.join(dir, 'artifacts');
+    return isRealDir(base) && subdirs(base).some(n => isRealFile(path.join(base, n, 'artifact.json')));
+  } catch (e) { return false; }
+}
+
 function findArchives(root, { exclude = [] } = {}) {
   const excluded = exclude.map(realOrResolved);
   const archives = [];
@@ -115,6 +128,10 @@ function findArchives(root, { exclude = [] } = {}) {
         archives.push({ root: dir, kind: 'artifacts', chats: [], hasViewer: isRealFile(path.join(dir, 'viewer.html')) });
         return;
       }
+      if (!chatNames.length && isArtifactsOnlyAll(dir)) {
+        archives.push({ root: dir, kind: 'mega', chats: [], hasViewer: isRealFile(path.join(dir, 'viewer.html')) });
+        return;
+      }
       if (isRealFile(path.join(dir, 'index.md')) && chatNames.length) {
         const chats = [];
         for (const n of chatNames) {
@@ -143,36 +160,15 @@ function findArchives(root, { exclude = [] } = {}) {
   return { archives, skipped, zips };
 }
 
-// True when dir is an archive as findArchives sees one: a chat, index.md beside a chat folder, or an Export
-// Artifacts export.
+// True when dir is an archive as findArchives sees one: a chat, index.md beside a chat folder, an Export
+// Artifacts export, or an Export All with artifacts and no chats.
 function isArchiveRoot(dir) {
   if (isRealFile(path.join(dir, 'original.json'))) return true;
   if (isArtifactsExport(dir)) return true;
+  if (isArtifactsOnlyAll(dir)) return true;
   if (!isRealFile(path.join(dir, 'index.md'))) return false;
   try { return subdirs(dir).some(n => isRealFile(path.join(dir, n, 'original.json'))); } catch (e) { return false; }
 }
-
-// True when an archive includes artifacts (a combined export, Claude Takeout 1.17 or later): an artifacts/
-// folder, or an export-manifest.json with an artifacts key. merge_archives doesn't handle those yet.
-// The folder counts only under its exact-case name (macOS finds a chat folder "Artifacts" by any case), when
-// it is not itself a chat (no original.json) and holds index.md or a <folder>/artifact.json.
-function hasArtifacts(root) {
-  let names = [];
-  try { names = fs.readdirSync(root); } catch (e) { /* unreadable */ }
-  const dir = path.join(root, 'artifacts');
-  if (names.includes('artifacts') && isRealDir(dir) && !isRealFile(path.join(dir, 'original.json'))) {
-    if (isRealFile(path.join(dir, 'index.md'))) return true;
-    try { if (subdirs(dir).some(n => isRealFile(path.join(dir, n, 'artifact.json')))) return true; } catch (e) { /* unreadable */ }
-  }
-  try {
-    const manifest = JSON.parse(stripBom(fs.readFileSync(path.join(root, 'export-manifest.json'), 'utf8')));
-    return !!manifest && typeof manifest === 'object' && Object.prototype.hasOwnProperty.call(manifest, 'artifacts');
-  } catch (e) { return false; }
-}
-
-// The refusal text; tool is the tool's own name.
-const artifactsRefusal = tool =>
-  `This archive includes artifacts (Claude Takeout 1.17 or later). ${tool} doesn't support those yet; its viewer.html is already complete.`;
 
 // ===================================================================
 // Generated-viewer marker
@@ -373,6 +369,30 @@ function realDirUnder(dir, rel) {
     if (!isRealDir(at)) return null;
   }
   return at;
+}
+
+// Markdown link targets into a store of published pages: the shared published/ of an Export All (../published/), a
+// chat's own (published/), and 1.18's artifacts/ (../artifacts/), also from a folder deeper in the chat (responses/:
+// ../../published/). merge_archives moves those, so it rewrites the links.
+const STORE_LINK = /^(\.\.\/)*published\/|^(\.\.\/)+artifacts\//;
+// A link: ](target), the target without spaces and with at most one level of balanced parentheses (a file named
+// "page (1).html" keeps its parentheses through encodeURIComponent).
+const MD_LINK = /\]\(((?:[^()\s]|\([^()\s]*\))+)\)/g;
+
+// text with every Markdown link into a store (STORE_LINK) mapped: map(target) gives the new target, or null to leave
+// the link as it is. Returns { text, unmapped: [target, ...] } (each target once, in the order found).
+function rewriteChatLinks(text, map) {
+  const unmapped = [];
+  const out = String(text).replace(MD_LINK, (whole, target) => {
+    if (!STORE_LINK.test(target)) return whole;
+    const to = map(target);
+    if (typeof to !== 'string' || !to) {
+      if (!unmapped.includes(target)) unmapped.push(target);
+      return whole;
+    }
+    return `](${to})`;
+  });
+  return { text: out, unmapped };
 }
 
 // A 1.18 store record as the published.json of a page (publishedFromDisk reads that shape): versions by folder name,
@@ -615,7 +635,13 @@ function addPublished(rec, page) {
   const list = Object.entries(page.json.versions).filter(([, v]) => v && typeof v === 'object' && typeof v.ver === 'string' && VER_KEY.test(v.ver))
     .sort((a, b) => (Number.isFinite(a[1].order) ? a[1].order : 0) - (Number.isFinite(b[1].order) ? b[1].order : 0));
   for (const [folderName, v] of list) {
-    if (rec.versions.has(v.ver)) continue;
+    if (rec.versions.has(v.ver)) {
+      // A 1.17 artifact's current version (artifact.json keeps no publishes): the chats' publishes of it from here.
+      const had = rec.versions.get(v.ver);
+      const seen = new Set(had.publishedIn.map(p => `${p.chat}\n${p.toolUseId}`));
+      had.publishedIn.push(...publishedInList(v.publishedIn).filter(p => !seen.has(`${p.chat}\n${p.toolUseId}`)));
+      continue;
+    }
     rec.order.push(v.ver);
     const dirAbs = !folderName.includes('/') ? realDirUnder(page.abs, folderName) : null;
     const ok = !!dirAbs;
@@ -745,6 +771,44 @@ function sameFromChats(store, v, chatFolders) {
   return v;
 }
 
+// artifact.json format 2 from a disk record (readArtifactStore's DiskRec, or one merge_archives builds), with the same
+// keys in the same order as popup.js's artifactJsonV2 (a test runs both on one input). A version's folder is its
+// archive-relative folder, written as its name inside the artifact folder; savedAs and startSaved only for a version
+// with a folder. The claude.ai link is rebuilt from the short id, so nothing else read from disk becomes the link.
+function artifactJsonV2FromDisk(rec) {
+  const m = rec.meta || {};
+  const versions = {};
+  for (const ver of rec.order) {
+    const v = rec.versions.get(ver);
+    if (!v) continue;
+    const folder = typeof v.folder === 'string' && v.folder ? v.folder.split('/').pop() : null;
+    const out = {
+      folder,
+      files: (Array.isArray(v.files) ? v.files : []).map(f => ({
+        path: f.path, savedAs: folder && typeof f.savedAs === 'string' ? f.savedAs : null, size: Number.isFinite(f.size) ? f.size : null,
+        contentType: typeof f.contentType === 'string' ? f.contentType : null, sha256: typeof f.sha256 === 'string' ? f.sha256 : null, verified: f.verified !== false,
+      })),
+      start: v.start || null, startSaved: folder && v.startSaved || null, incomplete: !!v.incomplete,
+      missing: Array.isArray(v.missing) ? v.missing.slice() : [], saved: !!folder && !!v.saved,
+    };
+    if (v.sameAs && typeof v.sameAs === 'object' && Object.keys(v.sameAs).length) out.sameAs = { ...v.sameAs };
+    out.publishedIn = (Array.isArray(v.publishedIn) ? v.publishedIn : []).map(p => ({
+      chat: p.chat, messageUuid: p.messageUuid, toolUseId: p.toolUseId, same: !!p.same, writtenAs: typeof p.writtenAs === 'string' ? p.writtenAs : null,
+    }));
+    versions[ver] = out;
+  }
+  return {
+    format: 2, uuid: rec.uuid, shortId: rec.shortId, url: `https://claude.ai/artifact/${rec.shortId || rec.uuid}`, title: str(rec.title), typeTitle: str(m.typeTitle),
+    sourceSurface: str(m.sourceSurface), rel: str(m.rel), public: m.public === true, createdAt: str(m.createdAt), updatedAt: str(m.updatedAt),
+    listed: rec.listed === true, current: typeof rec.current === 'string' && rec.current ? rec.current : null,
+    start: m.start || null, needsRuntime: !!m.needsRuntime, note: str(m.note),
+    ...(typeof rec.thumbRel === 'string' && rec.thumbRel ? { thumb: rec.thumbRel } : {}),
+    ...(m.incomplete ? { incomplete: true } : {}),
+    order: rec.order.filter(ver => rec.versions.has(ver)),
+    versions,
+  };
+}
+
 // The Artifacts screen's data from a store (readArtifactStore), the same the extension writes:
 //   views: an ArtifactView (export-core.js artifactView) per artifact claude.ai listed, with thumb (its card picture,
 //          viewer-files/thumbs/<name>, when on disk), ver (its current version) and sourceSurface; part and key are the
@@ -764,28 +828,16 @@ function artifactViewsFromDisk(store, chatFolders = new Map()) {
     const m = rec.meta;
     const currentKey = rec.current && versions.has(rec.current) ? rec.current : rec.format === 1 && !rec.current && versions.has('current') ? 'current' : null;
     // The artifact folder's record: format 2, with where each version is.
-    const out = {};
     const places = {};
     for (const ver of rec.order) {
       const v = versions.get(ver);
-      out[ver] = {
-        folder: v.folder ? v.folder.split('/').pop() : null,
-        files: v.files.map(f => ({ path: f.path, savedAs: v.folder ? f.savedAs : null, size: f.size, contentType: f.contentType, sha256: f.sha256, verified: f.verified })),
-        start: v.start, startSaved: v.folder ? v.startSaved : null, incomplete: v.incomplete, missing: v.missing.slice(), saved: !!v.folder && v.saved,
-        ...(v.sameAs ? { sameAs: { ...v.sameAs } } : {}), publishedIn: v.publishedIn.map(p => ({ ...p })),
-      };
       if (v.folder) places[ver] = { folder: v.folder };
       if (ver !== currentKey && store.layout !== 'standalone-v18' && store.layout !== 'standalone-flat') {
         const payload = payloadFromDisk(versionDiskFiles(v), v.start);
         if (payload) versionPayloads.push({ uuid: rec.uuid, ver, payload, startKind: core.artifactStartKind(v.start) });
       }
     }
-    records.push({
-      format: 2, uuid: rec.uuid, shortId: rec.shortId, url: `https://claude.ai/artifact/${rec.shortId || rec.uuid}`, title: rec.title, typeTitle: m.typeTitle,
-      sourceSurface: m.sourceSurface, rel: m.rel, public: m.public, createdAt: m.createdAt, updatedAt: m.updatedAt, listed: rec.listed, current: rec.current,
-      start: m.start, needsRuntime: m.needsRuntime, note: m.note, ...(rec.thumbRel ? { thumb: rec.thumbRel } : {}), ...(m.incomplete ? { incomplete: true } : {}),
-      order: rec.order.slice(), versions: out, dir: rec.dir, versionOrder: rec.order.slice(), versionPlaces: places,
-    });
+    records.push({ ...artifactJsonV2FromDisk({ ...rec, versions }), dir: rec.dir, versionOrder: rec.order.slice(), versionPlaces: places });
     if (!rec.listed) continue;
 
     // The view, as saveArtifact in popup.js builds it from the version it saved (or the chats did).
@@ -1118,4 +1170,4 @@ function chatFromDisk(archive, chat, store = null) {
   return { viewerChat, missing, warnings };
 }
 
-module.exports = { readArtifactStore, artifactViewsFromDisk, payloadFromDisk, hasArtifacts, artifactsRefusal, findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, NotAChat, matchFile, stripBom, embeddableText, isAddedText, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
+module.exports = { readArtifactStore, artifactViewsFromDisk, artifactJsonV2FromDisk, sameFromChats, rewriteChatLinks, realFileUnder, realDirUnder, payloadFromDisk, findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, NotAChat, matchFile, stripBom, embeddableText, isAddedText, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };

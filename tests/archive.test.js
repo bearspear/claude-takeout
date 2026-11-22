@@ -2559,32 +2559,30 @@ for (const name of ['Artifacts', 'artifacts']) {
   });
 }
 
-test('hasArtifacts (merge_archives): a combined archive with artifacts/index.md counts; a chat named artifacts does not', () => {
-  const { hasArtifacts } = require('../tools/archive-lib.js');
-  const combined = tmpRoot();
-  put(combined, 'index.md', '# all');
-  put(combined, 'Chat_a/original.json', chatJson('a1'));
-  put(combined, 'artifacts/index.md', '# artifacts');
-  assert.strictEqual(hasArtifacts(combined), true);
-  const old = tmpRoot();
-  put(old, 'index.md', '# all');
-  put(old, 'artifacts/original.json', chatJson('a1'));
-  put(old, 'artifacts/artefacts/x/artifact.json', '{}');
-  assert.strictEqual(hasArtifacts(old), false);
-});
-
-test('zipHasArtifacts: exact-case artifacts/ with index.md counts; Artifacts/ and a chat artifacts/ do not', async () => {
-  const JSZip = require('../jszip.min.js');
-  const { zipHasArtifacts } = require('../tools/archive-zip.js');
-  const tmp = tmpRoot();
-  const make = async (files) => {
-    const zip = new JSZip();
-    for (const [n, t] of Object.entries(files)) zip.file(n, t);
-    const p = path.join(tmp, Math.random().toString(36).slice(2) + '.zip');
-    fs.writeFileSync(p, await zip.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
-    return p;
-  };
-  assert.strictEqual(await zipHasArtifacts(await make({ 'r/index.md': '#', 'r/Chat_a/original.json': chatJson('a'), 'r/artifacts/index.md': '#' })), true);
-  assert.strictEqual(await zipHasArtifacts(await make({ 'r/index.md': '#', 'r/Artifacts/original.json': chatJson('a'), 'r/Artifacts/index.md': '#' })), false);
-  assert.strictEqual(await zipHasArtifacts(await make({ 'r/index.md': '#', 'r/artifacts/original.json': chatJson('a'), 'r/artifacts/x/artifact.json': '{}' })), false);
+test('an Export Changes archive with only artifacts (no chat folders) is an archive, and build_viewer gives it the Artifacts screen', async () => {
+  const root = tmpRoot();
+  put(root, 'index.md', '# changes');
+  put(root, 'export-manifest.json', JSON.stringify({ ...FULL, kind: 'changes', since: '2026-11-01T00:00:00Z', chats: [] }));
+  put(root, `artifacts/${AF}/artifact.json`, JSON.stringify(format2([['v1', G1], ['v2', G2]])));
+  put(root, `artifacts/${AF}/v1/index.html`, G1);
+  put(root, `artifacts/${AF}/v2/index.html`, G2);
+  const found = lib.findArchives(root);
+  assert.deepStrictEqual(found.archives.map(a => [a.root, a.kind, a.chats.length]), [[root, 'mega', 0]]);
+  assert.strictEqual(lib.isArchiveRoot(root), true);
+  const res = await tool().writeViewer(found.archives[0], {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  const data = viewerData(root);
+  assert.deepStrictEqual(data.chats, []);
+  assert.deepStrictEqual(data.artifacts.map(v => v.title), ['Guide']);
+  // Not one: a chat-less folder whose manifest is an Export All's but whose artifacts/ has no artifact.json, or one
+  // with no index.md.
+  const bare = tmpRoot();
+  put(bare, 'index.md', '# changes');
+  put(bare, 'export-manifest.json', JSON.stringify({ ...FULL, kind: 'changes' }));
+  put(bare, 'artifacts/index.md', '# artifacts');
+  assert.deepStrictEqual(lib.findArchives(bare).archives, []);
+  const noIndex = tmpRoot();
+  put(noIndex, 'export-manifest.json', JSON.stringify({ ...FULL, kind: 'changes' }));
+  put(noIndex, `artifacts/${AF}/artifact.json`, JSON.stringify(format2([['v2', G2]])));
+  assert.deepStrictEqual(lib.findArchives(noIndex).archives, []);
 });

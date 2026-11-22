@@ -3,12 +3,17 @@
 //   node tools/merge_archives.js <archive folder or ZIP>... --out <folder> [--name <name>] [--dry-run] [--json]
 // Each chat is taken once, from the archive with its newest copy: the latest updated_at in original.json,
 // then the later export (export-manifest.json's exported_at), then the archive named later. The sources
-// are only read. Everything is written into a new folder under --out, built under a temporary name and
-// renamed when complete; ZIPs are extracted into a hidden temporary folder under --out and removed after.
+// are only read. Artifacts and published pages of every layout (published/ before 1.17, published/ beside artifacts/
+// in 1.17, artifacts/ in 1.18, Export Artifacts exports) go into one 1.18 artifacts/ store: one folder per artifact, a
+// <ver>/ folder per version, each version taken whole from the newest source with a copy; the merged chats' links into
+// published/ are rewritten to it. Everything is written into a new folder under --out, built under a temporary name
+// and renamed when complete; ZIPs are extracted into a hidden temporary folder under --out and removed after.
 // Exit code 0 when clean, 1 if anything failed.
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { parseArgs } = require('util');
+const core = require('../export-core.js');
 const lib = require('./archive-lib.js');
 const zipLib = require('./archive-zip.js');
 const { writeViewer } = require('./build_viewer.js');
@@ -68,86 +73,309 @@ function copyTree(from, to, { skipTop = null } = {}) {
 }
 
 // ===================================================================
-// Published pages
+// Artifacts: one store
 // ===================================================================
 
-const plainName = n => typeof n === 'string' && n !== '' && n !== '.' && n !== '..' && !/[\\/\0]/.test(n);
-const PAGE_UUID = /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+// Names an artifact folder may not take in artifacts/ (popup.js ARTIFACT_ROOT_NAMES), compared without case.
+const ARTIFACT_ROOT_NAMES = ['index.md', 'index.html', 'export-manifest.json', 'errors.txt', 'write-errors.txt', 'viewer.html', 'viewer-check.gif', 'viewer-files'];
+const ARTIFACTS_UNLISTED_HEADING = "Published from chats, not in claude.ai's list";
+const ARTIFACTS_NO_LIST = "claude.ai's list isn't in this export";
+const sha256File = abs => crypto.createHash('sha256').update(fs.readFileSync(abs)).digest('hex');
+const encodePath = p => String(p).split('/').map(encodeURIComponent).join('/');
+// A version with something on disk to take: files in its folder, or a chat's own files (sameAs).
+const hasCopy = v => !!((v.folder && v.files.some(f => f.abs)) || v.sameAs);
 
-// The shared published/ folders of mega archives, one folder per page uuid, newest source first. A page keeps
-// the folder name its newest copy has; its version folders are united, a stored copy winning over a version only
-// listed (nothing saved), and published.json's versions and publishedIn are merged: nothing is overwritten.
-// A folder without a readable published.json is copied as it is when its name is free.
-function mergePublished(sources, archivesOf, building, report) {
-  const pages = new Map(); // uuid -> { want, json, from: Map(version folder -> source folder) }
-  const loose = [];
-  for (const s of [...sources].sort((a, b) => b.order - a.order)) {
-    for (const archive of archivesOf.get(s.order) || []) {
-      const root = path.join(archive.root, 'published');
-      const st = lstat(root);
-      if (archive.kind !== 'mega' || !st || !st.isDirectory()) continue;
-      for (const dir of fs.readdirSync(root).sort()) {
-        const from = path.join(root, dir);
-        const fst = lstat(from);
-        if (SKIP_NAMES.has(dir) || !fst || !fst.isDirectory()) continue;
-        const jst = lstat(path.join(from, 'published.json'));
-        const json = jst && jst.isFile() ? readJson(path.join(from, 'published.json')) : null;
-        if (!json || typeof json !== 'object' || typeof json.uuid !== 'string' || !PAGE_UUID.test(json.uuid) || !json.versions || typeof json.versions !== 'object') {
-          loose.push({ dir, from });
-          continue;
-        }
-        const uuid = json.uuid.toLowerCase();
-        if (!pages.has(uuid)) pages.set(uuid, { want: dir, json: { ...json, versions: {} }, from: new Map() });
-        const page = pages.get(uuid);
-        for (const [folder, v] of Object.entries(json.versions)) {
-          if (!v || typeof v !== 'object' || !plainName(folder)) continue;
-          const vst = lstat(path.join(from, folder));
-          const stored = v.saved === true && !!vst && vst.isDirectory();
-          const publishedIn = Array.isArray(v.publishedIn) ? v.publishedIn.filter(p => p && typeof p === 'object') : [];
-          // The same folder name for another ver (a 'current' that was another version then) gets a free name.
-          let key = folder;
-          for (let n = 2; page.json.versions[key] && page.json.versions[key].ver !== v.ver; n++) key = `${folder}_${n}`;
-          const had = page.json.versions[key];
-          if (!had) {
-            page.json.versions[key] = { ...v, saved: stored, publishedIn: publishedIn.slice() };
-            if (stored) page.from.set(key, path.join(from, folder));
-            continue;
-          }
-          const seen = new Set(had.publishedIn.map(p => `${p.chat}\n${p.toolUseId}`));
-          for (const p of publishedIn) if (!seen.has(`${p.chat}\n${p.toolUseId}`)) had.publishedIn.push(p);
-          if (!had.saved && stored) {
-            for (const f of ['files', 'start', 'startSaved', 'incomplete', 'needsRuntime', 'missing']) had[f] = v[f];
-            had.saved = true;
-            page.from.set(key, path.join(from, folder));
-          }
+// Newest source first: the later export (export-manifest.json's exported_at), then the source named later.
+function newestFirst(a, b) {
+  const ta = time(a.exportedAt);
+  const tb = time(b.exportedAt);
+  if (ta !== tb) return ta > tb ? -1 : 1;
+  return b.order - a.order || b.index - a.index;
+}
+
+// Every source archive's artifacts in whichever layout it has (lib.readArtifactStore), newest first. Each: { store,
+// archive, order, index, exportedAt, decides (claude.ai's list in it decides listed: a full Export All whose artifact
+// step ran, or an Export Artifacts; Export Changes never), chatOf (its chats' folders -> their copies; '' for a single
+// chat), chatFolders (chat uuid -> folder), folders (a saved version's folder -> { uuid, ver, byFile: savedAs -> path }) }.
+function readStores(sources, archivesOf, copies, report) {
+  const out = [];
+  for (const s of sources) {
+    (archivesOf.get(s.order) || []).forEach((archive, index) => {
+      const warnings = [];
+      const store = lib.readArtifactStore(archive.root, { warnings });
+      for (const w of warnings) report.warnings.push(`${archive.root}: ${w}`);
+      const manifest = readJson(path.join(archive.root, 'export-manifest.json'));
+      const step = !!manifest && !!manifest.artifacts && typeof manifest.artifacts === 'object' && !Array.isArray(manifest.artifacts);
+      const mine = copies.filter(c => c.archive === archive);
+      const rel = c => (archive.kind === 'mega' ? c.folder : '');
+      const folders = new Map();
+      for (const rec of store.records.values()) {
+        for (const [ver, v] of rec.versions) {
+          if (v.folder) folders.set(v.folder, { uuid: rec.uuid, ver, byFile: new Map(v.files.filter(f => f.savedAs).map(f => [f.savedAs, f.path])) });
         }
       }
+      out.push({
+        store, archive, order: s.order, index, exportedAt: store.exportedAt, decides: store.kind === 'artifacts' || (store.kind === 'full' && step),
+        chatOf: new Map(mine.map(c => [rel(c), c])), chatFolders: new Map(mine.filter(c => c.uuid).map(c => [c.uuid, rel(c)])), folders,
+      });
+    });
+  }
+  return out.sort(newestFirst);
+}
+
+// One version order from several (each in claude.ai's order, oldest source first, so a version only an older export
+// has comes before one only a newer has): a version not placed yet goes right after the one before it in its list,
+// else right before the one after it, else last.
+function mergeOrder(lists) {
+  const out = [];
+  for (const list of lists) {
+    list.forEach((ver, i) => {
+      if (out.includes(ver)) return;
+      const before = list.slice(0, i).reverse().find(x => out.includes(x));
+      if (before !== undefined) { out.splice(out.indexOf(before) + 1, 0, ver); return; }
+      const after = list.slice(i + 1).find(x => out.includes(x));
+      if (after !== undefined) out.splice(out.indexOf(after), 0, ver);
+      else out.push(ver);
+    });
+  }
+  return out;
+}
+
+// One record per artifact uuid from every store (newest first): its versions united, each taken whole from the newest
+// source that has a copy of it (else the newest that lists it), publishedIn united. listed, current, title and
+// claude.ai's card come from the newest store whose list decides (not listing it: listed false), else from the newest
+// store that has it. The card picture from the newest store that has one.
+function mergeRecords(stores) {
+  const decider = stores.find(st => st.decides) || null;
+  const byUuid = new Map();
+  for (const st of stores) {
+    for (const rec of st.store.records.values()) {
+      if (!byUuid.has(rec.uuid)) byUuid.set(rec.uuid, []);
+      byUuid.get(rec.uuid).push({ st, rec });
     }
   }
-  if (!pages.size && !loose.length) return;
-  const base = path.join(building, 'published');
+  const merged = [];
+  for (const [uuid, have] of byUuid) {
+    const fromDecider = decider ? have.find(h => h.st === decider) : null;
+    const top = fromDecider || have[0];
+    const versions = new Map();
+    for (const { st, rec } of have) {
+      for (const ver of rec.order) {
+        const v = lib.sameFromChats(st.store, rec.versions.get(ver), st.chatFolders);
+        const had = versions.get(ver);
+        if (!had) { versions.set(ver, { st, v, publishedIn: v.publishedIn.slice() }); continue; }
+        const seen = new Set(had.publishedIn.map(p => `${p.chat}\n${p.toolUseId}`));
+        for (const p of v.publishedIn) if (!seen.has(`${p.chat}\n${p.toolUseId}`)) { seen.add(`${p.chat}\n${p.toolUseId}`); had.publishedIn.push(p); }
+        if (!hasCopy(had.v) && hasCopy(v)) Object.assign(had, { st, v });
+      }
+    }
+    const listed = decider ? !!(fromDecider && fromDecider.rec.listed) : !!top.rec.listed;
+    // A page no source holds a version of, and claude.ai doesn't list, has nothing to keep.
+    if (!versions.size && !listed) continue;
+    merged.push({
+      uuid, rec: top.rec, listed, thumbFrom: have.find(h => h.rec.thumb) || null,
+      order: mergeOrder(have.slice().reverse().map(h => h.rec.order)), versions,
+    });
+  }
+  return merged;
+}
+
+// Copies a file to dir/<savedAs ('/'-separated)>, making its folders; false when it can't (the name is taken).
+function copyInto(src, dir, savedAs) {
+  const dest = path.join(dir, ...savedAs.split('/'));
+  try {
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.copyFileSync(src, dest, fs.constants.COPYFILE_EXCL);
+    return true;
+  } catch (e) { return false; }
+}
+
+// A sameAs version's chat files as the merged chats hold them: { <published path>: <root-relative file> } when the
+// merged copy of each chat has the file with the same bytes, else null.
+function repointSameAs(st, v, byChat, building) {
+  const out = {};
+  for (const [p, rel] of Object.entries(v.sameAs)) {
+    const segs = rel.split('/');
+    const mega = st.archive.kind === 'mega';
+    const copy = st.chatOf.get(mega ? segs[0] : '');
+    const inChat = mega ? segs.slice(1).join('/') : rel;
+    const chosen = copy && copy.uuid ? byChat.get(copy.uuid) : null;
+    const there = chosen && inChat ? lib.realFileUnder(path.join(building, chosen.out), inChat) : null;
+    if (!there || !v.sameAsAbs[p] || sha256File(there) !== sha256File(v.sameAsAbs[p])) return null;
+    out[p] = `${chosen.out}/${inChat}`;
+  }
+  return out;
+}
+
+// Writes artifacts/ (one folder per artifact, a <ver>/ folder per version with a copy, artifact.json format 2) and the
+// card pictures into viewer-files/thumbs/ for the viewer to keep. Returns { places: `${uuid}\n${ver}` -> where the
+// version is now ({ dir, folder, savedAs: path -> savedAs } or { sameAs }), rows (for artifacts/index.md), listed, thumbs }.
+function writeArtifacts(merged, building, chosen, report) {
+  const base = path.join(building, 'artifacts');
   fs.mkdirSync(base);
-  const used = new Set();
-  const add = (copied) => { report.files += copied.files; report.bytes += copied.bytes; };
-  for (const page of pages.values()) {
-    const dir = freeName(page.want, used);
+  const used = new Set(ARTIFACT_ROOT_NAMES);
+  const places = new Map();
+  const rows = [];
+  const byChat = new Map(chosen.filter(c => c.uuid).map(c => [c.uuid, c]));
+  const thumbsTaken = new Set();
+  let thumbs = 0;
+  for (const m of merged) {
+    const dir = freeName(path.posix.basename(m.rec.dir) || `artifact_${m.rec.shortId || m.uuid}`, used);
     fs.mkdirSync(path.join(base, dir));
-    const versions = Object.entries(page.json.versions).sort((a, b) => (Number(a[1].order) || 0) - (Number(b[1].order) || 0));
-    for (const [key] of versions) {
-      if (!page.from.has(key)) continue;
-      const copied = copyTree(page.from.get(key), path.join(base, dir, key));
-      add(copied);
-      for (const l of copied.skipped) report.warnings.push(`${page.from.get(key)}: ${l} is a link, so it was not copied`);
+    const taken = new Set(['artifact.json']);
+    const versions = new Map();
+    for (const ver of m.order) {
+      const { st, v, publishedIn } = m.versions.get(ver);
+      const folderFor = () => {
+        const name = freeName(core.publishedSegment(ver), taken);
+        fs.mkdirSync(path.join(base, dir, name));
+        return name;
+      };
+      let out;
+      if (v.folder && v.files.some(f => f.abs)) {
+        const name = folderFor();
+        const files = v.files.map(f => (f.abs && f.savedAs && copyInto(f.abs, path.join(base, dir, name), f.savedAs) ? f : { ...f, savedAs: null }));
+        const startSaved = v.startSaved && files.some(f => f.savedAs === v.startSaved) ? v.startSaved : null;
+        out = { ...v, folder: `artifacts/${dir}/${name}`, files, startSaved, sameAs: null };
+      } else if (v.sameAs) {
+        // A chat's own file stands for the version only while every merged chat that published it wrote it the same
+        // (their links and cards open their own file); one that didn't needs the version's own folder, as an export
+        // would have saved it.
+        const allSame = publishedIn.every(p => p.same || !byChat.has(p.chat));
+        const sameAs = allSame ? repointSameAs(st, v, byChat, building) : null;
+        if (sameAs) out = { ...v, folder: null, sameAs };
+        else {
+          // The chat copy in the merged archive differs (or isn't there), or a chat links the version itself: its bytes,
+          // from the source's chat file.
+          const name = folderFor();
+          const files = v.files.map(f => {
+            const src = v.sameAsAbs[f.path];
+            const savedAs = String(f.path).split('/').map(core.publishedSegment).join('/');
+            return src && copyInto(src, path.join(base, dir, name), savedAs) ? { ...f, savedAs } : { ...f, savedAs: null };
+          });
+          const start = files.find(f => f.path === v.start && f.savedAs);
+          out = { ...v, folder: `artifacts/${dir}/${name}`, files, saved: files.some(f => f.savedAs), startSaved: start ? start.savedAs : null, sameAs: null };
+          report.sameCopied++;
+        }
+      } else out = { ...v, folder: null, saved: false, sameAs: null };
+      out.publishedIn = publishedIn;
+      versions.set(ver, out);
+      places.set(`${m.uuid}\n${ver}`, out.folder
+        ? { dir, folder: out.folder.split('/').pop(), savedAs: new Map(out.files.filter(f => f.savedAs).map(f => [f.path, f.savedAs])) }
+        : { sameAs: out.sameAs || {} });
     }
-    fs.writeFileSync(path.join(base, dir, 'published.json'), JSON.stringify({ ...page.json, versions: Object.fromEntries(versions) }, null, 2), { flag: 'wx' });
+    // The card picture, for a listed artifact (the viewer shows only those): viewer-files/thumbs/, where the viewer keeps it.
+    let thumbRel = null;
+    if (m.listed && m.thumbFrom) {
+      const name = path.posix.basename(m.thumbFrom.rec.thumbRel);
+      if (!thumbsTaken.has(name.toLowerCase())) {
+        thumbsTaken.add(name.toLowerCase());
+        const at = path.join(building, 'viewer-files', 'thumbs');
+        fs.mkdirSync(at, { recursive: true });
+        fs.copyFileSync(m.thumbFrom.rec.thumb, path.join(at, name), fs.constants.COPYFILE_EXCL);
+        thumbRel = `viewer-files/thumbs/${name}`;
+        thumbs++;
+      }
+    }
+    const rec = { uuid: m.uuid, shortId: m.rec.shortId, title: m.rec.title, listed: m.listed, current: m.rec.current, meta: m.rec.meta, thumbRel, order: m.order, versions };
+    fs.writeFileSync(path.join(base, dir, 'artifact.json'), JSON.stringify(lib.artifactJsonV2FromDisk(rec), null, 2), { flag: 'wx' });
+    rows.push({ dir, rec });
   }
-  for (const { dir, from } of loose) {
-    if (used.has(dir.normalize('NFC').toLowerCase())) {
-      report.warnings.push(`${from}: no readable published.json, and the name is taken, so it was not copied`);
-      continue;
+  return { places, rows, listed: merged.filter(m => m.listed).length, thumbs };
+}
+
+// artifacts/index.md: each artifact once, claude.ai's first, by title, linked to its current version's start file (or
+// the newest version with one), with its versions. A shared artifact's start file is linked only when the viewer
+// would open its type (export-core.js openableName), as the extension's index does.
+function artifactsIndexMd(rows, { at, listed }) {
+  const cell = t => String(t || '').replace(/[\r\n]+/g, ' ').replace(/[\[\]<>|*_`#\\]/g, '\\$&');
+  const target = local => encodePath(local).replace(/[()]/g, c => (c === '(' ? '%28' : '%29'));
+  const startOf = (rec, ver) => {
+    const v = rec.versions.get(ver);
+    const local = v.folder && v.startSaved ? `${v.folder.slice('artifacts/'.length)}/${v.startSaved}` : v.sameAs && v.start && v.sameAs[v.start] ? `../${v.sameAs[v.start]}` : null;
+    if (!local || (core.isSharedArtifact(rec.meta.rel) && !core.openableName(local))) return null;
+    return target(local);
+  };
+  const lines = ['# Claude Takeout - Artifacts', '', `**Merged:** ${at}`, `**Listed by claude.ai:** ${listed == null ? ARTIFACTS_NO_LIST : listed}`];
+  const table = list => {
+    lines.push('', '| # | Artifact | Kind | Versions |', '|---|----------|------|----------|');
+    list.forEach(({ rec }, i) => {
+      const newest = [rec.current, ...rec.order.slice().reverse()].find(ver => ver && rec.versions.has(ver) && startOf(rec, ver));
+      const local = newest ? startOf(rec, newest) : null;
+      const name = cell(rec.title || 'Untitled');
+      const versions = rec.order.map(ver => {
+        const link = startOf(rec, ver);
+        return `${link ? `[${cell(ver)}](${link})` : cell(ver)}${ver === rec.current ? ' (current)' : ''}`;
+      }).join(', ');
+      lines.push(`| ${i + 1} | ${local ? `[${name}](${local})` : name} · [claude.ai](https://claude.ai/artifact/${rec.shortId || rec.uuid}) | ${cell(rec.meta.typeTitle || 'Page')} | ${versions} |`);
+    });
+  };
+  const byTitle = (a, b) => String(a.rec.title).toLowerCase().localeCompare(String(b.rec.title).toLowerCase()) || a.dir.localeCompare(b.dir);
+  const inList = rows.filter(r => r.rec.listed).sort(byTitle);
+  const unlisted = rows.filter(r => !r.rec.listed).sort(byTitle);
+  if (inList.length || !unlisted.length) table(inList);
+  if (unlisted.length) {
+    lines.push('', `## ${ARTIFACTS_UNLISTED_HEADING}`);
+    table(unlisted);
+  }
+  return '﻿' + lines.join('\n') + '\n';
+}
+
+// The Markdown files of a chat that link pages: README.md, full_chat.md, integrated_chat.md and responses/*.md.
+function chatMarkdownFiles(dir) {
+  const out = ['README.md', 'full_chat.md', 'integrated_chat.md'].filter(n => lstat(path.join(dir, n)) && lstat(path.join(dir, n)).isFile());
+  const responses = path.join(dir, 'responses');
+  if (lstat(responses) && lstat(responses).isDirectory()) {
+    for (const n of fs.readdirSync(responses).sort()) if (/\.md$/i.test(n) && lstat(path.join(responses, n)).isFile()) out.push(`responses/${n}`);
+  }
+  return out;
+}
+
+// Where a link in file (chat-relative) of chat c into its source's published/ (or a 1.18 source's artifacts/) now goes,
+// relative to that file in the merged chat: mapped by page uuid and version to its folder in artifacts/, or the chat
+// file it is the same as. null when the target isn't a saved file of a version the source's store knows.
+function linkMapper(c, st, places, file) {
+  const from = path.posix.join(c.archive.kind === 'mega' ? c.folder : '.', path.posix.dirname(file));
+  const to = path.posix.join(c.out, path.posix.dirname(file));
+  return target => {
+    let rel;
+    try { rel = target.split('/').map(decodeURIComponent).join('/'); } catch (e) { return null; }
+    const joined = path.posix.normalize(path.posix.join(from, rel));
+    if (joined === '..' || joined.startsWith('../')) return null;
+    const segs = joined.split('/');
+    for (let i = segs.length - 1; i > 0; i--) {
+      const hit = st.folders.get(segs.slice(0, i).join('/'));
+      if (!hit) continue;
+      const p = hit.byFile.get(segs.slice(i).join('/'));
+      const place = p == null ? null : places.get(`${hit.uuid}\n${hit.ver}`);
+      const now = !place ? null : place.savedAs ? place.savedAs.has(p) && `artifacts/${place.dir}/${place.folder}/${place.savedAs.get(p)}` : place.sameAs[p];
+      return now ? encodePath(path.posix.relative(to, now)) : null;
     }
-    freeName(dir, used);
-    add(copyTree(from, path.join(base, dir)));
+    return null;
+  };
+}
+
+// Rewrites the merged copies' links into published/ (and a 1.18 source's artifacts/) to the merged artifacts/. Links
+// it can't map are left as they are and listed in the report.
+function rewriteLinks(chosen, stores, places, building, report) {
+  const storeOf = new Map(stores.map(st => [st.archive, st]));
+  for (const c of chosen) {
+    const st = storeOf.get(c.archive);
+    if (!st) continue;
+    const dir = path.join(building, c.out);
+    for (const file of chatMarkdownFiles(dir)) {
+      const abs = path.join(dir, ...file.split('/'));
+      const text = fs.readFileSync(abs, 'utf8');
+      const got = lib.rewriteChatLinks(text, linkMapper(c, st, places, file));
+      for (const t of got.unmapped) {
+        report.unmappedLinks.push({ chat: c.out, file, target: t });
+        report.warnings.push(`${c.out}/${file}: a link to ${t} could not be mapped to artifacts/, so it was left as it is`);
+      }
+      if (got.text !== text) {
+        fs.writeFileSync(abs, got.text);
+        report.rewrittenFiles++;
+      }
+    }
   }
 }
 
@@ -162,7 +390,7 @@ function readSource(source, order, report) {
   for (const z of found.zips) report.warnings.push(`${z}: a ZIP inside a source is not opened; name it as a source of its own`);
   const copies = [];
   for (const archive of found.archives) {
-    const manifest = archive.kind === 'mega' ? readJson(path.join(archive.root, 'export-manifest.json')) : null;
+    const manifest = archive.kind !== 'single' ? readJson(path.join(archive.root, 'export-manifest.json')) : null;
     const exportedAt = manifest && typeof manifest.exported_at === 'string' ? manifest.exported_at : null;
     for (const chat of archive.chats) {
       const data = readJson(path.join(chat.dir, 'original.json'));
@@ -213,12 +441,13 @@ function pickNewest(copies) {
 
 const cell = s => String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
 
-function indexMd(chats, sources, at) {
+function indexMd(chats, sources, at, artifacts = 0) {
   const lines = [
     '# Claude Takeout - Merged archive',
     '',
     `**Merged:** ${at}`,
     `**Total Conversations:** ${chats.length}`,
+    ...(artifacts ? [`**Artifacts:** ${artifacts} ([list](artifacts/index.md))`] : []),
     '',
     '**Sources:**',
     ...sources.map(s => `- ${cell(s.label)} (${s.chats} chat${s.chats === 1 ? '' : 's'} taken)`),
@@ -263,20 +492,8 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
   const folderName = name || `claude-takeout-merged-${dateStr}`;
   if (/[\\/]/.test(folderName) || folderName === '.' || folderName === '..') throw new UsageError(`--name must be a plain folder name: ${folderName}`);
   const dest = path.join(outDir, folderName);
-  const report = { out: outDir, dest, dryRun, ok: false, status: 'failed', reason: '', sources: [], chats: 0, replaced: 0, files: 0, bytes: 0, viewer: null, warnings: [] };
+  const report = { out: outDir, dest, dryRun, ok: false, status: 'failed', reason: '', sources: [], chats: 0, replaced: 0, artifacts: 0, sameCopied: 0, rewrittenFiles: 0, unmappedLinks: [], files: 0, bytes: 0, viewer: null, warnings: [] };
   if (lstat(dest)) throw new UsageError(`${dest} already exists, so nothing was written. Pick another --name or --out.`);
-
-  // A combined archive (with artifacts) is refused before anything is written, ZIPs before extraction.
-  for (const s of sources) {
-    const refused = s.zip ? await zipLib.zipHasArtifacts(s.input)
-      : lib.findArchives(s.dir).archives.some(a => lib.hasArtifacts(a.root));
-    if (refused) {
-      report.status = 'failed';
-      report.refused = true;
-      report.reason = `${s.input}: ${lib.artifactsRefusal('merge_archives')}`;
-      return report;
-    }
-  }
 
   const scratch = path.join(outDir, `.merge-${process.pid}`);
   const building = path.join(outDir, `.${folderName}.partial-${process.pid}`);
@@ -305,7 +522,10 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       archivesOf.set(s.order, got.archives);
       all.push(...got.copies);
     }
-    if (!all.length) throw new Error('no Claude chats were found in the sources');
+    const stores = readStores(sources, archivesOf, all, report);
+    const merged = mergeRecords(stores);
+    report.artifacts = merged.length;
+    if (!all.length && !merged.length) throw new Error('no Claude chats or artifacts were found in the sources');
     const { chosen, replaced } = pickNewest(all);
     chosen.sort((a, b) => time(b.updatedAt) - time(a.updatedAt) || a.folder.localeCompare(b.folder));
     report.replaced = replaced;
@@ -322,10 +542,15 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
 
     // Built under a hidden name, then renamed: a merged archive is there complete or not at all.
     fs.mkdirSync(building);
-    const used = new Set(['projects', 'published', 'index.md', 'export-manifest.json', 'viewer.html', 'viewer-check.gif', 'viewer-files'].map(n => n.toLowerCase()));
+    const used = new Set(['projects', 'published', 'artifacts', 'index.md', 'export-manifest.json', 'viewer.html', 'viewer-check.gif', 'viewer-files'].map(n => n.toLowerCase()));
+    const storeOf = new Map(stores.map(st => [st.archive, st]));
     for (const c of chosen) {
       c.out = freeName(c.folder, used);
-      const copied = copyTree(c.dir, path.join(building, c.out), { skipTop: c.single ? VIEWER_NAMES : null });
+      // A chat's own published/ (a chat ZIP's) moves into the root artifacts/, so the copy leaves it out.
+      const st = storeOf.get(c.archive);
+      const own = st && st.store.published.some(page => page.chat === (c.archive.kind === 'mega' ? c.folder : null));
+      const skipTop = new Set([...(c.single ? VIEWER_NAMES : []), ...(own ? ['published'] : [])]);
+      const copied = copyTree(c.dir, path.join(building, c.out), { skipTop });
       report.files += copied.files;
       report.bytes += copied.bytes;
       for (const l of copied.skipped) report.warnings.push(`${c.dir}: ${l} is a link, so it was not copied`);
@@ -349,14 +574,22 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
         }
       }
     }
-    // Published pages of mega archives, once per page.
-    mergePublished(sources, archivesOf, building, report);
+    // Every source's artifacts and published pages, in one artifacts/ store; the chats' links follow them.
     const at = now.toISOString();
-    fs.writeFileSync(path.join(building, 'index.md'), indexMd(chosen, sources, at), { flag: 'wx' });
+    const decided = stores.some(st => st.decides);
+    let written = null;
+    if (merged.length) {
+      written = writeArtifacts(merged, building, chosen, report);
+      fs.writeFileSync(path.join(building, 'artifacts', 'index.md'), artifactsIndexMd(written.rows, { at, listed: decided ? written.listed : null }), { flag: 'wx' });
+      rewriteLinks(chosen, stores, written.places, building, report);
+    }
+    fs.writeFileSync(path.join(building, 'index.md'), indexMd(chosen, sources, at, merged.length), { flag: 'wx' });
     fs.writeFileSync(path.join(building, 'export-manifest.json'), JSON.stringify({
       format: 1, exported_at: at, kind: 'merged', since: null, listed: null,
       sources: sources.map(s => s.label),
       chats: chosen.map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updatedAt, folder: c.out, from: c.source })),
+      // claude.ai's list is in the merged archive when a source's list decided listed (readArtifactStore reads this key).
+      ...(written && decided ? { artifacts: { listed: written.listed, thumbs: written.thumbs } } : {}),
     }, null, 2), { flag: 'wx' });
     if (lstat(dest)) throw new Error(`${dest} appeared while merging, so it was left alone`);
     fs.renameSync(building, dest);
@@ -384,6 +617,8 @@ function formatReport(r) {
   else lines.push(r.dryRun ? `would write: ${r.dest}` : `written: ${r.dest}`);
   if (r.chats) lines.push(`${r.chats} chats${r.replaced ? `; ${r.replaced} older ${r.replaced === 1 ? 'copy' : 'copies'} left out` : ''}`);
   for (const s of r.sources) lines.push(`  ${s.chats} from ${s.path}`);
+  if (r.artifacts) lines.push(`${r.artifacts} artifact${r.artifacts === 1 ? '' : 's'} in artifacts/${r.rewrittenFiles ? `; links rewritten in ${r.rewrittenFiles} chat file${r.rewrittenFiles === 1 ? '' : 's'}` : ''}`);
+  if (r.unmappedLinks && r.unmappedLinks.length) lines.push(`${r.unmappedLinks.length} link${r.unmappedLinks.length === 1 ? '' : 's'} left as they were (see Warnings)`);
   if (r.viewer && r.viewer.status === 'written') lines.push('viewer.html written');
   if (r.warnings.length) lines.push('', 'Warnings:', ...r.warnings.map(w => `  ${w}`));
   return lines.join('\n');
@@ -407,7 +642,6 @@ async function main(argv) {
   try {
     const report = await merge(args.positionals, { out: args.values.out, name: args.values.name || null, dryRun: !!args.values['dry-run'] });
     console.log(json ? JSON.stringify(report) : formatReport(report));
-    if (report.refused) console.error(report.reason);
     return report.ok ? 0 : 1;
   } catch (e) {
     return fail(e.message);
