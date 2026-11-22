@@ -3810,10 +3810,10 @@ const diskFiles = (picked) => {
 
 test('Export All with artifacts on writes artifacts/ beside the chats', async () => {
   const list = [listed('a', '2026-01-01T00:00:00Z')];
-  const frames = [art(U(1), 'Quarterly Report'), art(U(2), 'Game')];
+  const frames = [art(U(1), 'Quarterly Report'), art(U(2), 'Game', { sourceSurface: 'cowork' })];
   const fetcher = publishedFetcher({ [U(1)]: livePage('Quarterly Report', { 'index.html': '<h1>Q</h1>' }), [U(2)]: livePage('Game', { 'index.html': 'g', 'app.js': 'go()' }) });
   const picked = new FakeDir();
-  const out = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, options: { directory: picked }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  const out = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, options: { directory: picked }, setup: bulkWithArtifacts({ frames, fetcher }), assets: true });
   const files = diskFiles(picked);
   const f1 = artFolder('Quarterly_Report', U(1));
   const f2 = artFolder('Game', U(2));
@@ -3838,6 +3838,9 @@ test('Export All with artifacts on writes artifacts/ beside the chats', async ()
   assert.deepStrictEqual(out.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: LIVE });
   assert.ok(!/errors\.txt|could not be listed/.test(out.status.textContent), out.status.textContent);
   assert.match(out.status.textContent, /Exported 1 conversations and 2 artifacts to /);
+  // The viewer's artifacts carry their current version and where claude.ai says they were made.
+  const viewerData = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(files['viewer.html'])[1].replace(/<\\\//g, '</'));
+  assert.deepStrictEqual(viewerData.artifacts.map((v) => [v.title, v.ver, v.sourceSurface]), [['Quarterly Report', LIVE, 'chat'], ['Game', LIVE, 'cowork']]);
 });
 
 test('the combined artifacts index links the viewer one folder up', () => {

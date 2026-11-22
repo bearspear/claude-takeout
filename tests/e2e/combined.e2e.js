@@ -4,14 +4,18 @@
 // chat in the sidebar still opens, and history goes back and forth; / searches the artifacts on their screen; a
 // reused page links its file in published/. The In chats tab: a card per file Claude made (not the one a chat
 // published as an artifact), kind chips with counts, search by name, a file page at #ac=<chat>.<file> previewed in the
-// guard frame with only its own chat's stylesheet and scripts, Made in opening the chat, and the version menu. A hostile shared artifact gets nothing out and can't reach the viewer,
+// guard frame with only its own chat's stylesheet and scripts, Made in opening the chat, and the version menu; a file
+// that may not match says so. Links: the All cards' source line and "also in chat", an artifact page's Made in /
+// Published in / Edited in (each opening its chat at the message, Back returning) and its menu of the versions chats
+// published, a Docs artifact's text rebuilt from its chat, Open artifact on a chat's published card, the heading of an
+// Export Changes run, and a run not unzipped (tiles, "unzip first"). A hostile shared artifact gets nothing out and can't reach the viewer,
 // and navigations to file: (an export file, an absolute path, a refresh, a link) are refused; data: and blob: are
 // refused by the guard frame's own frame-src 'none', which the page's policy doesn't have. An export with the
 // setting off has no Artifacts entry. No requests outside file:, no page errors.
 // Run: PW=<playwright-core> CHROME_EXE=<chrome> node tests/e2e/combined.e2e.js
 const { chromium } = require(process.env.PW);
 const fs = require('fs'), os = require('os'), path = require('path'), vm = require('vm');
-const { exportPopup, assetRoutes, publishedFetcher } = require('../helpers');
+const { exportPopup, assetRoutes, publishedFetcher, docTools, DOC_U } = require('../helpers');
 const { ATTACKS, ATTACK_ENDS, hostileHtml, navArtifact } = require('./hostile');
 const { uuidToBase58 } = require('../../export-core.js');
 
@@ -23,11 +27,22 @@ const art = (slug, title, extra = {}) => ({ slug, title, typeSlug: '', typeTitle
 const live = (title, files) => ({ title, live: LIVE, versions: { [LIVE]: { files } } });
 const msg = (uuid, parent, sender, n, content) => ({ uuid, parent_message_uuid: parent, sender, created_at: at(n), content, attachments: [], files: [], files_v2: [] });
 const PUB = 'mcp__claude-artifacts__publish_files';
+const EDIT = 'mcp__claude-artifacts__edit_version';
+const DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
+const OLD1 = '1794700000-0a01', OLD2 = '1794700001-0a02', LIVE2 = '1794799999-0b02';
+const editVersion = (id, slug) => [
+  { type: 'tool_use', id, name: EDIT, input: { slug, base_version: LIVE, edits: [], label: 'tweak' } },
+  { type: 'tool_result', tool_use_id: id, name: EDIT, content: [{ type: 'text', text: 'ok' }] },
+];
+const publish = (id, slug, version, source) => [
+  { type: 'tool_use', id, name: PUB, input: { title: 'Guide page', files: [{ as: 'index.html', path: source }] } },
+  { type: 'tool_result', tool_use_id: id, name: PUB, content: [{ type: 'text', text: JSON.stringify({ slug, version, url: `https://claude.ai/artifact/${uuidToBase58(slug)}`, title: 'Guide page' }) }] },
+];
 
 // A chat that only talks, and one that writes a page and publishes it as artifact U(9).
 const plainChat = {
   uuid: 'chat-plain', name: 'Plain talk', model: 'claude-x', created_at: at(1), updated_at: at(2), settings: {}, current_leaf_message_uuid: 'pa1',
-  chat_messages: [msg('ph1', null, 'human', 1, [{ type: 'text', text: 'hello there' }]), msg('pa1', 'ph1', 'assistant', 2, [{ type: 'text', text: 'Hi, plain reply.' }])],
+  chat_messages: [msg('ph1', null, 'human', 1, [{ type: 'text', text: 'hello there' }]), msg('pa1', 'ph1', 'assistant', 2, [...editVersion('pe', U(1)), { type: 'text', text: 'Hi, plain reply.' }])],
 };
 // The pages say what they see on the console, twice: a line from a frame this new can be missed, one a moment later
 // is not.
@@ -71,6 +86,9 @@ const makeChat = {
     msg('ma2', 'mh2', 'assistant', 10, [
       { type: 'tool_use', id: 'e1', name: 'str_replace', input: { path: '/home/claude/chart.svg', old_str: '<!--V1-->', new_str: '<!--V2-->' } },
       { type: 'tool_result', tool_use_id: 'e1', name: 'str_replace', content: [{ type: 'text', text: 'ok' }] },
+      // An edit the export can't replay: tool.py "may not match".
+      { type: 'tool_use', id: 'e2', name: 'str_replace', input: { path: '/mnt/user-data/outputs/tool.py', old_str: 'NOT IN THE FILE', new_str: 'x' } },
+      { type: 'tool_result', tool_use_id: 'e2', name: 'str_replace', content: [{ type: 'text', text: 'ok' }] },
       ...write('w5', 'big.md', BIG),
       { type: 'text', text: 'Changed it.' },
     ]),
@@ -78,14 +96,46 @@ const makeChat = {
 };
 // The publishing chat also writes a script, which the other chat's page names but must never get.
 pubChat.chat_messages[1].content.splice(2, 0, ...write('wo', 'other.js', "window.OTHER = 1; console.log('OTHER CHAT LOADED');"));
-const chats = { [plainChat.uuid]: plainChat, [pubChat.uuid]: pubChat, [makeChat.uuid]: makeChat };
+// A chat that publishes Guide page (U(1)) twice, at older versions than its current one: first exactly the file it
+// wrote (same), then a file claude.ai served differently (saved in published/); and edits the page.
+const OLDA = '<!doctype html><h1>Old A</h1><!--OLDA-->';
+const OLDB = '<!doctype html><h1>Old B served</h1><!--OLDB-->';
+const editChat = {
+  uuid: 'chat-edit', name: 'Editing', model: 'claude-x', created_at: at(14), updated_at: at(18), settings: {}, current_leaf_message_uuid: 'ea2',
+  chat_messages: [
+    msg('eh1', null, 'human', 14, [{ type: 'text', text: 'publish the old guide' }]),
+    msg('ea1', 'eh1', 'assistant', 15, [
+      { type: 'tool_use', id: 'ew1', name: 'Write', input: { file_path: '/home/claude/old.html', content: OLDA } },
+      { type: 'tool_result', tool_use_id: 'ew1', name: 'Write', content: [{ type: 'text', text: 'ok' }] },
+      ...publish('ep1', U(1), OLD1, '/home/claude/old.html'),
+      { type: 'text', text: 'Published the old one.' },
+    ]),
+    msg('eh2', 'ea1', 'human', 16, [{ type: 'text', text: 'and the new one' }]),
+    msg('ea2', 'eh2', 'assistant', 17, [
+      { type: 'tool_use', id: 'ew2', name: 'Write', input: { file_path: '/home/claude/new.html', content: '<!doctype html><h1>New as written</h1>' } },
+      { type: 'tool_result', tool_use_id: 'ew2', name: 'Write', content: [{ type: 'text', text: 'ok' }] },
+      ...publish('ep2', U(1), OLD2, '/home/claude/new.html'),
+      ...editVersion('ee', U(1)),
+      { type: 'text', text: 'Published and edited.' },
+    ]),
+  ],
+};
+// A chat that makes a Claude Docs document, the artifact DOC_U.
+const docT = docTools('mcp__Claude_Docs__', { realShape: true });
+const docChat = {
+  uuid: 'chat-doc', name: 'Docs chat', model: 'claude-x', created_at: at(20), updated_at: at(22), settings: {}, current_leaf_message_uuid: 'da1',
+  chat_messages: [
+    msg('dh1', null, 'human', 20, [{ type: 'text', text: 'write notes' }]),
+    msg('da1', 'dh1', 'assistant', 21, [docT.batch, docT.batchResult, docT.update('du1', 'sess.10', '## Alpha\n\nAlpha text.'), docT.result('du1', '{}'), { type: 'text', text: 'Wrote the doc.' }]),
+  ],
+};
+const chats = { [plainChat.uuid]: plainChat, [pubChat.uuid]: pubChat, [makeChat.uuid]: makeChat, [editChat.uuid]: editChat, [docChat.uuid]: docChat };
 const list = Object.values(chats).map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updated_at }));
 
 // Export All through the popup, with its artifact step: a ZIP (megaFormat zip), unzipped into a new folder.
-async function exportAll({ frames, pages, off = false }) {
+async function exportAll({ frames, pages, off = false, store = {}, changes = false }) {
   const JSZip = require('../../jszip.min.js');
   const sb = exportPopup({ routes: assetRoutes() }).sandbox;
-  const store = {};
   const fetcher = publishedFetcher(pages);
   sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter(k => k in store).map(k => [k, store[k]]));
   sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
@@ -105,6 +155,7 @@ async function exportAll({ frames, pages, off = false }) {
   sb.setTimeout = (f) => setTimeout(f, 0);
   vm.runInContext('orgId = "org-1"', sb);
   if (off) vm.runInContext('settings.exportAllArtifacts = false', sb);
+  if (changes) vm.runInContext("settings.megaZipScope = 'changes'", sb);
   await vm.runInContext('bulkExportZip({})', sb);
   if (!saved) throw new Error('no download: ' + sb.document.getElementById('status').textContent);
   const zip = await JSZip.loadAsync(await saved.arrayBuffer());
@@ -142,17 +193,25 @@ const navs = dir => [
     art(U(2), 'Hostile', { rel: 'shared', updatedAt: at(40) }),
     art(U(3), 'Shared deck', { rel: 'shared', updatedAt: at(35) }),
     art(U(9), 'Guide', { updatedAt: at(20) }),
+    art(U(5), 'Cowork deck', { sourceSurface: 'cowork', updatedAt: at(33) }),
+    art(U(6), 'Code dash', { sourceSurface: 'code', updatedAt: at(32) }),
+    art(DOC_U, 'Lorber Notes', { typeSlug: DOCS_TYPE, typeTitle: 'Docs', updatedAt: at(31) }),
+    art(U(7), 'Loose doc', { typeSlug: DOCS_TYPE, typeTitle: 'Docs', updatedAt: at(25) }),
   ];
   const pages = {
-    [U(1)]: live('Guide page', {
+    [U(1)]: { ...live('Guide page', {
       'index.html': '<!doctype html><link rel="stylesheet" href="app.css"><h1 id="t">Guide page body</h1>'
         + "<script>const say = () => console.log('GUIDE ' + [getComputedStyle(document.getElementById('t')).color, self.origin, document.querySelector('meta[http-equiv]').content.split(';')[0]].join(' | ')); say(); setTimeout(say, 120);</script>",
       'app.css': 'h1#t { color: rgb(1, 2, 3); }',
-    }),
+    }), history: [OLD1, OLD2, LIVE] },
     [U(2)]: live('Hostile', { 'index.html': hostileHtml(attacks) }),
     [U(3)]: live('Shared deck', { 'deck.html': '<h1>Shared page</h1>' }),
     [U(9)]: live('Guide', { 'index.html': GUIDE }),
+    [U(5)]: live('Cowork deck', { 'index.html': '<h1>Cowork</h1>' }),
+    [U(6)]: live('Code dash', { 'index.html': '<h1>Code</h1>' }),
   };
+  pages[U(1)].versions[OLD1] = { files: { 'index.html': OLDA } };
+  pages[U(1)].versions[OLD2] = { files: { 'index.html': OLDB } };
   // The navigations need a real file's absolute path in their text, so it's in a folder made ahead of the export.
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'combined-nav-'));
   fs.writeFileSync(path.join(base, 'escape.html'), "<!doctype html><script>console.log('ESCAPED')</script>");
@@ -162,6 +221,12 @@ const navs = dir => [
   });
   const { dir, data } = await exportAll({ frames, pages });
   const { dir: offDir, data: offData } = await exportAll({ frames, pages, off: true });
+  // Export Changes after a full run, where only one artifact changed on claude.ai.
+  const store = {};
+  await exportAll({ frames, pages, store });
+  const changedFrames = frames.map(f => (f.slug === U(3) ? { ...f, live: LIVE2, updatedAt: at(59) } : f));
+  const changedPages = { ...pages, [U(3)]: { title: 'Shared deck', live: LIVE2, versions: { [LIVE2]: { files: { 'deck.html': '<h1>Shared page, changed</h1>' } } } } };
+  const { dir: changesDir, data: changesData } = await exportAll({ frames: changedFrames, pages: changedPages, store, changes: true });
 
   // Chrome gives sandboxed frames processes of their own, and Playwright doesn't attach to a sandboxed frame inside
   // another (the preview in its guard frame): its console, requests and frame would go unseen. In one process they
@@ -212,13 +277,13 @@ const navs = dir => [
   check('the grid hash', await page.evaluate(() => location.hash) === '#artifacts');
   check('the screen is the artifacts app, in its shadow root', await page.evaluate(() => { const s = document.getElementById('artifacts-screen'); return !!s.shadowRoot && !document.getElementById('grid'); }));
   const tabs = page.locator('#artifacts-screen [role=tablist] [role=tab]');
-  check('tabs All / Yours / Shared with you / In chats with its count', JSON.stringify(await tabs.allTextContents()) === JSON.stringify(['All', 'Yours', 'Shared with you', 'In chats 7']), JSON.stringify(await tabs.allTextContents()));
+  check('tabs All / Yours / Shared with you / In chats with its count', JSON.stringify(await tabs.allTextContents()) === JSON.stringify(['All', 'Yours', 'Shared with you', 'In chats 10']), JSON.stringify(await tabs.allTextContents()));
   const titles = () => page.locator('#artifacts-screen #grid .card .title').allTextContents();
-  check('cards, newest first', JSON.stringify(await titles()) === JSON.stringify(['Guide page', 'Hostile', 'Shared deck', 'Guide', ...navs(base).map(n => n[0]).sort()]), JSON.stringify(await titles()));
+  check('cards, newest first', JSON.stringify(await titles()) === JSON.stringify(['Guide page', 'Hostile', 'Shared deck', 'Cowork deck', 'Code dash', 'Lorber Notes', 'Loose doc', 'Guide', ...navs(base).map(n => n[0]).sort()]), JSON.stringify(await titles()));
   await tabs.nth(1).click();
-  check('Yours filters', JSON.stringify(await titles()) === JSON.stringify(['Guide page', 'Guide']), JSON.stringify(await titles()));
+  check('Yours filters', JSON.stringify(await titles()) === JSON.stringify(['Guide page', 'Cowork deck', 'Code dash', 'Lorber Notes', 'Loose doc', 'Guide']), JSON.stringify(await titles()));
   await tabs.nth(2).click();
-  check('Shared filters', (await titles()).length === frames.length - 2, JSON.stringify(await titles()));
+  check('Shared filters', (await titles()).length === frames.length - 6, JSON.stringify(await titles()));
   await tabs.nth(0).click();
   check('the screen keeps its own look (its CSS, not the chat viewer\'s)', await page.locator('#artifacts-screen #grid').evaluate(g => getComputedStyle(g).display) === 'grid'
     && await page.locator('#artifacts-screen .card').first().evaluate(c => getComputedStyle(c).borderRadius) === '10px');
@@ -229,15 +294,18 @@ const navs = dir => [
   const fileId = name => Object.entries(data.chats[makeIndex].files).find(([, f]) => f.name === name)[0];
   check('kind filters only on In chats', await page.locator('#artifacts-screen #kinds').isHidden());
   await tabs.nth(3).click();
-  check('In chats: one card per file Claude made, newest first; the published file is under All', JSON.stringify(await titles()) === JSON.stringify(['big.md', 'chart.svg', 'notes.md', 'page.html', 'style.css', 'tool.py', 'other.js']), JSON.stringify(await titles()));
+  check('In chats: one card per file Claude made, newest first; the published file is under All', JSON.stringify(await titles()) === JSON.stringify(['Lorber_Notes.md', 'new.html', 'old.html', 'big.md', 'chart.svg', 'notes.md', 'page.html', 'style.css', 'tool.py', 'other.js']), JSON.stringify(await titles()));
   const chips = page.locator('#artifacts-screen #kinds .chip');
-  check('In chats: kind chips with counts', JSON.stringify(await chips.allTextContents()) === JSON.stringify(['All kinds', 'Pages 1', 'Docs 2', 'Diagrams 1', 'Code 3', 'Other 0']), JSON.stringify(await chips.allTextContents()));
-  check('In chats: each card names its chat', JSON.stringify(await page.locator('#artifacts-screen #grid .card .from').allTextContents()) === JSON.stringify([...Array(6).fill('💬Making files'), '💬Publishing']), JSON.stringify(await page.locator('#artifacts-screen #grid .card .from').allTextContents()));
+  const searchBox = page.locator('#artifacts-screen #search');
+  check('In chats: the search says files', await searchBox.getAttribute('placeholder') === 'Search files' && await searchBox.getAttribute('aria-label') === 'Search files');
+  check("the published file's source is listed when the same publish isn't the artifact's current version", (await titles()).includes('old.html'));
+  check('In chats: kind chips with counts', JSON.stringify(await chips.allTextContents()) === JSON.stringify(['All kinds', 'Pages 3', 'Docs 3', 'Diagrams 1', 'Code 3', 'Other 0']), JSON.stringify(await chips.allTextContents()));
+  check('In chats: each card names its chat', JSON.stringify(await page.locator('#artifacts-screen #grid .card .from').allTextContents()) === JSON.stringify(['💬Docs chat', '💬Editing', '💬Editing', ...Array(6).fill('💬Making files'), '💬Publishing']), JSON.stringify(await page.locator('#artifacts-screen #grid .card .from').allTextContents()));
   check('In chats: a file with versions says how many', (await page.locator('#artifacts-screen #grid .card', { hasText: 'chart.svg' }).locator('.versions').textContent()) === '2 versions');
   await chips.nth(2).click();
-  check('a chip filters by kind', JSON.stringify(await titles()) === JSON.stringify(['big.md', 'notes.md']) && await chips.nth(2).getAttribute('aria-pressed') === 'true', JSON.stringify(await titles()));
+  check('a chip filters by kind', JSON.stringify(await titles()) === JSON.stringify(['Lorber_Notes.md', 'big.md', 'notes.md']) && await chips.nth(2).getAttribute('aria-pressed') === 'true', JSON.stringify(await titles()));
   await page.locator('#artifacts-screen #search').fill('note');
-  check('search and a kind together, the counts follow the search', JSON.stringify(await titles()) === JSON.stringify(['notes.md']) && JSON.stringify(await chips.allTextContents()) === JSON.stringify(['All kinds', 'Pages 0', 'Docs 1', 'Diagrams 0', 'Code 0', 'Other 0']), JSON.stringify(await chips.allTextContents()));
+  check('search and a kind together, the counts follow the search', JSON.stringify(await titles()) === JSON.stringify(['Lorber_Notes.md', 'notes.md']) && JSON.stringify(await chips.allTextContents()) === JSON.stringify(['All kinds', 'Pages 0', 'Docs 2', 'Diagrams 0', 'Code 0', 'Other 0']), JSON.stringify(await chips.allTextContents()));
   await chips.nth(0).click();
   await page.locator('#artifacts-screen #search').fill('.py');
   check('search filters by file name', JSON.stringify(await titles()) === JSON.stringify(['tool.py']), JSON.stringify(await titles()));
@@ -265,7 +333,7 @@ const navs = dir => [
   await page.waitForSelector('#artifacts-screen #page:not([hidden])');
   check('Back returns to the file', await page.evaluate(() => location.hash) === `#ac=${makeIndex}.${fileId('page.html')}` && (await page.locator('#artifacts-screen #page-title').textContent()) === 'page.html');
   await page.locator('#artifacts-screen #home-button').click();
-  check('home returns to the In chats grid', await page.locator('#artifacts-screen #tab-chats').getAttribute('aria-selected') === 'true' && (await titles()).length === 7);
+  check('home returns to the In chats grid', await page.locator('#artifacts-screen #tab-chats').getAttribute('aria-selected') === 'true' && (await titles()).length === 10);
 
   // A diagram in two versions: the menu lists both, the latest first shown.
   await page.locator('#artifacts-screen #grid .card', { hasText: 'chart.svg' }).click();
@@ -292,10 +360,25 @@ const navs = dir => [
   await page.waitForSelector('#artifacts-screen #page-body pre.code-view');
   check('code shows as code', (await page.locator('#artifacts-screen #page-body pre.code-view').textContent()) === 'print("made in a chat")\n' && (await page.locator('#artifacts-screen #page-kind').textContent()) === 'Code');
   check('no Open file for a script', await page.locator('#artifacts-screen #page-links a').count() === 0);
+  check("a file that may not match says so, in the chat viewer's words", await shown(page, '#artifacts-screen #page-note')
+    && (await page.locator('#artifacts-screen #page-note').textContent()) === "An edit Claude made to this file couldn't be replayed, so it may not match what Claude made.", await page.locator('#artifacts-screen #page-note').textContent());
+  await page.evaluate(h => { location.hash = h; }, `#ac=${makeIndex}.${fileId('notes.md')}`);
+  await page.waitForSelector('#artifacts-screen #page-body .prose h1');
+  check('a file with no flag has no note', await page.locator('#artifacts-screen #page-note').isHidden());
   await page.evaluate(h => { location.hash = h; }, `#ac=${makeIndex}.nope`);
   await page.waitForSelector('#artifacts-screen #home:not([hidden])');
   check('an unknown file: the grid', await page.evaluate(() => location.hash) === '#artifacts');
   await tabs.nth(0).click();
+
+  // ---- The All tab's source line ----
+  check('All: the search says artifacts', await searchBox.getAttribute('placeholder') === 'Search artifacts' && await searchBox.getAttribute('aria-label') === 'Search artifacts');
+  const cardText = async (title, sel) => {
+    const c = page.locator('#artifacts-screen #grid .card').filter({ has: page.locator('.title', { hasText: new RegExp(`^${title}$`) }) });
+    return (await c.locator(sel).count()) ? c.locator(sel).textContent() : '';
+  };
+  const wantSource = { 'Guide page': '💬 2 chats', Hostile: 'Shared with you', 'Shared deck': 'Shared with you', 'Cowork deck': 'Cowork', 'Code dash': 'Code', 'Lorber Notes': '💬 1 chat', 'Loose doc': '', Guide: '💬 1 chat', navfile: 'Shared with you' };
+  for (const [title, want] of Object.entries(wantSource)) check(`source line: ${title}`, (await cardText(title, '.source')) === want, await cardText(title, '.source'));
+  check('also in chat: only the page a chat wrote as it now is', (await cardText('Guide', '.also')) === 'also in chat' && (await cardText('Guide page', '.also')) === '' && await page.locator('#artifacts-screen #grid .card .also').count() === 1);
 
   // / searches the artifacts on their screen, not the chats.
   await page.locator('#artifacts-screen #home h1').click();
@@ -325,6 +408,25 @@ const navs = dir => [
   check("the guard's policy is frame-src 'none', it runs nothing, and holds one frame", guardState.policy === "frame-src 'none'" && guardState.scripts === 0 && guardState.frames === 1, JSON.stringify(guardState));
   check('the preview frame: the same sandbox', guardState.sandbox === 'allow-scripts allow-forms allow-modals');
   check('the open-file link points at the saved file', fs.existsSync(path.join(dir, decodeURIComponent(await page.locator('#artifacts-screen #page-links a.open-file').getAttribute('href')))));
+  const groups = page.locator('#artifacts-screen #page-from .link-group');
+  check('the link line: Published in, then Edited in, each chat once', JSON.stringify(await groups.allTextContents()) === JSON.stringify(['Published in Editing', 'Edited in Editing, Plain talk']), JSON.stringify(await groups.allTextContents()));
+  const verMenu = page.locator('#artifacts-screen #page-from select');
+  check('the version menu: the older published versions, then the current one, chosen', JSON.stringify(await verMenu.locator('option').allTextContents()) === JSON.stringify(['v1', 'v2', 'Current']) && await verMenu.inputValue() === 'current', JSON.stringify(await verMenu.locator('option').allTextContents()));
+  await verMenu.selectOption({ label: 'v1' });
+  check('v1 opens the saved copy (the file the chat wrote)', (await (await previewOf(v)).$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--OLDA-->'));
+  await verMenu.selectOption({ label: 'v2' });
+  const v2Guard = await previewOf(v);
+  check('v2 opens the saved copy in published/', (await v2Guard.$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--OLDB-->') && await v2Guard.evaluate(() => document.querySelector('meta[http-equiv]').content === "frame-src 'none'"));
+  check('an older version has no claude.ai badge mix-up: its Open on claude.ai stays', await page.locator('#artifacts-screen #page-links a.open-claude').count() === 1);
+  await verMenu.selectOption('current');
+  check('Current goes back to the artifact', (await (await previewOf(v)).$eval('iframe', f => f.getAttribute('srcdoc'))).includes('Guide page body'));
+  await groups.nth(0).locator('.chat-link').click();
+  await page.waitForSelector('#chat .msg');
+  check('Published in opens the chat at that message', (await page.locator('#title').textContent()) === 'Editing' && await page.locator('#chat .msg[data-id="ea1"]').count() === 1 && !(await shown(page, '#artifacts-screen')));
+  await page.goBack();
+  await page.waitForSelector('#artifacts-screen #page:not([hidden])');
+  check('Back returns to the artifact', await page.evaluate(() => location.hash) === `#a=${p(1)}` && (await page.locator('#artifacts-screen #page-title').textContent()) === 'Guide page');
+  await previewOf(v);
   await page.goBack();
   await page.waitForSelector('#artifacts-screen #home:not([hidden])');
   check('Back returns to the grid', await page.evaluate(() => location.hash) === '#artifacts' && await page.locator('#artifacts-screen #page-body iframe').count() === 0);
@@ -340,6 +442,8 @@ const navs = dir => [
   check("a reused page opens the chat's file", reusedHref === encodeURI(reused.startSaved) && fs.existsSync(path.join(dir, reused.startSaved)), reusedHref);
   await previewOf(v);
   check('a reused page previews', await waitLog(v, 'REUSED Guide written'));
+  check('a page published only at its current version: no version menu', await page.locator('#artifacts-screen #page-from select').count() === 0
+    && JSON.stringify(await page.locator('#artifacts-screen #page-from .link-group').allTextContents()) === JSON.stringify(['Published in Publishing']));
 
   // ---- Chats still open ----
   await page.locator('#chat-list .item', { hasText: 'Plain talk' }).click();
@@ -354,6 +458,18 @@ const navs = dir => [
   await page.goForward();
   await page.waitForSelector('#scroll', { state: 'visible' });
   check('and forward to the chat', (await page.locator('#title').textContent()) === 'Plain talk' && await page.title() === 'Plain talk - Claude Takeout', await page.title());
+  // ---- Open artifact from a chat's published card ----
+  await page.locator('#chat-list .item', { hasText: 'Editing' }).click();
+  await page.waitForSelector('#chat .msg');
+  const openArt = page.locator('#chat .page-link .open-artifact');
+  check('a published card of an exported artifact: Open artifact', await openArt.count() === 2);
+  await openArt.first().click();
+  await page.waitForSelector('#artifacts-screen #page:not([hidden])');
+  check('Open artifact opens its page', await page.evaluate(() => location.hash) === `#a=${p(1)}` && (await page.locator('#artifacts-screen #page-title').textContent()) === 'Guide page');
+  await page.goBack();
+  await page.waitForSelector('#chat .msg');
+  check('Back returns to the chat', (await page.locator('#title').textContent()) === 'Editing');
+
   await page.locator('#artifacts-nav').click();
   await page.waitForSelector('#artifacts-screen #grid .card');
   await page.locator('#chat-list .item', { hasText: 'Plain talk' }).click();
@@ -363,6 +479,54 @@ const navs = dir => [
   check('/ on a chat still searches the chats', await page.evaluate(() => document.activeElement && document.activeElement.getAttribute('aria-label') === 'Search all chats'));
   check('no requests, no errors', v.seen.requests.length === 0 && v.seen.errors.length === 0, JSON.stringify([v.seen.requests, v.seen.errors]));
   await v.context.close();
+
+  // ---- Docs: the text the chat rebuilt, and Made in both ways ----
+  const docId = uuidToBase58(DOC_U);
+  const dv = await open(dir, `#a=${docId}`);
+  await dv.page.waitForSelector('#artifacts-screen #page-body .prose h1');
+  check('Docs: the chat\'s text', (await dv.page.locator('#artifacts-screen #page-body .prose h1').textContent()) === 'Lorber Notes' && (await dv.page.locator('#artifacts-screen #page-body .prose').textContent()).includes('Alpha text.'));
+  check('Docs: the note', (await dv.page.locator('#artifacts-screen #page-note').textContent()) === "Rebuilt from the chat. Edits made on claude.ai aren't included." && await shown(dv.page, '#artifacts-screen #page-note'));
+  check('Docs: Made in its chat', JSON.stringify(await dv.page.locator('#artifacts-screen #page-from .link-group').allTextContents()) === JSON.stringify(['Made in Docs chat']));
+  await dv.page.locator('#artifacts-screen #page-from .chat-link').click();
+  await dv.page.waitForSelector('#chat .msg[data-id="da1"]');
+  await dv.page.waitForTimeout(150);
+  check('Made in opens the chat scrolled to the message', (await dv.page.locator('#title').textContent()) === 'Docs chat'
+    && await dv.page.locator('#chat .msg[data-id="da1"]').evaluate(m => { const r = m.getBoundingClientRect(); return r.bottom > 0 && r.top < window.innerHeight; }));
+  await dv.page.goBack();
+  await dv.page.waitForSelector('#artifacts-screen #page-body .prose h1');
+  check('Back from the chat returns to the Docs artifact', await dv.page.evaluate(() => location.hash) === `#a=${docId}`);
+  await dv.page.evaluate(h => { location.hash = h; }, `#a=${p(7)}`);
+  await dv.page.waitForSelector('#artifacts-screen #page-body .docs-page');
+  check('Docs without a chat: the v1.16 page, no note, no link line', (await dv.page.locator('#artifacts-screen #page-body h2').textContent()) === 'Claude Docs document'
+    && await dv.page.locator('#artifacts-screen #page-note').isHidden() && await dv.page.locator('#artifacts-screen #page-from').isHidden());
+  check('the full export has no changes heading', await dv.page.locator('#artifacts-screen #since').count() === 0 || await dv.page.locator('#artifacts-screen #since').isHidden());
+  check('no requests, no errors (Docs)', dv.seen.requests.length === 0 && dv.seen.errors.length === 0, JSON.stringify([dv.seen.requests, dv.seen.errors]));
+  await dv.context.close();
+
+  // ---- Export Changes: the heading line ----
+  check('fixture: the changes run holds the changed artifact only', !!changesData.artifactsSince && JSON.stringify((changesData.artifacts || []).map(a => a.title)) === JSON.stringify(['Shared deck']), JSON.stringify(changesData.artifacts));
+  const cv = await open(changesDir, '#artifacts');
+  await cv.page.waitForSelector('#artifacts-screen #grid .card');
+  const since = await cv.page.locator('#artifacts-screen #since').textContent();
+  check('changes: "Changed since <date>: N of M listed"', new RegExp(`^Changed since .+\\d.*: 1 of ${frames.length} listed$`).test(since), since);
+  check('no requests, no errors (changes)', cv.seen.requests.length === 0 && cv.seen.errors.length === 0, JSON.stringify([cv.seen.requests, cv.seen.errors]));
+  await cv.context.close();
+
+  // ---- Not unzipped: no viewer-check.gif beside the page ----
+  const zippedDir = fs.mkdtempSync(path.join(os.tmpdir(), 'combined-zipped-'));
+  fs.cpSync(dir, zippedDir, { recursive: true });
+  fs.unlinkSync(path.join(zippedDir, 'viewer-check.gif'));
+  const zv = await open(zippedDir, '#artifacts');
+  await zv.page.waitForSelector('#artifacts-screen #grid .card');
+  await zv.page.waitForTimeout(150);
+  check('not unzipped: the grid, with tiles', await zv.page.locator('#artifacts-screen #grid .card .pic img').count() === 0 && await zv.page.locator('#artifacts-screen #grid .card .tile').count() === frames.length);
+  await zv.page.evaluate(h => { location.hash = h; }, `#a=${p(1)}`);
+  await zv.page.waitForSelector('#artifacts-screen #page:not([hidden])');
+  await zv.page.waitForTimeout(150);
+  check('not unzipped: opening says to unzip, no preview', (await zv.page.locator('#artifacts-screen #page-body').textContent()).includes('Unzip the export first, then open viewer.html again.') && await zv.page.locator('#artifacts-screen #page-body iframe').count() === 0);
+  check('not unzipped: no Open file', await zv.page.locator('#artifacts-screen a.open-file').count() === 0);
+  check('no requests, no errors (not unzipped)', zv.seen.requests.length === 0 && zv.seen.errors.length === 0, JSON.stringify([zv.seen.requests, zv.seen.errors]));
+  await zv.context.close();
 
   // Opened at an artifact's hash: its page, straight away.
   const direct = await open(dir, `#a=${p(3)}`);
@@ -447,6 +611,9 @@ const navs = dir => [
   await off.page.evaluate(() => { location.hash = '#artifacts'; });
   await off.page.waitForTimeout(200);
   check('setting off: #artifacts opens a chat', await shown(off.page, '#scroll') && await off.page.locator('#artifacts-screen').isHidden());
+  await off.page.locator('#chat-list .item', { hasText: 'Publishing' }).click();
+  await off.page.waitForSelector('#chat .page-link');
+  check('setting off: a published card has no Open artifact', await off.page.locator('#chat .open-artifact').count() === 0);
   check('setting off: no requests, no errors', off.seen.requests.length === 0 && off.seen.errors.length === 0, JSON.stringify([off.seen.requests, off.seen.errors]));
   await off.context.close();
 

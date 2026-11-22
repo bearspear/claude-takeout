@@ -14,6 +14,10 @@
 // search on file names; a card sets #ac=<chat index>.<file id>, which opens the file's page: "Made in" its chat
 // (onOpenChat), a version menu, and the file as an artifact's would show (an HTML or SVG file in the same guarded
 // sandbox, with only its own chat's scripts and stylesheets), Markdown, code, an image, or details.
+// Hosted, the screen also links artifacts and chats: an All card's source line (its linked chats, else Shared with you,
+// Cowork or Code) and "also in chat"; on an artifact's page a line of Made in / Published in / Edited in chats (each
+// opening that chat at its message) and a menu of the other versions chats published (their saved copies); a Docs
+// artifact a chat rebuilt shows that chat's text; an Export Changes run says what it holds under the heading.
 // Every text from the data goes in through textContent or attributes, never as markup.
 // Clicking a card sets #a=<id>, which opens that artifact's page: a top bar (home, title, kind, badges, Open file,
 // Open on claude.ai) above the artifact. What fills it (pageFor): a Docs page, a poster for Design and other typed
@@ -25,7 +29,8 @@
   // The home page and the artifact page: constant markup, no data in it.
   // Hosted, the grid has a fourth tab (In chats) with its kind filters, and a page a line under its top bar.
   const shell = (homeTag, hosted) => `<${homeTag} id="home">
-  <h1>Artifacts</h1>
+  <h1>Artifacts</h1>${hosted ? `
+  <p id="since" hidden></p>` : ''}
   <div class="bar">
     <div role="tablist" aria-label="Which artifacts">
       <button type="button" role="tab" id="tab-all" data-tab="all" aria-controls="grid">All</button>
@@ -202,11 +207,24 @@
         sub.append(globe);
       }
       info.append(name, sub);
+      // Hosted: where it comes from, and whether a chat has it as it now is.
+      if (hosted) {
+        const source = artifactSourceLine(v);
+        const also = alsoIds.has(v.id);
+        if (source || also) {
+          const line = el('span', 'src-line');
+          if (source) line.append(el('span', 'source', source));
+          if (also) line.append(el('span', 'also', 'also in chat'));
+          info.append(line);
+        }
+      }
       button.append(picture(v), info);
       button.addEventListener('click', () => { location.hash = '#a=' + v.id; });
       return button;
     }
 
+    // The artifacts a chat has as they now are (hosted): their cards say "also in chat".
+    const alsoIds = hosted ? alsoInChat(data) : new Set();
     // Cards are built once and reused, so a picture loads (or falls back) only once.
     const cards = new Map(views.map(v => [v, card(v)]));
 
@@ -302,6 +320,9 @@
     function render() {
       const query = search.value;
       if (kinds) kinds.hidden = tab !== 'chats';
+      const searchLabel = tab === 'chats' ? 'Search files' : 'Search artifacts';
+      search.placeholder = searchLabel;
+      search.setAttribute('aria-label', searchLabel);
       if (tab === 'chats') renderChats(query);
       else {
         const shown = artifactTabs(views, tab, query);
@@ -574,6 +595,9 @@
     // The chat viewer's REMOTE_NOTE points to its Code view, which this page doesn't have.
     const PAGE_REMOTE_NOTE = 'This page loads a script from the internet, which the viewer blocks, so it may not work here.';
     let mdParser = null;
+    // The note under the top bar: empty and hidden, or one or more sentences.
+    function clearNote() { pageNote.replaceChildren(); pageNote.hidden = true; }
+    function addNote(text) { pageNote.append(pageNote.childNodes.length ? ` ${text}` : text); pageNote.hidden = false; }
 
     function markdownPage(text) {
       if ((text.match(/[*_]/g) || []).length > EMPHASIS_LIMIT) {
@@ -620,7 +644,7 @@
       if (v.startKind === 'html' || v.startKind === 'svg') {
         if (text === null) return box.replaceChildren(failedPage(v));
         const doc = artifactPreviewDoc(text, v.start, payload);
-        if (doc.remote) { pageNote.textContent = PAGE_REMOTE_NOTE; pageNote.hidden = false; }
+        if (doc.remote) addNote(PAGE_REMOTE_NOTE);
         return box.replaceChildren(previewFrame(v, doc.srcdoc));
       }
       if (v.startKind === 'md') return box.replaceChildren(text === null ? failedPage(v) : markdownPage(text));
@@ -645,15 +669,44 @@
       box.dataset.id = String(v.id);
       box.append(el('p', 'loading', 'Loading…'));
       pageBody.replaceChildren(box);
-      pageNote.hidden = true;
+      clearNote();
       payloadOf(v).then(payload => {
         // Another page, or the same one rebuilt, took its place meanwhile.
         if (box.isConnected) fillPreview(v, box, payload);
       });
     }
 
+    // A Docs artifact a chat in the export rebuilt (hosted): that chat's last version of the document, as Markdown.
+    // Returns false when there is none, for the v1.16 Docs page.
+    const DOCS_NOTE = "Rebuilt from the chat. Edits made on claude.ai aren't included.";
+    function chatDocPage(v) {
+      const ref = hosted && v.docFile && typeof v.docFile === 'object' ? v.docFile : null;
+      const chat = ref && Number.isInteger(ref.chat) ? chats[ref.chat] : null;
+      const file = chat && chat.files && typeof ref.file === 'string' && Object.prototype.hasOwnProperty.call(chat.files, ref.file) ? chat.files[ref.file] : null;
+      const last = file && Array.isArray(file.versions) && file.versions.length ? file.versions[file.versions.length - 1] : null;
+      if (!last) return false;
+      const inPart = Number.isSafeInteger(last.part) && last.part > 0 && typeof last.key === 'string';
+      if (typeof last.text !== 'string' && !inPart) return false;
+      addNote(DOCS_NOTE);
+      if (file.flag) addNote(flagNote(file));
+      const box = el('div', 'preview');
+      box.dataset.id = String(v.id);
+      pageBody.replaceChildren(box);
+      if (typeof last.text === 'string') { box.replaceChildren(markdownPage(last.text)); return true; }
+      box.append(el('p', 'loading', 'Loading…'));
+      Promise.resolve(options.loadPart(last.part)).then(part => {
+        const text = part && Object.prototype.hasOwnProperty.call(part, last.key) && typeof part[last.key] === 'string' ? part[last.key] : null;
+        if (!box.isConnected) return;
+        if (text !== null) return box.replaceChildren(markdownPage(text));
+        const failed = sheet('details', "The text couldn't load, because viewer-files/ is missing or blocked.");
+        failed.append(actions(v));
+        box.replaceChildren(failed);
+      });
+      return true;
+    }
+
     function fillBody(v) {
-      if (v.docs) return pageBody.replaceChildren(docsPage(v));
+      if (v.docs) return chatDocPage(v) || pageBody.replaceChildren(docsPage(v));
       if (isPoster(v)) return pageBody.replaceChildren(posterPage(v));
       const shown = !v.notExported && v.start && !v.tooLarge && unzipped !== false;
       if (shown && PREVIEW_KINDS.has(v.startKind) && !v.startMissing) return openPreview(v);
@@ -674,16 +727,81 @@
       if (v.needsRuntime || isPoster(v)) badges.push(badge('needs claude.ai to run'));
       if (unverified(v)) badges.push(badge("not checked against claude.ai's checksum"));
       pageBadges.replaceChildren(...badges);
-      pageNote.hidden = true;
-      pageNote.textContent = '';
+      clearNote();
+      artifactLinks(v);
+      if (pageFrom) {
+        const row = linkGroups(v);
+        const menu = versionMenu(v);
+        if (menu) row.push(menu);
+        pageFrom.replaceChildren(...row);
+        pageFrom.hidden = row.length === 0;
+      }
+      fillBody(v);
+      pageBody.scrollTop = 0;
+    }
+
+    // The top bar's links for the artifact's own (current) files.
+    function artifactLinks(v) {
       const links = [];
       const startHref = v.notExported ? null : openHref(v, v.startSaved);
       if (startHref) links.push(link('btn open-file', 'Open file', startHref, false));
       links.push(link('btn open-claude', 'Open on claude.ai', claudeUrl(v), true));
       pageLinks.replaceChildren(...links);
-      if (pageFrom) { pageFrom.hidden = true; pageFrom.replaceChildren(); }
-      fillBody(v);
-      pageBody.scrollTop = 0;
+    }
+
+    // A chat's name as a link to it, opening at messageUuid.
+    function chatLink(chat, messageUuid) {
+      const button = el('button', 'chat-link', chatTitle(chat));
+      button.type = 'button';
+      button.addEventListener('click', () => { if (typeof options.onOpenChat === 'function') options.onOpenChat(chat, messageUuid || undefined); });
+      return button;
+    }
+
+    // Hosted: "Made in" / "Published in" / "Edited in" and the chats, each a link.
+    function linkGroups(v) {
+      if (!hosted) return [];
+      return artifactLinkGroups(v, chats).map(g => {
+        const group = el('span', 'link-group');
+        group.append(el('span', '', `${g.label} `));
+        g.chats.forEach((c, i) => {
+          if (i) group.append(', ');
+          group.append(chatLink(c.chat, c.messageUuid));
+        });
+        return group;
+      });
+    }
+
+    // Hosted: the versions chats published other than the current one, each opening its saved copy; null when none.
+    function versionMenu(v) {
+      if (!hosted) return null;
+      const { current, others } = publishedVersionsOf(data, v);
+      if (!others.length) return null;
+      const label = el('label', 'version-menu');
+      const select = document.createElement('select');
+      for (const [i, o] of others.entries()) {
+        const option = el('option', '', o.label || `Version ${i + 1}`);
+        option.value = String(i);
+        select.append(option);
+      }
+      const now = el('option', '', current ? `${current} (current)` : 'Current');
+      now.value = 'current';
+      now.selected = true;
+      select.append(now);
+      select.addEventListener('change', () => {
+        clearNote();
+        if (select.value === 'current') { artifactLinks(v); fillBody(v); return; }
+        const o = others[Number(select.value)];
+        const chat = chats[o.chat];
+        const file = chat && chat.files[o.file];
+        const ver = file && file.versions[o.version];
+        if (!ver) return;
+        const f = { chat: o.chat, file: o.file, name: String(file.name || v.title || 'Page') };
+        const href = fileHref(ver);
+        pageLinks.replaceChildren(...(href ? [link('btn open-file', 'Open file', href, false)] : []), link('btn open-claude', 'Open on claude.ai', claudeUrl(v), true));
+        showVersionBody(f, ver, String(v.id));
+      });
+      label.append(el('span', '', 'Version '), select);
+      return label;
     }
 
     // ---- An In chats file's page (hosted): as an artifact's, with "Made in" its chat and a menu of its versions ----
@@ -712,7 +830,7 @@
       const file = fileOf(f);
       if ((file.kind === 'html' || file.kind === 'svg') && text !== null) {
         const doc = artifactPreviewDoc(text, file.name, { texts: [...chatFileTexts(chats[f.chat])] });
-        if (doc.remote) { pageNote.textContent = PAGE_REMOTE_NOTE; pageNote.hidden = false; }
+        if (doc.remote) addNote(PAGE_REMOTE_NOTE);
         return box.replaceChildren(previewFrame({ title: f.name }, doc.srcdoc));
       }
       if (file.kind === 'md' && text !== null) return box.replaceChildren(markdownPage(text));
@@ -728,15 +846,22 @@
       box.replaceChildren(fileDetails(f, v, partFailed));
     }
 
-    // One version: its Open file link and the body. Text moved to a part loads from it.
+    // One version: its Open file link, the file's "may not match" note and the body.
     function showFileVersion(f, at) {
       const v = f.versions[at] || {};
       const href = fileHref(v);
       pageLinks.replaceChildren(...(href ? [link('btn open-file', 'Open file', href, false)] : []));
-      pageNote.hidden = true;
-      pageNote.textContent = '';
+      clearNote();
+      const flag = flagNote(fileOf(f));
+      if (flag) addNote(flag);
+      showVersionBody(f, v, formatInChatsHash(f.chat, f.file) || '');
+    }
+
+    // A chat file's version in the page body (an In chats file, or a version of an artifact a chat published).
+    // Text moved to a part loads from it.
+    function showVersionBody(f, v, id) {
       const box = el('div', 'preview');
-      box.dataset.id = formatInChatsHash(f.chat, f.file) || '';
+      box.dataset.id = id;
       pageBody.replaceChildren(box);
       const kind = fileOf(f).kind;
       if (typeof v.text === 'string' || !TEXT_KINDS.has(kind)) return fillFile(f, v, box, typeof v.text === 'string' ? v.text : null, false);
@@ -866,6 +991,13 @@
         else if (openId !== null && inChatsByHash.has(openId)) showFilePage(inChatsByHash.get(openId), fileVersion);
       };
       probe.src = 'viewer-check.gif';
+    }
+
+    // An Export Changes run (hosted): what the screen holds.
+    const sinceLine = byIdIn('since');
+    if (sinceLine && data.artifactsSince) {
+      sinceLine.textContent = `Changed since ${absoluteTime(data.artifactsSince) || String(data.artifactsSince)}: ${views.length} of ${Number(data.listed) || 0} listed`;
+      sinceLine.hidden = false;
     }
 
     checkUnzipped();

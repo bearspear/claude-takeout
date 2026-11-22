@@ -337,15 +337,25 @@ function renderPublished(page) {
   return box;
 }
 
-// The claude.ai link under a published page's card: the one place the message links the page.
+// The links under a published page's card: Open artifact, when the page is one of the export's artifacts (its page
+// on the Artifacts screen), and the claude.ai link, the one place the message links the page.
 const PAGE_URL = /^https:\/\/claude\.ai\/artifact\/[A-Za-z0-9_-]{1,64}$/;
 function pageLink(file) {
-  const url = file && file.published ? String(file.published.url || '') : '';
-  if (!PAGE_URL.test(url)) return null;
+  if (!file || !file.published) return null;
+  const url = String(file.published.url || '');
+  const artifact = artifactsApp && typeof file.artifact === 'string' && parseArtifactHash('#a=' + file.artifact) ? file.artifact : null;
+  if (!PAGE_URL.test(url) && !artifact) return null;
   const box = el('div', 'page-link');
-  const link = el('a', '', 'Open on claude.ai');
-  link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
-  box.append(icon('globe'), link);
+  if (artifact) {
+    const open = el('a', 'open-artifact', 'Open artifact');
+    open.href = '#a=' + artifact;
+    box.append(open);
+  }
+  if (PAGE_URL.test(url)) {
+    const link = el('a', '', 'Open on claude.ai');
+    link.href = url; link.target = '_blank'; link.rel = 'noopener noreferrer';
+    box.append(icon('globe'), link);
+  }
   return box;
 }
 
@@ -986,13 +996,7 @@ function loadPart(n) {
   return loading;
 }
 
-// What a file's flag means, for its badge and the panel note.
-const FLAG_NOTES = {
-  script: "Claude changed this file with a command the export can't replay, so it may not match what Claude made. replay_bash.py beside the extension can rebuild it from the chat folder.",
-  edit: "An edit Claude made to this file couldn't be replayed, so it may not match what Claude made.",
-  doc: 'Some edits to this document couldn\'t be rebuilt from the chat. The live document on claude.ai is the current one.',
-};
-const flagNote = file => (file && file.flag ? FLAG_NOTES[file.flag] || FLAG_NOTES.edit : '');
+// FLAG_NOTES and flagNote (what a file's flag means) are in viewer-logic.js.
 
 function renderCard(block, chat) {
   const file = resolveFile(chat.files, block.file, block.version) && chat.files[block.file];

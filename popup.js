@@ -5025,9 +5025,12 @@ async function bulkExportZip(options = {}) {
     }, null, 2));
 
     status.textContent = 'Building viewer...';
+    // The combined viewer also needs each artifact's current version (to tell it from older ones chats published)
+    // and where claude.ai says it was made (its card's source line); views, entries and rows are one per artifact.
+    const combinedViews = step ? step.views.map((v, i) => ({ ...v, ver: (step.entries[i] && step.entries[i].ver) || '', sourceSurface: (step.rows[i] && step.rows[i].sourceSurface) || '' })) : [];
     const viewerOpts = step
       // Every part the artifact step numbered, even one an error kept from being counted in partCount.
-      ? { artifacts: { views: step.views, listed: artifactList.listed, exported: startedAt, since }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }
+      ? { artifacts: { views: combinedViews, listed: artifactList.listed, exported: startedAt, since }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }
       : {};
     // Chats or artifacts to show: an Export Changes run where only artifacts changed still gets a viewer.
     const viewerWanted = exported > 0 || !!(viewerOpts.artifacts && viewerOpts.artifacts.views.length);

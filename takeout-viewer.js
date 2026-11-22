@@ -59,7 +59,8 @@
 //                folder. Each publish_files call gets a card for the version its toolUseId is in, one GenFile per page
 //                (key published:<uuid>, on or off the active branch) with published: { url, current, needsRuntime } and
 //                versions in `order`, each { label, text, href, same }: a same version links the file Claude wrote, any
-//                other its start file under dir, and one with nothing saved has no link. The card replaces the
+//                other its start file under dir, and one with nothing saved has no link; ver: claude.ai's version id,
+//                when known (the Artifacts screen matches it with an artifact's current version). The card replaces the
 //                tool's "Published on claude.ai" line, and an upload claude.ai attached to that message under the
 //                name of one of the page's sources is dropped, so the page shows once.
 (function (root) {
@@ -409,7 +410,7 @@
           let href = null;
           if (v.same && v.writtenAs) href = hrefOf(v.writtenAs);
           else if (v.startSaved && pageDir !== null) href = relHref(pageDir, v.folderName, v.startSaved);
-          return { label: String(v.label || ''), text, href, same: !!v.same };
+          return { label: String(v.label || ''), text, href, same: !!v.same, ...(typeof v.ver === 'string' && v.ver ? { ver: v.ver } : {}) };
         });
         const named = versions.map(v => v.startSaved || v.writtenAs).find(Boolean) || '';
         const hasText = out.some(v => v.text !== null);

@@ -78,6 +78,13 @@ button { font: inherit; color: inherit; }
 .version-menu { margin-left: auto; }
 .version-menu select { font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1px 4px; }
 .code-view { flex: 1; min-height: 0; margin: 0; padding: 16px 20px; overflow: auto; font: 12px/1.55 var(--mono); white-space: pre; tab-size: 4; color: var(--ink); background: var(--bg); }
+/* Chats and artifacts (the chat viewer's Artifacts screen only): a card's source line, a page's chat links, a changes run's heading. */
+.src-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-top: 4px; min-width: 0; }
+.src-line .source { font-size: 11px; line-height: 16px; padding: 0 7px; border-radius: 999px; background: var(--pill); color: var(--soft); white-space: nowrap; }
+.src-line .also { font-size: 11px; line-height: 16px; color: var(--acc); white-space: nowrap; }
+.link-group { min-width: 0; overflow-wrap: anywhere; }
+#since { margin: -12px 0 20px; font-size: 13px; color: var(--mute); }
+#since[hidden] { display: none; }
 #empty { color: var(--mute); font-size: 14px; text-align: center; padding: 64px 0; margin: 0; }
 /* One artifact open: a thin top bar, then the artifact edge to edge. */
 #page { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }

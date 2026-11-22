@@ -1622,7 +1622,7 @@ test('a same version links the written file', () => {
   const data = pubChain(1);
   const chat = buildViewerChat(data, ctxFor(data, { published: [pageEntry([pubVersion(0, { same: true, writtenAs: 'guide_v1.html', text: 'G1' })])] }));
   const [file] = Object.values(chat.files);
-  assert.deepStrictEqual(file.versions, [{ label: 'v1', text: 'G1', href: 'artefacts/guide_v1.html', same: true }]);
+  assert.deepStrictEqual(file.versions, [{ label: 'v1', text: 'G1', href: 'artefacts/guide_v1.html', same: true, ver: 'ver0' }]);
 });
 
 test('an Export All card links published/ at the export root', () => {
@@ -1656,7 +1656,7 @@ test('an incomplete version has no link', () => {
   const entry = pageEntry([pubVersion(0, { incomplete: true, start: null, startSaved: null, text: null }), pubVersion(1, { needsRuntime: true })]);
   const chat = buildViewerChat(data, ctxFor(data, { published: [entry] }));
   const [file] = Object.values(chat.files);
-  assert.deepStrictEqual(file.versions[0], { label: 'v1', text: null, href: null, same: false });
+  assert.deepStrictEqual(file.versions[0], { label: 'v1', text: null, href: null, same: false, ver: 'ver0' });
   assert.strictEqual(file.published.needsRuntime, true);
   // A page with nothing in the export is a missing file.
   const none = buildViewerChat(pubChain(1), ctxFor(pubChain(1), { published: [pageEntry([pubVersion(0, { incomplete: true, start: null, startSaved: null, text: null })])] }));
@@ -1921,7 +1921,7 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
 
 // ---- In chats: the files Claude made, across the export's chats ----
 {
-  const { inChatsFiles, alsoInChat, fileKindGroup, parseInChatsHash, formatInChatsHash, chatFileTexts } = require('../viewer/viewer-logic.js');
+  const { inChatsFiles, alsoInChat, fileKindGroup, parseInChatsHash, formatInChatsHash, chatFileTexts, artifactSourceLine, artifactLinkGroups, publishedVersionsOf, flagNote } = require('../viewer/viewer-logic.js');
   const ver = (href, extra = {}) => ({ label: '', text: 'x', href, ...extra });
   const msg = (id, at) => ({ id, parent: null, sender: 'assistant', at, blocks: [], uploads: [], attachments: [] });
   const inChatsData = () => ({
@@ -1933,7 +1933,7 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
           a1: { name: 'early.html', kind: 'html', versions: [ver('C0/artefacts/early.html')], madeAt: 'm1' },
           a2: { name: 'later.py', kind: 'code', versions: [ver('C0/artefacts/later.py')], madeAt: 'm2' },
           a3: { name: 'gone.txt', kind: 'missing', versions: [{ label: '', text: null, href: null }] },
-          a4: { name: 'Guide', kind: 'html', published: { url: 'u', current: true }, artifact: 'Art1', versions: [ver('C0/artefacts/guide.html', { same: true })] },
+          a4: { name: 'Guide', kind: 'html', published: { url: 'u', current: true }, artifact: 'Art1', versions: [ver('C0/artefacts/guide.html', { same: true, ver: 'G1' })] },
           a5: { name: 'guide.html', kind: 'html', versions: [ver('C0/artefacts/guide.html')], madeAt: 'm2' },
           a6: { name: 'attached.csv', kind: 'code', versions: [ver('C0/artefacts/attached.csv')] },
         },
@@ -1945,7 +1945,7 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
           a1: { name: 'chart.svg', kind: 'svg', versions: [ver('C1/artefacts/chart_v1.svg'), ver('C1/artefacts/chart_v2.svg')], madeAt: 'n1' },
           // A page published at v1 whose file changed afterwards: listed, with the artifact named.
           a2: { name: 'deck.html', kind: 'html', versions: [ver('C1/artefacts/deck_v1.html'), ver('C1/artefacts/deck_v2.html')], madeAt: 'n1' },
-          a3: { name: 'Deck', kind: 'html', published: { url: 'u', current: true }, artifact: 'Art2', versions: [ver('C1/artefacts/deck_v1.html', { same: true })] },
+          a3: { name: 'Deck', kind: 'html', published: { url: 'u', current: true }, artifact: 'Art2', versions: [ver('C1/artefacts/deck_v1.html', { same: true, ver: 'D1' })] },
           // The same source of a page that isn't in the export's artifacts: listed.
           a4: { name: 'Solo', kind: 'html', published: { url: 'u', current: true }, versions: [ver('C1/artefacts/solo.html', { same: true })] },
           a5: { name: 'solo.html', kind: 'html', versions: [ver('C1/artefacts/solo.html')], madeAt: 'n2' },
@@ -1954,7 +1954,7 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
         },
       },
     ],
-    artifacts: [{ id: 'Art1', title: 'Guide' }, { id: 'Art2', title: 'Deck' }],
+    artifacts: [{ id: 'Art1', title: 'Guide', ver: 'G1' }, { id: 'Art2', title: 'Deck', ver: 'D2' }],
   });
 
   test('inChatsFiles: newest first by the message that made the last version, then the undated by chat order', () => {
@@ -1977,6 +1977,23 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
     data.artifacts = data.artifacts.filter(v => v.id !== 'Art1');
     assert.ok(inChatsFiles(data).some(f => f.name === 'guide.html'));
     assert.deepStrictEqual([...alsoInChat(data)], []);
+  });
+
+  test("inChatsFiles hides a page's source only when the same publish is the artifact's current version", () => {
+    // Guide was published the same as guide.html at G1; the artifact is now at G2: the file is listed, naming it.
+    const data = inChatsData();
+    data.artifacts[0].ver = 'G2';
+    const guide = inChatsFiles(data).find(f => f.name === 'guide.html');
+    assert.ok(guide, 'listed');
+    assert.strictEqual(guide.alsoArtifact, 'Art1');
+    assert.deepStrictEqual([...alsoInChat(data)], []);
+    // A version with no ver, or an artifact with none, never counts as the current one.
+    const nover = inChatsData();
+    delete nover.chats[0].files.a4.versions[0].ver;
+    assert.ok(inChatsFiles(nover).some(f => f.name === 'guide.html'));
+    const noArtVer = inChatsData();
+    delete noArtVer.artifacts[0].ver;
+    assert.deepStrictEqual([...alsoInChat(noArtVer)], []);
   });
 
   test('inChatsFiles: uploads and pasted text are never listed, and odd data lists nothing', () => {
@@ -2009,6 +2026,55 @@ test('inlineArtifact decodes entities in src and href; inlineSiblings is unchang
     }
     assert.strictEqual(formatInChatsHash(3, 'a12'), '#ac=3.a12');
     for (const [c, f] of [[-1, 'a1'], [1.5, 'a1'], ['1', 'a1'], [1, 'a<b'], [1, '']]) assert.strictEqual(formatInChatsHash(c, f), null, `${c} ${f}`);
+  });
+
+  test('artifactSourceLine: linked chats, else shared, else Cowork or Code', () => {
+    assert.strictEqual(artifactSourceLine({ links: [{ chat: 0, how: 'made' }] }), '💬 1 chat');
+    assert.strictEqual(artifactSourceLine({ links: [{ chat: 0, how: 'made' }, { chat: 0, how: 'edited' }, { chat: 2, how: 'published' }], shared: true }), '💬 2 chats');
+    assert.strictEqual(artifactSourceLine({ links: [], shared: true, sourceSurface: 'cowork' }), 'Shared with you');
+    assert.strictEqual(artifactSourceLine({ links: [], sourceSurface: 'cowork' }), 'Cowork');
+    assert.strictEqual(artifactSourceLine({ sourceSurface: 'code' }), 'Code');
+    assert.strictEqual(artifactSourceLine({ sourceSurface: 'chat' }), '');
+    assert.strictEqual(artifactSourceLine({ links: [{ chat: 'x' }, null] }), '');
+  });
+
+  test('artifactLinkGroups: Made in, Published in, Edited in; each chat once, at its first message; missing chats skipped', () => {
+    const chats = [{ title: 'A' }, { title: 'B' }];
+    const view = { links: [
+      { chat: 1, messageUuid: 'b1', how: 'edited' }, { chat: 0, messageUuid: 'a1', how: 'published' }, { chat: 0, messageUuid: 'a2', how: 'published' },
+      { chat: 1, messageUuid: 'b2', how: 'made' }, { chat: 0, messageUuid: 'a3', how: 'edited' }, { chat: 5, messageUuid: 'z', how: 'made' }, { chat: 0, how: 'opened' },
+    ] };
+    assert.deepStrictEqual(artifactLinkGroups(view, chats), [
+      { how: 'made', label: 'Made in', chats: [{ chat: 1, messageUuid: 'b2' }] },
+      { how: 'published', label: 'Published in', chats: [{ chat: 0, messageUuid: 'a1' }] },
+      { how: 'edited', label: 'Edited in', chats: [{ chat: 1, messageUuid: 'b1' }, { chat: 0, messageUuid: 'a3' }] },
+    ]);
+    assert.deepStrictEqual(artifactLinkGroups({}, chats), []);
+  });
+
+  test("publishedVersionsOf: the artifact's current version and each other version chats published, once", () => {
+    const page = (versions, artifact = 'Art') => ({ name: 'Page', kind: 'html', published: { url: 'u', current: true }, artifact, versions });
+    const data = { chats: [
+      { files: { p1: page([ver('published/P/v1/index.html', { label: 'v1', ver: 'A' }), ver('C0/artefacts/p.html', { label: 'v3', ver: 'C', same: true })]) } },
+      { files: {
+        p1: page([ver('published/P/v2/index.html', { label: 'v2', ver: 'B' }), ver('published/P/v1/index.html', { label: 'v1', ver: 'A' })]),
+        p2: page([ver('published/Q/v1/index.html', { label: 'v1', ver: 'Q' })], 'Other'),
+        p3: page([{ label: 'v9', ver: 'N', text: null, href: null }]),
+      } },
+    ] };
+    const got = publishedVersionsOf(data, { id: 'Art', ver: 'C' });
+    assert.strictEqual(got.current, 'v3');
+    assert.deepStrictEqual(got.others, [{ label: 'v1', chat: 0, file: 'p1', version: 0 }, { label: 'v2', chat: 1, file: 'p1', version: 0 }]);
+    // Nothing published but the current version: no others.
+    assert.deepStrictEqual(publishedVersionsOf({ chats: [{ files: { p1: page([ver('x', { label: 'v3', ver: 'C' })]) } }] }, { id: 'Art', ver: 'C' }), { current: 'v3', others: [] });
+    assert.deepStrictEqual(publishedVersionsOf({}, { id: 'Art', ver: 'C' }), { current: '', others: [] });
+  });
+
+  test("flagNote: the chat viewer's may-not-match wording", () => {
+    assert.ok(/may not match/.test(flagNote({ flag: 'script' })) && /replay_bash\.py/.test(flagNote({ flag: 'script' })));
+    assert.strictEqual(flagNote({ flag: 'odd' }), flagNote({ flag: 'edit' }));
+    assert.strictEqual(flagNote({}), '');
+    assert.strictEqual(flagNote(null), '');
   });
 
   test('chatFileTexts: the newest text of the last file with each name', () => {

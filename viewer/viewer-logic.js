@@ -695,14 +695,17 @@ function fileKindGroup(name, kind, key = '') {
 
 // Both lists at once: the In chats entries, and the artifacts whose page a chat's file is, as that file now is.
 // A published page's version that is the same as the file Claude wrote links that file (same: true, the file's href);
-// when the page is one of the export's artifacts, the file whose last version that is isn't listed (the artifact's
-// card says "also in chat"), and a file with that page among its earlier versions names it in alsoArtifact.
+// when the page is one of the export's artifacts and that version is the artifact's current one (ver), the file whose
+// last version that is isn't listed (the artifact's card says "also in chat"); a file matching any other same publish
+// of that page is listed and names it in alsoArtifact.
 // Order: newest first by the message that made the file's last version (its time; a message with no usable time
 // stands in with its chat's update), then the chat's update, the message's place in the chat, the chat's place in
 // the data and the name. Files with no madeAt come after, by the chat's place in the data, then name.
 function inChatsSplit(data) {
   const chats = data && Array.isArray(data.chats) ? data.chats : [];
-  const artifactIds = new Set((data && Array.isArray(data.artifacts) ? data.artifacts : []).filter(v => v && typeof v.id === 'string').map(v => v.id));
+  // Each exported artifact's current version ('' when unknown, which no publish matches).
+  const currentVer = new Map((data && Array.isArray(data.artifacts) ? data.artifacts : []).filter(v => v && typeof v.id === 'string')
+    .map(v => [v.id, typeof v.ver === 'string' ? v.ver : '']));
   const time = iso => { const t = Date.parse(iso); return Number.isNaN(t) ? null : t; };
   const files = [];
   const also = new Set();
@@ -710,9 +713,14 @@ function inChatsSplit(data) {
     if (!chat || !chat.files || typeof chat.files !== 'object') return;
     const entries = Object.entries(chat.files).filter(([, f]) => f && typeof f === 'object' && Array.isArray(f.versions) && f.versions.length);
     const pageOfHref = new Map(); // href of a file Claude wrote -> the artifact published the same as it
+    const currentOfHref = new Map(); // the same, for a publish that is the artifact's current version
     for (const [, f] of entries) {
-      if (!f.published || !artifactIds.has(f.artifact)) continue;
-      for (const v of f.versions) if (v && v.same && typeof v.href === 'string') pageOfHref.set(v.href, f.artifact);
+      if (!f.published || !currentVer.has(f.artifact)) continue;
+      for (const v of f.versions) {
+        if (!v || !v.same || typeof v.href !== 'string') continue;
+        pageOfHref.set(v.href, f.artifact);
+        if (typeof v.ver === 'string' && v.ver && v.ver === currentVer.get(f.artifact)) currentOfHref.set(v.href, f.artifact);
+      }
     }
     const messages = Array.isArray(chat.messages) ? chat.messages : [];
     const place = new Map(messages.map((m, i) => [m && m.id, i]));
@@ -720,7 +728,7 @@ function inChatsSplit(data) {
     for (const [id, f] of entries) {
       if (f.published || f.kind === 'missing') continue;
       const last = f.versions[f.versions.length - 1];
-      if (last && pageOfHref.has(last.href)) { also.add(pageOfHref.get(last.href)); continue; }
+      if (last && currentOfHref.has(last.href)) { also.add(currentOfHref.get(last.href)); continue; }
       const earlier = f.versions.find(v => v && pageOfHref.has(v.href));
       const madeAt = typeof f.madeAt === 'string' && f.madeAt ? f.madeAt : null;
       const at = madeAt && place.has(madeAt) ? messages[place.get(madeAt)].at : null;
@@ -752,6 +760,76 @@ function inChatsFiles(data) { return inChatsSplit(data).files; }
 
 // The ids of the artifacts whose page is, as it now is, a file a chat made: their card says "also in chat".
 function alsoInChat(data) { return inChatsSplit(data).also; }
+
+// ---- Chats and artifacts: what the Artifacts screen says about each artifact's chats ----
+
+// An All-tab card's source line: the chats linked to it, else shared with you, else where claude.ai says it was made.
+function artifactSourceLine(view) {
+  const chats = new Set((view && Array.isArray(view.links) ? view.links : []).filter(l => l && Number.isInteger(l.chat)).map(l => l.chat));
+  if (chats.size) return `💬 ${chats.size} chat${chats.size === 1 ? '' : 's'}`;
+  if (view && view.shared) return 'Shared with you';
+  const surface = view && typeof view.sourceSurface === 'string' ? view.sourceSurface.toLowerCase() : '';
+  return surface === 'cowork' ? 'Cowork' : surface === 'code' ? 'Code' : '';
+}
+
+// An artifact page's line: its links grouped Made in, Published in, Edited in, each chat once (at its first message),
+// chats not in chats left out.
+const LINK_GROUPS = [['made', 'Made in'], ['published', 'Published in'], ['edited', 'Edited in']];
+function artifactLinkGroups(view, chats) {
+  const links = view && Array.isArray(view.links) ? view.links : [];
+  const list = Array.isArray(chats) ? chats : [];
+  const groups = [];
+  for (const [how, label] of LINK_GROUPS) {
+    const seen = new Set();
+    const out = [];
+    for (const l of links) {
+      if (!l || l.how !== how || !Number.isInteger(l.chat) || l.chat < 0 || !list[l.chat] || seen.has(l.chat)) continue;
+      seen.add(l.chat);
+      out.push({ chat: l.chat, messageUuid: typeof l.messageUuid === 'string' ? l.messageUuid : undefined });
+    }
+    if (out.length) groups.push({ how, label, chats: out });
+  }
+  return groups;
+}
+
+// The versions of an artifact the chats published: current, the label a chat gave the artifact's current version
+// ('' when none published it), and others, each other version once (by ver, else label) that has something saved,
+// as { label, chat, file, version } (a published:<uuid> file and its version), v1, v2, ... in order, then the rest.
+function publishedVersionsOf(data, view) {
+  const chats = data && Array.isArray(data.chats) ? data.chats : [];
+  const id = view && view.id;
+  const now = view && typeof view.ver === 'string' ? view.ver : '';
+  let current = '';
+  const seen = new Set();
+  const others = [];
+  chats.forEach((chat, ci) => {
+    for (const [fid, f] of Object.entries((chat && chat.files) || {})) {
+      if (!f || !f.published || f.artifact !== id || !Array.isArray(f.versions)) continue;
+      f.versions.forEach((v, i) => {
+        if (!v) return;
+        const label = String(v.label || '');
+        const ver = typeof v.ver === 'string' ? v.ver : '';
+        if (ver && ver === now) { if (!current) current = label; return; }
+        const key = ver ? `ver ${ver}` : `label ${label}`;
+        const saved = typeof v.text === 'string' || typeof v.href === 'string' || (Number.isSafeInteger(v.part) && v.part > 0);
+        if (seen.has(key) || !saved) return;
+        seen.add(key);
+        others.push({ label, chat: ci, file: fid, version: i });
+      });
+    }
+  });
+  const num = o => { const m = /^v(\d+)$/.exec(o.label); return m ? Number(m[1]) : null; };
+  others.sort((a, b) => { const x = num(a), y = num(b); return x === null || y === null ? (x === null) - (y === null) : x - y; });
+  return { current, others };
+}
+
+// What a file's flag means, for its badge and the note on its page (the chat viewer's and the Artifacts screen's).
+const FLAG_NOTES = {
+  script: "Claude changed this file with a command the export can't replay, so it may not match what Claude made. replay_bash.py beside the extension can rebuild it from the chat folder.",
+  edit: "An edit Claude made to this file couldn't be replayed, so it may not match what Claude made.",
+  doc: 'Some edits to this document couldn\'t be rebuilt from the chat. The live document on claude.ai is the current one.',
+};
+const flagNote = file => (file && file.flag ? FLAG_NOTES[file.flag] || FLAG_NOTES.edit : '');
 
 // #ac=<chat index>.<file id>: an In chats file.
 const IN_CHATS_HASH = /^#ac=(\d{1,6})\.([A-Za-z0-9_:-]{1,128})$/;
@@ -1296,5 +1374,5 @@ function groupChats(chats) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, publishedVersionsOf, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit };
 }
