@@ -2560,7 +2560,7 @@ test('Export Artifacts writes <Title>_<id>/<ver>/ and artifact.json format 2', a
   const plan = artFolder('Plan', U(2));
   const design = artFolder('Design_Empty', U(3));
   assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`${game}/`)).sort(),
-    [`${game}/${LIVE}/app.js`, `${game}/${LIVE}/artifact.json`, `${game}/${LIVE}/index.html`, `${game}/artifact.json`].sort());
+    [`${game}/${LIVE}/app.js`, `${game}/${LIVE}/artifact.json`, `${game}/${LIVE}/index.html`, `${game}/${LIVE}.zip`, `${game}/artifact.json`].sort());
   assert.strictEqual(files[`${game}/${LIVE}/artifact.json`], '{"mine":1}', 'a page file named artifact.json keeps its name in its version folder');
   for (const f of [plan, design]) assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`${f}/`)), [`${f}/artifact.json`]);
   const meta = JSON.parse(files[`${game}/artifact.json`]);
@@ -2649,7 +2649,7 @@ test('Export Artifacts saves each artifact\'s current files with artifact.json a
   assert.deepStrictEqual(plain(listCalls), [{ action: 'listArtifacts', withAccountName: true }]);
   const f1 = artFolder('Quarterly_Report', U(1));
   const f2 = artFolder('Game', U(2));
-  assert.deepStrictEqual(Object.keys(files).sort(), [`${f1}/artifact.json`, `${f1}/${LIVE}/index.html`, `${f2}/${LIVE}/app.js`, `${f2}/artifact.json`, `${f2}/${LIVE}/img/logo.svg`, `${f2}/${LIVE}/index.html`,
+  assert.deepStrictEqual(Object.keys(files).sort(), [`${f1}/artifact.json`, `${f1}/${LIVE}/index.html`, `${f2}/${LIVE}/app.js`, `${f2}/artifact.json`, `${f2}/${LIVE}/img/logo.svg`, `${f2}/${LIVE}/index.html`, `${f2}/${LIVE}.zip`,
     'export-manifest.json', 'index.html', 'index.md', 'viewer-check.gif', 'viewer-files/part-0001.js', 'viewer.html'].sort());
   assert.strictEqual(files[`${f2}/${LIVE}/app.js`], 'go()');
   const meta = JSON.parse(files[`${f2}/artifact.json`]);
@@ -3270,7 +3270,7 @@ test('each artifact gets a view record', async () => {
       start: 'index.html', startSaved: 'index.html', startKind: 'html', startSize: 30, tooLarge: false, startMissing: false, missingCount: 0,
       files: [{ path: 'index.html', savedAs: 'index.html', kind: 'html', verified: true }, { path: 'app.js', savedAs: 'app.js', kind: 'js', verified: true },
         { path: 'img/logo.svg', savedAs: 'img/logo.svg', kind: 'svg', verified: true }],
-      needsRuntime: false, notExported: false, note: '', url: `https://claude.ai/artifact/${id}`, thumb: null, part: game.part, key: 'a1',
+      needsRuntime: false, notExported: false, note: '', url: `https://claude.ai/artifact/${id}`, thumb: null, zip: `${artFolder('Game', U(2))}/${LIVE}.zip`, part: game.part, key: 'a1',
     });
     assert.ok(Number.isInteger(game.part) && game.part >= 1);
     assert.strictEqual(views[0].public, true);
@@ -3498,7 +3498,7 @@ test('artifact.json (format 2) has start and public, and the version its files',
   assert.deepStrictEqual({ ...game, versions: { [LIVE]: { ...v, files: v.files.map((f) => f.path) } } }, {
     format: 2, uuid: U(1), shortId: id, url: `https://claude.ai/artifact/${id}`, title: 'Game', typeTitle: '', sourceSurface: 'code', rel: 'mine', public: true,
     createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', listed: true, current: LIVE, start: 'index.html', needsRuntime: false, note: '', order: [LIVE],
-    versions: { [LIVE]: { folder: LIVE, files: ['index.html', 'app.js'], start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: [] } },
+    versions: { [LIVE]: { folder: LIVE, files: ['index.html', 'app.js'], start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, zip: `${LIVE}.zip`, publishedIn: [] } },
   });
   const plan = JSON.parse(files[`${artFolder('Plan', U(2))}/artifact.json`]);
   assert.deepStrictEqual([plan.start, plan.public, plan.note], [null, false, DOCS_NOTE]);
@@ -4392,7 +4392,7 @@ test('Review Focus 2: same version under two names', async () => {
   out = await runBulkZip({ list, chats: { a: two('p1', 'a', 'guide', 'm1'), b: two('q1', 'b', 'page', 'n1') }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
   files = await zipFiles(out.zip);
   assert.strictEqual(fetcher.count('publishedPageFile'), 0);
-  assert.deepStrictEqual(storeFiles(files, f), [`artifacts/${f}/artifact.json`, `artifacts/${f}/v1/index.html`, `artifacts/${f}/v1/style.css`]);
+  assert.deepStrictEqual(storeFiles(files, f), [`artifacts/${f}/artifact.json`, `artifacts/${f}/v1.zip`, `artifacts/${f}/v1/index.html`, `artifacts/${f}/v1/style.css`]);
   assert.deepStrictEqual([files[`artifacts/${f}/v1/index.html`], files[`artifacts/${f}/v1/style.css`]], ['PAGE', 'CSS']);
   meta = JSON.parse(files[`artifacts/${f}/artifact.json`]);
   assert.deepStrictEqual([meta.versions.v1.folder, meta.versions.v1.saved, 'sameAs' in meta.versions.v1], ['v1', true, false]);
@@ -4606,4 +4606,124 @@ test('Review Focus 2 (mixed): a version one chat wrote the same and another didn
     assert.ok(files['Chat_b/README.md'].includes(`(../artifacts/${f}/v1/index.html)`), files['Chat_b/README.md']);
     assert.ok(linkResolves(files, 'Chat_b', `../artifacts/${f}/v1/index.html`));
   }
+});
+
+// ---- A ZIP of each artifact's current multi-file version (v1.19) ----
+const zipEntries = async (bytes) => {
+  const JSZip = require('../jszip.min.js');
+  const z = await JSZip.loadAsync(bytes);
+  const out = [];
+  for (const n of Object.keys(z.files)) if (!z.files[n].dir) out.push({ name: n, date: z.files[n].date.toISOString(), bytes: await z.file(n).async('nodebuffer') });
+  return out;
+};
+const rawZip = async (zip, name) => zip.file(name).async('nodebuffer');
+
+test('versionZip is deterministic and dated', async () => {
+  const sb = exportPopup().sandbox;
+  sb.JSZip = require('../jszip.min.js');
+  sb.Uint8Array = Uint8Array;
+  const make = (date) => vm.runInContext(`versionZip([['index.html', '<p>hi</p>'], ['app.js', new Uint8Array([1, 2, 3])]], ${JSON.stringify(date)})`, sb);
+  const a = Buffer.from(await make('2026-11-01T00:00:00Z'));
+  const b = Buffer.from(await make('2026-11-01T00:00:00Z'));
+  assert.ok(a.equals(b), 'same input, same bytes');
+  assert.deepStrictEqual([...a.subarray(0, 4)], [0x50, 0x4b, 0x03, 0x04]);
+  const entries = await zipEntries(a);
+  assert.deepStrictEqual(entries.map((e) => e.name), ['index.html', 'app.js']);
+  assert.deepStrictEqual([entries[0].bytes.toString('utf8'), [...entries[1].bytes]], ['<p>hi</p>', [1, 2, 3]]);
+  // DOS dates keep two-second precision in local time; compare the calendar day.
+  assert.ok(entries.every((e) => new Date(e.date).getUTCFullYear() === 2026), entries.map((e) => e.date).join());
+  for (const empty of ['', 'not a date']) {
+    const z = await zipEntries(Buffer.from(await make(empty)));
+    assert.ok(z.every((e) => [1979, 1980].includes(new Date(e.date).getUTCFullYear())), z.map((e) => e.date).join());
+  }
+});
+
+test('Export Artifacts writes <ver>.zip for a multi-file current version, and none for one file', async () => {
+  const frames = [art(U(1), 'Game'), art(U(2), 'Single')];
+  const pages = {
+    [U(1)]: livePage('Game', { 'index.html': '<script src="app.js"></script>', 'js/app.js': 'go()', 'img.png': { body: 'PNGBYTES', type: 'image/png' } }),
+    [U(2)]: livePage('Single', { 'index.html': 'one' }),
+  };
+  const { files, raw, views } = await runArtifacts({ frames, pages });
+  const game = artFolder('Game', U(1));
+  const single = artFolder('Single', U(2));
+  assert.ok(`${game}/${LIVE}.zip` in raw, Object.keys(raw).join());
+  const entries = await zipEntries(raw[`${game}/${LIVE}.zip`]);
+  const meta = JSON.parse(files[`${game}/artifact.json`]);
+  const v = meta.versions[LIVE];
+  assert.deepStrictEqual(entries.map((e) => e.name), v.files.map((f) => f.savedAs));
+  for (const e of entries) assert.ok(e.bytes.equals(raw[`${game}/${LIVE}/${e.name}`]), e.name);
+  assert.strictEqual(v.zip, `${LIVE}.zip`);
+  assert.ok(!v.files.some((f) => /\.zip$/.test(f.savedAs)));
+  assert.strictEqual(views.find((x) => x.title === 'Game').zip, `${game}/${LIVE}.zip`);
+  assert.ok(!Object.keys(raw).some((n) => n.startsWith(`${single}/`) && n.endsWith('.zip')));
+  assert.ok(!('zip' in JSON.parse(files[`${single}/artifact.json`]).versions[LIVE]));
+  assert.strictEqual(views.find((x) => x.title === 'Single').zip, null);
+});
+
+test('an incomplete multi-file version zips what was saved; with one file saved, no ZIP', async () => {
+  const fail = { body: 'x', error: { error: 'HTTP 500', status: 500 } };
+  const frames = [art(U(1), 'Three'), art(U(2), 'Two')];
+  const pages = {
+    [U(1)]: livePage('Three', { 'index.html': 'a', 'b.js': 'b', 'c.css': fail }),
+    [U(2)]: livePage('Two', { 'index.html': 'a', 'b.js': fail }),
+  };
+  const { files, raw } = await runArtifacts({ frames, pages });
+  const three = artFolder('Three', U(1));
+  const two = artFolder('Two', U(2));
+  const v3 = JSON.parse(files[`${three}/artifact.json`]).versions[LIVE];
+  assert.strictEqual(v3.incomplete, true);
+  assert.strictEqual(v3.zip, `${LIVE}.zip`);
+  assert.deepStrictEqual((await zipEntries(raw[`${three}/${LIVE}.zip`])).map((e) => e.name), ['index.html', 'b.js']);
+  const v2 = JSON.parse(files[`${two}/artifact.json`]).versions[LIVE];
+  assert.ok(!('zip' in v2));
+  assert.ok(!(`${two}/${LIVE}.zip` in raw));
+});
+
+test('Export All zips the listed current version a chat published, not older or unlisted ones', async () => {
+  const PAGE2 = { 'index.html': 'P2', 'style.css': { body: 'S2', type: 'text/css' } };
+  const multi = (versions) => publishedFetcher({ [PUB_U]: { title: 'Guide', live: 'v2', history: ['v1', 'v2'], versions } });
+  const twoFiles = [{ as: 'index.html', path: '/home/claude/guide.html' }, { as: 'style.css', path: '/home/claude/style.css' }];
+  const chat = () => Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', twoFiles)), pubMsg('m2', 'm1', publish('p2', PUB_U, 'v2', twoFiles))]), { uuid: 'a', name: 'Chat a' });
+  const versions = { v1: { files: { 'index.html': 'P1', 'style.css': { body: 'S1', type: 'text/css' } } }, v2: { files: PAGE2 } };
+  const f = artFolder('Listed', PUB_U);
+  // Listed, current v2: v2.zip only.
+  let out = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat() }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Listed', { live: 'v2' })], fetcher: multi(versions) }) });
+  let files = await zipFiles(out.zip);
+  assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`artifacts/${f}/`) && n.endsWith('.zip')), [`artifacts/${f}/v2.zip`]);
+  const entries = await zipEntries(await rawZip(out.zip, `artifacts/${f}/v2.zip`));
+  assert.deepStrictEqual(entries.map((e) => [e.name, e.bytes.toString('utf8')]), [['index.html', 'P2'], ['style.css', 'S2']]);
+  const meta = JSON.parse(files[`artifacts/${f}/artifact.json`]);
+  assert.deepStrictEqual([meta.versions.v2.zip, 'zip' in meta.versions.v1], ['v2.zip', false]);
+  // Unlisted: no current version, no ZIP.
+  out = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat() }, setup: bulkWithArtifacts({ frames: [], fetcher: multi(versions) }) });
+  files = await zipFiles(out.zip);
+  assert.ok(!Object.keys(files).some((n) => n.startsWith('artifacts/') && n.endsWith('.zip')), Object.keys(files).join());
+});
+
+test('a multi-file same version copied from a chat gets a ZIP of the copy', async () => {
+  const chat = Object.assign(pubChat([pubMsg('m1', null, [
+    use('w1', 'Write', { file_path: '/home/claude/guide.html', content: 'PAGE' }), result('w1'),
+    use('w2', 'Write', { file_path: '/home/claude/guide.css', content: 'CSS' }), result('w2'),
+    ...publish('p1', PUB_U, 'v1', [{ as: 'index.html', path: '/home/claude/guide.html' }, { as: 'style.css', path: '/home/claude/guide.css' }]),
+  ])]), { uuid: 'a', name: 'Chat a' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': 'PAGE', 'style.css': { body: 'CSS', type: 'text/css' } } } } } });
+  const out = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
+  const f = artFolder('Guide', PUB_U);
+  assert.strictEqual(fetcher.count('publishedPageFile'), 0);
+  const entries = await zipEntries(await rawZip(out.zip, `artifacts/${f}/v1.zip`));
+  assert.deepStrictEqual(entries.map((e) => [e.name, e.bytes.toString('utf8')]), [['index.html', 'PAGE'], ['style.css', 'CSS']]);
+  assert.strictEqual(JSON.parse(await out.zip.file(`artifacts/${f}/artifact.json`).async('string')).versions.v1.zip, 'v1.zip');
+});
+
+test('Export Changes writes no ZIP for an artifact it does not write', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE } } } };
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-09T00:00:00Z')];
+  const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-09T00:00:00Z') };
+  const frames = [art(U(1), 'One'), art(U(2), 'Two')];
+  const two = { 'index.html': '1', 'a.js': '2' };
+  const fetcher = publishedFetcher({ [U(1)]: livePage('One', two), [U(2)]: livePage('Two', two) });
+  const { zip } = await runBulkZip({ list, chats, stored, options: { changesOnly: true }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  const names = Object.keys(zip.files).filter((n) => n.endsWith('.zip'));
+  assert.deepStrictEqual(names, [`artifacts/${artFolder('Two', U(2))}/${LIVE}.zip`]);
 });

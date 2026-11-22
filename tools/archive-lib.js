@@ -613,6 +613,14 @@ function thumbOf(root, rel) {
   return { rel, abs };
 }
 
+// A version's ZIP (1.19): named <folder>.zip in artifact.json and a real file beside the version folder, never
+// reached through a link. { zip: <name>, zipAbs } or nothing.
+function zipOf(root, dir, folder, zip) {
+  if (typeof folder !== 'string' || typeof zip !== 'string' || zip !== `${folder}.zip`) return {};
+  const abs = realFileUnder(root, `${dir}/${zip}`);
+  return abs ? { zip, zipAbs: abs } : {};
+}
+
 // artifact.json format 2 (Claude Takeout 1.18): a version folder per version, sameAs for one a chat wrote the same.
 function recordFromV2(root, dir, json) {
   const rec = newRecord(json.uuid.toLowerCase(), json.shortId, json.title, dir);
@@ -629,6 +637,7 @@ function recordFromV2(root, dir, json) {
       start: typeof v.start === 'string' && v.start ? v.start : null, startSaved: at && typeof v.startSaved === 'string' && v.startSaved ? v.startSaved : null,
       incomplete: !!v.incomplete, missing: Array.isArray(v.missing) ? v.missing.filter(p => typeof p === 'string') : [], saved: !!v.saved && !!at,
       ...(at ? { sameAs: null, sameAsAbs: null } : sameAsOf(v.sameAs, root)), publishedIn: publishedInList(v.publishedIn),
+      ...(at ? zipOf(root, dir, v.folder, v.zip) : {}),
     });
   }
   const thumb = thumbOf(root, json.thumb);
@@ -864,6 +873,7 @@ function artifactJsonV2FromDisk(rec) {
       })),
       start: v.start || null, startSaved: folder && v.startSaved || null, incomplete: !!v.incomplete,
       missing: Array.isArray(v.missing) ? v.missing.slice() : [], saved: !!folder && !!v.saved,
+      ...(folder && typeof v.zip === 'string' && v.zip === `${folder}.zip` ? { zip: v.zip } : {}),
     };
     if (v.sameAs && typeof v.sameAs === 'object' && Object.keys(v.sameAs).length) out.sameAs = { ...v.sameAs };
     out.publishedIn = (Array.isArray(v.publishedIn) ? v.publishedIn : []).map(p => ({
@@ -948,6 +958,7 @@ function artifactViewsFromDisk(store, chatFolders = new Map()) {
       createdAt: m.createdAt, updatedAt: m.updatedAt, folder, files, missing, start: m.start, startSaved, startSize, needsRuntime: m.needsRuntime,
       notExported: /(^|; )not exported/.test(note), note,
       inPayload: !!(m.start && payload && (payload.texts.some(t => t[0] === m.start) || payload.images.some(t => t[0] === m.start))), reused,
+      zip: cv && cv.folder && typeof cv.zip === 'string' && cv.zip ? `${rec.dir}/${cv.zip}` : null,
     });
     // Export All's views also carry the current version and claude.ai's source line (popup.js combinedViews).
     const standalone = store.layout === 'standalone-v18' || store.layout === 'standalone-flat';

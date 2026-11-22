@@ -3336,8 +3336,10 @@ const publishedSignedOutReply = (r) => !!(r && (r.status === 401 || r.error === 
 // missing: [path], problems: ['path (why)'], incomplete, start, startSaved, startSize, startText, needsRuntime, unverified,
 // texts, images }. With collect (Export Artifacts' viewer), texts (path -> text) and images (path -> { bytes, type })
 // hold the saved files a preview can use, within PREVIEW_ITEM_MAX each and PREVIEW_TOTAL_MAX in all of each kind
-// (see previewKind); otherwise both are empty. Chat exports ignore them.
-async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished, collect = false }) {
+// (see previewKind); otherwise both are empty. Chat exports ignore them. With zip ({ date }: the current version of an
+// artifact in the store), two or more saved files are also written as <version folder>.zip beside the folder
+// (versionZip); zipped says whether it was.
+async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished, collect = false, zip = null }) {
   const start = publishedStart(files);
   const missing = [];
   const problems = [];
@@ -3352,6 +3354,7 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   let imageBytes = 0;
   // Preview candidates, kept after the loop: the start file first, so other files never crowd it out.
   const candidates = [];
+  const zipped = [];
   const keep = (f, bytes) => {
     const kind = previewKind(f.path);
     if (!kind || bytes.length > PREVIEW_ITEM_MAX) return;
@@ -3398,6 +3401,7 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
       unverified.set(f.path, { sha256: await sha256Hex(bytes), size: bytes.length });
     }
     target.file(`${prefix}${names.get(f.path)}`, bytes);
+    if (zip) zipped.push([names.get(f.path), bytes]);
     written++;
     if (f === start) startSize = bytes.length;
     if (f === start && isPublishedText(f)) startText = new TextDecoder().decode(bytes);
@@ -3406,13 +3410,36 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   for (const [f, bytes] of candidates) if (f === start) keep(f, bytes);
   for (const [f, bytes] of candidates) if (f !== start) keep(f, bytes);
   const startOk = !!start && !missing.includes(start.path);
+  const wroteZip = zip ? await writeVersionZip(target, prefix, zipped, zip.date) : false;
   return {
-    saved: written > 0, missing, problems, incomplete: missing.length > 0,
+    saved: written > 0, zipped: wroteZip, missing, problems, incomplete: missing.length > 0,
     start: startOk ? start.path : null, startSaved: startOk ? names.get(start.path) : null, startSize: startOk ? startSize : null,
     startText, needsRuntime: publishedNeedsRuntime(startText), unverified, texts, images,
   };
 }
 
+
+// A version's files as one ZIP: entries in the order given ([saved name, bytes or text]), DEFLATE, each dated date
+// (an ISO time; empty or not a date: 1980-01-01), so the same files and date always give the same bytes.
+async function versionZip(entries, date) {
+  let when = new Date(typeof date === 'string' ? date : '');
+  if (!date || Number.isNaN(when.getTime())) when = new Date('1980-01-01T00:00:00Z');
+  const zip = new JSZip();
+  for (const [name, data] of entries) zip.file(name, data, { date: when, binary: typeof data !== 'string' });
+  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE', compressionOptions: { level: 6 } });
+}
+
+// Writes <prefix without its trailing />.zip when entries has two or more files. True when written; a ZIP that can't
+// be built is left out (the version's files are all saved, and artifact.json then names no ZIP).
+async function writeVersionZip(target, prefix, entries, date) {
+  if (entries.length < 2 || !prefix.endsWith('/')) return false;
+  try {
+    target.file(`${prefix.slice(0, -1)}.zip`, await versionZip(entries, date));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 // File entries (for published.json or artifact.json) of files saved unchecked: sha256 and size of the saved
 // bytes and verified: false.
@@ -3621,6 +3648,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
     const got = await fetchPublishedFiles({
       target, prefix: exportAll ? store.versionFolder(rec.store, v.key) : `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
       state, onSignedOut: markSignedOut, fetchPublished, collect: wanted(rec.uuid, v.ver),
+      zip: exportAll && wanted(rec.uuid, v.ver) ? { date: rec.store.meta.updatedAt } : null,
     });
     // Export All: a version the store points at a chat's file for (sameAs) stays as it was when no copy was saved.
     const keptSame = exportAll && !got.saved && !!v.sameAs;
@@ -3631,6 +3659,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
         v.folder = got.saved ? v.folderName : null;
         // A copy saved: the version no longer points at a chat's file.
         if (got.saved) delete v.sameAs;
+        if (got.zipped) v.zip = `${v.folderName}.zip`; else delete v.zip;
       }
       markUnverified(v.files, got.unverified);
       v.missing = got.missing;
@@ -3649,7 +3678,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
   // Export All: a version this chat wrote the same (matched: path -> { name, text }) that the store has no copy of.
   // One file: the store points at this chat's file (sameAs), unless another chat's already is. Several: the chat's
   // texts are copied into its version folder; claude.ai's checksums matched them, so nothing is fetched.
-  const keepSame = (rec, v, matched) => {
+  const keepSame = async (rec, v, matched) => {
     if (v.saved) return;
     if (v.files.length === 1) {
       const f = v.files[0];
@@ -3671,6 +3700,9 @@ async function savePublishedPages(folder, data, ctx = {}) {
     const at = store.versionFolder(rec.store, v.key);
     for (const f of v.files) target.file(`${at}${v.names.get(f.path)}`, matched.get(f.path).text);
     Object.assign(v, { saved: true, attempted: true, folder: v.folderName, missing: [], incomplete: false });
+    if (wanted(rec.uuid, v.ver) && await writeVersionZip(target, at, v.files.map((f) => [v.names.get(f.path), matched.get(f.path).text]), rec.store.meta.updatedAt)) {
+      v.zip = `${v.folderName}.zip`;
+    }
     const startText = v.start && matched.has(v.start) ? matched.get(v.start).text : null;
     v.needsRuntime = publishedNeedsRuntime(startText);
     v.text = typeof startText === 'string' && startText.length <= limit ? startText : null;
@@ -3731,7 +3763,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
       }
       const matched = await judge(v.files, m.publishes, m.sources);
       const same = !!matched;
-      if (same && exportAll) keepSame(rec, v, matched);
+      if (same && exportAll) await keepSame(rec, v, matched);
       if (!same && !v.attempted && !state.publishedSignedOut) await fetchVersion(rec, v);
       // A version the store points at a chat's file for (sameAs) stays complete when this chat's fetch fails.
       if (!same && !v.saved && !v.sameAs) v.incomplete = true;
@@ -5397,6 +5429,8 @@ function artifactJsonV2(rec) {
       })),
       start: v.start || null, startSaved: (folder && v.startSaved) || null, incomplete: !!v.incomplete,
       missing: Array.isArray(v.missing) ? v.missing.slice() : [], saved: !!folder && !!v.saved,
+      // The version's ZIP beside its folder (only the current version with two or more saved files has one).
+      ...(folder && typeof v.zip === 'string' && v.zip === `${folder}.zip` ? { zip: v.zip } : {}),
     };
     if (v.sameAs && typeof v.sameAs === 'object' && Object.keys(v.sameAs).length) out.sameAs = { ...v.sameAs };
     out.publishedIn = (Array.isArray(v.publishedIn) ? v.publishedIn : []).map((p) => ({
@@ -5536,7 +5570,8 @@ async function saveArtifact(root, a, ctx) {
         if (info.rejected.length) parts.push(`${artifactCount(info.rejected.length, 'file')} with unsafe paths not fetched`);
         warn(name, `Artifact "${name}": file names changed to stay inside its folder: ${parts.join('; ')}.`, openNote);
       }
-      got = await fetchPublishedFiles({ target: root, prefix: store.versionFolder(rec, info.ver), uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished, collect: true });
+      got = await fetchPublishedFiles({ target: root, prefix: store.versionFolder(rec, info.ver), uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished, collect: true,
+        zip: { date: rec.meta.updatedAt } });
       meta.missing = got.missing;
       meta.incomplete = got.incomplete;
       markUnverified(files, got.unverified);
@@ -5552,6 +5587,7 @@ async function saveArtifact(root, a, ctx) {
         if (v) {
           // A copy that didn't save keeps pointing at the chat's file.
           if (!got.saved && prev && prev.sameAs) v.sameAs = prev.sameAs;
+          if (got.zipped) v.zip = `${v.folder}.zip`;
           Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
           rec.versions.set(info.ver, v);
         } else {
@@ -5600,7 +5636,7 @@ async function saveArtifact(root, a, ctx) {
     start, startSaved, startSize: kept || same || keptOnFail ? keptStartSize(kept || same || keptOnFail) : got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
     inPayload: kept || same || keptOnFail ? !!(start && payload && (payload.texts.some((t) => t[0] === start) || payload.images.some((t) => t[0] === start)))
       : !!(got && !failed && start && (got.texts.has(start) || got.images.has(start))),
-    reused: !!same,
+    reused: !!same, zip: zipHref(prefix, rec, meta.ver),
   });
   return {
     row: {
@@ -5611,6 +5647,12 @@ async function saveArtifact(root, a, ctx) {
     entry: { uuid, title, folder, ver: meta.ver },
     meta, view, payload,
   };
+}
+
+// The root-relative href of a version's ZIP (store record rec, version ver), or null when it has none.
+function zipHref(prefix, rec, ver) {
+  const v = rec && rec.versions instanceof Map ? rec.versions.get(ver || '') : null;
+  return v && typeof v.zip === 'string' && v.zip ? `${prefix}${rec.dir}/${v.zip}` : null;
 }
 
 // The size of a kept version's start file, from its listing (claude.ai's or, unchecked, the saved bytes').
