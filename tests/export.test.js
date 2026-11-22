@@ -2502,7 +2502,138 @@ const U = (n) => `${String(n).padStart(8, '0')}-1111-4111-8111-111111111111`;
 const art = (slug, title, extra = {}) => ({ slug, title, typeSlug: '', typeTitle: '', sourceSurface: 'chat', rel: 'mine', live: LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z', ...extra });
 const livePage = (title, files, extra = {}) => ({ title, live: LIVE, versions: { [LIVE]: { files } }, ...extra });
 const artFolder = (name, uuid) => `${name}_${uuidToBase58(uuid)}`;
+// An artifact's current (LIVE) version folder, and the current version in its artifact.json (format 2).
+const artVer = (name, uuid) => `${artFolder(name, uuid)}/${LIVE}`;
+const curVer = (meta) => meta.versions[meta.current];
 const DOCS_NOTE = "Claude Docs text isn't available as a file; export the chat that made it to get the document.";
+
+// ---- The artifacts store: one folder per artifact, one folder per version, artifact.json format 2 ----
+test('artifactJsonV2 writes format 2 with versions, listed and current', () => {
+  const sb = exportPopup().sandbox;
+  const sha = 'a'.repeat(64);
+  sb.__in = JSON.parse(JSON.stringify({
+    uuid: U(1), shortId: 'Short1', dir: 'Guide_Short1', title: 'Guide', listed: true, current: 'v2',
+    meta: { url: 'https://claude.ai/artifact/Short1', typeTitle: 'Page', sourceSurface: 'chat', rel: 'mine', public: true, createdAt: 'c', updatedAt: 'u', note: 'n', start: 'index.html', needsRuntime: false, thumb: 'viewer-files/thumbs/Short1.png' },
+    versions: [
+      ['v1', { folder: null, files: [{ path: 'index.html', savedAs: 'index.html', size: 3, contentType: 'text/html', sha256: sha }], start: 'index.html', startSaved: 'index.html',
+        incomplete: false, missing: [], saved: false, sameAs: { 'index.html': 'Chat_a/artefacts/guide.html' },
+        publishedIn: [{ chat: 'a', messageUuid: 'm1', toolUseId: 'p1', same: true, writtenAs: 'guide.html' }] }],
+      ['v2', { folder: 'v2', files: [{ path: 'index.html', savedAs: 'index.html', size: 4, contentType: 'text/html', sha256: sha, verified: false }], start: 'index.html', startSaved: 'index.html',
+        incomplete: false, missing: [], saved: true, publishedIn: [{ chat: 'b', messageUuid: 'n1', toolUseId: 'q1', same: false, writtenAs: null }] }],
+    ],
+  }));
+  const out = vm.runInContext(`(() => {
+    const rec = { ...__in, versions: new Map(__in.versions) };
+    const v2 = rec.versions.get('v2');
+    Object.defineProperty(v2, 'preview', { value: { texts: [['index.html', 'x']], images: [] } });
+    Object.defineProperty(v2.publishedIn[0], 'text', { value: 'x' });
+    return JSON.stringify(artifactJsonV2(rec));
+  })()`, sb);
+  const json = JSON.parse(out);
+  assert.deepStrictEqual(Object.keys(json), ['format', 'uuid', 'shortId', 'url', 'title', 'typeTitle', 'sourceSurface', 'rel', 'public', 'createdAt', 'updatedAt',
+    'listed', 'current', 'start', 'needsRuntime', 'note', 'thumb', 'versions']);
+  assert.deepStrictEqual([json.format, json.listed, json.current, json.uuid, json.title], [2, true, 'v2', U(1), 'Guide']);
+  assert.deepStrictEqual(Object.keys(json.versions), ['v1', 'v2']);
+  assert.deepStrictEqual(Object.keys(json.versions.v1), ['folder', 'files', 'start', 'startSaved', 'incomplete', 'missing', 'saved', 'sameAs', 'publishedIn']);
+  assert.deepStrictEqual(Object.keys(json.versions.v2), ['folder', 'files', 'start', 'startSaved', 'incomplete', 'missing', 'saved', 'publishedIn']);
+  assert.strictEqual(json.versions.v1.folder, null);
+  assert.deepStrictEqual(json.versions.v1.sameAs, { 'index.html': 'Chat_a/artefacts/guide.html' });
+  assert.strictEqual(json.versions.v2.folder, 'v2');
+  assert.deepStrictEqual(Object.keys(json.versions.v2.files[0]), ['path', 'savedAs', 'size', 'contentType', 'sha256', 'verified']);
+  assert.deepStrictEqual([json.versions.v1.files[0].verified, json.versions.v2.files[0].verified], [true, false]);
+  assert.deepStrictEqual(json.versions.v1.publishedIn, [{ chat: 'a', messageUuid: 'm1', toolUseId: 'p1', same: true, writtenAs: 'guide.html' }]);
+  assert.deepStrictEqual(json.versions.v2.publishedIn, [{ chat: 'b', messageUuid: 'n1', toolUseId: 'q1', same: false, writtenAs: null }]);
+  assert.ok(!out.includes('preview') && !out.includes('"text"'));
+});
+
+test('Export Artifacts writes <Title>_<id>/<ver>/ and artifact.json format 2', async () => {
+  const frames = [art(U(1), 'Game'), art(U(2), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' }), art(U(3), 'Design Empty', { typeSlug: DESIGN_TYPE, typeTitle: 'Design' })];
+  const pages = {
+    [U(1)]: livePage('Game', { 'index.html': '<script src="app.js"></script>', 'app.js': 'go()', 'artifact.json': '{"mine":1}' }),
+    [U(3)]: livePage('Design Empty', { 'artifact-type/runtime.js': 'rt' }),
+  };
+  const { files, views } = await runArtifacts({ frames, pages });
+  const game = artFolder('Game', U(1));
+  const plan = artFolder('Plan', U(2));
+  const design = artFolder('Design_Empty', U(3));
+  assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`${game}/`)).sort(),
+    [`${game}/${LIVE}/app.js`, `${game}/${LIVE}/artifact.json`, `${game}/${LIVE}/index.html`, `${game}/artifact.json`].sort());
+  assert.strictEqual(files[`${game}/${LIVE}/artifact.json`], '{"mine":1}', 'a page file named artifact.json keeps its name in its version folder');
+  for (const f of [plan, design]) assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`${f}/`)), [`${f}/artifact.json`]);
+  const meta = JSON.parse(files[`${game}/artifact.json`]);
+  assert.deepStrictEqual([meta.format, meta.listed, meta.current, meta.start], [2, true, LIVE, 'index.html']);
+  assert.deepStrictEqual(Object.keys(meta.versions), [LIVE]);
+  const v = meta.versions[LIVE];
+  assert.deepStrictEqual([v.folder, v.saved, v.incomplete, v.start, v.startSaved], [LIVE, true, false, 'index.html', 'index.html']);
+  assert.deepStrictEqual(v.files.map((f) => f.savedAs), ['index.html', 'app.js', 'artifact.json']);
+  assert.ok(!('files' in meta) && !('ver' in meta));
+  const docs = JSON.parse(files[`${plan}/artifact.json`]);
+  assert.deepStrictEqual([docs.format, docs.listed, docs.note, docs.versions], [2, true, DOCS_NOTE, {}]);
+  assert.deepStrictEqual(JSON.parse(files[`${design}/artifact.json`]).versions, {});
+  assert.ok(files['index.html'].includes(`href="${game}/${LIVE}/index.html"`), files['index.html']);
+  assert.ok(files['index.md'].includes(`[Game](${game}/${LIVE}/index.html)`), files['index.md']);
+  assert.ok(files['index.md'].includes(`[${LIVE}](${game}/${LIVE}/index.html) (current)`), files['index.md']);
+  const view = views.find((x) => x.title === 'Game');
+  assert.strictEqual(view.folder, `${game}/${LIVE}`);
+  assert.strictEqual(view.startSaved, 'index.html');
+  const manifest = JSON.parse(files['export-manifest.json']);
+  assert.deepStrictEqual(manifest.artifacts.map((e) => e.folder), [game, plan, design]);
+});
+
+test('a version with no id goes to current/', () => {
+  const sb = exportPopup().sandbox;
+  const root = zipStub();
+  sb.__root = root;
+  const out = JSON.parse(vm.runInContext(`(() => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const rec = store.record('${U(1)}', { title: 'Guide' });
+    const again = store.record('${U(1).toUpperCase()}', { title: 'Other' });
+    const a = store.versionFolder(rec, '');
+    const b = store.versionFolder(rec, 'v1');
+    const c = store.versionFolder(rec, 'current');
+    const d = store.versionFolder(rec, 'artifact.json');
+    rec.versions.set('', { folder: 'current', files: [], saved: true, publishedIn: [] });
+    store.write(rec);
+    return JSON.stringify({ same: rec === again, a, b, c, d, again: store.versionFolder(rec, ''), has: [store.has('${U(1)}', ''), store.has('${U(1)}', 'v1')], n: store.records().length });
+  })()`, sb));
+  const dir = `artifacts/${artFolder('Guide', U(1))}`;
+  assert.deepStrictEqual(out, { same: true, a: `${dir}/current/`, b: `${dir}/v1/`, c: `${dir}/current_2/`, d: `${dir}/artifact.json_2/`, again: `${dir}/current/`, has: [true, false], n: 1 });
+  const json = JSON.parse(root.written[`${dir}/artifact.json`]);
+  assert.deepStrictEqual([json.format, json.current, Object.keys(json.versions)], [2, null, ['current']]);
+});
+
+test('runArtifactStep with a store does not fetch a version it already holds whole', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: livePage('Guide', { 'index.html': 'live' }), [U(2)]: livePage('Part', { 'index.html': 'p2' }) });
+  const root = zipStub();
+  sb.setTimeout = (f) => setTimeout(f, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide'), art(U(2), 'Part')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const pub = [{ chat: 'a', messageUuid: 'm1', toolUseId: 'p1', same: false, writtenAs: null }];
+    const whole = { folder: '${LIVE}', files: [{ path: 'index.html', savedAs: 'index.html', size: 4, contentType: 'text/html', sha256: '${'b'.repeat(64)}' }],
+      start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: pub };
+    Object.defineProperty(whole, 'preview', { value: { texts: [['index.html', 'mine']], images: [] } });
+    store.record('${U(1)}', { title: 'Guide' }).versions.set('${LIVE}', whole);
+    // Part: incomplete, so fetched again; its publishes stay.
+    store.record('${U(2)}', { title: 'Part' }).versions.set('${LIVE}', { ...whole, incomplete: true, missing: ['index.html'], publishedIn: pub.slice() });
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, full: false, listed: 2, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return JSON.stringify({ views: step.views, rows: step.rows, whole: step.whole });
+  })()`, sb));
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(1)), 0);
+  assert.strictEqual(fetcher.count('publishedPageFile', U(2)), 1);
+  const g = artFolder('Guide', U(1));
+  const p = artFolder('Part', U(2));
+  assert.ok(!(`artifacts/${g}/${LIVE}/index.html` in root.written), 'not written again');
+  assert.strictEqual(Buffer.from(root.written[`artifacts/${p}/${LIVE}/index.html`]).toString('utf8'), 'p2');
+  assert.deepStrictEqual(out.whole, [true, true]);
+  assert.strictEqual(out.views[0].folder, `artifacts/${g}/${LIVE}`);
+  assert.strictEqual(out.rows[0].folder, `${g}/${LIVE}`);
+  const meta = JSON.parse(root.written[`artifacts/${g}/artifact.json`]);
+  assert.deepStrictEqual([meta.current, meta.versions[LIVE].publishedIn.length], [LIVE, 1]);
+  const part = JSON.parse(root.written[`artifacts/${p}/artifact.json`]);
+  assert.deepStrictEqual([part.versions[LIVE].incomplete, part.versions[LIVE].publishedIn.map((x) => x.chat)], [false, ['a']]);
+});
 
 test('Export Artifacts saves each artifact\'s current files with artifact.json and an index', async () => {
   const frames = [art(U(1), 'Quarterly Report'), art(U(2), 'Game', { sourceSurface: 'code' })];
@@ -2515,24 +2646,24 @@ test('Export Artifacts saves each artifact\'s current files with artifact.json a
   assert.deepStrictEqual(plain(listCalls), [{ action: 'listArtifacts', withAccountName: true }]);
   const f1 = artFolder('Quarterly_Report', U(1));
   const f2 = artFolder('Game', U(2));
-  assert.deepStrictEqual(Object.keys(files).sort(), [`${f1}/artifact.json`, `${f1}/index.html`, `${f2}/app.js`, `${f2}/artifact.json`, `${f2}/img/logo.svg`, `${f2}/index.html`,
+  assert.deepStrictEqual(Object.keys(files).sort(), [`${f1}/artifact.json`, `${f1}/${LIVE}/index.html`, `${f2}/${LIVE}/app.js`, `${f2}/artifact.json`, `${f2}/${LIVE}/img/logo.svg`, `${f2}/${LIVE}/index.html`,
     'export-manifest.json', 'index.html', 'index.md', 'viewer-check.gif', 'viewer-files/part-0001.js', 'viewer.html'].sort());
-  assert.strictEqual(files[`${f2}/app.js`], 'go()');
+  assert.strictEqual(files[`${f2}/${LIVE}/app.js`], 'go()');
   const meta = JSON.parse(files[`${f2}/artifact.json`]);
-  assert.deepStrictEqual(Object.keys(meta).sort(), ['createdAt', 'files', 'format', 'incomplete', 'missing', 'needsRuntime', 'note', 'public', 'rel', 'shortId', 'sourceSurface', 'start', 'title', 'typeTitle', 'updatedAt', 'url', 'uuid', 'ver'].sort());
+  assert.deepStrictEqual(Object.keys(meta).sort(), ['createdAt', 'current', 'format', 'listed', 'needsRuntime', 'note', 'public', 'rel', 'shortId', 'sourceSurface', 'start', 'title', 'typeTitle', 'updatedAt', 'url', 'uuid', 'versions'].sort());
   const shortId = uuidToBase58(U(2));
-  assert.deepStrictEqual([meta.format, meta.uuid, meta.shortId, meta.url, meta.title, meta.ver, meta.sourceSurface, meta.rel, meta.incomplete, meta.needsRuntime, meta.createdAt, meta.updatedAt],
-    [1, U(2), shortId, `https://claude.ai/artifact/${shortId}`, 'Game', LIVE, 'code', 'mine', false, false, '2026-10-01T00:00:00Z', '2026-11-01T00:00:00Z']);
-  assert.deepStrictEqual(meta.files.map((f) => [f.path, f.savedAs]), [['index.html', 'index.html'], ['app.js', 'app.js'], ['img/logo.svg', 'img/logo.svg']]);
-  assert.ok(meta.files.every((f) => /^[0-9a-f]{64}$/.test(f.sha256) && f.size > 0 && f.contentType));
-  assert.deepStrictEqual(meta.missing, []);
+  assert.deepStrictEqual([meta.format, meta.uuid, meta.shortId, meta.url, meta.title, meta.current, meta.sourceSurface, meta.rel, curVer(meta).incomplete, meta.needsRuntime, meta.createdAt, meta.updatedAt],
+    [2, U(2), shortId, `https://claude.ai/artifact/${shortId}`, 'Game', LIVE, 'code', 'mine', false, false, '2026-10-01T00:00:00Z', '2026-11-01T00:00:00Z']);
+  assert.deepStrictEqual(curVer(meta).files.map((f) => [f.path, f.savedAs]), [['index.html', 'index.html'], ['app.js', 'app.js'], ['img/logo.svg', 'img/logo.svg']]);
+  assert.ok(curVer(meta).files.every((f) => /^[0-9a-f]{64}$/.test(f.sha256) && f.size > 0 && f.contentType && f.verified === true));
+  assert.deepStrictEqual(curVer(meta).missing, []);
   const manifest = JSON.parse(files['export-manifest.json']);
   assert.deepStrictEqual([manifest.format, manifest.kind, manifest.listed], [1, 'artifacts', 2]);
   assert.ok(manifest.exported_at);
   assert.deepStrictEqual(manifest.artifacts, [{ uuid: U(1), title: 'Quarterly Report', folder: f1, ver: LIVE }, { uuid: U(2), title: 'Game', folder: f2, ver: LIVE }]);
   const md = files['index.md'];
   assert.match(md, /\*\*Listed by claude\.ai:\*\* 2/);
-  assert.ok(md.includes(`[Game](${f2}/index.html)`), md);
+  assert.ok(md.includes(`[Game](${f2}/${LIVE}/index.html)`), md);
   assert.ok(md.includes(`(https://claude.ai/artifact/${shortId})`), md);
   assert.ok(/\| 3 \|/.test(md) || /3 files/.test(md), md);
   assert.match(files['index.html'], /Listed by claude\.ai: 2/);
@@ -2552,7 +2683,7 @@ test('Export Artifacts to a folder writes the same files', async () => {
   assert.strictEqual(runs.length, 1);
   assert.match(runs[0], /^claude-takeout-artifacts-mika-\d{4}-\d{2}-\d{2}_\d{4}$/);
   assert.deepStrictEqual(Object.keys(disk.files).sort(), Object.keys(zipped.files).sort());
-  assert.strictEqual(disk.files[`${artFolder('Two', U(2))}/a.html`], 'two');
+  assert.strictEqual(disk.files[`${artVer('Two', U(2))}/a.html`], 'two');
   assert.match(disk.status.textContent, new RegExp(`Exported 2 artifacts to ${runs[0]}\\.`));
 });
 
@@ -2580,9 +2711,9 @@ test('a Claude Docs artifact is listed with a note and not fetched', async () =>
     assert.deepStrictEqual(Object.keys(files).filter((n) => n.startsWith(`${folder}/`)), [`${folder}/artifact.json`]);
     const meta = JSON.parse(files[`${folder}/artifact.json`]);
     assert.strictEqual(meta.note, DOCS_NOTE);
-    assert.deepStrictEqual(meta.files, []);
+    assert.deepStrictEqual(meta.versions, {});
   }
-  assert.ok(files[`${artFolder('Mock', U(3))}/index.html`], 'a typed artifact that is not Docs is fetched');
+  assert.ok(files[`${artVer('Mock', U(3))}/index.html`], 'a typed artifact that is not Docs is fetched');
   const md = files['index.md'];
   const planRow = md.split('\n').find((l) => l.includes('Plan'));
   assert.ok(planRow.includes(`| ${DOCS_NOTE} |`), planRow);
@@ -2598,7 +2729,7 @@ test('an artifact claude.ai refuses is a warning; the rest export', async () => 
     [U(4)]: livePage('Last', { 'index.html': 'last' }),
   };
   const { files, fetcher, status } = await runArtifacts({ frames, pages });
-  assert.strictEqual(files[`${artFolder('Mine', U(2))}/index.html`], 'mine');
+  assert.strictEqual(files[`${artVer('Mine', U(2))}/index.html`], 'mine');
   assert.strictEqual(fetcher.count('publishedPageInfo', U(4)), 0, 'nothing is fetched after a 401');
   assert.strictEqual(fetcher.count('publishedPageInfo', U(3)), 1);
   const errors = files['errors.txt'];
@@ -2608,7 +2739,7 @@ test('an artifact claude.ai refuses is a warning; the rest export', async () => 
   assert.ok(!/\*\*Conversation:\*\*/.test(errors) && /Export Artifacts/.test(errors), errors.slice(0, 300));
   const theirs = JSON.parse(files[`${artFolder('Theirs', U(1))}/artifact.json`]);
   assert.match(theirs.note, /not exported/i);
-  assert.strictEqual(theirs.incomplete, true);
+  assert.deepStrictEqual(theirs.versions, {});
   const last = JSON.parse(files[`${artFolder('Last', U(4))}/artifact.json`]);
   assert.match(last.note, /not exported/i);
   const row = files['index.md'].split('\n').find((l) => l.includes('Theirs'));
@@ -2628,13 +2759,13 @@ test('same-titled artifacts get distinct folders, and unsafe titles and paths st
   const s1 = artFolder('Same', U(1));
   const s2 = artFolder('Same', U(2));
   assert.notStrictEqual(s1, s2);
-  assert.strictEqual(files[`${s1}/index.html`], 'a');
-  assert.strictEqual(files[`${s2}/index.html`], 'b');
-  const evil = artFolder('etcpasswd', U(3));
+  assert.strictEqual(files[`${s1}/${LIVE}/index.html`], 'a');
+  assert.strictEqual(files[`${s2}/${LIVE}/index.html`], 'b');
+  const evil = artVer('etcpasswd', U(3));
   assert.strictEqual(files[`${evil}/ok.html`], 'ok');
   assert.strictEqual(files[`${evil}/a_b.html`], 'colon');
   assert.strictEqual(files[`${evil}/_CON.txt`], 'con');
-  assert.ok(files[`${artFolder('artifact', U(4))}/index.html`]);
+  assert.ok(files[`${artVer('artifact', U(4))}/index.html`]);
   for (const name of Object.keys(files)) {
     assert.ok(!name.startsWith('/') && name.split('/').every((s) => s && s !== '..' && s !== '.') && !name.includes(':'), name);
   }
@@ -2715,7 +2846,7 @@ test('a missing live version writes the no-published-version note without fetchi
     assert.deepStrictEqual(Object.keys(files).filter((f) => f.startsWith(`${folder}/`)), [`${folder}/artifact.json`]);
     const meta = JSON.parse(files[`${folder}/artifact.json`]);
     assert.strictEqual(meta.note, 'no published version');
-    assert.strictEqual(meta.ver, '');
+    assert.deepStrictEqual([meta.current, meta.versions], [null, {}]);
   }
 });
 
@@ -2724,7 +2855,7 @@ test('shared artifacts are exported and labelled shared with you', async () => {
   const pages = { [U(1)]: livePage('Theirs', { 'index.html': 'theirs' }), [U(2)]: livePage('Mine', { 'index.html': 'mine' }) };
   const { files } = await runArtifacts({ frames, pages });
   const folder = artFolder('Theirs', U(1));
-  assert.strictEqual(files[`${folder}/index.html`], 'theirs');
+  assert.strictEqual(files[`${folder}/${LIVE}/index.html`], 'theirs');
   const meta = JSON.parse(files[`${folder}/artifact.json`]);
   assert.strictEqual(meta.rel, 'shared');
   assert.match(meta.note, /shared with you/);
@@ -2774,7 +2905,7 @@ test('Export Artifacts leaves the export record alone', async () => {
   assert.ok(!JSON.stringify(reads).includes('exportRecord'), JSON.stringify(reads));
 });
 
-test('a page file named artifact.json or ARTIFACT.json becomes artifact_2.json', async () => {
+test('a page file named artifact.json or ARTIFACT.json keeps its name in its version folder', async () => {
   const frames = [art(U(1), 'Lower'), art(U(2), 'Upper')];
   const pages = {
     [U(1)]: livePage('Lower', { 'index.html': 'i', 'artifact.json': '{"mine":1}', 'sub/artifact.json': 'deep' }),
@@ -2783,14 +2914,13 @@ test('a page file named artifact.json or ARTIFACT.json becomes artifact_2.json',
   const { files } = await runArtifacts({ frames, pages });
   const lower = artFolder('Lower', U(1));
   const upper = artFolder('Upper', U(2));
-  assert.strictEqual(files[`${lower}/artifact_2.json`], '{"mine":1}');
-  assert.strictEqual(files[`${lower}/sub/artifact.json`], 'deep');
-  assert.strictEqual(JSON.parse(files[`${lower}/artifact.json`]).format, 1);
-  assert.strictEqual(files[`${upper}/ARTIFACT_2.json`], '{"mine":2}');
-  assert.ok(!(`${upper}/ARTIFACT.json` in files));
-  assert.strictEqual(JSON.parse(files[`${upper}/artifact.json`]).format, 1);
+  assert.strictEqual(files[`${lower}/${LIVE}/artifact.json`], '{"mine":1}');
+  assert.strictEqual(files[`${lower}/${LIVE}/sub/artifact.json`], 'deep');
+  assert.strictEqual(JSON.parse(files[`${lower}/artifact.json`]).format, 2);
+  assert.strictEqual(files[`${upper}/${LIVE}/ARTIFACT.json`], '{"mine":2}');
+  assert.strictEqual(JSON.parse(files[`${upper}/artifact.json`]).format, 2);
   const meta = JSON.parse(files[`${lower}/artifact.json`]);
-  assert.strictEqual(meta.files.find((f) => f.path === 'artifact.json').savedAs, 'artifact_2.json');
+  assert.strictEqual(curVer(meta).files.find((f) => f.path === 'artifact.json').savedAs, 'artifact.json');
 });
 
 test('index.md escapes titles and link targets', async () => {
@@ -2803,8 +2933,8 @@ test('index.md escapes titles and link targets', async () => {
   assert.ok(!row.includes('<b>'), row);
   assert.ok(!/[^\\]\| pipe/.test(row), row);
   const folder = artFolder(require('../export-core.js').safeFileTitle(frames[0].title), U(1));
-  assert.ok(files[`${folder}/page (1).html`], Object.keys(files).join());
-  assert.ok(row.includes(`](${encodeURIComponent(folder)}/page%20%281%29.html)`), row);
+  assert.ok(files[`${folder}/${LIVE}/page (1).html`], Object.keys(files).join());
+  assert.ok(row.includes(`](${encodeURIComponent(folder)}/${LIVE}/page%20%281%29.html)`), row);
 });
 
 test('the recovery hint for artifact_export names Export Artifacts, and errors.txt does not say Conversation', () => {
@@ -2900,7 +3030,7 @@ test('index.html escapes everything from claude.ai and links only local files an
     const local = !h.includes(':') && !h.startsWith('/') && !h.split('/').includes('..');
     assert.ok(remote || local, h);
   }
-  assert.ok(hrefs.includes(`${encodeURIComponent(artFolder(require('../export-core.js').safeFileTitle(frames[0].title), U(1)))}/pa%20ge%231.html`), hrefs.join());
+  assert.ok(hrefs.includes(`${encodeURIComponent(artFolder(require('../export-core.js').safeFileTitle(frames[0].title), U(1)))}/${LIVE}/pa%20ge%231.html`), hrefs.join());
   for (const m of html.matchAll(/<a [^>]*href="https:[^"]*"[^>]*>/g)) assert.match(m[0], /rel="noopener noreferrer"/);
   assert.match(html, /prefers-color-scheme: dark/);
 });
@@ -2932,7 +3062,7 @@ test('an artifact whose export throws unexpectedly still gets a row, a manifest 
       safeFileTitle = (t) => { if (t === 'Boom') throw new RangeError('bad'); return title(t); };
     })()`, sb),
   });
-  assert.strictEqual(files[`${artFolder('Fine', U(1))}/index.html`], 'fine');
+  assert.strictEqual(files[`${artVer('Fine', U(1))}/index.html`], 'fine');
   const manifest = JSON.parse(files['export-manifest.json']);
   assert.strictEqual(manifest.artifacts.length, 3);
   for (const [name, uuid] of [['Throws', U(2)], ['Boom', U(3)]]) {
@@ -2941,7 +3071,7 @@ test('an artifact whose export throws unexpectedly still gets a row, a manifest 
     assert.strictEqual(entry.ver, '');
     const meta = JSON.parse(files[`${entry.folder}/artifact.json`]);
     assert.strictEqual(meta.note, NOTE);
-    assert.strictEqual(meta.incomplete, true);
+    assert.deepStrictEqual([meta.format, meta.current, meta.versions], [2, LIVE, {}]);
     const mdRow = files['index.md'].split('\n').find((l) => l.includes(name));
     assert.ok(mdRow && mdRow.includes(NOTE), mdRow);
     const htmlRow = files['index.html'].split('\n').find((l) => l.startsWith('<tr><td>') && l.includes(name));
@@ -2977,10 +3107,10 @@ test('a shared artifact links its start file locally only for types the viewer w
     assert.ok(!files['index.html'].includes(`${folder}/`), `${n}: no local link in index.html`);
   });
   const pdf = encodeURIComponent(artFolder('S6', U(7)));
-  assert.ok(files['index.md'].includes(`(${pdf}/notes.pdf)`), files['index.md']);
-  assert.ok(files['index.html'].includes(`href="${pdf}/notes.pdf"`));
+  assert.ok(files['index.md'].includes(`(${pdf}/${LIVE}/notes.pdf)`), files['index.md']);
+  assert.ok(files['index.html'].includes(`href="${pdf}/${LIVE}/notes.pdf"`));
   for (const [t, n, u] of [['OwnXml', 'page.xml', U(20)], ['OwnSvg', 'art.svg', U(21)]]) {
-    const href = `${encodeURIComponent(artFolder(t, u))}/${n}`;
+    const href = `${encodeURIComponent(artFolder(t, u))}/${LIVE}/${n}`;
     assert.ok(files['index.md'].includes(`(${href})`), `own ${n} keeps its link`);
     assert.ok(files['index.html'].includes(`href="${href}"`));
   }
@@ -3011,7 +3141,7 @@ test('an artifact folder\'s title part is at most 200 UTF-8 bytes', async () => 
   const title = letter.repeat(60);
   const { files } = await runArtifacts({ frames: [art(U(1), title)], pages: { [U(1)]: livePage(title, { 'index.html': 'a' }) } });
   const folder = `${letter.repeat(50)}_${uuidToBase58(U(1))}`;
-  assert.strictEqual(files[`${folder}/index.html`], 'a', Object.keys(files).join());
+  assert.strictEqual(files[`${folder}/${LIVE}/index.html`], 'a', Object.keys(files).join());
 });
 
 test('a throw mid-export hides the progress, sets an error status and re-enables the buttons', async () => {
@@ -3067,17 +3197,17 @@ test('Cowork and Code artifacts listed without checksums are saved unverified', 
   };
   const { files, fetcher } = await runArtifacts({ frames, pages });
   const meta = (name, n) => JSON.parse(files[`${artFolder(name, U(n))}/artifact.json`]);
-  assert.strictEqual(files[`${artFolder('Cowork_Page', U(1))}/index.html`], '<p>cowork</p>');
+  assert.strictEqual(files[`${artVer('Cowork_Page', U(1))}/index.html`], '<p>cowork</p>');
   const cowork = meta('Cowork_Page', 1);
-  assert.deepStrictEqual(cowork.files, [{ path: 'index.html', savedAs: 'index.html', size: 13, contentType: 'text/html', sha256: sha('<p>cowork</p>'), verified: false }]);
-  assert.strictEqual(cowork.incomplete, false);
+  assert.deepStrictEqual(curVer(cowork).files, [{ path: 'index.html', savedAs: 'index.html', size: 13, contentType: 'text/html', sha256: sha('<p>cowork</p>'), verified: false }]);
+  assert.strictEqual(curVer(cowork).incomplete, false);
   assert.strictEqual(cowork.note, "files not checked against claude.ai's checksum");
   const shared = meta('Shared', 2);
-  assert.deepStrictEqual(shared.files.map((f) => [f.path, f.sha256, f.verified]), [['index.html', sha('<p>s</p>'), false], ['gone.css', null, false]]);
-  assert.deepStrictEqual(shared.missing, ['gone.css']);
+  assert.deepStrictEqual(curVer(shared).files.map((f) => [f.path, f.sha256, f.verified]), [['index.html', sha('<p>s</p>'), false], ['gone.css', null, false]]);
+  assert.deepStrictEqual(curVer(shared).missing, ['gone.css']);
   assert.match(shared.note, /^shared with you; .*files not checked against claude\.ai's checksum/);
   const checked = meta('Checked', 3);
-  assert.ok(!('verified' in checked.files[0]));
+  assert.strictEqual(curVer(checked).files[0].verified, true);
   assert.strictEqual(checked.note, '');
   const call = fetcher.calls.find((c) => c.action === 'publishedPageFile' && c.uuid === U(1));
   assert.ok(call.size == null, 'no size is claimed for an unlisted size');
@@ -3091,10 +3221,10 @@ test('files of unknown size count their real bytes against the 50 MB page total'
   const pages = { [U(1)]: livePage('Big', { 'index.html': { body: big, unverified: true }, 'more.html': { body: big, unverified: true } }) };
   const { files } = await runArtifacts({ frames, pages });
   const folder = artFolder('Big', U(1));
-  assert.strictEqual(files[`${folder}/index.html`].length, big.length);
-  assert.strictEqual(files[`${folder}/more.html`], undefined);
+  assert.strictEqual(files[`${folder}/${LIVE}/index.html`].length, big.length);
+  assert.strictEqual(files[`${folder}/${LIVE}/more.html`], undefined);
   const meta = JSON.parse(files[`${folder}/artifact.json`]);
-  assert.deepStrictEqual(meta.missing, ['more.html']);
+  assert.deepStrictEqual(curVer(meta).missing, ['more.html']);
   assert.match(files['errors.txt'], /more\.html \(page over 50 MB\)/);
 });
 
@@ -3133,7 +3263,7 @@ test('each artifact gets a view record', async () => {
     const id = uuidToBase58(U(2));
     assert.deepStrictEqual(game, {
       id, title: 'Game', kind: 'Page', typed: false, docs: false, shared: false, public: false,
-      createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', folder: artFolder('Game', U(2)),
+      createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', folder: artVer('Game', U(2)),
       start: 'index.html', startSaved: 'index.html', startKind: 'html', startSize: 30, tooLarge: false, startMissing: false, missingCount: 0,
       files: [{ path: 'index.html', savedAs: 'index.html', kind: 'html', verified: true }, { path: 'app.js', savedAs: 'app.js', kind: 'js', verified: true },
         { path: 'img/logo.svg', savedAs: 'img/logo.svg', kind: 'svg', verified: true }],
@@ -3166,7 +3296,7 @@ test('preview texts and images go to parts, flushed per artifact', async () => {
   const payload = payloadOf(zipped.files, site);
   assert.deepStrictEqual(payload.texts, [['index.html', pages[U(1)].versions[LIVE].files['index.html']], ['app.css', 'body{}']]);
   assert.deepStrictEqual(payload.images, [['img/a.png', `data:image/png;base64,${small.toString('base64')}`]]);
-  assert.strictEqual(zipped.raw[`${artFolder('Site', U(1))}/big.png`].length, big.length, 'the big image is still saved');
+  assert.strictEqual(zipped.raw[`${artVer('Site', U(1))}/big.png`].length, big.length, 'the big image is still saved');
 
   // Folder mode, with parts that close per artifact: each part is written before that artifact's flush.
   const picked = new FakeDir();
@@ -3187,7 +3317,8 @@ test('preview texts and images go to parts, flushed per artifact', async () => {
   });
   const log = disk.popup.sandbox.__log;
   for (const view of disk.views) {
-    const meta = log.indexOf(`file ${view.folder}/artifact.json`);
+    // view.folder is the version folder; artifact.json is beside it.
+    const meta = log.indexOf(`file ${view.folder.replace(/\/[^/]+$/, '')}/artifact.json`);
     const part = log.indexOf(`file viewer-files/part-${String(view.part).padStart(4, '0')}.js`);
     const nextFlush = log.indexOf('flush', meta);
     assert.ok(meta >= 0 && part > meta && part < nextFlush, JSON.stringify(log));
@@ -3231,7 +3362,7 @@ test('card pictures are saved outside artifact folders', async () => {
     assert.ok(!files['errors.txt'], files['errors.txt']);
     assert.strictEqual(status.className, 'status ready');
     assert.strictEqual(fetcher.count('publishedPageInfo', U(3)), 1, 'a 401 picture does not sign the export out');
-    assert.strictEqual(files[`${artFolder('Three', U(3))}/index.html`], 'three');
+    assert.strictEqual(files[`${artVer('Three', U(3))}/index.html`], 'three');
   }
 });
 
@@ -3354,16 +3485,17 @@ test('index and manifest count card pictures', async () => {
   assert.strictEqual(JSON.parse(files['export-manifest.json']).thumbs, 1);
 });
 
-test('artifact.json gains start and public, nothing else changes', async () => {
+test('artifact.json (format 2) has start and public, and the version its files', async () => {
   const frames = [art(U(1), 'Game', { sourceSurface: 'code', public: true }), art(U(2), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' })];
   const pages = { [U(1)]: livePage('Game', { 'index.html': '<script src="app.js"></script>', 'app.js': 'go()' }) };
   const { files } = await runArtifacts({ frames, pages });
   const game = JSON.parse(files[`${artFolder('Game', U(1))}/artifact.json`]);
   const id = uuidToBase58(U(1));
-  assert.deepStrictEqual({ ...game, files: game.files.map((f) => f.path) }, {
-    format: 1, uuid: U(1), shortId: id, url: `https://claude.ai/artifact/${id}`, title: 'Game', typeTitle: '', sourceSurface: 'code', rel: 'mine', ver: LIVE,
-    createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', files: ['index.html', 'app.js'], missing: [], incomplete: false, needsRuntime: false, note: '',
-    start: 'index.html', public: true,
+  const v = game.versions[LIVE];
+  assert.deepStrictEqual({ ...game, versions: { [LIVE]: { ...v, files: v.files.map((f) => f.path) } } }, {
+    format: 2, uuid: U(1), shortId: id, url: `https://claude.ai/artifact/${id}`, title: 'Game', typeTitle: '', sourceSurface: 'code', rel: 'mine', public: true,
+    createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', listed: true, current: LIVE, start: 'index.html', needsRuntime: false, note: '',
+    versions: { [LIVE]: { folder: LIVE, files: ['index.html', 'app.js'], start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: [] } },
   });
   const plan = JSON.parse(files[`${artFolder('Plan', U(2))}/artifact.json`]);
   assert.deepStrictEqual([plan.start, plan.public, plan.note], [null, false, DOCS_NOTE]);
@@ -3385,7 +3517,7 @@ test('index.html and index.md drop a shared artifact\'s local HTML link; index.h
     assert.ok(!/\]\((?!https:)/.test(mdRow(t)), mdRow(t));
     assert.ok(mdRow(t).includes('[claude.ai](https://claude.ai/artifact/'), mdRow(t));
   }
-  assert.ok(htmlRow('Mine').includes(`href="${artFolder('Mine', U(2))}/index.html"`), htmlRow('Mine'));
+  assert.ok(htmlRow('Mine').includes(`href="${artVer('Mine', U(2))}/index.html"`), htmlRow('Mine'));
   assert.ok(htmlRow('Their picture').includes('/a.png"'), 'a shared picture keeps its link');
   assert.ok(mdRow('[Mine]'), files['index.md']);
   assert.ok(html.includes('<a href="viewer.html">'), 'the viewer link when it was built');
@@ -3607,7 +3739,7 @@ test('a viewer build failure leaves the artifacts export complete', async () => 
   for (const options of [{}, { directory: new FakeDir() }]) {
     const { files, status } = await runArtifacts({ frames, pages, options, routes: throwing });
     assert.ok(!files['viewer.html'] && !files['viewer-check.gif']);
-    assert.strictEqual(files[`${artFolder('Two', U(2))}/index.html`], 'two');
+    assert.strictEqual(files[`${artVer('Two', U(2))}/index.html`], 'two');
     assert.ok(files['index.md'] && files['export-manifest.json']);
     assert.ok(!files['index.html'].includes('viewer.html'), 'no viewer link');
     assert.match(status.textContent, /Exported 2 artifacts to .*\. viewer\.html could not be built\.$/);

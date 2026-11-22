@@ -244,7 +244,7 @@ async function exportTo(frames, pages, thumbs) {
   check('HTML start opens the preview', await body().locator('.preview').count() === 1);
   const own = pg.locator('#page-links a.open-file');
   const ownFolder = JSON.parse(fs.readFileSync(path.join(pagesDir, 'export-manifest.json'), 'utf8')).artifacts.find(a => a.title === 'Own page').folder;
-  check('own artifact: Open file links the saved start file', await own.count() === 1 && await own.getAttribute('href') === `${encodeURIComponent(ownFolder)}/index.html` && await own.getAttribute('target') === '_blank', await own.getAttribute('href'));
+  check('own artifact: Open file links the saved start file', await own.count() === 1 && await own.getAttribute('href') === `${encodeURIComponent(ownFolder)}/${LIVE}/index.html` && await own.getAttribute('target') === '_blank', await own.getAttribute('href'));
   check('unverified badge', (await pg.locator('#page-badges').textContent()).includes("not checked against claude.ai's checksum"));
   check('no needs-claude.ai badge on a plain page', !(await pg.locator('#page-badges').textContent()).includes('needs claude.ai'));
 
@@ -311,8 +311,8 @@ async function exportTo(frames, pages, thumbs) {
   const navs = [
     ['navhttps', "location.href = 'https://remote.test/nav';"],
     ['navhttp', "location.href = 'http://remote.test/nav';"],
-    ['navlocal', `location.href = 'navlocal_${p(42)}/index.html';`],
-    ['navfile', `location.href = new URL('navfile_${p(43)}/index.html', document.baseURI).href;`],
+    ['navlocal', `location.href = 'navlocal_${p(42)}/${LIVE}/index.html';`],
+    ['navfile', `location.href = new URL('navfile_${p(43)}/${LIVE}/index.html', document.baseURI).href;`],
     ['navdata', "location.href = 'data:text/html,<script>console.log(%22ESCAPED%22)<\\/script>';"],
     ['navblob', "location.href = URL.createObjectURL(new Blob(['<script>console.log(\"ESCAPED\")<\\/script>'], { type: 'text/html' }));"],
     ['navrefresh', '', '<meta http-equiv="refresh" content="0;url=https://remote.test/refresh">'],
@@ -380,7 +380,7 @@ async function exportTo(frames, pages, thumbs) {
   for (const [n, bytes] of Object.entries(prevRaw)) { const fp = path.join(prevDir, n); fs.mkdirSync(path.dirname(fp), { recursive: true }); fs.writeFileSync(fp, bytes); }
   const nested = prevViews.find(v => v.title === 'Nested site');
   check('fixture: a file was saved as _2', nested.files.some(f => f.path === 'site/js/util.js' && /_2\.js$/.test(f.savedAs)), JSON.stringify(nested.files));
-  check('fixture: the nav folders are where the pages point', prevViews.find(v => v.title === 'navlocal').folder === `navlocal_${p(42)}`, prevViews.find(v => v.title === 'navlocal').folder);
+  check('fixture: the nav folders are where the pages point', prevViews.find(v => v.title === 'navlocal').folder === `navlocal_${p(42)}/${LIVE}`, prevViews.find(v => v.title === 'navlocal').folder);
 
   const openPrev = async (hash, scheme = 'light') => {
     const context = await browser.newContext({ viewport: { width: 1300, height: 900 }, colorScheme: scheme });
@@ -519,7 +519,7 @@ async function exportTo(frames, pages, thumbs) {
   await md.page.goto(md.url + `#a=${p(63)}`);
   await md.page.waitForFunction(() => { const i = document.querySelector('#page-body .preview img'); return i && i.complete && i.naturalWidth > 0; }, null, { timeout: 3000 }).catch(() => {});
   const bigSrc = await md.page.$eval('#page-body .preview img', i => i.getAttribute('src')).catch(() => null);
-  check("own image too large for the part: shown from its saved file", !!bigSrc && /^Big_picture_[^/]+\/big\.png$/.test(bigSrc)
+  check("own image too large for the part: shown from its saved file", !!bigSrc && /^Big_picture_[^/]+\/1794783850-4a6e\/big\.png$/.test(bigSrc)
     && await md.page.$eval('#page-body .preview img', i => i.naturalWidth) === 40, String(bigSrc));
   await md.page.goto(md.url + `#a=${p(64)}`);
   await md.page.waitForSelector('#page-body .details', { timeout: 3000 }).catch(() => {});
