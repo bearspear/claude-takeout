@@ -4471,3 +4471,62 @@ test('artifact.json orders versions by claude.ai\'s history, keys the no-id vers
   assert.strictEqual(out.json.incomplete, true);
   assert.deepStrictEqual(out.rows, ['v1', 'v2', 'current', 'current_2']);
 });
+
+test('a current version the chats saved with a start file too large to preview is kept, not fetched again', async () => {
+  const BIG = `<!--${'x'.repeat(2 * 1024 * 1024 + 10)}-->`;
+  const viewerData = (files) => JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(files['viewer.html'])[1].replace(/<\\\//g, '</'));
+  // Saved whole by the chat into v1/.
+  let chat = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  let fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': BIG } } } } });
+  let out = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }), assets: true });
+  let files = await zipFiles(out.zip);
+  const f = artFolder('Guide', PUB_U);
+  assert.strictEqual(fetcher.count('publishedPageFile', PUB_U), 1, 'only the chat fetched it');
+  let meta = JSON.parse(files[`artifacts/${f}/artifact.json`]);
+  assert.deepStrictEqual([meta.versions.v1.folder, meta.versions.v1.saved, meta.versions.v1.incomplete], ['v1', true, false]);
+  let view = viewerData(files).artifacts[0];
+  assert.deepStrictEqual([view.tooLarge, view.startMissing, view.notExported], [true, false, false]);
+  assert.deepStrictEqual(out.store.exportRecord['org-1'].artifacts, { [PUB_U]: 'v1' });
+  // The same as the chat's file: sameAs stays, nothing fetched.
+  chat = Object.assign(pubChat([pubMsg('m1', null, [use('w', 'Write', { file_path: '/home/claude/guide.html', content: BIG }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs)])]), { uuid: 'a', name: 'Chat a' });
+  fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': BIG } } } } });
+  out = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }), assets: true });
+  files = await zipFiles(out.zip);
+  assert.strictEqual(fetcher.count('publishedPageFile', PUB_U), 0);
+  meta = JSON.parse(files[`artifacts/${f}/artifact.json`]);
+  assert.deepStrictEqual([meta.versions.v1.folder, meta.versions.v1.sameAs], [null, { 'index.html': 'Chat_a/artefacts/guide.html' }]);
+  view = viewerData(files).artifacts[0];
+  assert.deepStrictEqual([view.tooLarge, view.reused, view.notExported], [true, true, false]);
+});
+
+test('a version the chats saved whole stays saved when the artifact step\'s fetch of it fails', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: livePage('Guide', { 'index.html': { body: 'live', error: { error: 'HTTP 500', status: 500 } } }) });
+  const root = zipStub();
+  sb.setTimeout = (f) => setTimeout(f, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide')] });
+  await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    // Whole, but with no preview kept, so the step fetches it again.
+    store.record('${U(1)}', { title: 'Guide' }).versions.set('${LIVE}', { folder: '${LIVE}', files: [{ path: 'index.html', savedAs: 'index.html', size: 4, contentType: 'text/html', sha256: '${'b'.repeat(64)}' }],
+      start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: [{ chat: 'a', messageUuid: 'm1', toolUseId: 'p1', same: false, writtenAs: null }] });
+    await runArtifactStep(__root, { store, artifacts: __arts, full: false, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+  })()`, sb);
+  assert.strictEqual(fetcher.count('publishedPageFile', U(1)), 1);
+  const v = JSON.parse(root.written[`artifacts/${artFolder('Guide', U(1))}/artifact.json`]).versions[LIVE];
+  assert.deepStrictEqual([v.folder, v.saved, v.incomplete, v.publishedIn.length], [LIVE, true, false, 1]);
+});
+
+test('a sameAs version stays complete when a later chat\'s fetch of it fails', async () => {
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, [
+    use('w', 'Write', { file_path: '/home/claude/guide.html', content: 'SAME' }), result('w'), ...publish('p1', PUB_U, 'v1', guideAs),
+  ])]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U, 'v1', guideAs))]), { uuid: 'b', name: 'Chat b' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'SAME', error: { error: 'HTTP 500', status: 500 } } } } } } });
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const { zip } = await runBulkZip({ list, chats: { a: chatA, b: chatB }, setup: bulkWithArtifacts({ fetcher }) });
+  const files = await zipFiles(zip);
+  assert.strictEqual(fetcher.count('publishedPageFile', PUB_U), 1, 'chat b tried');
+  const v = JSON.parse(files[`artifacts/${artFolder('Guide', PUB_U)}/artifact.json`]).versions.v1;
+  assert.deepStrictEqual([v.folder, v.saved, v.incomplete, v.sameAs], [null, false, false, { 'index.html': 'Chat_a/artefacts/guide.html' }]);
+});

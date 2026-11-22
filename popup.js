@@ -3190,12 +3190,14 @@ function displayLines(name, input, result, webImages = {}, up = '') {
 }
 
 // ============================================================================
-// Published pages: the pages a chat published with publish_files, saved in published/
+// Published pages: the pages a chat published with publish_files or the Artifact tool
 // ============================================================================
 // content.js fetches them (publishedPageInfo, publishedPageFile); the asset token never reaches the popup.
 // A version is "same" when every file of it equals, by SHA-256, the text this export already holds for its
-// source as of the publishing message; then nothing is copied. Otherwise its files go to
-// published/<page>/<version>/, beside the chat or, in Export All, once at the export root.
+// source as of the publishing message; then nothing is fetched. A single-chat export saves the others in
+// published/<page>/<version>/ beside the chat, with published.json. Export All keeps every version in the one
+// artifacts store (artifactStore), artifacts/<Title>_<id>/<ver>/ with artifact.json (format 2), shared with its
+// artifact step: a same version of one file points at the chat's file (sameAs), one of several files is copied.
 
 const PUBLISHED_MAX_FILE = 32 * 1024 * 1024;   // one file, raw bytes, checked from _files.json before fetching
 const PUBLISHED_MAX_BYTES = 50 * 1024 * 1024;  // all files of one page version
@@ -3656,20 +3658,24 @@ async function savePublishedPages(folder, data, ctx = {}) {
       target, prefix: exportAll ? store.versionFolder(rec.store, v.key) : `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
       state, onSignedOut: markSignedOut, fetchPublished, collect: wanted(rec.uuid, v.ver),
     });
-    if (wanted(rec.uuid, v.ver)) keepPreview(v, artifactPayload(got));
-    v.saved = got.saved;
-    if (exportAll) {
-      v.folder = got.saved ? v.folderName : null;
-      // A copy saved: the version no longer points at a chat's file.
-      if (got.saved) delete v.sameAs;
+    // Export All: a version the store points at a chat's file for (sameAs) stays as it was when no copy was saved.
+    const keptSame = exportAll && !got.saved && !!v.sameAs;
+    if (!keptSame) {
+      if (wanted(rec.uuid, v.ver)) keepPreview(v, artifactPayload(got));
+      v.saved = got.saved;
+      if (exportAll) {
+        v.folder = got.saved ? v.folderName : null;
+        // A copy saved: the version no longer points at a chat's file.
+        if (got.saved) delete v.sameAs;
+      }
+      markUnverified(v.files, got.unverified);
+      v.missing = got.missing;
+      v.incomplete = got.incomplete;
+      v.start = got.start;
+      v.startSaved = got.startSaved;
+      v.needsRuntime = got.needsRuntime;
+      v.text = got.startText !== null && got.startText.length <= limit ? got.startText : null;
     }
-    markUnverified(v.files, got.unverified);
-    v.missing = got.missing;
-    v.incomplete = got.incomplete;
-    v.start = got.start;
-    v.startSaved = got.startSaved;
-    v.needsRuntime = got.needsRuntime;
-    v.text = got.startText !== null && got.startText.length <= limit ? got.startText : null;
     if (got.problems.length) {
       noted.add(rec.uuid);
       warn(rec.title || rec.dir, `Published page "${rec.title || rec.dir}" (${v.ver}): ${got.problems.length} file${got.problems.length === 1 ? '' : 's'} could not be saved: ${got.problems.join(', ')}.`, openNote(rec));
@@ -3755,7 +3761,8 @@ async function savePublishedPages(folder, data, ctx = {}) {
       const same = !!matched;
       if (same && exportAll) keepSame(rec, v, matched);
       if (!same && !v.attempted && !state.publishedSignedOut) await fetchVersion(rec, v);
-      if (!same && !v.saved) v.incomplete = true;
+      // A version the store points at a chat's file for (sameAs) stays complete when this chat's fetch fails.
+      if (!same && !v.saved && !v.sameAs) v.incomplete = true;
       const startFile = publishedStart(v.files);
       const own = same && startFile ? matched.get(startFile.path) : null;
       for (const pub of m.publishes) {
@@ -5551,7 +5558,8 @@ async function saveArtifact(root, a, ctx) {
   let verFolder = null;
 
   // A version the store already has (plain, non-Docs only): no fetch. Its preview must hold the start file when the
-  // viewer would show it; otherwise it is fetched again, into its own folder.
+  // viewer would show it; otherwise it is fetched again, into its own folder. A start file over PREVIEW_ITEM_MAX is
+  // never in a preview: the version is kept as it is, and the view says the start is too large to preview.
   let kept = null;
   let same = null;
   if (!docs && meta.ver && typeSlug === '' && store.has(uuid, meta.ver)) {
@@ -5559,7 +5567,8 @@ async function saveArtifact(root, a, ctx) {
     const preview = v && v.preview && typeof v.preview === 'object' ? v.preview : null;
     const kind = v && v.start ? previewKind(v.start) : null;
     const inPreview = (list) => !!(preview && Array.isArray(list) && list.some((t) => t[0] === v.start));
-    const shown = !kind || inPreview(kind === 'text' ? preview && preview.texts : preview && preview.images);
+    const startSize = v && v.start && Array.isArray(v.files) ? keptStartSize(v) : null;
+    const shown = !kind || inPreview(kind === 'text' ? preview && preview.texts : preview && preview.images) || (startSize != null && startSize > PREVIEW_ITEM_MAX);
     if (shown && storeVersionWhole(v)) kept = v;
     else if (shown && storeVersionSame(v)) same = v;
   }
@@ -5616,17 +5625,20 @@ async function saveArtifact(root, a, ctx) {
       markUnverified(files, got.unverified);
       startSaved = got.startSaved;
       if (files.length) {
-        // Publishes the chats recorded for this version stay with it.
+        // Publishes the chats recorded for this version stay with it, and a version the chats saved whole stays saved
+        // when this fetch saves nothing.
         const prev = rec.versions.get(info.ver);
-        const v = {
+        const v = !got.saved && storeVersionWhole(prev) ? null : {
           folder: got.saved ? store.folderName(rec, info.ver) : null, files, start: got.start, startSaved: got.startSaved,
           incomplete: got.incomplete, missing: got.missing, saved: got.saved, publishedIn: prev && Array.isArray(prev.publishedIn) ? prev.publishedIn : [],
         };
-        // A copy that didn't save keeps pointing at the chat's file.
-        if (!got.saved && prev && prev.sameAs) v.sameAs = prev.sameAs;
-        Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
-        rec.versions.set(info.ver, v);
-        verFolder = v.folder;
+        if (v) {
+          // A copy that didn't save keeps pointing at the chat's file.
+          if (!got.saved && prev && prev.sameAs) v.sameAs = prev.sameAs;
+          Object.defineProperty(v, 'preview', { value: artifactPayload(got), writable: true, configurable: true });
+          rec.versions.set(info.ver, v);
+        }
+        verFolder = v ? v.folder : prev.folder;
       }
       meta.needsRuntime = info.runtimeSkipped > 0 || typeSlug !== '' || got.needsRuntime;
       if (!files.length) notes.push(typeSlug || info.runtimeSkipped > 0 ? 'open on claude.ai' : 'no files; open on claude.ai');
