@@ -432,6 +432,39 @@
       return a;
     }
 
+    // Download: a file whose text or image this page holds, saved through a blob: link (saveBytes, viewer-logic.js).
+    // Never a link to the file on disk, which Chrome would open, and never from inside a preview frame.
+    function downloadButton(name, data) {
+      const button = el('button', 'btn download', 'Download');
+      button.type = 'button';
+      button.setAttribute('aria-label', `Download ${name}`);
+      button.addEventListener('click', () => saveBytes(name, data));
+      return button;
+    }
+    // A path's bytes in a payload: its text, or its image's bytes; null when the payload doesn't hold it.
+    function heldData(payload, path) {
+      const texts = pathMap(payload && payload.texts, t => typeof t === 'string');
+      if (texts.has(path)) return texts.get(path);
+      const images = pathMap(payload && payload.images, u => typeof u === 'string' && SAFE_IMAGE_URI.test(u));
+      return images.has(path) ? dataUrlBytes(images.get(path)) : null;
+    }
+    // The current version's ZIP the export wrote beside its folder (Export All, Export Artifacts): a plain link, which
+    // Chrome downloads. None inside a ZIP, and none the allowlist refuses.
+    function zipLink(v) {
+      if (unzipped === false || typeof v.zip !== 'string' || !v.zip) return null;
+      const href = relHref(v.zip);
+      if (!href || !openableHref(href)) return null;
+      const a = el('a', 'btn download-zip', v.missingCount > 0 ? 'Download ZIP (some files missing)' : 'Download ZIP');
+      a.setAttribute('href', href);
+      return a;
+    }
+    // A payload's holdings for a view, once loaded; the same promise for every caller.
+    const heldPayloads = new WeakMap();
+    function heldPayload(v) {
+      if (!heldPayloads.has(v)) heldPayloads.set(v, payloadOf(v));
+      return heldPayloads.get(v);
+    }
+
     const isPoster = v => v.typed === true && !v.docs;
     const files = v => (Array.isArray(v.files) ? v.files.filter(f => f && typeof f.path === 'string') : []);
     const unverified = v => files(v).some(f => f.verified === false);
@@ -449,6 +482,11 @@
         const href = openHref(v, f.savedAs);
         if (href) li.append(link('open-file', 'Open file', href, false));
         ul.append(li);
+        // Download, when this page holds the file (its part loads once, for the whole list).
+        if (!v.notExported) heldPayload(v).then(payload => {
+          const data = heldData(payload, f.path);
+          if (data !== null && li.isConnected) li.append(downloadButton(f.path, data));
+        });
       }
       frag.append(ul);
       return frag;
@@ -753,8 +791,17 @@
       const links = [];
       const startHref = v.notExported ? null : openHref(v, v.startSaved);
       if (startHref) links.push(link('btn open-file', 'Open file', startHref, false));
+      const zip = v.notExported ? null : zipLink(v);
+      if (zip) links.push(zip);
       links.push(link('btn open-claude', 'Open on claude.ai', claudeUrl(v), true));
       pageLinks.replaceChildren(...links);
+      // Download for the start file, once its part has loaded and only while these links are still the page's.
+      if (v.notExported || !v.start) return;
+      const first = links[0];
+      heldPayload(v).then(payload => {
+        const data = heldData(payload, v.start);
+        if (data !== null && first.isConnected && first.parentNode === pageLinks) pageLinks.prepend(downloadButton(v.start, data));
+      });
     }
 
     // A chat's name as a link to it, opening at messageUuid.
@@ -847,6 +894,7 @@
     // Only what a browser won't run as a page opens, as in the chat viewer; none inside a ZIP.
     const fileHref = v => (unzipped !== false && typeof v.href === 'string' && openableHref(v.href) ? v.href : null);
     const fileOf = f => chats[f.chat].files[f.file];
+    const decodeURIComponentSafe = t => { try { return decodeURIComponent(t); } catch (e) { return t; } };
 
     function fileDetails(f, v, partFailed) {
       const box = sheet('details', partFailed ? "The text couldn't load, because viewer-files/ is missing or blocked." : `${f.name} can't be shown here.`, fileKindLabel(fileOf(f)));
@@ -865,6 +913,11 @@
     // only its own chat's scripts and stylesheets beside it; Markdown renders as the chat viewer's; an image by its link.
     function fillFile(f, v, box, text, partFailed) {
       const file = fileOf(f);
+      // Download for a text this page holds, named as the version's file is (report_v2.html).
+      if (text !== null) {
+        const name = typeof v.href === 'string' && v.href ? decodeURIComponentSafe(v.href.split('/').pop()) : file.name;
+        pageLinks.prepend(downloadButton(name || file.name || 'download', text));
+      }
       if ((file.kind === 'html' || file.kind === 'svg') && text !== null) {
         const doc = artifactPreviewDoc(text, file.name, { texts: [...chatFileTexts(chats[f.chat])] });
         if (doc.remote) addNote(PAGE_REMOTE_NOTE);
