@@ -108,7 +108,7 @@ class ExportErrorCollector {
         return 'A page Claude published on claude.ai (publish_files) could not be saved, or only in part, or its file names were changed to be safe on disk. The chat itself is exported. Open the page on claude.ai (link in the note) while signed in, and export again; a page that was unpublished or deleted can no longer be saved.';
 
       case 'artifact_export':
-        return 'Export Artifacts saves the current version of each artifact claude.ai lists. This one was not saved, or only in part, or its file names were changed to stay inside its folder; the other artifacts are in the export. Open it on claude.ai (link in the note) while signed in, and run Export Artifacts again. An artifact that was unpublished, deleted or unshared can no longer be saved. When claude.ai\'s list looks cut short, compare index.md with claude.ai/artifacts.';
+        return 'Export Artifacts saves the current version of each artifact claude.ai lists. This one was not saved, or only in part, or its file names were changed to stay inside its folder; the other artifacts are in the export. Open it on claude.ai (link in the note) while signed in, and run Export Artifacts again. An artifact that was unpublished, deleted or unshared can no longer be saved. When claude.ai\'s full list could not be read in full (a code, or longer than the export reads), compare index.md with claude.ai/artifacts. Artifacts found only by paging are saved without a card picture.';
 
       case 'doc_diagram':
         return 'claude.ai draws a Claude Docs document\'s diagrams only on the document\'s own page, so the export shows each by its caption. To keep them, ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again: that copy is saved in artefacts/ and linked from the document. Or open the live document (link in the note).';
@@ -4674,8 +4674,12 @@ function changedSince(conversations, recorded) {
   return (conversations || []).filter((c) => c && (!Object.prototype.hasOwnProperty.call(known, c.uuid) || known[c.uuid] !== c.updated_at));
 }
 
-// The live version an artifact was listed with, as the record keeps it.
-const listedArtifactVer = (a) => (a && typeof a.live === 'string' ? a.live : '');
+// The live version an artifact was listed with, as the record keeps it. One found only by paging has no listed
+// version: its update time stands in ('paged:<updatedAt>'), or '' when it has none (then it is not recorded).
+const listedArtifactVer = (a) => {
+  if (a && a.paged === true) return typeof a.updatedAt === 'string' && a.updatedAt ? `paged:${a.updatedAt}` : '';
+  return a && typeof a.live === 'string' ? a.live : '';
+};
 
 // Artifacts (artifactsFromList) new or with another version since the record; all of them with no record.
 function changedArtifacts(list, recorded) {
@@ -5017,9 +5021,9 @@ async function bulkExportZip(options = {}) {
     const savedArtifacts = step ? step.views.filter((v) => !v.notExported).length : 0;
     const andArtifacts = savedArtifacts ? ` and ${artifactCount(savedArtifacts, 'artifact')}` : '';
     // Recorded with the chats after the write: artifacts saved whole (one with a missing file is tried again next time).
-    // One found only by paging has no listed version to compare with, so it is left out and included next time too.
+    // One found only by paging is recorded by its update time; with none, it is left out and included next time too.
     const exportedArtifacts = step ? includedArtifacts
-      .filter((a, i) => step.whole[i] === true && a.paged !== true)
+      .filter((a, i) => step.whole[i] === true && !(a.paged === true && !listedArtifactVer(a)))
       .map((a) => ({ uuid: String(a.slug).toLowerCase(), ver: listedArtifactVer(a) })) : [];
 
     // Create index.md at root
@@ -5555,6 +5559,9 @@ async function saveArtifact(root, a, ctx) {
     const info = publishedSignedOutReply(reply) ? (signOut(), null) : cleanPublishedInfo(reply);
     if (!info) {
       notExported('signed out of claude.ai (see errors.txt)');
+    } else if (a.paged === true && (info.error === 'bad response' || info.status === 404)) {
+      // Found only by paging, with no version claude.ai serves (a draft, say): as a listed one with no live version.
+      notes.push('no published version');
     } else if (info.error) {
       notExported(`${info.error} (see errors.txt)`);
       warn(name, `Artifact "${name}" could not be fetched: ${info.error}.`, openNote);

@@ -4085,21 +4085,36 @@ test('a same version points at the chat\'s artefacts file', async () => {
   assert.ok(Object.entries(files).some(([n, t]) => /^viewer-files\/part-/.test(n) && t.includes('SAME-TEXT-ONE')), 'the preview has the text');
 });
 
-test('Export Changes leaves an artifact found only by paging out of the record, so it is fetched again next time', async () => {
+test('Export Changes records an artifact found only by paging by its update time, and fetches it again only when that changes', async () => {
   const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE } } } };
   const list = [listed('a', '2026-01-01T00:00:00Z')];
   const chats = { a: chatFor('a', '2026-01-01T00:00:00Z') };
-  const frames = [art(U(1), 'One'), art(U(2), 'Paged', { live: '', paged: true })];
-  const fetcher = publishedFetcher({ [U(1)]: livePage('One', { 'index.html': '1' }), [U(2)]: livePage('Paged', { 'index.html': 'p' }) });
-  const reply = { frames, paging: { status: 'ok', added: 1 } };
-  const first = await runBulkZip({ list, chats, stored, options: { changesOnly: true }, setup: bulkWithArtifacts({ list: reply, fetcher }) });
+  const fetcher = publishedFetcher({ [U(1)]: livePage('One', { 'index.html': '1' }), [U(2)]: livePage('Paged', { 'index.html': 'p' }), [U(3)]: livePage('Undated', { 'index.html': 'u' }) });
+  const reply = (updatedAt) => ({ frames: [art(U(1), 'One'), art(U(2), 'Paged', { live: '', paged: true, updatedAt }), art(U(3), 'Undated', { live: '', paged: true, updatedAt: '' })], paging: { status: 'ok', added: 2 } });
+  const run = (stored, updatedAt) => runBulkZip({ list, chats, stored, options: { changesOnly: true }, setup: bulkWithArtifacts({ list: reply(updatedAt), fetcher }) });
+  const first = await run(stored, '2026-11-01T00:00:00Z');
   const files = await zipFiles(first.zip);
   assert.strictEqual(files[`artifacts/${artFolder('Paged', U(2))}/${LIVE}/index.html`], 'p');
-  assert.deepStrictEqual(first.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE }, 'its listed version is unknown, so it is not recorded');
+  assert.deepStrictEqual(first.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: 'paged:2026-11-01T00:00:00Z' }, 'one with no update time is not recorded');
   assert.strictEqual(fetcher.count('publishedPageInfo', U(2)), 1);
-  const again = await runBulkZip({ list, chats, stored: first.store, options: { changesOnly: true }, setup: bulkWithArtifacts({ list: reply, fetcher }) });
-  assert.strictEqual(fetcher.count('publishedPageInfo', U(2)), 2, 'still included the next time');
-  assert.ok(again.zip);
+  await run(first.store, '2026-11-01T00:00:00Z');
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(2)), 1, 'unchanged: not fetched again');
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(3)), 2, 'no update time: included each time');
+  await run(first.store, '2026-11-20T00:00:00Z');
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(2)), 2, 'updated: fetched again');
+});
+
+test('a paged artifact claude.ai serves no version of gets the no-published-version note, not a warning', async () => {
+  const frames = [art(U(1), 'Draft', { live: '', paged: true }), art(U(2), 'Odd', { live: '', paged: true })];
+  const pages = { [U(2)]: { title: 'Odd', error: { ver: 7, files: [] } } };
+  const { files } = await runArtifacts({ list: { frames, paging: { status: 'ok', added: 2 }, accountName: 'Mika', orgId: 'org-1' }, pages });
+  for (const [n, t] of [[1, 'Draft'], [2, 'Odd']]) {
+    const meta = JSON.parse(files[`${artFolder(t, U(n))}/artifact.json`]);
+    assert.strictEqual(meta.note, 'no published version', t);
+    assert.ok(!meta.incomplete, t);
+  }
+  const errs = files['errors.txt'] || '';
+  assert.ok(!/could not be fetched/.test(errs), errs);
 });
 
 test('Export Changes includes changed artifacts only and records versions', async () => {

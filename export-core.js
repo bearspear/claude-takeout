@@ -367,9 +367,9 @@ const PUBLISH_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-
 const PUBLISH_VER_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,63}$/;
 
 // The frames claude.ai listed, reduced to the fields an export may keep (public: a boolean). Anything else (owner, audience, thumbnail,
-// URLs) is dropped, a slug that is not a UUID is dropped, and a uuid appears once. full: the list may be cut
-// short (no paging is known): 60 or more frames and a multiple of 10, which includes a limit of 1000.
-// listed: how many frames claude.ai sent, before any was dropped.
+// URLs) is dropped, a slug that is not a UUID is dropped, and a uuid appears once; paged (only when true) marks one
+// found only by paging claude.ai's full list. listed: how many frames claude.ai sent, before any was dropped.
+// paging: how the full list was paged (artifactPaging), or null.
 function artifactsFromList(reply) {
   const frames = reply && Array.isArray(reply.frames) ? reply.frames : [];
   const str = (v) => (typeof v === 'string' ? v : '');

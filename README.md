@@ -400,7 +400,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.20.4
 
-- **The whole artifact list** - claude.ai's quick artifact list can't be paged and may stop short on a large account. Export Artifacts and Export All now also page through claude.ai's full list (the one claude.ai/artifacts reads) and save any artifact the quick list missed, at its current version, without a card picture; `errors.txt` counts them. If the full list can't be read, or is longer than 10,000 artifacts, `errors.txt` says the export may be incomplete. The old warning for a round number of artifacts is gone.
+- **The whole artifact list** - claude.ai's quick artifact list can't be paged and may stop short on a large account. Export Artifacts and Export All now also page through claude.ai's full list (the one claude.ai/artifacts reads) and save any artifact the quick list missed, at its current version, without a card picture; `errors.txt` counts them. Export Changes fetches such an artifact again only when claude.ai's update time for it changes. If the full list can't be read, or has more than 100 pages of 100 entries (folders count too), `errors.txt` says the export may be incomplete. The old warning for a round number of artifacts is gone.
 
 ### v1.20.3
 
@@ -449,7 +449,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.15.0
 
-- **Export Artifacts** - A new **Export Artifacts** button saves every artifact on claude.ai/artifacts, from any chat, project or Claude Code session, and any shared with you (marked "shared with you"), in its current version. Each goes in its own folder with an `artifact.json`, and `index.html` and `index.md` list them all. The list is fetched first, and nothing is written when it is empty or fails. Claude Docs documents are listed with a link, since their text isn't available as a file; artifacts built on claude.ai's own page code are marked "needs claude.ai to run". Like Export All it saves into a folder (or a ZIP, see **Export All and Export Artifacts save as** in Settings); use the folder for a large account, since a ZIP is built in memory. It needs a claude.ai tab open and signed in. Since v1.20.4 the export pages through claude.ai's full list too, so nothing is missed on a large account. Artifacts from Cowork and Claude Code, and those shared with you, are saved too; claude.ai gives no checksum for their files, so they are marked as not checked.
+- **Export Artifacts** - A new **Export Artifacts** button saves every artifact on claude.ai/artifacts, from any chat, project or Claude Code session, and any shared with you (marked "shared with you"), in its current version. Each goes in its own folder with an `artifact.json`, and `index.html` and `index.md` list them all. The list is fetched first, and nothing is written when it is empty or fails. Claude Docs documents are listed with a link, since their text isn't available as a file; artifacts built on claude.ai's own page code are marked "needs claude.ai to run". Like Export All it saves into a folder (or a ZIP, see **Export All and Export Artifacts save as** in Settings); use the folder for a large account, since a ZIP is built in memory. It needs a claude.ai tab open and signed in. Since v1.20.4 the export pages through claude.ai's full list too, so the list is complete unless `errors.txt` says otherwise. Artifacts from Cowork and Claude Code, and those shared with you, are saved too; claude.ai gives no checksum for their files, so they are marked as not checked.
 
 ### v1.14.0
 
