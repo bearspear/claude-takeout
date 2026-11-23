@@ -3231,6 +3231,8 @@ function cleanPublishedInfo(r) {
     title: typeof r.title === 'string' ? r.title : '',
     history: (Array.isArray(r.history) ? r.history : []).filter((h) => typeof h === 'string' && PUBLISHED_VER_RE.test(h)),
     files, rejected, runtimeSkipped,
+    // An older version whose list is the live version's (content.js): its files are fetched unverified.
+    listFromLive: r.listFromLive === true,
   };
 }
 

@@ -4969,3 +4969,10 @@ test('a Design artifact\'s boards are kept ahead of its other files in the previ
   const kept = [...held[views[0].key].texts.map((t) => t[0])];
   assert.deepStrictEqual(kept.slice(0, 3), ['index.html', 'project/canvas.json', 'project/Main.dc.html'], kept.join());
 });
+
+test('cleanPublishedInfo keeps listFromLive only as true', () => {
+  const clean = vm.runInContext('cleanPublishedInfo', exportPopup().sandbox);
+  const base = { ver: 'v1', title: 'T', history: ['v1'], files: [{ path: 'index.html', size: null, contentType: 'text/html', sha256: null }], rejected: [], runtimeSkipped: 0 };
+  assert.strictEqual(clean({ ...base, listFromLive: true }).listFromLive, true);
+  for (const v of [false, 'true', 1, undefined]) assert.strictEqual(clean({ ...base, listFromLive: v }).listFromLive, false, String(v));
+});

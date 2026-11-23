@@ -130,7 +130,7 @@ function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, page
       if (url.includes('/api/frame/')) {
         const exp = Math.floor(Date.now() / 1000) + expiresIn;
         const body = { ver: 'V', title: 'T', history: ['V'], files: [], assetToken: 'a.b.c.' + exp };
-        return resp(200, { json: info ? info(body) : body });
+        return resp(200, { json: info ? info(body, url) : body });
       }
       if (url.includes('_files.json')) return filesJson ? filesJson() : resp(200, { json: { ver: 'V', files: listing } });
       if (direct && !url.includes('/_src/')) return direct();
@@ -571,6 +571,21 @@ const tests = {
     assert.strictEqual(calls, 100);
     assert.deepStrictEqual(capped.paging, { status: 'capped', added: 100 });
     assert.strictEqual(capped.frames.length, 100);
+  },
+
+  'an older version with no _files.json and no files of its own lists the live version\'s files': async () => {
+    const live = [{ path: 'index.html', contentType: 'text/html' }];
+    const mk = (liveFiles) => publishedHarness({
+      filesJson: () => resp(404),
+      info: (body, url) => (new URL(url).searchParams.get('ver') === 'old' ? { ...body, ver: 'old', files: [] } : { ...body, ver: 'V', files: liveFiles }),
+    });
+    const res = await mk(live).call({ action: 'publishedPageInfo', uuid: PUB, ver: 'old' });
+    assert.deepStrictEqual(res.files, [{ path: 'index.html', size: null, contentType: 'text/html', sha256: null }]);
+    assert.strictEqual(res.ver, 'old');
+    assert.strictEqual(res.listFromLive, true);
+    assert.deepStrictEqual(await mk([]).call({ action: 'publishedPageInfo', uuid: PUB, ver: 'old' }), { error: 'HTTP 404', status: 404 });
+    const own = await mk(live).call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.ok(!('listFromLive' in own), 'the live version lists its own files');
   },
 
   'publishedPageInfo gives history oldest first': async () => {
