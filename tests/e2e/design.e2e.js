@@ -30,6 +30,7 @@ const CANVAS = {
     'Hostile.dc.html': { x: 0, y: 400, w: 600, h: 400, title: 'Hostile board' },
     'Far.dc.html': { x: 0, y: 6000, w: 300, h: 200, title: 'Far away' },
     'Gone.dc.html': { x: 400, y: 400, w: 300, h: 200, title: 'Not saved' },
+    'Off.dc.html': { x: 1e9, y: 0, w: 300, h: 200, title: 'Off canvas' },
   },
   notes: {
     t: { kind: 'title1', text: 'Section heading', x: 0, y: -120, maxW: 1100 },
@@ -46,6 +47,7 @@ const designFiles = {
   'project/Pics.dc.html': board('Pics', '<img src="/_blob/abc">'),
   'project/Hostile.dc.html': hostileHtml(attacks),
   'project/Far.dc.html': board('Far'),
+  'project/Off.dc.html': board('Off'),
 };
 const frames = [art(U(1), 'Mockups'), art(U(2), 'Bare design')];
 const pages = {
@@ -153,10 +155,15 @@ async function writeOut(zip) {
     }
     check(`${label}: nothing ran in the viewer`, !(await page.evaluate(() => !!window.__hit)));
 
+    const deepActive = () => page.evaluate(() => { let a = document.activeElement; while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; return a ? (a.id || a.getAttribute('aria-label') || a.className) : null; });
+    // Opened by its address (the chat viewer routes it): focus is on the page title, not left on a hidden column.
+    check(`${label}: focus on the page title when opened by its address`, (await deepActive()) === 'page-title', String(await deepActive()));
+
     // Open alone, and back.
     await page.locator('.design-board', { hasText: 'Home A' }).locator('button.board-open').click();
     await page.locator('button.canvas-back').waitFor({ timeout: 3000 }).catch(() => {});
     check(`${label}: Open alone shows the board by itself`, await page.locator('.design-canvas').count() === 0 && await page.locator('#page-body .preview iframe').count() === 1);
+    check(`${label}: Open alone puts focus on Back to the canvas`, String(await deepActive()).includes('canvas-back'), String(await deepActive()));
     await page.locator('button.canvas-back').click();
     await canvas.waitFor({ timeout: 3000 }).catch(() => {});
     check(`${label}: Back to the canvas`, await page.locator('.design-canvas').count() === 1);
@@ -165,6 +172,44 @@ async function writeOut(zip) {
     await canvas.waitFor({ timeout: 3000 }).catch(() => {});
     const focused = await page.evaluate(() => { let a = document.activeElement; while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; return a ? a.getAttribute('aria-label') : null; });
     check(`${label}: Back puts focus on the board it left`, focused === 'Open Home A alone', String(focused));
+    // A board listed under the canvas (out of range): Open alone, and Back lands on its row.
+    await page.locator('.design-skipped button.board-open').click();
+    await page.locator('button.canvas-back').click();
+    await canvas.waitFor({ timeout: 3000 }).catch(() => {});
+    check(`${label}: Back from a board not drawn lands on its row`, (await deepActive()) === 'Open Off canvas alone', String(await deepActive()));
+    // Narrow: each board's title row stays one line; then wide again, and the canvas follows the width.
+    const wideWidth = (await canvas.boundingBox()).width;
+    // Title rows: never wider than the board (a long title or badge shortens), the title never squeezed to nothing.
+    const rows = () => page.locator('.design-board').evaluateAll(bs => bs.map(b => {
+      const head = b.querySelector('.board-head');
+      const title = head.querySelector('.board-title');
+      return { name: b.dataset.name, board: b.getBoundingClientRect().width, row: head.getBoundingClientRect().width, title: title.getBoundingClientRect().width };
+    }));
+    const wideRows = await rows();
+    check(`${label}: no title row is wider than its board`, wideRows.every(r => r.row <= r.board + 1), JSON.stringify(wideRows));
+    check(`${label}: a badge doesn't squeeze the title away`, wideRows.every(r => r.title >= 20), JSON.stringify(wideRows));
+    // Keyboard focus on a board, its frame marked: a resize keeps both.
+    await page.locator('.design-board', { hasText: 'Home A' }).locator('button.board-open').focus();
+    await page.locator('.design-board', { hasText: 'Home A' }).locator('iframe').evaluate(f => { f.dataset.kept = 'yes'; });
+    await page.setViewportSize({ width: 420, height: 900 });
+    await page.waitForTimeout(500);
+    check(`${label}: a resize keeps keyboard focus on the board`, (await deepActive()) === 'Open Home A alone', String(await deepActive()));
+    check(`${label}: and keeps its frame (no reload)`, await page.locator('.design-board', { hasText: 'Home A' }).locator('iframe[data-kept="yes"]').count() === 1);
+    const clipped = await page.locator('.design-board .board-head').evaluateAll(hs => hs.filter(h => h.querySelector('button.board-open')).map(h => {
+      const b = h.querySelector('button.board-open').getBoundingClientRect();
+      const r = h.getBoundingClientRect();
+      return b.left >= r.left - 0.5 && b.right <= r.right + 0.5 ? null : [Math.round(b.left - r.left), Math.round(b.right - r.right)];
+    }).filter(Boolean));
+    check(`${label}: Open alone stays whole on small boards`, clipped.length === 0, JSON.stringify(clipped));
+    const narrowRows = await rows();
+    check(`${label}: small boards' rows stay about their width`, narrowRows.every(r => r.row <= Math.max(r.board, 6.5 * 12) + 1), JSON.stringify(narrowRows));
+    const narrowWidth = (await canvas.boundingBox()).width;
+    const heads = await page.locator('.design-board .board-head').evaluateAll(hs => hs.map(h => h.getBoundingClientRect().height));
+    check(`${label}: the canvas follows a narrower window`, narrowWidth < wideWidth * 0.6, JSON.stringify([wideWidth, narrowWidth]));
+    check(`${label}: board title rows stay one line when small`, heads.every(h => h <= 30), JSON.stringify(heads));
+    await page.setViewportSize({ width: 1300, height: 900 });
+    await page.waitForTimeout(500);
+    check(`${label}: and a wider one`, Math.abs((await canvas.boundingBox()).width - wideWidth) < 40, String((await canvas.boundingBox()).width));
     const again = await page.locator('#page-badges .badge').allTextContents();
     check(`${label}: badges stay single after Back`, again.filter(b => b === 'Design canvas').length === 1 && again.filter(b => b === 'some boards need claude.ai').length === 1, again.join('|'));
 

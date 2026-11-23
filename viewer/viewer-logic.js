@@ -678,6 +678,26 @@ function chatFileTexts(chat) {
   return texts;
 }
 
+// A version the same as a chat's files (e.same, e.files with savedAs the chat's own file, root-relative): each file's
+// text from the chat version saved at that place (its href), keyed by the published path, so a page runs with the
+// siblings it was published with, in their folders, not the chat's newest ones. [[path, text]]; [] for anything else.
+function versionCopyTexts(chat, e) {
+  if (!chat || !e || e.same !== true || !Array.isArray(e.files)) return [];
+  const decode = t => { try { return decodeURIComponent(t); } catch (err) { return t; } };
+  const byPlace = new Map();
+  for (const file of Object.values(chat.files || {})) {
+    for (const v of (file && Array.isArray(file.versions) ? file.versions : [])) {
+      if (v && typeof v.text === 'string' && typeof v.href === 'string' && v.href) byPlace.set(decode(v.href), v.text);
+    }
+  }
+  const out = [];
+  for (const f of e.files) {
+    if (!f || typeof f.path !== 'string' || typeof f.savedAs !== 'string' || !byPlace.has(f.savedAs)) continue;
+    out.push([f.path, byPlace.get(f.savedAs)]);
+  }
+  return out;
+}
+
 const CODE_EXTENSIONS = new Set(('js mjs cjs ts jsx tsx py rb go rs java kt swift c h cc cpp hpp cs php sh bash zsh ps1 sql r lua pl ' +
   'scala dart css scss less json yaml yml toml xml ini').split(' '));
 
@@ -1404,6 +1424,8 @@ function saveBytes(name, data) {
 // ---- A Design artifact's canvas (v1.20): its boards and notes from project/canvas.json, drawn without claude.ai ----
 
 const DESIGN_BOARD_MAX = 60;
+// Notes drawn at most (text boxes, cheap, but a canvas.json could hold any number).
+const DESIGN_NOTE_MAX = 2000;
 // Places and sizes past these are skipped: one far-off board or note would shrink everything else to nothing.
 const DESIGN_COORD_MAX = 1e5;
 const DESIGN_SIZE_MAX = 2e4;
@@ -1436,7 +1458,8 @@ function boardFlags(text) {
 // notes: [{ id, text, x, y, w, fill, heading }], skipped: [{ name, title }] }, shifted so the smallest x and y are 0;
 // null when it isn't a canvas or no board's file is held (held(path) says). Boards: keys of boards naming a
 // <name>.dc.html in project/, with finite x, y, w, h; at most DESIGN_BOARD_MAX drawn, the rest and the ones with bad
-// numbers in skipped. Notes: in noteOrder, then the others, each with finite x and y; w, else maxW, else 320. A note's
+// numbers in skipped. Notes: in noteOrder, then the others, at most DESIGN_NOTE_MAX, each with finite x and y; a sticky
+// note's width is w, else maxW, a heading's maxW, else w (one out of range falls back to the other; none given: 320). A note's
 // height isn't known before it's drawn: the canvas leaves 200 below the lowest one.
 function designCanvas(text, held) {
   let json;
@@ -1461,6 +1484,7 @@ function designCanvas(text, held) {
   const ids = [...new Set([...ordered, ...Object.keys(noteSrc)])];
   const notes = [];
   for (const id of ids) {
+    if (notes.length >= DESIGN_NOTE_MAX) break;
     const n = noteSrc[id];
     if (!designObject(n)) continue;
     const x = num(n.x);
@@ -1469,18 +1493,29 @@ function designCanvas(text, held) {
     // A heading (title1) is as wide as its maxW (its w is the editor's measure of the text, and wraps it); a sticky
     // note is as wide as its w.
     const width = v => (num(v) !== null && v > 0 ? v : null);
-    const w = (n.kind === 'title1' ? width(n.maxW) || width(n.w) : width(n.w) || width(n.maxW)) || 320;
-    if (!inSize(w)) continue;
+    // The first that fits the canvas: a maxW out of range falls back to w, as w does to maxW. Widths given and none in
+    // range: skipped; none given: 320.
+    const given = (n.kind === 'title1' ? [n.maxW, n.w] : [n.w, n.maxW]).map(width).filter(c => c !== null);
+    const w = given.length ? given.find(inSize) : 320;
+    if (w === undefined) continue;
     notes.push({ id, text: str(n.text), x, y, w, fill: noteFill(n.fill), heading: n.kind === 'title1' });
   }
-  const minX = Math.min(...boards.map(b => b.x), ...notes.map(n => n.x));
-  const minY = Math.min(...boards.map(b => b.y), ...notes.map(n => n.y));
-  for (const o of [...boards, ...notes]) { o.x -= minX; o.y -= minY; }
-  const width = Math.max(...boards.map(b => b.x + b.w), ...notes.map(n => n.x + n.w));
-  const height = Math.max(...boards.map(b => b.y + b.h), ...notes.map(n => n.y + 200));
+  // Loops, not Math.min(...list): a long list overflows the call stack.
+  const all = [...boards, ...notes];
+  let minX = Infinity;
+  let minY = Infinity;
+  for (const o of all) { if (o.x < minX) minX = o.x; if (o.y < minY) minY = o.y; }
+  let width = 0;
+  let height = 0;
+  for (const o of all) {
+    o.x -= minX;
+    o.y -= minY;
+    width = Math.max(width, o.x + o.w);
+    height = Math.max(height, o.y + (o.h === undefined ? 200 : o.h));
+  }
   return { width, height, title: str(json.title), boards, notes, skipped };
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX };
 }

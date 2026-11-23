@@ -2152,7 +2152,7 @@ test('dataUrlBytes decodes a base64 data URL, and nothing else', () => {
 });
 
 // ---- v1.20: a Design artifact's canvas from project/canvas.json ----
-const { designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX } = require('../viewer/viewer-logic.js');
+const { designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX } = require('../viewer/viewer-logic.js');
 const SAMPLE_CANVAS = {
   v: 3, title: 'Panel mockups',
   boards: { 'Main.dc.html': { x: 0, y: 0, w: 380, h: 720, title: 'Home A' }, 'HomeB.dc.html': { x: 460, y: 0, w: 380, h: 720, title: 'Home B' } },
@@ -2258,4 +2258,34 @@ test('an artifact\'s version entries carry their own files, saved where that ver
     ['v2', [{ path: 'index.html', savedAs: 'index.html', verified: true }, { path: 'new.js', savedAs: 'new.js', verified: true }]],
     ['v0', [{ path: 'index.html', savedAs: 'Chat_a/artefacts/guide.html', verified: true }]],
   ]);
+});
+
+test('designCanvas: a heading whose maxW is out of range uses its w; notes are capped and many of them don\'t throw', () => {
+  const heldAll = () => true;
+  const board = { 'Main.dc.html': { x: 0, y: 0, w: 380, h: 720, title: 'Home' } };
+  const wide = designCanvas(JSON.stringify({ boards: board, notes: { t: { kind: 'title1', text: 'Big', x: 0, y: -100, maxW: 5e4, w: 600 } } }), heldAll);
+  assert.deepStrictEqual(wide.notes.map(n => [n.id, n.w]), [['t', 600]]);
+  const notes = {};
+  for (let i = 0; i < 150000; i++) notes[`n${i}`] = { text: 'x', x: i % 1000, y: Math.floor(i / 1000) * 10 };
+  const many = designCanvas(JSON.stringify({ boards: board, notes }), heldAll);
+  assert.strictEqual(many.notes.length, DESIGN_NOTE_MAX);
+  assert.ok(Number.isFinite(many.width) && Number.isFinite(many.height));
+});
+
+test('versionCopyTexts: a same version\'s files from the chat versions it was saved as, by their published paths', () => {
+  const { versionCopyTexts } = require('../viewer/viewer-logic.js');
+  const chat = { files: {
+    f1: { name: 'index.html', versions: [{ text: '<script src="js/app.js"></script>v1', href: 'Chat/artefacts/index_v1.html' }, { text: 'v2 page', href: 'Chat/artefacts/index_v2.html' }] },
+    f2: { name: 'app.js', versions: [{ text: 'OLD()', href: 'Chat/artefacts/app_v1.js' }, { text: 'NEW()', href: 'Chat/artefacts/app_v2.js' }] },
+    f3: { name: 'p%20q.css', versions: [{ text: 'b{}', href: 'Chat/artefacts/p%2520q.css' }] },
+  } };
+  const e = { same: true, files: [
+    { path: 'index.html', savedAs: 'Chat/artefacts/index_v1.html' },
+    { path: 'js/app.js', savedAs: 'Chat/artefacts/app_v1.js' },
+    { path: 'css/p q.css', savedAs: 'Chat/artefacts/p%20q.css' },
+    { path: 'gone.js', savedAs: 'Chat/artefacts/nothing.js' },
+  ] };
+  assert.deepStrictEqual(versionCopyTexts(chat, e), [['index.html', '<script src="js/app.js"></script>v1'], ['js/app.js', 'OLD()'], ['css/p q.css', 'b{}']]);
+  assert.deepStrictEqual(versionCopyTexts(chat, { same: false, files: e.files }), [], 'only a version the same as the chat\'s files');
+  assert.deepStrictEqual(versionCopyTexts(null, e), []);
 });
