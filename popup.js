@@ -108,7 +108,7 @@ class ExportErrorCollector {
         return 'A page Claude published on claude.ai (publish_files) could not be saved, or only in part, or its file names were changed to be safe on disk. The chat itself is exported. Open the page on claude.ai (link in the note) while signed in, and export again; a page that was unpublished or deleted can no longer be saved.';
 
       case 'artifact_export':
-        return 'Export Artifacts saves the current version of each artifact claude.ai lists. This one was not saved, or only in part, or its file names were changed to stay inside its folder; the other artifacts are in the export. Open it on claude.ai (link in the note) while signed in, and run Export Artifacts again. An artifact that was unpublished, deleted or unshared can no longer be saved. When claude.ai\'s list looks cut short, compare index.md with claude.ai/artifacts.';
+        return 'Export Artifacts saves the current version of each artifact claude.ai lists. This one was not saved, or only in part, or its file names were changed to stay inside its folder; the other artifacts are in the export. Open it on claude.ai (link in the note) while signed in, and run Export Artifacts again. An artifact that was unpublished, deleted or unshared can no longer be saved. When claude.ai\'s full list could not be read in full (a code, or longer than the export reads), compare index.md with claude.ai/artifacts. Artifacts found only by paging are saved without a card picture.';
 
       case 'doc_diagram':
         return 'claude.ai draws a Claude Docs document\'s diagrams only on the document\'s own page, so the export shows each by its caption. To keep them, ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again: that copy is saved in artefacts/ and linked from the document. Or open the live document (link in the note).';
@@ -4674,8 +4674,12 @@ function changedSince(conversations, recorded) {
   return (conversations || []).filter((c) => c && (!Object.prototype.hasOwnProperty.call(known, c.uuid) || known[c.uuid] !== c.updated_at));
 }
 
-// The live version an artifact was listed with, as the record keeps it.
-const listedArtifactVer = (a) => (a && typeof a.live === 'string' ? a.live : '');
+// The live version an artifact was listed with, as the record keeps it. One found only by paging has no listed
+// version: its update time stands in ('paged:<updatedAt>'), or '' when it has none (then it is not recorded).
+const listedArtifactVer = (a) => {
+  if (a && a.paged === true) return typeof a.updatedAt === 'string' && a.updatedAt ? `paged:${a.updatedAt}` : '';
+  return a && typeof a.live === 'string' ? a.live : '';
+};
 
 // Artifacts (artifactsFromList) new or with another version since the record; all of them with no record.
 function changedArtifacts(list, recorded) {
@@ -4995,7 +4999,7 @@ async function bulkExportZip(options = {}) {
         parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
       } catch (e) { /* no previews; the export goes on */ }
       step = await runArtifactStep(megaZip, {
-        store, artifacts: includedArtifacts, full: artifactList.full, listed: artifactList.listed, fetchPublished, picturesAllowed,
+        store, artifacts: includedArtifacts, paging: artifactList.paging, listed: artifactList.listed, fetchPublished, picturesAllowed,
         docChats: new Map([...docChats].map(([uuid, d]) => [uuid, d.title])), parts, run: !!run,
         collector: new ExportErrorCollector(null, null, { label: 'Export Artifacts' }),
         onProgress: (done, n) => showProgress(done, n, `${done} / ${n}`),
@@ -5017,8 +5021,9 @@ async function bulkExportZip(options = {}) {
     const savedArtifacts = step ? step.views.filter((v) => !v.notExported).length : 0;
     const andArtifacts = savedArtifacts ? ` and ${artifactCount(savedArtifacts, 'artifact')}` : '';
     // Recorded with the chats after the write: artifacts saved whole (one with a missing file is tried again next time).
+    // One found only by paging is recorded by its update time; with none, it is left out and included next time too.
     const exportedArtifacts = step ? includedArtifacts
-      .filter((a, i) => step.whole[i] === true)
+      .filter((a, i) => step.whole[i] === true && !(a.paged === true && !listedArtifactVer(a)))
       .map((a) => ({ uuid: String(a.slug).toLowerCase(), ver: listedArtifactVer(a) })) : [];
 
     // Create index.md at root
@@ -5545,7 +5550,7 @@ async function saveArtifact(root, a, ctx) {
   } else if (docs) {
     const madeBy = ctx.docChats instanceof Map ? ctx.docChats.get(uuid) : null;
     notes.push(madeBy ? `Text rebuilt from the chat ${madeBy}.` : DOCS_ARTIFACT_NOTE);
-  } else if (!meta.ver) {
+  } else if (!meta.ver && a.paged !== true) {
     notes.push('no published version');
   } else if (state.publishedSignedOut) {
     notExported('signed out of claude.ai (see errors.txt)');
@@ -5554,6 +5559,9 @@ async function saveArtifact(root, a, ctx) {
     const info = publishedSignedOutReply(reply) ? (signOut(), null) : cleanPublishedInfo(reply);
     if (!info) {
       notExported('signed out of claude.ai (see errors.txt)');
+    } else if (a.paged === true && (info.error === 'bad response' || info.status === 404)) {
+      // Found only by paging, with no version claude.ai serves (a draft, say): as a listed one with no live version.
+      notes.push('no published version');
     } else if (info.error) {
       notExported(`${info.error} (see errors.txt)`);
       warn(name, `Artifact "${name}" could not be fetched: ${info.error}.`, openNote);
@@ -5708,14 +5716,14 @@ function unexpectedArtifactRow(root, a, ctx) {
 // The Export Artifacts loop: saves every listed artifact (artifactsFromList) into a store (artifactStore, its prefix
 // '' or 'artifacts/') in root and returns what the indexes, manifest and viewer are built from. Folder, artifact.json
 // and view paths carry the prefix, so a viewer at the root finds them; card pictures and preview parts stay in the
-// root's viewer-files/. opts: { store (optional: a new one at opts.prefix otherwise), artifacts, full, listed,
+// root's viewer-files/. opts: { store (optional: a new one at opts.prefix otherwise), artifacts, paging (artifactsFromList: how claude.ai's full list was paged; warns when it failed, was capped or found more), listed,
 // fetchPublished, picturesAllowed, docChats (see saveArtifact), parts (CTViewer.artifactViewParts or null),
 // onProgress(done, total), run (truthy on disk: flush per artifact), collector (optional; otherwise one labelled
 // 'Export Artifacts') }. Each artifact's artifact.json is written through store.write once, after its picture. Never throws.
 // Returns { views, rows, entries, whole (per artifact: saved with nothing missing), thumbs, collector, writeFailures, partCount, signedOut }; rows and entries name
 // folders relative to prefix.
 async function runArtifactStep(root, opts = {}) {
-  const { artifacts = [], full = false, listed = artifacts.length, fetchPublished, picturesAllowed = false, parts = null, onProgress = null, run = false } = opts;
+  const { artifacts = [], paging = null, listed = artifacts.length, fetchPublished, picturesAllowed = false, parts = null, onProgress = null, run = false } = opts;
   const store = opts.store || artifactStore(root, { prefix: opts.prefix || '' });
   const collector = opts.collector || new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
   const warn = (filename, message, note = null) => collector.addWarning('artifact_export', filename, message, { note });
@@ -5730,9 +5738,15 @@ async function runArtifactStep(root, opts = {}) {
   let partCount = 0;
   const total = artifacts.length;
   try {
-    if (full) {
-      warn('artifact list', `claude.ai listed ${listed} artifacts, a number at which its list may be cut short, so this export may be incomplete.`,
-        'Compare index.md with claude.ai/artifacts.');
+    const compare = 'Compare index.md with claude.ai/artifacts.';
+    if (paging && paging.status === 'failed') {
+      warn('artifact list', `claude.ai's artifact list could not be read in full (${paging.code}), so this export has the ${listed} artifacts of its quick list and may be incomplete.`, compare);
+    } else if (paging && paging.status === 'capped') {
+      warn('artifact list', `claude.ai's artifact list is longer than this export reads, so this export may be incomplete.`, compare);
+    }
+    if (paging && paging.added > 0) {
+      const n = paging.added;
+      warn('artifact list', `claude.ai's quick list missed ${n} artifact${n === 1 ? '' : 's'}; ${n === 1 ? 'it was' : 'they were'} found by paging through its full list and saved without a card picture.`);
     }
     const thumbState = {};
     const writeParts = (list) => { for (const p of list) root.file(`viewer-files/${p.name}`, p.body); };
@@ -5809,7 +5823,7 @@ async function exportArtifacts(options = {}) {
     status.textContent = publishedSignedOutReply(reply) ? 'Sign in to claude.ai, then try again.' : `Could not fetch the artifact list: ${code}.`;
     return;
   }
-  const { artifacts, full, listed } = artifactsFromList(reply);
+  const { artifacts, paging, listed } = artifactsFromList(reply);
   if (!artifacts.length) {
     status.className = 'status ready';
     status.textContent = 'No artifacts on claude.ai.';
@@ -5845,7 +5859,7 @@ async function exportArtifacts(options = {}) {
       parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
     } catch (e) { /* no previews; the export goes on */ }
     const { views, rows, entries, thumbs, writeFailures, partCount } = await runArtifactStep(root, {
-      store: artifactStore(root, { prefix: '' }), artifacts, full, listed, fetchPublished, picturesAllowed, parts, collector, run,
+      store: artifactStore(root, { prefix: '' }), artifacts, paging, listed, fetchPublished, picturesAllowed, parts, collector, run,
       onProgress: (done, count) => showProgress(done, count, `${done} / ${count}`),
     });
     let viewerBuilt = false;
