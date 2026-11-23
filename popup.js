@@ -3656,11 +3656,14 @@ async function savePublishedPages(folder, data, ctx = {}) {
   const keepPreview = (v, payload) => Object.defineProperty(v, 'preview', { value: payload, writable: true, configurable: true });
   const fetchVersion = async (rec, v) => {
     v.attempted = true;
+    const outBefore = !!state.publishedSignedOut;
     const got = await fetchPublishedFiles({
       target, prefix: exportAll ? store.versionFolder(rec.store, v.key) : `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
       state, onSignedOut: markSignedOut, fetchPublished, collect: wanted(rec.uuid, v.ver),
       zip: exportAll && wanted(rec.uuid, v.ver) ? { date: rec.store.meta.updatedAt, whole: true } : null,
     });
+    // A 401 that cut this fetch short (not part of artifact.json): later chats blame it, not their own cause.
+    if (!outBefore && state.publishedSignedOut) Object.defineProperty(v, 'signedOutGap', { value: true, configurable: true });
     // Export All: a version the store points at a chat's file for (sameAs) stays as it was when no copy was saved.
     const keptSame = exportAll && !got.saved && !!v.sameAs;
     if (!keptSame) {
@@ -3797,8 +3800,10 @@ async function savePublishedPages(folder, data, ctx = {}) {
         text: same ? (own && own.text.length <= limit ? own.text : null) : (usable ? v.text : null),
         publishes: m.publishes.slice(),
       });
-      // Left incomplete once claude.ai answered 401 (this chat or an earlier one): say why (retry below).
-      if (state.publishedSignedOut && versions[versions.length - 1].incomplete) { noteSkipped(); noted.add(rec.uuid); }
+      // Left incomplete by the 401 (cut short by it, or never fetched after it): say why (retry below). A version
+      // that failed for its own reason before the 401 keeps that reason, warned in the chat that fetched it.
+      if (state.publishedSignedOut && versions[versions.length - 1].incomplete
+        && (v.signedOutGap === true || (!same && !v.attempted && !v.saved && !v.sameAs))) { noteSkipped(); noted.add(rec.uuid); }
     }
     versions.sort((a, b) => a.order - b.order);
     const entry = { uuid: rec.uuid, shortId: rec.shortId, title: rec.title, url: rec.url, current: group.some((p) => p.current), dir: dirOf(rec), versions };
@@ -4942,7 +4947,7 @@ async function bulkExportZip(options = {}) {
     // A Claude Docs artifact's uuid -> the chat in this export that rebuilt its text (the latest), for its artifact.json note.
     const docChats = new Map();
     const viewerChats = [];
-    const exportedChats = [];  // { uuid, name, updated_at (as listed), folder }, for the manifest and the record
+    const exportedChats = [];  // { uuid, name, updated_at (as listed), folder, retry?, stores? }, for the manifest and the record (recordableExport)
 
     for (const conv of conversations) {
       try {

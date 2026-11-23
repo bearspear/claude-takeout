@@ -415,8 +415,8 @@
     // Open file: any saved file of the owner's own artifacts; of any other, only what openableHref allows (never
     // HTML or SVG, which would run someone else's code from disk, unsandboxed). None inside a ZIP, where it can't open.
     // A view reused from a chat's files (Export All) has its paths from viewer.html already, not from its folder.
-    // The owner's own artifact, whose HTML or SVG may open from disk: foreign false (shared false in viewers built
-    // before v1.20.5, which have no foreign).
+    // The owner's own artifact, whose HTML or SVG may open from disk: foreign false (shared false for a view with no
+    // foreign; artifactView always sets it).
     const ownArtifact = v => (typeof v.foreign === 'boolean' ? v.foreign === false : v.shared === false);
     function openHref(v, savedAs) {
       if (unzipped === false) return null;

@@ -4295,6 +4295,22 @@ test('a chat after a 401 in the middle of a version\'s files says why that versi
   assert.ok(!store.exportRecord || !store.exportRecord['org-1'] || !Object.keys(store.exportRecord['org-1'].chats).length);
 });
 
+test('a version that failed before a 401 keeps its own cause: a later chat does not blame the 401', async () => {
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  const chatC = Object.assign(pubChat([pubMsg('k1', null, publish('r1', PUB_U2, 'v1', guideAs, 'Out2', 'Out'))]), { uuid: 'c', name: 'Chat c' });
+  const chatD = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U, 'v1', guideAs))]), { uuid: 'd', name: 'Chat d' });
+  const fetcher = publishedFetcher({
+    [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'tampered', sha256: sha('original') } } } } },
+    [PUB_U2]: { error: { error: 'HTTP 401', status: 401 } },
+  });
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('c', '2026-01-02T00:00:00Z'), listed('d', '2026-01-03T00:00:00Z')];
+  const { zip } = await runBulkZip({ list, chats: { a: chatA, c: chatC, d: chatD }, setup: bulkWithPages(fetcher, { calls: 0 }) });
+  const errC = await zip.file('Chat_c/errors.txt').async('string');
+  assert.strictEqual((errC.match(/HTTP 401/g) || []).length, 1, 'the chat that met the 401 says so once');
+  const errD = zip.file('Chat_d/errors.txt') ? await zip.file('Chat_d/errors.txt').async('string') : '';
+  assert.ok(!/HTTP 401/.test(errD), errD);
+});
+
 test('runArtifactStep lets go of each version\'s preview once its part is written', async () => {
   const sb = exportPopup().sandbox;
   const fetcher = publishedFetcher({ [U(1)]: livePage('Guide', { 'index.html': 'live' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) });
