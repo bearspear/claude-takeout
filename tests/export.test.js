@@ -2051,14 +2051,29 @@ test('artifactsFromList keeps only the safe fields', () => {
     owner_email: 'a@b.c', thumbImgURL: 'https://x/y.png', link: 'https://claude.ai/z' };
   const r = plain(core.artifactsFromList({ frames: [good, { ...good }, { ...good, slug: '../x' }, { ...good, slug: PUB_U.replace('0a1b', '0a1c'), live: '../v' }] }));
   assert.strictEqual(r.artifacts.length, 2);
-  assert.strictEqual(r.full, false);
+  assert.ok(!('full' in r), 'no round-number guess');
   assert.strictEqual(r.artifacts[1].live, '');
   assert.deepStrictEqual(Object.keys(r.artifacts[0]).sort(), ['createdAt', 'live', 'public', 'rel', 'slug', 'sourceSurface', 'title', 'typeSlug', 'typeTitle', 'updatedAt']);
   assert.ok(!JSON.stringify(r).includes('a@b.c') && !JSON.stringify(r).includes('http'));
-  const n = (k) => core.artifactsFromList({ frames: Array.from({ length: k }, (_, i) => ({ slug: `00000000-0000-4000-8000-${String(i).padStart(12, '0')}` })) }).full;
-  for (const k of [60, 70, 500, 1000]) assert.strictEqual(n(k), true, String(k));
-  for (const k of [0, 19, 59, 61, 499]) assert.strictEqual(n(k), false, String(k));
-  assert.deepStrictEqual(plain(core.artifactsFromList({})), { artifacts: [], full: false, listed: 0 });
+  const paged = (v) => core.artifactsFromList({ frames: [{ ...good, paged: v }] }).artifacts[0];
+  assert.strictEqual(paged(true).paged, true);
+  for (const v of [false, 'true', 1, undefined]) assert.ok(!('paged' in paged(v)), String(v));
+  assert.deepStrictEqual(plain(core.artifactsFromList({})), { artifacts: [], listed: 0, paging: null });
+});
+
+test('artifactsFromList keeps how claude.ai\'s full list was paged, as plain values', () => {
+  const pg = (paging) => plain(core.artifactsFromList({ frames: [], paging }).paging);
+  assert.deepStrictEqual(pg({ status: 'ok', added: 2 }), { status: 'ok', added: 2 });
+  assert.deepStrictEqual(pg({ status: 'capped', added: 0 }), { status: 'capped', added: 0 });
+  assert.deepStrictEqual(pg({ status: 'failed', code: 'HTTP 500' }), { status: 'failed', code: 'HTTP 500' });
+  assert.deepStrictEqual(pg({ status: 'failed', code: 'repeated page' }), { status: 'failed', code: 'repeated page' });
+  assert.deepStrictEqual(pg({ status: 'failed', code: 'see https://x/?__frame_t=t' }), { status: 'failed', code: 'unknown' });
+  assert.deepStrictEqual(pg({ status: 'failed', code: 'x'.repeat(41) }), { status: 'failed', code: 'unknown' });
+  assert.deepStrictEqual(pg({ status: 'failed' }), { status: 'failed', code: 'unknown' });
+  assert.deepStrictEqual(pg({ status: 'ok', added: -1 }), { status: 'ok', added: 0 });
+  assert.deepStrictEqual(pg({ status: 'ok', added: 1.5 }), { status: 'ok', added: 0 });
+  assert.deepStrictEqual(pg({ status: 'ok', added: 3, url: 'https://x' }), { status: 'ok', added: 3 });
+  for (const bad of [undefined, null, 'ok', {}, { status: 'done' }]) assert.strictEqual(pg(bad), null, JSON.stringify(bad));
 });
 
 test('artifactsFromList keeps public as a boolean', () => {
@@ -2776,14 +2791,36 @@ test('same-titled artifacts get distinct folders, and unsafe titles and paths st
   assert.ok(files['errors.txt'].includes('3 files with unsafe paths not fetched'), files['errors.txt']);
 });
 
-test('a full list of 500 warns that it may be incomplete', async () => {
+test('a round number of artifacts alone no longer warns', async () => {
   const frames = Array.from({ length: 500 }, (_, i) => art(U(i + 1), `A ${i}`, { live: '' }));
-  const { files, fetcher } = await runArtifacts({ frames });
-  assert.strictEqual(fetcher.calls.length, 0);
-  assert.strictEqual((files['errors.txt'].match(/may be incomplete/g) || []).length, 1, files['errors.txt']);
+  const { files } = await runArtifacts({ list: { frames, paging: { status: 'ok', added: 0 }, accountName: 'Mika', orgId: 'org-1' } });
+  assert.ok(!files['errors.txt'] || !/artifact list/.test(files['errors.txt']), files['errors.txt']);
   assert.match(files['index.md'], /\*\*Listed by claude\.ai:\*\* 500/);
-  const few = await runArtifacts({ frames: frames.slice(0, 19) });
-  assert.ok(!few.files['errors.txt'] || !/may be incomplete/.test(few.files['errors.txt']));
+});
+
+test('an artifact found only by paging is saved at its live version, with a warning that counts it', async () => {
+  const frames = [art(U(1), 'Quick'), art(U(2), 'Paged', { live: '', paged: true })];
+  const pages = { [U(1)]: livePage('Quick', { 'index.html': 'q' }), [U(2)]: livePage('Paged', { 'index.html': 'p' }) };
+  const { files, fetcher } = await runArtifacts({ list: { frames, paging: { status: 'ok', added: 1 }, accountName: 'Mika', orgId: 'org-1' }, pages });
+  const f2 = artFolder('Paged', U(2));
+  assert.strictEqual(files[`${f2}/${LIVE}/index.html`], 'p');
+  assert.strictEqual(JSON.parse(files[`${f2}/artifact.json`]).current, LIVE);
+  assert.deepStrictEqual(fetcher.calls.filter((c) => c.action === 'publishedPageInfo').map((c) => [c.uuid, c.ver]), [[U(1), LIVE], [U(2), '']]);
+  const errs = files['errors.txt'] || '';
+  assert.strictEqual((errs.match(/quick list missed 1 artifact\b/g) || []).length, 1, errs);
+  assert.ok(!/may be incomplete/.test(errs), errs);
+  assert.match(files['index.md'], /\*\*Listed by claude\.ai:\*\* 2/);
+});
+
+test('a full list that could not be paged, or was cut at the page cap, warns that the export may be incomplete', async () => {
+  const frames = [art(U(1), 'One')];
+  const pages = { [U(1)]: livePage('One', { 'index.html': 'o' }) };
+  const failed = await runArtifacts({ list: { frames, paging: { status: 'failed', code: 'HTTP 500' }, accountName: 'Mika', orgId: 'org-1' }, pages });
+  assert.match(failed.files['errors.txt'], /could not be read in full \(HTTP 500\).*may be incomplete/, failed.files['errors.txt']);
+  const capped = await runArtifacts({ list: { frames, paging: { status: 'capped', added: 0 }, accountName: 'Mika', orgId: 'org-1' }, pages });
+  assert.match(capped.files['errors.txt'], /longer than this export reads.*may be incomplete/, capped.files['errors.txt']);
+  const plainList = await runArtifacts({ frames, pages });
+  assert.ok(!plainList.files['errors.txt'], 'a reply without paging (older content.js) warns nothing');
 });
 
 test('nothing private or token-shaped reaches a file', async () => {
@@ -3049,7 +3086,6 @@ test('listed is claude.ai\'s raw count, even when a frame is dropped', async () 
   assert.match(files['index.html'], /Listed by claude\.ai: 60\b/);
   assert.strictEqual(JSON.parse(files['export-manifest.json']).listed, 60);
   assert.strictEqual(JSON.parse(files['export-manifest.json']).artifacts.length, 59);
-  assert.match(files['errors.txt'], /claude\.ai listed 60 artifacts/);
   assert.strictEqual(files['index.md'].split('\n').filter((l) => /^\| \d+ \|/.test(l)).length, 59);
 });
 
@@ -4047,6 +4083,23 @@ test('a same version points at the chat\'s artefacts file', async () => {
   assert.strictEqual(files['Chat_a/artefacts/guide.html'], 'SAME-TEXT-ONE');
   assert.ok(!files[`artifacts/${f}/artifact.json`].includes('SAME-TEXT-ONE'), 'the text stays out of artifact.json');
   assert.ok(Object.entries(files).some(([n, t]) => /^viewer-files\/part-/.test(n) && t.includes('SAME-TEXT-ONE')), 'the preview has the text');
+});
+
+test('Export Changes leaves an artifact found only by paging out of the record, so it is fetched again next time', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE } } } };
+  const list = [listed('a', '2026-01-01T00:00:00Z')];
+  const chats = { a: chatFor('a', '2026-01-01T00:00:00Z') };
+  const frames = [art(U(1), 'One'), art(U(2), 'Paged', { live: '', paged: true })];
+  const fetcher = publishedFetcher({ [U(1)]: livePage('One', { 'index.html': '1' }), [U(2)]: livePage('Paged', { 'index.html': 'p' }) });
+  const reply = { frames, paging: { status: 'ok', added: 1 } };
+  const first = await runBulkZip({ list, chats, stored, options: { changesOnly: true }, setup: bulkWithArtifacts({ list: reply, fetcher }) });
+  const files = await zipFiles(first.zip);
+  assert.strictEqual(files[`artifacts/${artFolder('Paged', U(2))}/${LIVE}/index.html`], 'p');
+  assert.deepStrictEqual(first.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE }, 'its listed version is unknown, so it is not recorded');
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(2)), 1);
+  const again = await runBulkZip({ list, chats, stored: first.store, options: { changesOnly: true }, setup: bulkWithArtifacts({ list: reply, fetcher }) });
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(2)), 2, 'still included the next time');
+  assert.ok(again.zip);
 });
 
 test('Export Changes includes changed artifacts only and records versions', async () => {

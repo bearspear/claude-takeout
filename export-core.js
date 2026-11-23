@@ -385,9 +385,26 @@ function artifactsFromList(reply) {
       sourceSurface: str(f.sourceSurface), rel: str(f.rel),
       live: typeof f.live === 'string' && PUBLISH_VER_RE.test(f.live) ? f.live : '',
       updatedAt: str(f.updatedAt), createdAt: str(f.createdAt), public: f.public === true,
+      // Found only by paging claude.ai's full list: its live version is resolved when it is fetched.
+      ...(f.paged === true ? { paged: true } : {}),
     });
   }
-  return { artifacts, full: frames.length >= 60 && frames.length % 10 === 0, listed: frames.length };
+  return { artifacts, listed: frames.length, paging: artifactPaging(reply && reply.paging) };
+}
+
+// How content.js paged claude.ai's full artifact list, as plain values: { status: 'ok' | 'capped', added } (artifacts
+// the quick list missed) or { status: 'failed', code } (a short code; anything else becomes 'unknown'); null when
+// the reply has none.
+function artifactPaging(p) {
+  if (!p || typeof p !== 'object') return null;
+  if (p.status === 'ok' || p.status === 'capped') {
+    return { status: p.status, added: Number.isInteger(p.added) && p.added > 0 ? p.added : 0 };
+  }
+  if (p.status === 'failed') {
+    const code = typeof p.code === 'string' && /^[A-Za-z0-9 ]{1,40}$/.test(p.code) ? p.code : 'unknown';
+    return { status: 'failed', code };
+  }
+  return null;
 }
 
 // The pages a chat published, one entry per uuid + version, in chat order over every message (also

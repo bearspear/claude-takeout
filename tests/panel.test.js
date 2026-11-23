@@ -105,8 +105,8 @@ function resp(status, { json, bytes, stream, headers = {} } = {}) {
   };
 }
 // info(body): changes the /api/frame/<uuid> reply; filesJson(): the _files.json response; direct(): a file
-// fetched by its own path under /_f/<ver>/ (not _src/).
-function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, cookie = 'lastActiveOrg=11111111-0000-4000-8000-000000000001', account, info, filesJson, direct, thumb } = {}) {
+// fetched by its own path under /_f/<ver>/ (not _src/). pages(url): the /api/frame/artifacts reply (404 when absent).
+function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, pages, cookie = 'lastActiveOrg=11111111-0000-4000-8000-000000000001', account, info, filesJson, direct, thumb } = {}) {
   const reqs = [], delays = [], logs = [];
   const record = (...a) => { logs.push(a.map(String).join(' ')); };
   const listing = files || {
@@ -124,6 +124,7 @@ function publishedHarness({ src, srcThrow, files, expiresIn = 3600, frames, cook
     fetch: async (url, opts) => {
       reqs.push({ url, opts });
       if (url.includes('/api/frame/frames')) return frames();
+      if (url.includes('/api/frame/artifacts?')) return pages ? pages(url) : resp(404);
       if (thumb && !url.startsWith('https://claude.ai/')) return thumb(url);
       if (url.includes('/api/account')) return resp(200, { json: account });
       if (url.includes('/api/frame/')) {
@@ -504,6 +505,72 @@ const tests = {
     assert.deepStrictEqual(await err(() => ({ ...resp(200), json: async () => { throw new Error('x'); } })), { error: 'bad response' });
     assert.deepStrictEqual(await err(() => resp(200, {}), { cookie: '' }), { error: 'no org' });
     assert.deepStrictEqual(await err(() => { throw new Error('secret https://x'); }), { error: 'network' });
+  },
+
+  'listArtifacts pages claude.ai\'s full list and adds what its quick list missed': async () => {
+    const quick = { slug: PUB, title: 'A', type_slug: '', type_title: '', source_surface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', created_at: 'c', thumbImgURL: thumbUrl() };
+    const secret = 'https://' + PUB2 + '.frame.claudeusercontent.com/_f/V2/_thumb.img?__frame_t=secrettok.2';
+    const extra = { kind: 'page', id: PUB2, title: 'B', type_slug: 'ts', type_title: 'Tt', source: 'chat', rel: 'shared', updated_at: 'u2', created_at: 'c2',
+      audience: 'public', thumbnail_url: secret, open_url: 'https://claude.ai/artifact/x', owner_account: { email: 'o@x.y' } };
+    const pages = (url) => {
+      const tok = new URL(url).searchParams.get('page_token');
+      if (!tok) return resp(200, { json: { artifacts: [{ kind: 'page', id: PUB.toUpperCase() }, { kind: 'folder', id: PUB3 }], next_page_token: 'a+b/c' } });
+      if (tok === 'a+b/c') return resp(200, { json: { artifacts: [extra, { kind: 'page', id: '../x' }, { kind: 'page', id: PUB2 }, null], next_page_token: '' } });
+      return resp(500);
+    };
+    const h = publishedHarness({ frames: () => resp(200, { json: { frames: [quick] } }), pages });
+    const res = await h.call({ action: 'listArtifacts' });
+    assert.deepStrictEqual(res.frames.map((f) => f.slug), [PUB, PUB2]);
+    assert.deepStrictEqual(res.frames[1], { slug: PUB2, title: 'B', typeSlug: 'ts', typeTitle: 'Tt', sourceSurface: 'chat', rel: 'shared', live: '', updatedAt: 'u2', createdAt: 'c2', public: true, paged: true });
+    assert.deepStrictEqual(res.paging, { status: 'ok', added: 1 });
+    const calls = h.reqs.filter((r) => r.url.includes('/api/frame/artifacts?'));
+    assert.strictEqual(calls.length, 2);
+    for (const c of calls) {
+      const q = new URL(c.url).searchParams;
+      assert.strictEqual(c.opts.headers['X-Frame-CP'], 'go');
+      assert.strictEqual(c.opts.credentials, 'same-origin');
+      assert.strictEqual(q.get('rel'), 'all');
+      assert.strictEqual(q.get('org'), '11111111-0000-4000-8000-000000000001');
+      assert.ok(!q.has('empty'), 'no filter that hides typed artifacts');
+    }
+    assert.strictEqual(new URL(calls[1].url).searchParams.get('page_token'), 'a+b/c');
+    const text = JSON.stringify(res);
+    for (const s of ['secrettok', 'claudeusercontent', 'o@x.y', 'open_url', 'audience']) assert.ok(!text.includes(s), s);
+    assert.deepStrictEqual(await h.call({ action: 'artifactThumbUrl', uuid: PUB2 }), { error: 'no picture' }, 'a paged artifact has no picture');
+    assert.ok(!h.logs.some((l) => /secrettok|claudeusercontent/.test(l)));
+  },
+
+  'listArtifacts keeps its quick list when paging fails, with a code only': async () => {
+    const quick = () => resp(200, { json: { frames: [{ slug: PUB, live: 'v1' }] } });
+    const run = async (pages) => publishedHarness({ frames: quick, pages }).call({ action: 'listArtifacts' });
+    const second = (bad) => (url) => (new URL(url).searchParams.get('page_token') ? bad() : resp(200, { json: { artifacts: [{ kind: 'page', id: PUB2 }], next_page_token: 't' } }));
+    for (const [pages, code] of [
+      [second(() => resp(500)), 'HTTP 500'],
+      [() => { throw new Error('secret https://x'); }, 'network'],
+      [() => resp(200, { json: { artifacts: {} } }), 'bad response'],
+      [() => ({ ...resp(200), json: async () => { throw new Error('x'); } }), 'bad response'],
+      [() => resp(200, { json: { artifacts: [], next_page_token: 7 } }), 'bad response'],
+      [undefined, 'HTTP 404'],
+    ]) {
+      const res = await run(pages);
+      assert.deepStrictEqual(res.frames.map((f) => f.slug), [PUB], code);
+      assert.deepStrictEqual(res.paging, { status: 'failed', code }, code);
+    }
+  },
+
+  'listArtifacts stops on a repeated page token and after its page cap': async () => {
+    const quick = () => resp(200, { json: { frames: [] } });
+    const loop = publishedHarness({ frames: quick, pages: () => resp(200, { json: { artifacts: [{ kind: 'page', id: PUB }], next_page_token: 'same' } }) });
+    const looped = await loop.call({ action: 'listArtifacts' });
+    assert.deepStrictEqual(looped.paging, { status: 'failed', code: 'repeated page' });
+    assert.deepStrictEqual(looped.frames, [], 'a list that loops adds nothing');
+    let n = 0;
+    const endless = publishedHarness({ frames: quick, pages: () => resp(200, { json: { artifacts: [{ kind: 'page', id: `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}` }], next_page_token: 't' + n } }) });
+    const capped = await endless.call({ action: 'listArtifacts' });
+    const calls = endless.reqs.filter((r) => r.url.includes('/api/frame/artifacts?')).length;
+    assert.strictEqual(calls, 100);
+    assert.deepStrictEqual(capped.paging, { status: 'capped', added: 100 });
+    assert.strictEqual(capped.frames.length, 100);
   },
 
   'listArtifacts maps audience to public and never returns it': async () => {

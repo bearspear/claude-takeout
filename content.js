@@ -281,6 +281,38 @@
     return frames;
   }
 
+  // claude.ai's paged artifact list (/api/frame/artifacts, what claude.ai/artifacts itself reads), every page, with
+  // no empty filter (empty=exclude, the page's default, hides typed artifacts). /api/frame/frames, the quick list,
+  // has no paging and may stop short; this one gives each artifact's fields but not its live version. Returns
+  // { status: 'ok' | 'capped', items } or { status: 'failed', code }: an HTTP status, 'network', 'bad response'
+  // or 'repeated page'. Only plain values are kept, never a URL.
+  const ARTIFACT_PAGE_SIZE = 100;
+  const ARTIFACT_PAGE_MAX = 100;
+  async function fetchArtifactPages(org) {
+    const items = [];
+    const tokens = new Set();
+    let token = '';
+    for (let page = 0; page < ARTIFACT_PAGE_MAX; page++) {
+      let res;
+      try {
+        res = await fetch('https://claude.ai/api/frame/artifacts?rel=all&sort=last_viewed&with_folder=true&through_folders=true&limit=' +
+          ARTIFACT_PAGE_SIZE + '&org=' + encodeURIComponent(org) + (token ? '&page_token=' + encodeURIComponent(token) : ''),
+          { credentials: 'same-origin', headers: { 'X-Frame-CP': 'go', 'Accept': 'application/json' } });
+      } catch (e) { return { status: 'failed', code: 'network' }; }
+      if (!res.ok) return { status: 'failed', code: 'HTTP ' + res.status };
+      let body;
+      try { body = await res.json(); } catch (e) { return { status: 'failed', code: 'bad response' }; }
+      const next = body ? body.next_page_token : undefined;
+      if (!body || !Array.isArray(body.artifacts) || (next != null && typeof next !== 'string')) return { status: 'failed', code: 'bad response' };
+      for (const a of body.artifacts) if (a && typeof a === 'object' && a.kind !== 'folder') items.push(a);
+      if (!next) return { status: 'ok', items };
+      if (tokens.has(next)) return { status: 'failed', code: 'repeated page' };
+      tokens.add(next);
+      token = next;
+    }
+    return { status: 'capped', items };
+  }
+
   async function listArtifacts(request) {
     const org = await getOrgForPublished(request);
     artifactThumbUrls = null; // a failed listing leaves no pictures
@@ -293,8 +325,29 @@
       sourceSurface: str(f.source_surface), rel: str(f.rel), live: str(f.live),
       updatedAt: str(f.updatedAt), createdAt: str(f.created_at), public: f.audience === 'public',
     }));
+    // What the quick list missed, from the paged list: its fields, no live version (the page info resolves it)
+    // and no picture. A paging failure keeps the quick list as it is.
+    let paging;
+    const paged = await fetchArtifactPages(org);
+    if (paged.status === 'failed') {
+      paging = { status: 'failed', code: paged.code };
+    } else {
+      const seen = new Set(frames.map((f) => f.slug.toLowerCase()));
+      let added = 0;
+      for (const a of paged.items) {
+        if (typeof a.id !== 'string' || !PUBLISHED_UUID.test(a.id) || seen.has(a.id.toLowerCase())) continue;
+        seen.add(a.id.toLowerCase());
+        added++;
+        frames.push({
+          slug: a.id, title: str(a.title), typeSlug: str(a.type_slug), typeTitle: str(a.type_title),
+          sourceSurface: str(a.source), rel: str(a.rel), live: '',
+          updatedAt: str(a.updated_at), createdAt: str(a.created_at), public: a.audience === 'public', paged: true,
+        });
+      }
+      paging = { status: paged.status, added };
+    }
     const accountName = request.withAccountName ? await fetchAccountName() : null;
-    return { frames, accountName, orgId: org };
+    return { frames, paging, accountName, orgId: org };
   }
 
   // An artifact's card picture URL as { url }, checked when listed and rebuilt from its parts, or
