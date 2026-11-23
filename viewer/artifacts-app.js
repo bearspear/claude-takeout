@@ -1,5 +1,5 @@
 // The artifacts app: the viewer.html of an Export Artifacts export, and the Artifacts screen of the chat viewer.
-// window.CTArtifactsApp.mount(container, options) builds it in container and returns { route(hash), show() }.
+// window.CTArtifactsApp.mount(container, options) builds it in container and returns { route(hash), show(), refocus() }.
 //   Standalone (no options): container is document.body. The data is the page's inline #data,
 //     { exported, listed, artifacts: ArtifactView[] } (see artifactView in popup.js); parts load through this
 //     app's own window.__archivePart; the app follows the hash itself.
@@ -787,10 +787,12 @@
         const text = texts.has(DESIGN_CANVAS_FILE) ? texts.get(DESIGN_CANVAS_FILE) : null;
         const layout = text === null ? null : designCanvas(text, path => texts.has(path));
         if (!layout) return pageBody.replaceChildren(posterPage(v));
-        pageBody.replaceChildren(canvasPage(v, layout, payload, texts));
+        let wrap = canvasPage(v, layout, payload, texts);
+        pageBody.replaceChildren(wrap);
         canvasBadges(layout, texts);
         if (focus) {
-          const at = pageBody.querySelector(`.design-board[data-name="${CSS.escape(focus)}"]`);
+          // A board on the canvas, or its row in the list of boards not drawn.
+          const at = pageBody.querySelector(`.design-board[data-name="${CSS.escape(focus)}"], .design-skipped li[data-name="${CSS.escape(focus)}"]`);
           if (at) {
             at.scrollIntoView({ block: 'center' });
             // Keyboard focus back where it was: the board's Open alone.
@@ -798,6 +800,29 @@
             if (open) open.focus({ preventScroll: true });
           }
         }
+        // The scale follows the page's width: laid out again when it changes, keeping the place in it.
+        if (typeof ResizeObserver === 'function') {
+          let width = pageBody.clientWidth;
+          let timer = null;
+          const resize = new ResizeObserver(() => {
+            if (!wrap.isConnected) { resize.disconnect(); return; }
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+              if (!wrap.isConnected || Math.abs(pageBody.clientWidth - width) < 24) return;
+              width = pageBody.clientWidth;
+              const at = pageBody.scrollTop / Math.max(1, pageBody.scrollHeight);
+              const next = canvasPage(v, layout, payload, texts);
+              if (wrap.stopFrames) wrap.stopFrames();
+              wrap.replaceWith(next);
+              wrap = next;
+              pageBody.scrollTop = at * pageBody.scrollHeight;
+            }, 150);
+          });
+          resize.observe(pageBody);
+        }
+      }).catch(() => {
+        // A canvas.json the layout chokes on: the poster page, as for none.
+        if (box.isConnected) pageBody.replaceChildren(posterPage(v));
       });
     }
     const DESIGN_CANVAS_FILE = 'project/canvas.json';
@@ -869,6 +894,8 @@
           const flags = boardFlags(texts.get(b.path));
           if (flags.templated) head.append(el('span', 'board-badge', "Uses claude.ai's templates; shown as saved"));
           if (flags.blobs) head.append(el('span', 'board-badge', 'Images not in this export'));
+          // The row is one line, so a small board cuts it: the whole of it on hover.
+          head.title = [b.title, ...[...head.querySelectorAll('.board-badge')].map(x => x.textContent)].join(' · ');
           const holder = el('div', 'board-frame');
           holder.style.transform = `scale(${scale})`;
           body.append(holder);
@@ -887,11 +914,13 @@
         const ul = el('ul', 'files');
         for (const s of layout.skipped) {
           const li = el('li');
+          li.dataset.name = s.name;
           li.append(el('span', 'path', s.title));
           const path = `project/${s.name}`;
           if (texts.has(path)) {
             const open = el('button', 'btn board-open', 'Open alone');
             open.type = 'button';
+            open.setAttribute('aria-label', `Open ${s.title} alone`);
             open.addEventListener('click', () => openBoard(v, { name: s.name, path, title: s.title }, payload, texts));
             li.append(open);
           }
@@ -902,6 +931,7 @@
       }
       if (observer) queueMicrotask(() => { for (const item of frameOf.keys()) observer.observe(item); });
       else for (const [item, b] of frameOf) item.querySelector('.board-frame').append(previewFrame({ title: b.title }, boardDoc(b, payload, texts)));
+      wrap.stopFrames = () => { if (observer) observer.disconnect(); };
       return wrap;
     }
 
@@ -917,6 +947,16 @@
       box.append(bar, previewFrame({ title: b.title }, boardDoc(b, payload, texts)));
       pageBody.replaceChildren(box);
       pageBody.scrollTop = 0;
+      // The button that opened it is gone: focus the way back.
+      back.focus({ preventScroll: true });
+    }
+
+    // The current version's badges (a Design canvas replaces the first with its own, canvasBadges).
+    function pageBadgesOf(v) {
+      const badges = [];
+      if (v.needsRuntime || isPoster(v)) badges.push(badge('needs claude.ai to run'));
+      if (unverified(v)) badges.push(badge("not checked against claude.ai's checksum"));
+      return badges;
     }
 
     function showPage(v) {
@@ -925,10 +965,7 @@
       pageTitle.title = title;
       pageKind.textContent = String(v.kind || 'Page');
       document.title = `${title} - Artifacts`;
-      const badges = [];
-      if (v.needsRuntime || isPoster(v)) badges.push(badge('needs claude.ai to run'));
-      if (unverified(v)) badges.push(badge("not checked against claude.ai's checksum"));
-      pageBadges.replaceChildren(...badges);
+      pageBadges.replaceChildren(...pageBadgesOf(v));
       clearNote();
       artifactLinks(v);
       if (pageFrom) {
@@ -1010,22 +1047,29 @@
       }
       select.addEventListener('change', () => {
         clearNote();
-        if (select.value === 'current') { artifactLinks(v); fillBody(v); return; }
+        if (select.value === 'current') { pageBadges.replaceChildren(...pageBadgesOf(v)); artifactLinks(v); fillBody(v); return; }
         const e = list[Number(select.value)];
         if (!e) return;
         const href = versionHref(v, e);
         pageLinks.replaceChildren(...(href ? [link('btn open-file', 'Open file', href, false)] : []), link('btn open-claude', 'Open on claude.ai', claudeUrl(v), true));
+        // Badges of this version, not the current one's: only whether its own files were checked.
+        pageBadges.replaceChildren(...(unverified(e) ? [badge("not checked against claude.ai's checksum")] : []));
+        // A version with a preview of its own (from disk): shown as the artifact is, from its own folder, ahead of a
+        // chat's copy, whose siblings may be the chat's later ones. This version's own files, place and payload;
+        // nothing of the current version's (its files, missing count, ZIP or note) goes with it.
+        if (Number.isSafeInteger(e.part) && e.part > 0 && typeof e.key === 'string' && typeof e.start === 'string' && PREVIEW_KINDS.has(e.startKind) && unzipped !== false) {
+          return openPreview({ ...v, start: e.start, startSaved: e.startSaved, startKind: e.startKind, folder: e.folder, reused: e.same === true, part: e.part, key: e.key,
+            files: Array.isArray(e.files) ? e.files : [], missingCount: 0, zip: null, note: '', startMissing: false, tooLarge: false });
+        }
         const copy = e.copy && typeof e.copy === 'object' && Number.isInteger(e.copy.chat) ? e.copy : null;
         const chat = copy ? chats[copy.chat] : null;
         const file = chat && chat.files && typeof copy.file === 'string' && Object.prototype.hasOwnProperty.call(chat.files, copy.file) ? chat.files[copy.file] : null;
         const ver = file && Array.isArray(file.versions) ? file.versions[copy.version] : null;
-        if (ver) return showVersionBody({ chat: copy.chat, file: copy.file, name: String(file.name || v.title || 'Page') }, ver, String(v.id));
-        // A version with a preview of its own (from disk): shown as the artifact is, from its own folder.
-        if (Number.isSafeInteger(e.part) && e.part > 0 && typeof e.key === 'string' && typeof e.start === 'string' && PREVIEW_KINDS.has(e.startKind) && unzipped !== false) {
-          // This version's own files, place and payload; nothing of the current version's (its files, missing count,
-          // ZIP or note) goes with it.
-          return openPreview({ ...v, start: e.start, startSaved: e.startSaved, startKind: e.startKind, folder: e.folder, reused: e.same === true, part: e.part, key: e.key,
-            files: Array.isArray(e.files) ? e.files : [], missingCount: 0, zip: null, note: '', startMissing: false, tooLarge: false });
+        if (ver) {
+          // The files it was published with, from the chat's versions they were saved as, at their own paths.
+          const siblings = versionCopyTexts(chat, e);
+          return showVersionBody({ chat: copy.chat, file: copy.file, name: String(file.name || v.title || 'Page') }, ver, String(v.id),
+            siblings.length ? { texts: siblings, start: typeof e.start === 'string' && e.start ? e.start : null } : null);
         }
         const box = sheet('details', `${versionName(e)} can't be shown here.`);
         if (href) {
@@ -1070,7 +1114,7 @@
 
     // text: the version's text, or null. A page or diagram runs in the same guarded sandbox as an artifact's, with
     // only its own chat's scripts and stylesheets beside it; Markdown renders as the chat viewer's; an image by its link.
-    function fillFile(f, v, box, text, partFailed) {
+    function fillFile(f, v, box, text, partFailed, own = null) {
       const file = fileOf(f);
       // Download for a text this page holds, named as the version's file is (report_v2.html).
       if (text !== null) {
@@ -1078,7 +1122,8 @@
         pageLinks.prepend(downloadButton(name || file.name || 'download', text));
       }
       if ((file.kind === 'html' || file.kind === 'svg') && text !== null) {
-        const doc = artifactPreviewDoc(text, file.name, { texts: [...chatFileTexts(chats[f.chat])] });
+        const doc = own ? artifactPreviewDoc(text, own.start || file.name, { texts: own.texts })
+          : artifactPreviewDoc(text, file.name, { texts: [...chatFileTexts(chats[f.chat])] });
         if (doc.remote) addNote(PAGE_REMOTE_NOTE);
         return box.replaceChildren(previewFrame({ title: f.name }, doc.srcdoc));
       }
@@ -1108,18 +1153,19 @@
 
     // A chat file's version in the page body (an In chats file, or a version of an artifact a chat published).
     // Text moved to a part loads from it.
-    function showVersionBody(f, v, id) {
+    // own: { texts, start } for a version shown with the files it was published with (versionCopyTexts), else null.
+    function showVersionBody(f, v, id, own = null) {
       const box = el('div', 'preview');
       box.dataset.id = id;
       pageBody.replaceChildren(box);
       const kind = fileOf(f).kind;
-      if (typeof v.text === 'string' || !TEXT_KINDS.has(kind)) return fillFile(f, v, box, typeof v.text === 'string' ? v.text : null, false);
+      if (typeof v.text === 'string' || !TEXT_KINDS.has(kind)) return fillFile(f, v, box, typeof v.text === 'string' ? v.text : null, false, own);
       if (!(Number.isSafeInteger(v.part) && v.part > 0 && typeof v.key === 'string')) return fillFile(f, v, box, null, false);
       box.append(el('p', 'loading', 'Loading…'));
       Promise.resolve(options.loadPart(v.part)).then(part => {
         const text = part && Object.prototype.hasOwnProperty.call(part, v.key) && typeof part[v.key] === 'string' ? part[v.key] : null;
         // Another page or version took its place meanwhile.
-        if (box.isConnected) fillFile(f, v, box, text, text === null);
+        if (box.isConnected) fillFile(f, v, box, text, text === null, own);
       });
     }
 
@@ -1255,6 +1301,9 @@
     return {
       route(hash) { return route(hash); },
       show() { route(HOME_HASH); },
+      // The host calls it once the screen is visible: route() focuses the page title while the screen may still be
+      // hidden, which a browser ignores.
+      refocus() { if (!page.hidden) pageTitle.focus({ preventScroll: true }); },
     };
   }
 

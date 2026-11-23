@@ -1823,7 +1823,10 @@ function routeArtifacts(hash) {
   const titles = artifactsOn ? null : { page: document.title, top: document.getElementById('title').textContent };
   if (!artifactsApp.route(hash)) return false;
   shown = hash;
+  const wasOn = artifactsOn;
   showArtifacts(true, titles);
+  // The page title took focus while the screen was hidden, which a browser ignores: again now it shows.
+  if (!wasOn && typeof artifactsApp.refocus === 'function') artifactsApp.refocus();
   return true;
 }
 

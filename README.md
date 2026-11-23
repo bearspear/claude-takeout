@@ -398,6 +398,12 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.20.7
+
+- **Older versions run with their own files** - On an artifact's page, an older version that a chat wrote identically now previews with the files it was published with, in their folders, not with the chat's later edits of them. A version with a preview of its own (a rebuilt or merged archive) uses that first. Its badges are its own, not the current version's.
+- **Keyboard focus** - Opening an artifact from a chat (its link or the address) puts focus on the artifact's title, not on the hidden chat. Open alone on a Design board focuses Back to the canvas, and Back returns to a board listed under the canvas too.
+- **Design canvas** - The canvas follows the window's width when it changes. A board's title row stays on one line however small the board (the whole row shows on hover). A heading whose `maxW` is out of range uses its `w`; at most 2,000 notes are drawn; a `canvas.json` the layout can't handle shows the "needs claude.ai to run" page instead of hanging at Loading.
+
 ### v1.20.6
 
 - **Merging a merged archive with an older one** - The merged archive now records when claude.ai's artifact list was taken (`decided_at`, `listed_at` in its manifest). Merging it again with an older export no longer moves an artifact back to an older version or unlists artifacts the newer list had.
