@@ -54,8 +54,8 @@
     <span class="spacer"></span>
     <span id="page-badges"></span>
     <span id="page-links"></span>
-  </header>${hosted ? `
-  <div id="page-from" hidden></div>` : ''}
+  </header>
+  <div id="page-from" hidden></div>
   <p id="page-note" role="note" hidden></p>
   <div id="page-body"></div>
 </section>
@@ -1056,8 +1056,8 @@
     // null for one version or none. Another version shows the text a chat's card of it holds (its copy), else its own
     // preview when it has one (part, key), and Open file opens its file in its version folder (or, for one the same
     // as a chat's file, that file).
+    // Standalone too since v1.21 (an Export Artifacts export keeps every version); a version's chat copy is hosted only.
     function versionMenu(v) {
-      if (!hosted) return null;
       const list = Array.isArray(v.versions) ? v.versions.filter(e => e && typeof e === 'object') : [];
       // One version, the current one: nothing to choose.
       if (!list.length || (list.length === 1 && list[0].current === true)) return null;
@@ -1091,6 +1091,11 @@
         // A version with a preview of its own (from disk): shown as the artifact is, from its own folder, ahead of a
         // chat's copy, whose siblings may be the chat's later ones. This version's own files, place and payload;
         // nothing of the current version's (its files, missing count, ZIP or note) goes with it.
+        // A Design artifact's older version: its own canvas, from its own payload.
+        if (isDesign(v) && Number.isSafeInteger(e.part) && e.part > 0 && typeof e.key === 'string') {
+          return openCanvas({ ...v, start: e.start, startSaved: e.startSaved, folder: e.folder, reused: e.same === true, part: e.part, key: e.key,
+            files: Array.isArray(e.files) ? e.files : [], missingCount: 0, zip: null, note: '' });
+        }
         if (Number.isSafeInteger(e.part) && e.part > 0 && typeof e.key === 'string' && typeof e.start === 'string' && PREVIEW_KINDS.has(e.startKind) && unzipped !== false) {
           return openPreview({ ...v, start: e.start, startSaved: e.startSaved, startKind: e.startKind, folder: e.folder, reused: e.same === true, part: e.part, key: e.key,
             files: Array.isArray(e.files) ? e.files : [], missingCount: 0, zip: null, note: '', startMissing: false, tooLarge: false });

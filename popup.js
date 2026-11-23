@@ -5157,13 +5157,8 @@ async function bulkExportZip(options = {}) {
     // and where claude.ai says it was made (its card's source line); views, entries and rows are one per artifact.
     const combinedViews = step ? step.views.map((v, i) => ({ ...v, ver: (step.entries[i] && step.entries[i].ver) || '', sourceSurface: (step.rows[i] && step.rows[i].sourceSurface) || '' })) : [];
     // records (every artifact.json written, with its folder) and listFetched (whether claude.ai's list is in this
-    // export) are for the viewer's artifact screens.
-    // versionOrder: artifact.json's version keys in claude.ai's order, which the object's own key order loses for a
-    // numeric-looking id.
-    const storeRecords = store.records().filter((rec) => store.written(rec)).map((rec) => {
-      const json = artifactJsonV2(rec);
-      return { ...json, dir: `${store.prefix}${rec.dir}`, versionOrder: json.order.slice() };
-    });
+    // export) are for the viewer's artifact screens (viewerStoreRecord).
+    const storeRecords = store.records().filter((rec) => store.written(rec)).map((rec) => viewerStoreRecord(store, rec));
     const viewerOpts = step
       // Every part the artifact step numbered, even one an error kept from being counted in partCount.
       ? { artifacts: { views: combinedViews, listed: artifactList.listed, exported: startedAt, since, listFetched: true, records: storeRecords }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }
@@ -5387,6 +5382,15 @@ async function saveArtifactThumb(root, uuid, id, fetchPublished, state = {}) {
 // ({ exported, listed, artifacts }); artifact texts and images are in viewer-files/ parts, written before.
 // opts.fileScripts: parts were written, so the page may load them. Returns whether viewer.html was written;
 // any failure writes nothing and returns false, because the export must still finish.
+// A store record as the viewer data takes it (takeout-viewer.js recordVersions): artifact.json's content, its folder
+// root-relative, the version order, and versionPlaces (each older version's folder and preview part).
+// versionOrder: artifact.json's version keys in claude.ai's order, which the object's own key order loses for a
+// numeric-looking id.
+function viewerStoreRecord(store, rec) {
+  const json = artifactJsonV2(rec);
+  return { ...json, dir: `${store.prefix}${rec.dir}`, versionOrder: json.order.slice(), versionPlaces: rec.versionPlaces || {} };
+}
+
 async function writeArtifactsViewer(root, views, opts = {}) {
   try {
     const [template, logic, app, marked, artifactsCss] = await Promise.all(CTViewer.ARTIFACTS_VIEWER_ASSETS.map(async (asset) => {
@@ -5915,6 +5919,19 @@ async function runArtifactStep(root, opts = {}) {
           writeParts(parts.drain());
         }
       } catch (e) { view = { ...view, part: null, key: null }; }
+      // Its older versions: where each is, and its own preview part while the budget's reserve allows (v1.21).
+      try {
+        const rec = store.record(artifacts[i].slug);
+        for (const [ver, payload] of saved.history ? saved.history.payloads : []) {
+          const v = rec.versions.get(ver);
+          if (!v || !v.folder) continue;
+          const placed = parts ? parts.add({}, payload, { reserve: CTViewer.ARTIFACT_HISTORY_RESERVE }) : { part: null };
+          if (!rec.versionPlaces) rec.versionPlaces = {};
+          rec.versionPlaces[ver] = { folder: `${store.prefix}${rec.dir}/${v.folder}`,
+            ...(placed.part != null ? { part: placed.part, key: placed.key, startKind: artifactStartKind(v.start) } : {}) };
+        }
+        if (parts) writeParts(parts.drain());
+      } catch (e) { /* older versions keep their folders; their previews are extras */ }
       // The previews this artifact kept in memory (its fetch, or a chat's for the artifact step) are in its part now,
       // or never will be: let them go, so a large account doesn't hold every one until the export ends.
       try {
@@ -5998,13 +6015,20 @@ async function exportArtifacts(options = {}) {
     try {
       parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
     } catch (e) { /* no previews; the export goes on */ }
+    const store = artifactStore(root, { prefix: '' });
     const { views, rows, entries, thumbs, writeFailures, partCount } = await runArtifactStep(root, {
-      store: artifactStore(root, { prefix: '' }), artifacts, paging, listed, fetchPublished, picturesAllowed, parts, collector, run,
+      store, artifacts, paging, listed, fetchPublished, picturesAllowed, parts, collector, run,
       onProgress: (done, count) => showProgress(done, count, `${done} / ${count}`),
+    });
+    // Each view's versions for the version menu, as Export All's viewer data has them (v1.21: every version).
+    const recordOf = new Map(store.records().filter((rec) => store.written(rec)).map((rec) => [String(rec.shortId || rec.uuid), rec]));
+    const viewsWithVersions = views.map((view) => {
+      const rec = recordOf.get(String(view.id));
+      try { return rec ? { ...view, versions: CTViewer.recordVersions(viewerStoreRecord(store, rec), new Map()) } : view; } catch (e) { return view; }
     });
     let viewerBuilt = false;
     try {
-      viewerBuilt = await writeArtifactsViewer(root, views, { exported: startedAt, listed, fileScripts: partCount > 0 }) === true;
+      viewerBuilt = await writeArtifactsViewer(root, viewsWithVersions, { exported: startedAt, listed, fileScripts: partCount > 0 }) === true;
     } catch (e) { viewerBuilt = false; }
     // On disk, written now, so index.html links viewer.html only when it is really there.
     if (run) {

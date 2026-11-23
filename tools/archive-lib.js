@@ -920,7 +920,8 @@ function artifactViewsFromDisk(store, chatFolders = new Map()) {
     for (const ver of rec.order) {
       const v = versions.get(ver);
       if (v.folder) places[ver] = { folder: v.folder };
-      if (ver !== currentKey && store.layout !== 'standalone-v18' && store.layout !== 'standalone-flat') {
+      // An Export Artifacts export keeps older versions since v1.21; a flat one (before 1.18) has none.
+      if (ver !== currentKey && store.layout !== 'standalone-flat') {
         const payload = payloadFromDisk(versionDiskFiles(v), v.start);
         if (payload) versionPayloads.push({ uuid: rec.uuid, ver, payload, startKind: core.artifactStartKind(v.start) });
       }

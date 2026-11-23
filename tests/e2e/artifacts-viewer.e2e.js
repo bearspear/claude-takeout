@@ -580,6 +580,21 @@ async function exportTo(frames, pages, thumbs) {
   rtcTop.sock.close();
   rtcNested.sock.close();
 
+  // An older version from the version menu: its own page, with its own sibling files.
+  const histDir = await exportTo([art(U(8), 'History page')], { [U(8)]: { title: 'History page', live: LIVE, history: ['v1', LIVE], versions: {
+    v1: { files: { 'index.html': '<link rel="stylesheet" href="style.css"><h1>Old</h1><!--V1-->', 'style.css': 'h1{color:rgb(1,2,3)}' } },
+    [LIVE]: { files: { 'index.html': '<h1>New</h1>' } },
+  } } }, {});
+  const histView = await open(histDir, 'light', `#a=${uuidToBase58(U(8))}`);
+  const menu = histView.page.locator('#page-from select');
+  check('history: the version menu lists every version, oldest first', JSON.stringify(await menu.locator('option').allTextContents()) === JSON.stringify(['v1', 'v2 (current)']), JSON.stringify(await menu.locator('option').allTextContents()));
+  await menu.selectOption({ label: 'v1' }, { timeout: 3000 }).catch(() => {});
+  await histView.page.waitForSelector('#page-body .preview iframe', { timeout: 3000 }).catch(() => {});
+  const oldDoc = await histView.page.$eval('#page-body .preview iframe', f => f.getAttribute('srcdoc')).catch(() => '');
+  check('history: v1 previews its own page and its own stylesheet', oldDoc.includes('<!--V1-->') && oldDoc.includes('rgb(1,2,3)'), oldDoc.slice(0, 200));
+  check('history: its Open file is in its own folder', decodeURIComponent((await histView.page.locator('#page-links a.open-file').getAttribute('href', { timeout: 3000 }).catch(() => '')) || '').endsWith('/v1/index.html'));
+  check('history: no page errors, no requests', histView.errors.length === 0 && histView.requests.length === 0, JSON.stringify([histView.errors, histView.requests]));
+
   // A missing part says so.
   for (const n of fs.readdirSync(path.join(prevDir, 'viewer-files'))) if (/^part-\d+\.js$/.test(n)) fs.unlinkSync(path.join(prevDir, 'viewer-files', n));
   const mp = await openPrev(`#a=${p(31)}`);

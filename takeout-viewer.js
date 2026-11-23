@@ -76,6 +76,8 @@
   const TEXT_EMBED_LIMIT = 2 * 1024 * 1024; // longest upload or project text a caller should embed
   const PART_LIMIT = 4 * 1024 * 1024; // largest viewer-files part, unless one text alone is larger
   const UPLOAD_INLINE_LIMIT = 64 * 1024; // upload text over this many UTF-8 bytes goes to a part
+  // An older version's preview goes in only while this much of the budget is left, for the current versions to come.
+  const ARTIFACT_HISTORY_RESERVE = 64 * 1024 * 1024;
   const ARTIFACT_PARTS_BUDGET = 256 * 1024 * 1024; // Export Artifacts: all part bodies together, at most
   const VIEWER_CHECK_FILE = 'viewer-check.gif';
   const VIEWER_CHECK_BASE64 = 'R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7';
@@ -930,12 +932,15 @@
       pending = [];
       pendingBytes = 0;
     };
-    const add = (view, payload) => {
+    // reserve: room to leave for what comes later (an older version's preview, ARTIFACT_HISTORY_RESERVE); one that
+    // doesn't fit within it is left out, and the budget is not marked full for the rest.
+    const add = (view, payload, { reserve = 0 } = {}) => {
       const key = 'a' + keys++;
       const has = payload && ((Array.isArray(payload.texts) && payload.texts.length) || (Array.isArray(payload.images) && payload.images.length));
       if (!has || full) return { ...view, part: null, key: null };
       const item = `${escapeJson(key)}:${escapeJson({ texts: payload.texts || [], images: payload.images || [] })}`;
       const bytes = encoder.encode(item).length + 1;
+      if (reserve > 0 && used + bytes > budget - reserve) return { ...view, part: null, key: null };
       if (used + bytes > budget) {
         full = true;
         return { ...view, part: null, key: null };
@@ -1013,7 +1018,7 @@
     return page.replace(/\/\*(KATEX_CSS|ARTIFACTS_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|ARTIFACTS_APP_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
-  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, ARTIFACTS_VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT, artifactViewParts, ARTIFACT_PARTS_BUDGET };
+  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, ARTIFACTS_VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT, artifactViewParts, ARTIFACT_PARTS_BUDGET, ARTIFACT_HISTORY_RESERVE, recordVersions };
   root.CTViewer = Object.assign(root.CTViewer || {}, api);
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);

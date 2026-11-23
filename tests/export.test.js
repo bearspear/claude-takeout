@@ -3300,7 +3300,9 @@ test('each artifact gets a view record', async () => {
   for (const options of [{}, { directory: new FakeDir() }]) {
     const { views } = await runArtifacts({ frames, pages, options });
     assert.strictEqual(views.length, 6);
-    const game = views[1];
+    // Every view carries its versions for the version menu (v1.21); the rest of the record is pinned below.
+    assert.ok(views.every((v) => Array.isArray(v.versions)));
+    const game = (({ versions, ...rest }) => rest)(views[1]);
     const id = uuidToBase58(U(2));
     assert.deepStrictEqual(game, {
       id, title: 'Game', kind: 'Page', typed: false, docs: false, shared: false, foreign: false, public: false,
@@ -5130,4 +5132,30 @@ test('Export Artifacts records nothing, and a full Export All fetches every vers
   const full = histFetcher();
   await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored, setup: bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher: full }) });
   assert.deepStrictEqual(infoCalls(full), [[U(1), LIVE], [U(1), 'v1'], [U(1), 'v2']], 'a full export saves every version, every time');
+});
+
+test('artifactViewParts: a reserve keeps room for what comes later', () => {
+  const { artifactViewParts, ARTIFACT_HISTORY_RESERVE } = require('../takeout-viewer.js');
+  assert.strictEqual(ARTIFACT_HISTORY_RESERVE, 64 * 1024 * 1024);
+  const older = { texts: [['a.html', 'x'.repeat(650)]], images: [] };
+  const current = { texts: [['b.html', 'y'.repeat(400)]], images: [] };
+  const parts = artifactViewParts({ budget: 1000, partLimit: 1e6 });
+  assert.strictEqual(parts.add({}, older, { reserve: 400 }).part, null, 'an older preview past budget - reserve is left out');
+  assert.notStrictEqual(parts.add({}, current).part, null, 'and the budget is not marked full');
+  assert.notStrictEqual(artifactViewParts({ budget: 1000, partLimit: 1e6 }).add({}, older).part, null);
+});
+
+test('older versions get preview parts: in the standalone viewer\'s versions and Export All\'s viewer data', async () => {
+  const pages = { [U(1)]: histPage('Guide', { v1: { files: { 'index.html': '<h1>one</h1><!--V1-->' } }, [LIVE]: { files: { 'index.html': 'live' } } }) };
+  const { views } = await runArtifacts({ frames: [art(U(1), 'Guide')], pages });
+  const vs = views[0].versions;
+  assert.deepStrictEqual(vs.map((e) => [e.ver, e.current]), [['v1', false], [LIVE, true]]);
+  assert.ok(Number.isSafeInteger(vs[0].part) && vs[0].part > 0 && typeof vs[0].key === 'string', JSON.stringify(vs[0]));
+  assert.strictEqual(vs[0].folder, `${artFolder('Guide', U(1))}/v1`);
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') },
+    setup: bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher: publishedFetcher(pages) }), assets: true });
+  const html = await zip.file('viewer.html').async('string');
+  const data = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(html)[1]);
+  const e1 = data.artifacts[0].versions.find((e) => e.ver === 'v1');
+  assert.ok(e1 && Number.isSafeInteger(e1.part) && e1.folder === `artifacts/${artFolder('Guide', U(1))}/v1`, JSON.stringify(e1));
 });

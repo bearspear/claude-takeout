@@ -351,9 +351,12 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
 
     if (standalone) {
       // The Export Artifacts page: the artifacts alone, as the extension wrote it.
-      const input = await artifactsInput(store, { chatFolders, firstPart: 1, onPart: writePart, versions: false });
+      const input = await artifactsInput(store, { chatFolders, firstPart: 1, onPart: writePart });
       copyThumbs(input.thumbs);
-      const data = { exported: store.exportedAt, listed: store.listed, artifacts: input.views };
+      // Each view's versions for the version menu, as the extension writes them (v1.21).
+      const recordOf = new Map(input.records.map(r => [String(r.shortId || r.uuid), r]));
+      const views = input.views.map(v => (recordOf.has(String(v.id)) ? { ...v, versions: CTViewer.recordVersions(recordOf.get(String(v.id)), new Map()) } : v));
+      const data = { exported: store.exportedAt, listed: store.listed, artifacts: views };
       writeNew(tmp.viewer, artifactsViewerHtml(data, { fileScripts: input.partCount > 0 }), temps);
     } else {
       const built = await buildParts(added, { root: archive.root, onPart: writePart });

@@ -50,8 +50,13 @@ const designFiles = {
   'project/Off.dc.html': board('Off'),
 };
 const frames = [art(U(1), 'Mockups'), art(U(2), 'Bare design')];
+const OLD = '1794700000-0abc';
+const oldCanvas = { v: 3, title: 'Mockups', boards: { 'Early.dc.html': { x: 0, y: 0, w: 300, h: 200, title: 'Only in the first version' } } };
 const pages = {
-  [U(1)]: { title: 'Mockups', live: LIVE, versions: { [LIVE]: { files: designFiles } } },
+  [U(1)]: { title: 'Mockups', live: LIVE, history: [OLD, LIVE], versions: {
+    [OLD]: { files: { 'index.html': designFiles['index.html'], 'project/canvas.json': { body: JSON.stringify(oldCanvas), type: 'application/json' }, 'project/Early.dc.html': board('Early') } },
+    [LIVE]: { files: designFiles },
+  } },
   [U(2)]: { title: 'Bare design', live: LIVE, versions: { [LIVE]: { files: { 'index.html': '<!doctype html><script src="artifact-type/app.js"></script>' } } } },
 };
 
@@ -212,6 +217,14 @@ async function writeOut(zip) {
     check(`${label}: and a wider one`, Math.abs((await canvas.boundingBox()).width - wideWidth) < 40, String((await canvas.boundingBox()).width));
     const again = await page.locator('#page-badges .badge').allTextContents();
     check(`${label}: badges stay single after Back`, again.filter(b => b === 'Design canvas').length === 1 && again.filter(b => b === 'some boards need claude.ai').length === 1, again.join('|'));
+
+    // An older version from the menu: its own canvas.
+    await page.locator('#page-from select').selectOption({ label: 'v1' }, { timeout: 3000 }).catch(() => {});
+    await page.locator('.design-board', { hasText: 'Only in the first version' }).waitFor({ timeout: 4000 }).catch(() => {});
+    check(`${label}: an older version shows its own canvas`, await page.locator('.design-board', { hasText: 'Only in the first version' }).count() === 1 && await page.locator('.design-board', { hasText: 'Home A' }).count() === 0);
+    await page.locator('#page-from select').selectOption('current', { timeout: 3000 }).catch(() => {});
+    await canvas.waitFor({ timeout: 4000 }).catch(() => {});
+    check(`${label}: and back to the current one`, await page.locator('.design-board', { hasText: 'Home A' }).count() === 1);
 
     // A Design artifact with no canvas.json keeps the poster page.
     await page.evaluate(id => { location.hash = `#a=${id}`; }, uuidToBase58(U(2)));
