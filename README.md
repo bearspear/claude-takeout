@@ -398,6 +398,13 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.20.6
+
+- **Merging a merged archive with an older one** - The merged archive now records when claude.ai's artifact list was taken (`decided_at`, `listed_at` in its manifest). Merging it again with an older export no longer moves an artifact back to an older version or unlists artifacts the newer list had.
+- **Complete copies win** - A version found in several sources comes from the newest complete copy, so a newer copy that is missing files no longer replaces an older complete one.
+- **Notes and warnings follow the merge** - An artifact no longer says "not exported (see errors.txt)" when the merged archive has its files, and the sources' `artifacts/errors.txt` are collected into the merged one, so remaining "see errors.txt" notes point at something.
+- **ZIPs** - The current version keeps its ZIP when another source has one for the same files. A source ZIP entry that can't be extracted now ends the merge with exit code 1.
+
 ### v1.20.5
 
 - **Export Changes doesn't skip what wasn't saved** - In a folder export, a chat or artifact with a file that could not be written (`write-errors.txt`, including a chat's published pages in `artifacts/`) is no longer recorded as exported, so the next Export Changes tries it again. The same goes for chats whose published pages were skipped after claude.ai answered 401 partway through an Export All; those chats' `errors.txt` now say why their pages are missing.
