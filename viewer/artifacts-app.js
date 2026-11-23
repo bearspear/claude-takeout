@@ -775,8 +775,21 @@
     const isDesign = v => isPoster(v) && v.kind === 'Design' && !v.notExported && unzipped !== false;
     const CANVAS_MARGIN = '600px';
 
+    // The canvas on the page, if any: one resize observer and its frames' observer, stopped when the page changes.
+    let canvasResize = null;
+    let canvasWrap = null;
+    let canvasTimer = null;
+    function stopCanvas() {
+      clearTimeout(canvasTimer);
+      if (canvasResize) canvasResize.disconnect();
+      if (canvasWrap && canvasWrap.stopFrames) canvasWrap.stopFrames();
+      canvasResize = null;
+      canvasWrap = null;
+    }
+
     // Loads the payload; a layout (designCanvas) shows the canvas, anything else the poster page.
     function openCanvas(v, focus = null) {
+      stopCanvas();
       const box = el('div', 'preview');
       box.dataset.id = String(v.id);
       box.append(el('p', 'loading', 'Loading…'));
@@ -787,7 +800,7 @@
         const text = texts.has(DESIGN_CANVAS_FILE) ? texts.get(DESIGN_CANVAS_FILE) : null;
         const layout = text === null ? null : designCanvas(text, path => texts.has(path));
         if (!layout) return pageBody.replaceChildren(posterPage(v));
-        let wrap = canvasPage(v, layout, payload, texts);
+        const wrap = canvasPage(v, layout, payload, texts);
         pageBody.replaceChildren(wrap);
         canvasBadges(layout, texts);
         if (focus) {
@@ -800,26 +813,22 @@
             if (open) open.focus({ preventScroll: true });
           }
         }
-        // The scale follows the page's width: laid out again when it changes, keeping the place in it.
+        // The scale follows the page's width, in place (frames, focus and their scripts stay), keeping the place in it.
         if (typeof ResizeObserver === 'function') {
-          let width = pageBody.clientWidth;
-          let timer = null;
-          const resize = new ResizeObserver(() => {
-            if (!wrap.isConnected) { resize.disconnect(); return; }
-            clearTimeout(timer);
-            timer = setTimeout(() => {
-              if (!wrap.isConnected || Math.abs(pageBody.clientWidth - width) < 24) return;
-              width = pageBody.clientWidth;
-              const at = pageBody.scrollTop / Math.max(1, pageBody.scrollHeight);
-              const next = canvasPage(v, layout, payload, texts);
-              if (wrap.stopFrames) wrap.stopFrames();
-              wrap.replaceWith(next);
-              wrap = next;
-              pageBody.scrollTop = at * pageBody.scrollHeight;
+          canvasResize = new ResizeObserver(() => {
+            clearTimeout(canvasTimer);
+            canvasTimer = setTimeout(() => {
+              // Only this canvas's own, while it is the one on the page.
+              if (canvasWrap !== wrap || !wrap.isConnected) return;
+              const at = [pageBody.scrollTop / Math.max(1, pageBody.scrollHeight), pageBody.scrollLeft / Math.max(1, pageBody.scrollWidth)];
+              wrap.rescale(pageBody.clientWidth);
+              pageBody.scrollTop = at[0] * pageBody.scrollHeight;
+              pageBody.scrollLeft = at[1] * pageBody.scrollWidth;
             }, 150);
           });
-          resize.observe(pageBody);
+          canvasResize.observe(pageBody);
         }
+        canvasWrap = wrap;
       }).catch(() => {
         // A canvas.json the layout chokes on: the poster page, as for none.
         if (box.isConnected) pageBody.replaceChildren(posterPage(v));
@@ -839,23 +848,18 @@
       return artifactPreviewDoc(texts.get(b.path), b.path, payload).srcdoc;
     }
 
+    // canvasPage's wrap: rescale(avail) fits it to a new width in place, so frames, focus and scripts stay.
     function canvasPage(v, layout, payload, texts) {
       const wrap = el('div', 'design-wrap');
-      const avail = Math.max(320, (pageBody.clientWidth || 1000) - 48);
-      const scale = canvasScale(layout.width, avail);
       const canvas = el('div', 'design-canvas');
-      canvas.style.width = `${Math.ceil(layout.width * scale)}px`;
-      canvas.style.height = `${Math.ceil(layout.height * scale)}px`;
-      const px = n => `${Math.round(n * scale)}px`;
+      // Everything placed on the canvas, with what its place is made of, for apply(scale).
+      const placed = [];
       for (const n of layout.notes) {
         const note = el('div', n.heading ? 'design-note heading' : 'design-note');
         note.dataset.fill = n.fill;
-        note.style.left = px(n.x);
-        note.style.top = px(n.y);
-        note.style.width = px(n.w);
-        note.style.fontSize = `${Math.max(9, Math.round((n.heading ? 28 : 14) * scale))}px`;
         note.textContent = n.text;
         canvas.append(note);
+        placed.push({ node: note, o: n, note: true });
       }
       // Frames come and go as boards near the view, so only about a screenful runs at once.
       const frameOf = new Map();
@@ -875,11 +879,7 @@
       for (const b of layout.boards) {
         const item = el('div', 'design-board');
         item.dataset.name = b.name;
-        item.style.left = px(b.x);
-        item.style.top = px(b.y);
-        item.style.width = px(b.w);
         const head = el('div', 'board-head');
-        head.append(el('span', 'board-title', b.title));
         if (b.held) {
           const open = el('button', 'board-open', 'Open alone');
           open.type = 'button';
@@ -887,26 +887,51 @@
           open.addEventListener('click', () => openBoard(v, b, payload, texts));
           head.append(open);
         }
+        head.append(el('span', 'board-title', b.title));
         item.append(head);
         const body = el('div', 'board-body');
-        body.style.height = px(b.h);
+        let holder = null;
         if (b.held) {
           const flags = boardFlags(texts.get(b.path));
           if (flags.templated) head.append(el('span', 'board-badge', "Uses claude.ai's templates; shown as saved"));
           if (flags.blobs) head.append(el('span', 'board-badge', 'Images not in this export'));
-          // The row is one line, so a small board cuts it: the whole of it on hover.
-          head.title = [b.title, ...[...head.querySelectorAll('.board-badge')].map(x => x.textContent)].join(' · ');
-          const holder = el('div', 'board-frame');
-          holder.style.transform = `scale(${scale})`;
+          holder = el('div', 'board-frame');
           body.append(holder);
           frameOf.set(item, b);
         } else {
           body.classList.add('missing');
           body.append(el('span', '', "Not in the viewer's files"));
         }
+        // The row is one line, so a small board cuts it: the whole of it on hover.
+        head.title = [b.title, ...[...head.querySelectorAll('.board-badge')].map(x => x.textContent)].join(' · ');
         item.append(body);
         canvas.append(item);
+        placed.push({ node: item, o: b, body, holder });
       }
+      const apply = scale => {
+        canvas.style.width = `${Math.ceil(layout.width * scale)}px`;
+        canvas.style.height = `${Math.ceil(layout.height * scale)}px`;
+        const px = n => `${Math.round(n * scale)}px`;
+        for (const p of placed) {
+          p.node.style.left = px(p.o.x);
+          p.node.style.top = px(p.o.y);
+          p.node.style.width = px(p.o.w);
+          if (p.note) p.node.style.fontSize = `${Math.max(9, Math.round((p.o.heading ? 28 : 14) * scale))}px`;
+          else {
+            p.body.style.height = px(p.o.h);
+            if (p.holder) p.holder.style.transform = `scale(${scale})`;
+          }
+        }
+      };
+      const fit = avail => canvasScale(layout.width, Math.max(320, (avail || 1000) - 48));
+      let scale = fit(pageBody.clientWidth);
+      apply(scale);
+      wrap.rescale = avail => {
+        const next = fit(avail);
+        if (next === scale) return;
+        scale = next;
+        apply(scale);
+      };
       wrap.append(canvas);
       if (layout.skipped.length) {
         const more = el('div', 'design-skipped');
@@ -937,6 +962,7 @@
 
     // One board alone, at its own size, with the way back to the canvas (no new hash: Back here, not in history).
     function openBoard(v, b, payload, texts) {
+      stopCanvas();
       const box = el('div', 'preview');
       box.dataset.id = String(v.id);
       const bar = el('p', 'canvas-bar');
@@ -960,6 +986,7 @@
     }
 
     function showPage(v) {
+      stopCanvas();
       const title = String(v.title || 'Untitled');
       pageTitle.textContent = title;
       pageTitle.title = title;
@@ -1046,6 +1073,7 @@
         select.append(now);
       }
       select.addEventListener('change', () => {
+        stopCanvas();
         clearNote();
         if (select.value === 'current') { pageBadges.replaceChildren(...pageBadgesOf(v)); artifactLinks(v); fillBody(v); return; }
         const e = list[Number(select.value)];
@@ -1066,10 +1094,10 @@
         const file = chat && chat.files && typeof copy.file === 'string' && Object.prototype.hasOwnProperty.call(chat.files, copy.file) ? chat.files[copy.file] : null;
         const ver = file && Array.isArray(file.versions) ? file.versions[copy.version] : null;
         if (ver) {
-          // The files it was published with, from the chat's versions they were saved as, at their own paths.
-          const siblings = versionCopyTexts(chat, e);
+          // The files it was published with, from the chat's versions they were saved as, at their own paths; for a
+          // version saved in a folder of its own, only its start file: never the chat's later ones.
           return showVersionBody({ chat: copy.chat, file: copy.file, name: String(file.name || v.title || 'Page') }, ver, String(v.id),
-            siblings.length ? { texts: siblings, start: typeof e.start === 'string' && e.start ? e.start : null } : null);
+            { texts: versionCopyTexts(chat, e), start: typeof e.start === 'string' && e.start ? e.start : null });
         }
         const box = sheet('details', `${versionName(e)} can't be shown here.`);
         if (href) {
@@ -1222,6 +1250,7 @@
         openId = null;
         page.hidden = true;
         home.hidden = false;
+        stopCanvas();
         pageBody.replaceChildren();
         pageNote.hidden = true;
         return false;
@@ -1249,6 +1278,7 @@
       openId = null;
       page.hidden = true;
       home.hidden = false;
+      stopCanvas();
       pageBody.replaceChildren();
       pageNote.hidden = true;
       document.title = homeTitle;

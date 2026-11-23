@@ -400,9 +400,9 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.20.7
 
-- **Older versions run with their own files** - On an artifact's page, an older version that a chat wrote identically now previews with the files it was published with, in their folders, not with the chat's later edits of them. A version with a preview of its own (a rebuilt or merged archive) uses that first. Its badges are its own, not the current version's.
+- **Older versions don't borrow later files** - On an artifact's page, an older version shown from a chat's copy no longer runs with the chat's later edits of its other files: it gets the files it was published with when the chat wrote them identically, else only its own page. A version with a preview of its own (a rebuilt or merged archive) is shown from that first. Its badges are its own, not the current version's.
 - **Keyboard focus** - Opening an artifact from a chat (its link or the address) puts focus on the artifact's title, not on the hidden chat. Open alone on a Design board focuses Back to the canvas, and Back returns to a board listed under the canvas too.
-- **Design canvas** - The canvas follows the window's width when it changes. A board's title row stays on one line however small the board (the whole row shows on hover). A heading whose `maxW` is out of range uses its `w`; at most 2,000 notes are drawn; a `canvas.json` the layout can't handle shows the "needs claude.ai to run" page instead of hanging at Loading.
+- **Design canvas** - The canvas follows the window's width when it changes, in place: boards keep running and keyboard focus stays. A board's title row stays on one line however small the board, Open alone first and always whole (the whole row shows on hover). A heading whose `maxW` is out of range uses its `w`; at most 2,000 notes are drawn; a `canvas.json` the layout can't handle shows the "needs claude.ai to run" page instead of hanging at Loading.
 
 ### v1.20.6
 

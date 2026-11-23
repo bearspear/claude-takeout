@@ -1458,7 +1458,8 @@ function boardFlags(text) {
 // notes: [{ id, text, x, y, w, fill, heading }], skipped: [{ name, title }] }, shifted so the smallest x and y are 0;
 // null when it isn't a canvas or no board's file is held (held(path) says). Boards: keys of boards naming a
 // <name>.dc.html in project/, with finite x, y, w, h; at most DESIGN_BOARD_MAX drawn, the rest and the ones with bad
-// numbers in skipped. Notes: in noteOrder, then the others, each with finite x and y; w, else maxW, else 320. A note's
+// numbers in skipped. Notes: in noteOrder, then the others, at most DESIGN_NOTE_MAX, each with finite x and y; a sticky
+// note's width is w, else maxW, a heading's maxW, else w (one out of range falls back to the other; none given: 320). A note's
 // height isn't known before it's drawn: the canvas leaves 200 below the lowest one.
 function designCanvas(text, held) {
   let json;

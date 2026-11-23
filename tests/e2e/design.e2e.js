@@ -179,8 +179,19 @@ async function writeOut(zip) {
     check(`${label}: Back from a board not drawn lands on its row`, (await deepActive()) === 'Open Off canvas alone', String(await deepActive()));
     // Narrow: each board's title row stays one line; then wide again, and the canvas follows the width.
     const wideWidth = (await canvas.boundingBox()).width;
+    // Keyboard focus on a board, its frame marked: a resize keeps both.
+    await page.locator('.design-board', { hasText: 'Home A' }).locator('button.board-open').focus();
+    await page.locator('.design-board', { hasText: 'Home A' }).locator('iframe').evaluate(f => { f.dataset.kept = 'yes'; });
     await page.setViewportSize({ width: 420, height: 900 });
     await page.waitForTimeout(500);
+    check(`${label}: a resize keeps keyboard focus on the board`, (await deepActive()) === 'Open Home A alone', String(await deepActive()));
+    check(`${label}: and keeps its frame (no reload)`, await page.locator('.design-board', { hasText: 'Home A' }).locator('iframe[data-kept="yes"]').count() === 1);
+    const clipped = await page.locator('.design-board .board-head').evaluateAll(hs => hs.filter(h => h.querySelector('button.board-open')).map(h => {
+      const b = h.querySelector('button.board-open').getBoundingClientRect();
+      const r = h.getBoundingClientRect();
+      return b.left >= r.left - 0.5 && b.right <= r.right + 0.5 ? null : [Math.round(b.left - r.left), Math.round(b.right - r.right)];
+    }).filter(Boolean));
+    check(`${label}: Open alone stays whole on small boards`, clipped.length === 0, JSON.stringify(clipped));
     const narrowWidth = (await canvas.boundingBox()).width;
     const heads = await page.locator('.design-board .board-head').evaluateAll(hs => hs.map(h => h.getBoundingClientRect().height));
     check(`${label}: the canvas follows a narrower window`, narrowWidth < wideWidth * 0.6, JSON.stringify([wideWidth, narrowWidth]));
