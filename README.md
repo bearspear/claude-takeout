@@ -171,7 +171,7 @@ claude-takeout-2026-01-01.zip
 
 Each conversation folder has the identical structure to individual ZIP exports, except that pages Claude published are saved once, in the shared `artifacts/` folder at the root, and each chat's README links there.
 
-`artifacts/` holds one folder per artifact, `<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version (the current version and each older version a chat published; the current version also as `<version>.zip` when it has two or more files), plus `index.html`, `index.md` and, if something failed, `errors.txt`. Every page a chat published gets a folder, also with **Include artifacts in Export All** off; with it on (the default), the artifacts claude.ai lists are added, and the index lists pages claude.ai no longer lists under "Published from chats, not in claude.ai's list". Export All writes no `published/` folder. `artifacts` is a reserved name (and `published` stays one), so no chat folder takes it. One `viewer.html` at the root covers the chats and the artifacts.
+`artifacts/` holds one folder per artifact, `<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version (every version claude.ai keeps, since v1.21, and each version a chat published; the current version also as `<version>.zip` when it has two or more files), plus `index.html`, `index.md` and, if something failed, `errors.txt`. Every page a chat published gets a folder, also with **Include artifacts in Export All** off; with it on (the default), the artifacts claude.ai lists are added, and the index lists pages claude.ai no longer lists under "Published from chats, not in claude.ai's list". Export All writes no `published/` folder. `artifacts` is a reserved name (and `published` stays one), so no chat folder takes it. One `viewer.html` at the root covers the chats and the artifacts.
 
 ## Keyboard Shortcuts
 
@@ -398,6 +398,13 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.21.0
+
+- **Every version of every artifact** - Export Artifacts and Export All now save every version claude.ai keeps of each artifact, not only the current one, each in its own `<version>/` folder, so an export is a full backup: if claude.ai deletes a version, or a whole artifact, an export you already made still has it. On a first export this means more files and time (on one account: 68 versions instead of 19). Claude Docs are as before (claude.ai doesn't serve their text as files). Older versions of Cowork and Claude Code pages are saved at the current version's file paths, marked not checked.
+- **Export Changes fetches only what's new** - It skips versions an earlier Export All saved (versions never change once made), and fetches again a version that failed. A version claude.ai no longer serves is noted ("N older versions no longer on claude.ai") and not asked for again.
+- **Preview older versions** - The version menu on an artifact's page now also shows in the Export Artifacts viewer, and every older version previews as the current one does, with its own files; a Design version shows its own canvas. Older previews use the viewer's preview budget only while a quarter of it is left, so current versions always come first.
+- **Version order** - claude.ai lists versions newest first; exports up to v1.20.7 kept that order while labelling it oldest first, so the version menu called the current version v1. Versions are now oldest first, and the old-archive tools read older exports the same way.
+
 ### v1.20.7
 
 - **Older versions don't borrow later files** - On an artifact's page, an older version shown from a chat's copy no longer runs with the chat's later edits of its other files: it gets the files it was published with when the chat wrote them identically, else only its own page. A version with a preview of its own (a rebuilt or merged archive) is shown from that first. Its badges are its own, not the current version's.
@@ -469,7 +476,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.15.0
 
-- **Export Artifacts** - A new **Export Artifacts** button saves every artifact on claude.ai/artifacts, from any chat, project or Claude Code session, and any shared with you (marked "shared with you"), in its current version. Each goes in its own folder with an `artifact.json`, and `index.html` and `index.md` list them all. The list is fetched first, and nothing is written when it is empty or fails. Claude Docs documents are listed with a link, since their text isn't available as a file; artifacts built on claude.ai's own page code are marked "needs claude.ai to run". Like Export All it saves into a folder (or a ZIP, see **Export All and Export Artifacts save as** in Settings); use the folder for a large account, since a ZIP is built in memory. It needs a claude.ai tab open and signed in. Since v1.20.4 the export pages through claude.ai's full list too, so the list is complete unless `errors.txt` says otherwise. Artifacts from Cowork and Claude Code, and those shared with you, are saved too; claude.ai gives no checksum for their files, so they are marked as not checked.
+- **Export Artifacts** - A new **Export Artifacts** button saves every artifact on claude.ai/artifacts, from any chat, project or Claude Code session, and any shared with you (marked "shared with you"), in its current version (every version since v1.21). Each goes in its own folder with an `artifact.json`, and `index.html` and `index.md` list them all. The list is fetched first, and nothing is written when it is empty or fails. Claude Docs documents are listed with a link, since their text isn't available as a file; artifacts built on claude.ai's own page code are marked "needs claude.ai to run". Like Export All it saves into a folder (or a ZIP, see **Export All and Export Artifacts save as** in Settings); use the folder for a large account, since a ZIP is built in memory. It needs a claude.ai tab open and signed in. Since v1.20.4 the export pages through claude.ai's full list too, so the list is complete unless `errors.txt` says otherwise. Artifacts from Cowork and Claude Code, and those shared with you, are saved too; claude.ai gives no checksum for their files, so they are marked as not checked.
 
 ### v1.14.0
 

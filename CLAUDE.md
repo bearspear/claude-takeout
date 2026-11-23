@@ -271,7 +271,7 @@ claude-takeout-[<display name>-][changes-]<YYYY-MM-DD>_<HHMM>.zip   (megaZipName
 └── ...
 ```
 
-A mega-ZIP or folder also holds `artifacts/` whenever a chat published a page or (with `exportAllArtifacts` on, the default) claude.ai lists an artifact: one folder per artifact, `<Title>_<shortId>/`, with `artifact.json` and a `<ver>/` folder per version saved (the current version and each older version a chat published; a version a chat wrote identically has no folder, `sameAs` points at the chat's file; the current version with two or more files also as `<ver>.zip` beside its folder), plus `index.html`, `index.md` (pages claude.ai doesn't list under "Published from chats, not in claude.ai's list") and `errors.txt` only with warnings. Viewer parts and card pictures stay in the root's `viewer-files/`. `export-manifest.json` gains `artifacts: { listed, thumbs, items }`, `index.md` says "Published from chats only: N", and `artifacts` joins `projects` as a reserved chat folder name (`published` stays reserved, though Export All writes no `published/` any more). One root `viewer.html` covers chats and artifacts. `build_viewer.js` reads such an archive and every older layout; `merge_archives.js` merges them into this layout.
+A mega-ZIP or folder also holds `artifacts/` whenever a chat published a page or (with `exportAllArtifacts` on, the default) claude.ai lists an artifact: one folder per artifact, `<Title>_<shortId>/`, with `artifact.json` and a `<ver>/` folder per version saved (every version in claude.ai's history since v1.21, fetched by `saveHistory`, and each version a chat published; a version a chat wrote identically has no folder, `sameAs` points at the chat's file; the current version with two or more files also as `<ver>.zip` beside its folder), plus `index.html`, `index.md` (pages claude.ai doesn't list under "Published from chats, not in claude.ai's list") and `errors.txt` only with warnings. Viewer parts and card pictures stay in the root's `viewer-files/`. `export-manifest.json` gains `artifacts: { listed, thumbs, items }`, `index.md` says "Published from chats only: N", and `artifacts` joins `projects` as a reserved chat folder name (`published` stays reserved, though Export All writes no `published/` any more). One root `viewer.html` covers chats and artifacts. `build_viewer.js` reads such an archive and every older layout; `merge_archives.js` merges them into this layout.
 
 `artifact.json` format 2: `format`, `uuid`, `shortId`, `url`, `title`, `typeTitle`, `sourceSurface`, `rel`, `public`, `createdAt`, `updatedAt`, `listed`, `current`, `start`, `needsRuntime`, `note`, `thumb`, `incomplete` (top level, only when a fetch of it failed), `order` (version ids in claude.ai's history order; JSON can't keep the order of numeric-looking keys) and `versions` (`<ver>: { folder, files: [{ path, savedAs, size, contentType, sha256, verified }], start, startSaved, incomplete, missing, saved, sameAs?, zip? (`<folder>.zip`, only the current version with two or more saved files), publishedIn: [{ chat, messageUuid, toolUseId, same, writtenAs }] }`). A Claude Docs row's note says "Text rebuilt from the chat <chat title>." when a chat in the export rebuilt it.
 
@@ -282,7 +282,7 @@ Export Artifacts (a separate export, `claude-takeout-artifacts-[<name>-]<stamp>`
 ├── index.html, index.md       # Every artifact: title link to its start file, kind, source, files, notes; "Listed by claude.ai: N", "Card pictures: N of M"; a shared artifact's HTML/SVG gets no local link
 ├── export-manifest.json       # { format: 1, kind: "artifacts", exported_at, listed, thumbs, artifacts: [{ uuid, title, folder, ver }] }
 ├── errors.txt                 # Only with warnings (artifact_export)
-└── <Title>_<shortId>/         # artifact.json (format 2) + <ver>/ per version saved (the current version), + <ver>.zip when it has two or more files
+└── <Title>_<shortId>/         # artifact.json (format 2) + <ver>/ per version saved (every version claude.ai keeps), + <ver>.zip of the current one when it has two or more files
 ```
 
 ---
@@ -329,7 +329,7 @@ If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a
   },
   "useSidePanel": false,  // mirrored at top level so background.js can read it
   "exportRecord": {       // written after each mega-ZIP; with megaZipScope "changes", the mega-ZIP takes chats whose listed updated_at differs
-    "<org id>": { "at": "ISO time of that export", "chats": { "<chat uuid>": "updated_at as the chat list gave it" }, "artifacts": { "<artifact uuid>": "its live version as listed (paged:<updatedAt> for one found only by paging); only artifacts saved whole and written" } }
+    "<org id>": { "at": "ISO time of that export", "chats": { "<chat uuid>": "updated_at as the chat list gave it" }, "artifacts": { "<artifact uuid>": "its live version as listed (paged:<updatedAt> for one found only by paging); only artifacts saved whole and written" }, "artifactVersions": { "<artifact uuid>": ["version ids an Export All saved whole or found gone (v1.21); Export Changes skips them"] } }
   }  // recordableExport leaves out chats and artifacts with a write failure, and chats whose published pages were skipped after a 401
 }
 ```
