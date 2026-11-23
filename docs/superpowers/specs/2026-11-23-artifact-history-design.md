@@ -17,6 +17,7 @@ The owner decided (2026-11-23):
   - **Chat and Design artifacts** (also Design made in Claude Code): `/_f/<ver>/_files.json` answers for every older version with that version's own list and checksums (one Design artifact's lists grew 2, 4, 5 … 9 files over 12 versions). Saved exactly, verified, as the current version is today.
   - **Cowork and Claude Code pages** (no `_files.json`, 404): `/_f/<ver>/_src/<path>` with the live version's paths returns the older version's own content (both pages tried gave different bytes per version). *My call:* save an older version at the live version's paths, marked not checked (`verified: false`, no claude.ai checksum), as these pages' files already are; a path the older version doesn't have is `missing`, not a failure of the export.
 - Claude Docs are skipped as today (24 of the 68 versions).
+- **Found while planning:** exports up to v1.20.7 keep `history` as claude.ai sends it (newest first) while the code reads it as oldest first, so the version menu labels the current version `v1` (the owner's export of 2026-11-22 has one such artifact). v1.21 turns it oldest first in `content.js` and reads older archives' `artifact.json` the same way (a listed record whose current version is first is reversed).
 
 ## Goals
 
