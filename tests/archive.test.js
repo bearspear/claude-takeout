@@ -2203,6 +2203,18 @@ test('readArtifactStore reads every layout into the same records', () => {
   }
 });
 
+test('artifactViewsFromDisk: a listed artifact with no rel is not the owner\'s for local links', () => {
+  const views = (rel) => {
+    const root = megaWith(tmpRoot(), FULL);
+    put(root, `artifacts/${AF}/artifact.json`, JSON.stringify({ ...format2([['v2', G2]]), rel }));
+    put(root, `artifacts/${AF}/v2/index.html`, G2);
+    return lib.artifactViewsFromDisk(lib.readArtifactStore(root)).views;
+  };
+  assert.strictEqual(views('mine')[0].shared, false);
+  assert.strictEqual(views('')[0].shared, true);
+  assert.strictEqual(views('shared')[0].shared, true);
+});
+
 test('readArtifactStore: a 1.17 savedIn naming a chat\'s own file is that file, as 1.18\'s sameAs', () => {
   const root = megaWith(tmpRoot(), FULL);
   put(root, 'Chat_a/artefacts/guide.html', G2);

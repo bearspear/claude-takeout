@@ -398,6 +398,13 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.20.5
+
+- **Export Changes doesn't skip what wasn't saved** - In a folder export, a chat or artifact with a file that could not be written (`write-errors.txt`) is no longer recorded as exported, so the next Export Changes tries it again. The same goes for chats whose published pages were skipped after claude.ai answered 401 partway through an Export All; those chats' `errors.txt` now say why their pages are missing.
+- **Less memory on a large account** - Each artifact's preview is let go once it is written to `viewer-files/`, instead of being held until the export ends.
+- **Unknown sharing counts as someone else's** - An artifact claude.ai lists without saying it is yours gets the same care as one shared with you: no link that would open its HTML or SVG from disk, in the viewer and in `index.html`/`index.md`. Its note doesn't claim it was shared.
+- **Docs** - TECHNICAL.md brought up to date (published-page tools, preview caps, the card picture route), the `delivered_file` warning in USAGE, the e2e tests in CLAUDE.md.
+
 ### v1.20.4
 
 - **The whole artifact list** - claude.ai's quick artifact list can't be paged and may stop short on a large account. Export Artifacts and Export All now also page through claude.ai's full list (the one claude.ai/artifacts reads) and save any artifact the quick list missed, at its current version, without a card picture; `errors.txt` counts them. Export Changes fetches such an artifact again only when claude.ai's update time for it changes. If the full list can't be read, or has more than 100 pages of 100 entries (folders count too), `errors.txt` says the export may be incomplete. The old warning for a round number of artifacts is gone.
@@ -437,7 +444,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 ### v1.17.0
 
 - **Export All saves your artifacts too** - Export All also saves what claude.ai/artifacts lists into an `artifacts/` folder (the same files and `index.html` as Export Artifacts), and skips a second download of any page a chat already saved. Turn it off with **Include artifacts in Export All** in Settings. Export Changes takes only the artifacts whose version changed. The Export Artifacts button is unchanged. Export All never asks for the card-picture permission: without it, cards are tiles.
-- **One viewer for chats and artifacts** - An Export All's `viewer.html` has an Artifacts screen beside the chats, with tabs All, Yours, Shared with you and In chats (files Claude made inside the chats). A chat links to the artifacts it made or published, and an artifact links back to its chats. Older archives with an `artifacts/` folder are refused by `build_viewer.js` and `merge_archives.js`, since their viewer is already complete.
+- **One viewer for chats and artifacts** - An Export All's `viewer.html` has an Artifacts screen beside the chats, with tabs All, Yours, Shared with you and In chats (files Claude made inside the chats). A chat links to the artifacts it made or published, and an artifact links back to its chats. Older archives with an `artifacts/` folder are refused by `build_viewer.js` and `merge_archives.js`, since their viewer is already complete (no longer: see v1.18.0).
 
 ### v1.16.1
 

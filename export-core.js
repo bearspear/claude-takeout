@@ -1647,6 +1647,9 @@ const CLAUDE_DOCS_TYPE = 'c8f0b311-af6a-4d22-a07b-61eb818fc35d';
 const isClaudeDocsArtifact = (a) => a.typeSlug === CLAUDE_DOCS_TYPE || (!a.typeSlug && a.typeTitle === 'Docs');
 // Shared with you: claude.ai says so with a rel other than 'mine'; an empty rel says nothing.
 const isSharedArtifact = (rel) => typeof rel === 'string' && rel !== '' && rel !== 'mine';
+// Whether local links treat an artifact as someone else's (no HTML or SVG opened from disk): shared, or one claude.ai
+// listed without saying it is the owner's (rel 'mine'). Its note and label still follow isSharedArtifact.
+const artifactForeign = (rel, listed) => isSharedArtifact(rel) || (listed === true && rel !== 'mine');
 
 // A file's kind for the artifacts viewer, from its name.
 function artifactFileKind(p) {
@@ -1792,14 +1795,14 @@ const artifactUrl = (r) => {
 // saved is a root-relative path, so it is reached from there.
 const artifactLocal = (r, base = '') => {
   if (!r.startSaved) return null;
-  if (isSharedArtifact(r.rel) && !openableName(r.startSaved)) return null;
+  if (artifactForeign(r.rel, r.listed) && !openableName(r.startSaved)) return null;
   if (r.reused) return encodePath(`${'../'.repeat(String(base).split('/').filter(Boolean).length)}${r.startSaved}`);
   return encodePath(`${r.folder}/${r.startSaved}`);
 };
 // A row's versions (rows from a store have them): [{ label, local (as artifactLocal), current }].
 const artifactVersionLinks = (r, base = '') => (Array.isArray(r.versions) ? r.versions : []).map((v) => ({
   label: v.label, current: !!v.current,
-  local: v.folder || v.reused ? artifactLocal({ rel: r.rel, folder: v.folder, startSaved: v.startSaved, reused: !!v.reused }, base) : null,
+  local: v.folder || v.reused ? artifactLocal({ rel: r.rel, listed: r.listed, folder: v.folder, startSaved: v.startSaved, reused: !!v.reused }, base) : null,
 }));
 
 // index.md: one table row per artifact, by title. opts: { listed, exportedAt, warnings, thumbs (card pictures saved) }.
@@ -1927,7 +1930,7 @@ if (typeof module !== 'undefined' && module.exports) {
     fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
-    publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact,
+    publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact, artifactForeign,
     artifactFileKind, artifactStartKind, artifactView,
   };
 }
