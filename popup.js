@@ -5547,6 +5547,8 @@ async function saveArtifact(root, a, ctx) {
   let got = null;
   let gotPayload = null;
   let failed = false;
+  // saveHistory's result, for the record and the viewer; null when no history was fetched.
+  let history = null;
   const signOut = () => {
     if (state.publishedSignedOut) return;
     state.publishedSignedOut = true;
@@ -5661,6 +5663,17 @@ async function saveArtifact(root, a, ctx) {
       if (meta.missing.length) notes.push(`${artifactCount(meta.missing.length, 'file')} not saved (see errors.txt)`);
       if ([...got.unverified.values()].some(Boolean)) notes.push("files not checked against claude.ai's checksum");
     }
+    // Every older version claude.ai keeps (v1.21): after the current one, oldest to newest.
+    if (!docs && !failed && !state.publishedSignedOut && rec.current) {
+      if (!rec.history.includes(rec.current)) {
+        const reply = await fetchPublished({ action: 'publishedPageInfo', uuid, ver: rec.current });
+        const info = publishedSignedOutReply(reply) ? (signOut(), null) : cleanPublishedInfo(reply);
+        if (info && !info.error && info.history.length >= rec.history.length) rec.history = info.history;
+      }
+      const skip = ctx.skipVersions instanceof Map && ctx.skipVersions.get(uuid) instanceof Set ? ctx.skipVersions.get(uuid) : new Set();
+      history = await saveHistory(root, rec, { ...ctx, signOut }, { skip, name, openNote });
+      if (history.settled.length) notes.push(`${artifactCount(history.settled.length, 'older version')} no longer on claude.ai`);
+    }
   } catch (e) {
     // Not a refusal from claude.ai (those are replies, not throws): the artifact is listed as not exported.
     warn(name, `Artifact "${name}" could not be exported: unexpected error.`, openNote);
@@ -5700,8 +5713,56 @@ async function saveArtifact(root, a, ctx) {
       ...(rowReused ? { reused: true } : {}), listed: true, versions: artifactRowVersions(rec),
     },
     entry: { uuid, title, folder, ver: meta.ver },
-    meta, view, payload,
+    meta, view, payload, history,
   };
+}
+
+// The older versions of an artifact (rec.history, oldest first, the current one left out) into the store, each in
+// its own version folder as the current one is saved. Not fetched: a version in skip (an earlier export recorded it),
+// one the store has whole or as a chat's file (sameAs). claude.ai answering 404 or listing no files: settled (gone,
+// not retried). Any other failure, or a version saved short of a file: failed, warned once per artifact (codes
+// only). An older Cowork/Claude Code version listed from the live version (listFromLive) is unverified, and a file it
+// lacks is missing without failing it. A 401 stops (ctx.signOut). Returns { payloads: [[ver, payload]], settled,
+// saved, failed }.
+async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNote = '' } = {}) {
+  const { fetchPublished, state, warn, store } = ctx;
+  const out = { payloads: [], settled: [], saved: [], failed: [] };
+  const problems = [];
+  for (const ver of rec.history) {
+    if (ver === rec.current || skip.has(ver)) continue;
+    if (state.publishedSignedOut) break;
+    const prev = rec.versions.get(ver);
+    if (storeVersionWhole(prev) || (prev && prev.sameAs)) { out.saved.push(ver); continue; }
+    const reply = await fetchPublished({ action: 'publishedPageInfo', uuid: rec.uuid, ver });
+    if (publishedSignedOutReply(reply)) { ctx.signOut(); break; }
+    const info = cleanPublishedInfo(reply);
+    if (info.error) {
+      if (info.status === 404) out.settled.push(ver);
+      else { out.failed.push(ver); problems.push(info.error); }
+      continue;
+    }
+    if (!info.files.length) { out.settled.push(ver); continue; }
+    const { names } = publishedSavedNames(info.files.map((f) => f.path));
+    const files = info.files.map((f) => ({ path: f.path, savedAs: names.get(f.path), size: f.size, contentType: f.contentType, sha256: f.sha256 }));
+    const got = await fetchPublishedFiles({ target: root, prefix: store.versionFolder(rec, ver), uuid: rec.uuid, ver, files, names, state,
+      onSignedOut: ctx.signOut, fetchPublished, collect: true });
+    markUnverified(files, got.unverified);
+    if (info.listFromLive) for (const f of files) f.verified = false;
+    const v = {
+      folder: got.saved ? store.folderName(rec, ver) : null, files, start: got.start, startSaved: got.startSaved,
+      incomplete: info.listFromLive ? !got.saved : got.incomplete, missing: got.missing, saved: got.saved,
+      publishedIn: prev && Array.isArray(prev.publishedIn) ? prev.publishedIn : [],
+    };
+    rec.versions.set(ver, v);
+    if (got.saved) out.payloads.push([ver, artifactPayload(got)]);
+    if (got.saved && !v.incomplete && (info.listFromLive || !got.missing.length)) out.saved.push(ver);
+    else { out.failed.push(ver); problems.push(...(got.problems.length ? got.problems : ['not saved'])); }
+    if (state.publishedSignedOut) break;
+  }
+  if (out.failed.length) {
+    warn(name, `Artifact "${name}": ${artifactCount(out.failed.length, 'older version')} could not be saved: ${[...new Set(problems)].join(', ')}.`, openNote);
+  }
+  return out;
 }
 
 // The root-relative href of a version's ZIP (store record rec, version ver), or null when it has none.
@@ -5804,7 +5865,8 @@ async function runArtifactStep(root, opts = {}) {
       }
       rows.push(saved.row);
       entries.push(saved.entry);
-      whole.push(!!(saved.meta && !saved.meta.incomplete && !(saved.meta.missing && saved.meta.missing.length) && !saved.view.notExported));
+      whole.push(!!(saved.meta && !saved.meta.incomplete && !(saved.meta.missing && saved.meta.missing.length) && !saved.view.notExported
+        && !(saved.history && saved.history.failed.length)));
       let view = { ...saved.view, thumb: null, part: null, key: null };
       // The card picture and the preview part are extras: a failure leaves them out, with no warning.
       try {
