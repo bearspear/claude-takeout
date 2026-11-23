@@ -1019,3 +1019,82 @@ test('the current version keeps a ZIP another source has for the same files', as
   await merge([other, newer], { out: path.join(tmp, 'o3'), name: 'm', now: NOW });
   assert.ok(!fs.existsSync(path.join(tmp, 'o3', 'm', 'artifacts', `Guide_${SID}`, 'v1.zip')));
 });
+
+test('a ZIP from a source missing files is not attached to a complete copy', async () => {
+  const tmp = tmpRoot();
+  const v1 = (both, zip) => ({ folder: 'v1', files: [{ ...fileOf('one'), verified: true }, { path: 'app.js', savedAs: 'app.js', size: 2, contentType: 'text/javascript', sha256: sha('js'), verified: true }],
+    start: 'index.html', startSaved: 'index.html', incomplete: !both, missing: both ? [] : ['app.js'], saved: true, publishedIn: [], ...(zip ? { zip: 'v1.zip' } : {}) });
+  const mk = (name, at, both) => {
+    const root = path.join(tmp, name);
+    mega(root, at, { [`Chat_${name}`]: chatJson(name, at) });
+    put(root, 'export-manifest.json', manifestOf(at));
+    put(root, `artifacts/Guide_${SID}/artifact.json`, format2(U, 'Guide', { current: 'v1', versions: { v1: v1(both, !both) } }));
+    put(root, `artifacts/Guide_${SID}/v1/index.html`, 'one');
+    if (both) put(root, `artifacts/Guide_${SID}/v1/app.js`, 'js');
+    else fs.writeFileSync(path.join(root, `artifacts/Guide_${SID}/v1.zip`), PKZIP('only index'));
+    return root;
+  };
+  const r = await merge([mk('a', '2026-11-01T00:00:00Z', true), mk('b', '2026-11-05T00:00:00Z', false)], { out: path.join(tmp, 'o'), name: 'm', now: NOW });
+  assert.strictEqual(r.ok, true, r.reason);
+  const d = path.join(tmp, 'o', 'm');
+  assert.ok(!fs.existsSync(path.join(d, 'artifacts', `Guide_${SID}`, 'v1.zip')));
+  assert.strictEqual(artifactJson(d, `Guide_${SID}`).versions.v1.zip, undefined);
+});
+
+test('a note cleared by the merge clears the record\'s incomplete too, also for a chat\'s own file', async () => {
+  const tmp = tmpRoot();
+  const notExported = (root, at) => {
+    mega(root, at, { Chat_c: chatJson('c', at) });
+    put(root, 'export-manifest.json', manifestOf(at, 'changes'));
+    const j = JSON.parse(format2(U, 'Guide', { current: 'v1', versions: { v1: v2(null, 'Guide v1') } }));
+    j.note = 'not exported: signed out of claude.ai (see errors.txt)';
+    j.incomplete = true;
+    put(root, `artifacts/Guide_${SID}/artifact.json`, JSON.stringify(j));
+    return root;
+  };
+  const full = artifactsMega(tmp, 'f', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]);
+  await merge([full, notExported(path.join(tmp, 'c'), '2026-11-07T00:00:00Z')], { out: path.join(tmp, 'o'), name: 'm', now: NOW });
+  const d = path.join(tmp, 'o', 'm');
+  const a = artifactJson(d, `Guide_${SID}`);
+  assert.deepStrictEqual([a.note, a.incomplete], ['', undefined]);
+  assert.ok(!/not saved/.test(fs.readFileSync(path.join(d, 'artifacts', 'index.md'), 'utf8')));
+  // The full export saved v1 as a pointer to its chat's own file.
+  const f2 = path.join(tmp, 'f2');
+  mega(f2, '2026-11-01T00:00:00Z', { Chat_f: chatJson('f', '2026-11-01T00:00:00Z') });
+  put(f2, 'Chat_f/artefacts/index.html', 'Guide v1');
+  put(f2, 'export-manifest.json', manifestOf('2026-11-01T00:00:00Z'));
+  const jf = JSON.parse(format2(U, 'Guide', { current: 'v1', versions: { v1: { ...v2(null, 'Guide v1', [pin('f', 't', true, 'index.html')]), sameAs: { 'index.html': 'Chat_f/artefacts/index.html' } } } }));
+  put(f2, `artifacts/Guide_${SID}/artifact.json`, JSON.stringify(jf));
+  const r2 = await merge([f2, notExported(path.join(tmp, 'c2'), '2026-11-07T00:00:00Z')], { out: path.join(tmp, 'o2'), name: 'm', now: NOW });
+  assert.strictEqual(r2.ok, true, r2.reason);
+  const b = artifactJson(path.join(tmp, 'o2', 'm'), `Guide_${SID}`);
+  assert.ok(b.versions.v1.sameAs, 'still the chat\'s file');
+  assert.deepStrictEqual([b.note, b.incomplete], ['', undefined]);
+});
+
+test('the card picture comes from the source the listing came from, not the newest archive', async () => {
+  const tmp = tmpRoot();
+  const OLD = Buffer.concat([PNG, Buffer.from('old')]);
+  const NEW = Buffer.concat([PNG, Buffer.from('new')]);
+  const withThumb = (root, bytes) => {
+    const file = path.join(root, `artifacts/Guide_${SID}/artifact.json`);
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    j.thumb = `viewer-files/thumbs/${SID}.png`;
+    fs.writeFileSync(file, JSON.stringify(j));
+    put(root, `viewer-files/thumbs/${SID}.png`, bytes);
+    return root;
+  };
+  const first = withThumb(artifactsMega(tmp, 'a', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]), OLD);
+  await merge([first], { out: path.join(tmp, 'm1'), name: 'm', now: new Date('2026-11-20T00:00:00Z') });
+  const newer = withThumb(artifactsMega(tmp, 'b', '2026-11-10T00:00:00Z', 'full', [[U, 'Guide', true, 'v2']]), NEW);
+  await merge([path.join(tmp, 'm1', 'm'), newer], { out: path.join(tmp, 'm2'), name: 'm', now: new Date('2026-11-21T00:00:00Z') });
+  const d = path.join(tmp, 'm2', 'm');
+  assert.strictEqual(artifactJson(d, `Guide_${SID}`).current, 'v2');
+  assert.deepStrictEqual(fs.readFileSync(path.join(d, `viewer-files/thumbs/${SID}.png`)), NEW);
+});
+
+test('formatReport says why a written merge did not succeed', () => {
+  const { formatReport } = require('../tools/merge_archives.js');
+  const text = formatReport({ status: 'written', ok: false, dest: '/x/m', reason: '1 source ZIP entry was not extracted (see the warnings)', sources: [], warnings: ['s.zip: entry not extracted: a/C/a.md'] });
+  assert.match(text, /^written: \/x\/m\nnot complete: 1 source ZIP entry was not extracted/);
+});

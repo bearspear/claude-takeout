@@ -403,7 +403,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 - **Merging a merged archive with an older one** - The merged archive now records when claude.ai's artifact list was taken (`decided_at`, `listed_at` in its manifest). Merging it again with an older export no longer moves an artifact back to an older version or unlists artifacts the newer list had.
 - **Complete copies win** - A version found in several sources comes from the newest complete copy, so a newer copy that is missing files no longer replaces an older complete one.
 - **Notes and warnings follow the merge** - An artifact no longer says "not exported (see errors.txt)" when the merged archive has its files, and the sources' `artifacts/errors.txt` are collected into the merged one, so remaining "see errors.txt" notes point at something.
-- **ZIPs** - The current version keeps its ZIP when another source has one for the same files. A source ZIP entry that can't be extracted now ends the merge with exit code 1.
+- **ZIPs** - The current version keeps its ZIP when another source has one for the same files. A ZIP of a copy that is missing files isn't attached to a complete one. A source ZIP entry that can't be extracted now ends the merge with exit code 1, and the report says why. Card pictures follow the listing, like the current version.
 
 ### v1.20.5
 

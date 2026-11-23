@@ -87,7 +87,7 @@ const hasCopy = v => hasFolder(v) || !!v.sameAs;
 const wholeCopy = v => (hasFolder(v) && !v.incomplete && !(v.missing && v.missing.length) && v.files.every(f => f.abs)) || (!!v.sameAs && !v.incomplete);
 // Two versions' file lists the same (path and checksum each): a ZIP of one is a ZIP of the other.
 const sameFiles = (a, b) => {
-  const key = v => v.files.filter(f => f.savedAs).map(f => `${f.path}\n${f.sha256}`).sort().join('\n');
+  const key = v => v.files.filter(f => f.savedAs && !(v.missing || []).includes(f.path)).map(f => `${f.path}\n${f.sha256}`).sort().join('\n');
   return key(a) !== '' && key(a) === key(b);
 };
 
@@ -200,7 +200,7 @@ function mergeRecords(stores) {
     if (!versions.size && !listed) continue;
     const listedAt = !listed ? null : listedLater ? lister.st.listedAtOf(lister.rec) : fromDecider ? decider.decidedAt : top.st.listedAtOf(top.rec);
     merged.push({
-      uuid, rec: top.rec, listed, listedAt, thumbFrom: have.find(h => h.rec.thumb) || null,
+      uuid, rec: top.rec, listed, listedAt, thumbFrom: (top.rec.thumb ? top : have.find(h => h.rec.thumb)) || null,
       order: mergeOrder(have.slice().reverse().map(h => h.rec.order)), versions,
     });
   }
@@ -268,7 +268,7 @@ function repointSameAs(st, v, byChat, building) {
 function mergedNote(note, cur) {
   const parts = String(note || '').split('; ').filter(Boolean);
   if (!cur) return parts.join('; ');
-  const whole = (cur.folder || cur.sameAs) && cur.saved !== false && !cur.incomplete && !(cur.missing && cur.missing.length);
+  const whole = ((cur.folder && cur.saved !== false) || cur.sameAs) && !cur.incomplete && !(cur.missing && cur.missing.length);
   return parts.filter(p => !(whole && (/^not exported\b/.test(p) || /not saved \(see errors\.txt\)$/.test(p)))
     && !(cur.folder && p === 'files saved with the chats')).join('; ');
 }
@@ -339,7 +339,7 @@ function writeArtifacts(merged, building, chosen, report) {
       delete out.zipAbs;
       // Another source's ZIP of the same files serves as well, when the copied folder's source has none.
       const zipFrom = copiedFrom && copiedFrom.zipAbs ? copiedFrom
-        : copiedFrom ? (folders.find(f => f.v.zipAbs && sameFiles(f.v, copiedFrom)) || {}).v || null : null;
+        : copiedFrom ? (folders.find(f => f.v.zipAbs && wholeCopy(f.v) === wholeCopy(copiedFrom) && sameFiles(f.v, copiedFrom)) || {}).v || null : null;
       if (ver === m.rec.current && out.folder && zipFrom) {
         const name = `${out.folder.split('/').pop()}.zip`;
         if (isZip(zipFrom.zipAbs)) {
@@ -365,7 +365,13 @@ function writeArtifacts(merged, building, chosen, report) {
         thumbs++;
       }
     }
-    const rec = { uuid: m.uuid, shortId: m.rec.shortId, title: m.rec.title, listed: m.listed, current: m.rec.current, meta: { ...m.rec.meta, note: mergedNote(m.rec.meta.note, versions.get(m.rec.current)) }, thumbRel, order: m.order, versions };
+    // incomplete (a fetch failed) goes with the "not exported" note the merge dropped, when every merged version is
+    // whole; set for another reason (a chat's publish whose page info failed leaves no version), it stays.
+    const note = mergedNote(m.rec.meta.note, versions.get(m.rec.current));
+    const droppedNotExported = /(^|; )not exported\b/.test(m.rec.meta.note || '') && !/(^|; )not exported\b/.test(note);
+    const allWhole = [...versions.values()].every(v => (v.folder || v.sameAs) && !v.incomplete && !(v.missing && v.missing.length));
+    const meta = { ...m.rec.meta, note, incomplete: !!m.rec.meta.incomplete && !(droppedNotExported && allWhole) };
+    const rec = { uuid: m.uuid, shortId: m.rec.shortId, title: m.rec.title, listed: m.listed, current: m.rec.current, meta, thumbRel, order: m.order, versions };
     fs.writeFileSync(path.join(base, dir, 'artifact.json'), JSON.stringify(lib.artifactJsonV2FromDisk(rec), null, 2), { flag: 'wx' });
     // Its index row, as the extension builds one for a store record (export-core.js storeRecordRow): the record in
     // popup.js's store shape (version folders named inside the artifact folder, history its order).
@@ -737,6 +743,7 @@ function formatReport(r) {
   const lines = [];
   if (r.status === 'failed') lines.push(`failed: ${r.reason}`);
   else lines.push(r.dryRun ? `would write: ${r.dest}` : `written: ${r.dest}`);
+  if (r.status !== 'failed' && r.ok === false && r.reason) lines.push(`not complete: ${r.reason}`);
   if (r.chats) lines.push(`${r.chats} chats${r.replaced ? `; ${r.replaced} older ${r.replaced === 1 ? 'copy' : 'copies'} left out` : ''}`);
   for (const s of r.sources) lines.push(`  ${s.chats} from ${s.path}`);
   if (r.artifacts) lines.push(`${r.artifacts} artifact${r.artifacts === 1 ? '' : 's'} in artifacts/${r.rewrittenFiles ? `; links rewritten in ${r.rewrittenFiles} chat file${r.rewrittenFiles === 1 ? '' : 's'}` : ''}`);
