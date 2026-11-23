@@ -64,7 +64,7 @@ PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/stepper.e2e.js
 ```
 
-`combined.e2e.js` covers an Export All's viewer with artifacts. It launches Chromium with `--disable-features=IsolateSandboxedIframes`: Chrome gives sandboxed frames processes of their own, and Playwright doesn't attach to a sandboxed frame inside another (the preview in its guard frame), so its console, requests and frame would go unseen. In one process they are seen; the sandbox, origin and policies are the same either way.
+`combined.e2e.js` covers an Export All's viewer with artifacts, and `design.e2e.js` the Design canvas. Both launch Chromium with `--disable-features=IsolateSandboxedIframes`: Chrome gives sandboxed frames processes of their own, and Playwright doesn't attach to a sandboxed frame inside another (the preview in its guard frame), so its console, requests and frame would go unseen. In one process they are seen; the sandbox, origin and policies are the same either way.
 
 `viewer.e2e.js` is the only coverage for `sanitizeHtml`, so run it after changing anything in the viewer.
 

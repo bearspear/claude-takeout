@@ -2494,7 +2494,7 @@ test('Export All: a url-only publish joins a version another chat stored, with n
   assert.deepStrictEqual(json.versions.v3.publishedIn.map((p) => p.chat), ['a', 'b']);
 });
 
-test('Export All: a page skipped after a 401 is "not saved" without an errors.txt pointer in a chat with none', async () => {
+test('Export All: a page skipped after a 401 is "not saved", and a later chat\'s errors.txt says why', async () => {
   const signedOut = { error: 'HTTP 401', status: 401 };
   const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs, 'Out1', 'Out'))]), { uuid: 'a', name: 'Chat a' });
   const chatB = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U2, 'v1', guideAs, 'Out2', 'Out too'))]), { uuid: 'b', name: 'Chat b' });
@@ -2504,8 +2504,10 @@ test('Export All: a page skipped after a 401 is "not saved" without an errors.tx
   const readmeA = await zip.file('Chat_a/README.md').async('string');
   const readmeB = await zip.file('Chat_b/README.md').async('string');
   assert.ok(/not saved \(see errors\.txt\)/.test(readmeA), readmeA);
-  assert.ok(/not saved/.test(readmeB) && !/see errors\.txt/.test(readmeB), readmeB);
-  assert.ok(!zip.file('Chat_b/errors.txt'));
+  assert.ok(/not saved \(see errors\.txt\)/.test(readmeB), readmeB);
+  const errB = await zip.file('Chat_b/errors.txt').async('string');
+  assert.strictEqual((errB.match(/an earlier request in this export was answered HTTP 401/g) || []).length, 1, errB);
+  assert.ok(!/claude\.ai answered HTTP 401, as if/.test(errB), 'only the chat that met the 401 says so');
 });
 
 // ---- Export Artifacts ----
@@ -3301,7 +3303,7 @@ test('each artifact gets a view record', async () => {
     const game = views[1];
     const id = uuidToBase58(U(2));
     assert.deepStrictEqual(game, {
-      id, title: 'Game', kind: 'Page', typed: false, docs: false, shared: false, public: false,
+      id, title: 'Game', kind: 'Page', typed: false, docs: false, shared: false, foreign: false, public: false,
       createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', folder: artVer('Game', U(2)),
       start: 'index.html', startSaved: 'index.html', startKind: 'html', startSize: 30, tooLarge: false, startMissing: false, missingCount: 0,
       files: [{ path: 'index.html', savedAs: 'index.html', kind: 'html', verified: true }, { path: 'app.js', savedAs: 'app.js', kind: 'js', verified: true },
@@ -4240,6 +4242,104 @@ test('a multi-file page a chat saved previews with all its files', async () => {
   assert.ok(part && part[1].includes('PAGE-HTML') && part[1].includes('PAGE-CSS'), part && part[1]);
   assert.ok(part[1].indexOf('PAGE-HTML') < part[1].indexOf('PAGE-CSS'), 'start file first');
   assert.ok(!out[`artifacts/${artFolder('Guide', PUB_U)}/artifact.json`].includes('PAGE-'), 'previews stay out of artifact.json');
+});
+
+test('recordableExport leaves out chats and artifacts whose files could not be written', () => {
+  const fn = vm.runInContext('recordableExport', exportPopup().sandbox);
+  const chats = [{ uuid: 'a', updated_at: 't1', folder: 'Chat_a' }, { uuid: 'b', updated_at: 't2', folder: 'Chat_ab' }, { uuid: 'c', updated_at: 't3', folder: 'Chat_c', retry: true }];
+  const artifacts = [{ uuid: 'u1', ver: 'v1', folder: 'artifacts/One_x' }, { uuid: 'u2', ver: 'v2', folder: 'artifacts/One_xy' }];
+  const failures = [{ path: 'Chat_a/uploads/p01_big.pdf', error: 'QuotaExceededError' }, { path: 'artifacts/One_x/v1/index.html', error: 'x' }, { path: 'viewer.html', error: 'x' }];
+  const out = plain(fn(chats, artifacts, failures));
+  assert.deepStrictEqual(out.chats.map((c) => c.uuid), ['b'], 'a failed to write, c must be fetched again');
+  assert.deepStrictEqual(out.artifacts.map((a) => a.uuid), ['u2']);
+  const none = plain(fn(chats, artifacts, []));
+  assert.deepStrictEqual([none.chats.length, none.artifacts.length], [2, 2]);
+});
+
+test('Export All after a sign-out mid-way: later chats say their pages were skipped, and none of them is recorded', async () => {
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U2, 'v1', guideAs, 'Two2', 'Two'))]), { uuid: 'b', name: 'Chat b' });
+  const chatC = Object.assign(pubChat([{ uuid: 'h', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'hi' }] }]), { uuid: 'c', name: 'Chat c' });
+  const fetcher = publishedFetcher({ [PUB_U]: { error: { error: 'HTTP 401', status: 401 } }, [PUB_U2]: { title: 'Two', history: ['v1'], versions: { v1: { files: { 'index.html': 'two' } } } } });
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z'), listed('c', '2026-01-03T00:00:00Z')];
+  const { zip, store } = await runBulkZip({ list, chats: { a: chatA, b: chatB, c: chatC }, setup: bulkWithPages(fetcher, { calls: 0 }) });
+  const errB = await zip.file('Chat_b/errors.txt').async('string');
+  assert.match(errB, /not fetched: an earlier request in this export was answered HTTP 401/, errB);
+  assert.strictEqual(fetcher.count('publishedPageInfo', PUB_U2), 0);
+  assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats).sort(), ['c'], 'a and b have pages to fetch again');
+  const manifest = JSON.parse(await zip.file('export-manifest.json').async('string'));
+  assert.deepStrictEqual(manifest.chats.map((c) => c.uuid), ['a', 'b', 'c'], 'the manifest still lists every chat exported');
+});
+
+test('a chat whose published version failed to write into the artifacts store is not recorded', async () => {
+  const pageAs = [{ as: 'page.html', path: '/home/claude/page.html' }];
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', pageAs))]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([{ uuid: 'h', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'hi' }] }]), { uuid: 'b', name: 'Chat b' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1', 'v2'], versions: { v1: { files: { 'page.html': 'old' } } } } });
+  const picked = new FakeDir('picked', (name) => name === 'page.html');
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const { store } = await runBulkZip({ list, chats: { a: chatA, b: chatB }, options: { directory: picked }, setup: bulkWithPages(fetcher, { calls: 0 }) });
+  assert.ok(diskFiles(picked)['write-errors.txt'].includes('/v1/page.html'), 'the failure is listed');
+  assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats), ['b']);
+});
+
+test('a chat after a 401 in the middle of a version\'s files says why that version is missing, and is not recorded', async () => {
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U, 'v1', guideAs))]), { uuid: 'b', name: 'Chat b' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'x', error: { error: 'HTTP 401', status: 401 } } } } } } });
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const { zip, store } = await runBulkZip({ list, chats: { a: chatA, b: chatB }, setup: bulkWithPages(fetcher, { calls: 0 }) });
+  const readmeB = await zip.file('Chat_b/README.md').async('string');
+  assert.match(readmeB, /not saved \(see errors\.txt\)/, readmeB);
+  assert.match(await zip.file('Chat_b/errors.txt').async('string'), /an earlier request in this export was answered HTTP 401/);
+  assert.ok(!store.exportRecord || !store.exportRecord['org-1'] || !Object.keys(store.exportRecord['org-1'].chats).length);
+});
+
+test('a version that failed before a 401 keeps its own cause: a later chat does not blame the 401', async () => {
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  const chatC = Object.assign(pubChat([pubMsg('k1', null, publish('r1', PUB_U2, 'v1', guideAs, 'Out2', 'Out'))]), { uuid: 'c', name: 'Chat c' });
+  const chatD = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U, 'v1', guideAs))]), { uuid: 'd', name: 'Chat d' });
+  const fetcher = publishedFetcher({
+    [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'tampered', sha256: sha('original') } } } } },
+    [PUB_U2]: { error: { error: 'HTTP 401', status: 401 } },
+  });
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('c', '2026-01-02T00:00:00Z'), listed('d', '2026-01-03T00:00:00Z')];
+  const { zip } = await runBulkZip({ list, chats: { a: chatA, c: chatC, d: chatD }, setup: bulkWithPages(fetcher, { calls: 0 }) });
+  const errC = await zip.file('Chat_c/errors.txt').async('string');
+  assert.strictEqual((errC.match(/HTTP 401/g) || []).length, 1, 'the chat that met the 401 says so once');
+  const errD = zip.file('Chat_d/errors.txt') ? await zip.file('Chat_d/errors.txt').async('string') : '';
+  assert.ok(!/HTTP 401/.test(errD), errD);
+});
+
+test('runArtifactStep lets go of each version\'s preview once its part is written', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: livePage('Guide', { 'index.html': 'live' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) });
+  const root = zipStub();
+  sb.setTimeout = (f) => setTimeout(f, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide'), art(U(2), 'Two')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const parts = CTViewer.artifactViewParts({ partLimit: 4 * 1024 * 1024, budget: 64 * 1024 * 1024 });
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 2, fetchPublished: __fetch, picturesAllowed: false, parts });
+    const kept = store.records().flatMap((r) => [...r.versions.values()]).filter((v) => v && v.preview).length;
+    return JSON.stringify({ kept, parts: step.views.map((v) => v.part != null) });
+  })()`, sb));
+  assert.deepStrictEqual(out.parts, [true, true], 'the previews reached their parts');
+  assert.strictEqual(out.kept, 0);
+});
+
+test('an artifact claude.ai lists with no rel is treated as not the owner\'s for local links', async () => {
+  const frames = [art(U(1), 'Mine', { rel: 'mine' }), art(U(2), 'Unknown', { rel: '' })];
+  const pages = { [U(1)]: livePage('Mine', { 'index.html': 'm' }), [U(2)]: livePage('Unknown', { 'index.html': 'u' }) };
+  const { files, views } = await runArtifacts({ frames, pages });
+  const byTitle = Object.fromEntries(views.map((v) => [v.title, v]));
+  assert.deepStrictEqual([byTitle.Mine.shared, byTitle.Mine.foreign], [false, false]);
+  assert.strictEqual(byTitle.Unknown.foreign, true, 'no Open file link for its HTML in the viewer');
+  assert.strictEqual(byTitle.Unknown.shared, false, 'not put under Shared with you');
+  const fu = artFolder('Unknown', U(2));
+  assert.ok(!files['index.md'].includes(`(${fu}/${LIVE}/index.html)`), 'no local link in the index');
+  assert.ok(files['index.md'].includes(`(${artFolder('Mine', U(1))}/${LIVE}/index.html)`));
+  assert.notStrictEqual(JSON.parse(files[`${fu}/artifact.json`]).note, 'shared with you', 'its note does not claim it was shared');
 });
 
 // Export All keeps a published version's preview in memory only for the artifact step's listed live version.
