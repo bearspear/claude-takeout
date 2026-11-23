@@ -801,6 +801,8 @@
         const layout = text === null ? null : designCanvas(text, path => texts.has(path));
         if (!layout) return pageBody.replaceChildren(posterPage(v));
         const wrap = canvasPage(v, layout, payload, texts);
+        // Known at once, so stopCanvas reaches its frames whatever happens next.
+        canvasWrap = wrap;
         pageBody.replaceChildren(wrap);
         canvasBadges(layout, texts);
         if (focus) {
@@ -815,11 +817,15 @@
         }
         // The scale follows the page's width, in place (frames, focus and their scripts stay), keeping the place in it.
         if (typeof ResizeObserver === 'function') {
+          // The width it was last fitted to: a change under 20 px (a scrollbar, a rounding) is let be.
+          let fitted = pageBody.clientWidth;
           canvasResize = new ResizeObserver(() => {
             clearTimeout(canvasTimer);
             canvasTimer = setTimeout(() => {
               // Only this canvas's own, while it is the one on the page.
               if (canvasWrap !== wrap || !wrap.isConnected) return;
+              if (Math.abs(pageBody.clientWidth - fitted) < 20) return;
+              fitted = pageBody.clientWidth;
               const at = [pageBody.scrollTop / Math.max(1, pageBody.scrollHeight), pageBody.scrollLeft / Math.max(1, pageBody.scrollWidth)];
               wrap.rescale(pageBody.clientWidth);
               pageBody.scrollTop = at[0] * pageBody.scrollHeight;
@@ -1198,6 +1204,7 @@
     }
 
     function showFilePage(f, at) {
+      stopCanvas();
       const versions = f.versions.length;
       const pick = Number.isInteger(at) && at >= 0 && at < versions ? at : versions - 1;
       pageTitle.textContent = f.name;

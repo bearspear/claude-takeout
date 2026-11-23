@@ -100,7 +100,8 @@ button { font: inherit; color: inherit; }
 .badge { font-size: 11px; line-height: 16px; padding: 2px 8px; border-radius: 999px; background: var(--pill); color: var(--soft); white-space: nowrap; }
 .btn { display: inline-flex; align-items: center; font-size: 12px; line-height: 16px; padding: 5px 10px; border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--ink); text-decoration: none; white-space: nowrap; cursor: pointer; }
 .btn:hover { border-color: var(--line-strong); background: var(--hover); }
-#page-body { flex: 1; min-height: 0; overflow: auto; }
+/* The scrollbar's room is kept, so a scrollbar coming and going doesn't change the width a canvas fits. */
+#page-body { flex: 1; min-height: 0; overflow: auto; scrollbar-gutter: stable; }
 .sheet { max-width: 760px; margin: 0 auto; padding: 40px 20px 64px; }
 .sheet h2 { font: 400 24px/1.25 var(--serif); margin: 0 0 8px; }
 .sheet .lead { color: var(--soft); margin: 0 0 20px; }
@@ -163,12 +164,13 @@ button { font: inherit; color: inherit; }
 /* A board sits exactly at its place; its title row goes above it, as on claude.ai, so it never pushes the board down
    onto what lies below. */
 .design-board { position: absolute; }
-.design-board .board-head { position: absolute; left: 0; right: 0; bottom: 100%; padding-bottom: 4px; display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; font-size: 12px; color: var(--soft); min-height: 18px; overflow: hidden; min-width: max-content; max-width: max(100%, 6.5em); }
-/* One line however small the board: Open alone first and always whole (the row is never narrower than it), then the
-   title, which shortens; badges past the edge are cut (the whole row is in its tooltip). */
+.design-board .board-head { position: absolute; left: 0; right: 0; bottom: 100%; padding-bottom: 4px; display: flex; flex-wrap: nowrap; align-items: center; gap: 6px; font-size: 12px; color: var(--soft); min-height: 18px; overflow: hidden; min-width: 6.5em; }
+/* One line, the board's width (Open alone's at least): Open alone first and always whole, then the title, shortened
+   with an ellipsis, then badges, which shorten first (the whole row is in its tooltip). */
 .design-board .board-head > * { flex: none; }
 .design-board .board-head .board-open { order: -1; }
-.design-board .board-head .board-title { flex: 1 1 0; min-width: 0; }
+.design-board .board-head .board-title { flex: 0 1 auto; min-width: 2em; }
+.design-board .board-head .board-badge { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .design-board .board-title { font-weight: 600; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
 .board-open { font-size: 11px; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 6px; padding: 1px 6px; cursor: pointer; }
 .board-badge { font-size: 10px; padding: 1px 6px; border-radius: 999px; background: var(--pill); color: var(--soft); }

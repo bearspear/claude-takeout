@@ -179,6 +179,15 @@ async function writeOut(zip) {
     check(`${label}: Back from a board not drawn lands on its row`, (await deepActive()) === 'Open Off canvas alone', String(await deepActive()));
     // Narrow: each board's title row stays one line; then wide again, and the canvas follows the width.
     const wideWidth = (await canvas.boundingBox()).width;
+    // Title rows: never wider than the board (a long title or badge shortens), the title never squeezed to nothing.
+    const rows = () => page.locator('.design-board').evaluateAll(bs => bs.map(b => {
+      const head = b.querySelector('.board-head');
+      const title = head.querySelector('.board-title');
+      return { name: b.dataset.name, board: b.getBoundingClientRect().width, row: head.getBoundingClientRect().width, title: title.getBoundingClientRect().width };
+    }));
+    const wideRows = await rows();
+    check(`${label}: no title row is wider than its board`, wideRows.every(r => r.row <= r.board + 1), JSON.stringify(wideRows));
+    check(`${label}: a badge doesn't squeeze the title away`, wideRows.every(r => r.title >= 20), JSON.stringify(wideRows));
     // Keyboard focus on a board, its frame marked: a resize keeps both.
     await page.locator('.design-board', { hasText: 'Home A' }).locator('button.board-open').focus();
     await page.locator('.design-board', { hasText: 'Home A' }).locator('iframe').evaluate(f => { f.dataset.kept = 'yes'; });
@@ -192,6 +201,8 @@ async function writeOut(zip) {
       return b.left >= r.left - 0.5 && b.right <= r.right + 0.5 ? null : [Math.round(b.left - r.left), Math.round(b.right - r.right)];
     }).filter(Boolean));
     check(`${label}: Open alone stays whole on small boards`, clipped.length === 0, JSON.stringify(clipped));
+    const narrowRows = await rows();
+    check(`${label}: small boards' rows stay about their width`, narrowRows.every(r => r.row <= Math.max(r.board, 6.5 * 12) + 1), JSON.stringify(narrowRows));
     const narrowWidth = (await canvas.boundingBox()).width;
     const heads = await page.locator('.design-board .board-head').evaluateAll(hs => hs.map(h => h.getBoundingClientRect().height));
     check(`${label}: the canvas follows a narrower window`, narrowWidth < wideWidth * 0.6, JSON.stringify([wideWidth, narrowWidth]));
