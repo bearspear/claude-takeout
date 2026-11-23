@@ -629,6 +629,9 @@ function recordFromV2(root, dir, json) {
   const keys = Object.keys(versions).filter(k => VER_KEY.test(k) && versions[k] && typeof versions[k] === 'object');
   const order = Array.isArray(json.order) ? json.order.filter(k => typeof k === 'string' && keys.includes(k)) : [];
   rec.order = [...new Set([...order, ...keys])];
+  // Up to v1.20.7 the order was claude.ai's history as sent, newest first: the current version (claude.ai's newest)
+  // first is read back oldest first.
+  if (rec.current && rec.order.length > 1 && rec.order[0] === rec.current) rec.order.reverse();
   for (const ver of rec.order) {
     const v = versions[ver];
     const at = v.folder ? versionFolder(root, dir, v.folder) : null;

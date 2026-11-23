@@ -143,7 +143,8 @@
     const entry = { token, expires: publishedExpiry(token, Date.now()), ver: resolved, files };
     publishedTokens.set(uuid + ':' + resolved, entry);
     publishedTokens.set(uuid + ':' + ver, entry);
-    return { entry, title: body.title, history: body.history };
+    // claude.ai lists history newest first (observed 2026-11-23); everything after this reads it oldest first.
+    return { entry, title: body.title, history: Array.isArray(body.history) ? body.history.slice().reverse() : body.history };
   }
 
   async function publishedToken(uuid, ver, org, force) {

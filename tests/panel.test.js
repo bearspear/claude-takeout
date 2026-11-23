@@ -573,6 +573,12 @@ const tests = {
     assert.strictEqual(capped.frames.length, 100);
   },
 
+  'publishedPageInfo gives history oldest first': async () => {
+    const h = publishedHarness({ info: (body) => ({ ...body, ver: 'v3', history: ['v3', 'v2', 'v1'] }), filesJson: () => resp(200, { json: { ver: 'v3', files: { 'index.html': { sha256: 'h', size: 1, contentType: 'text/html' } } } }) });
+    const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.deepStrictEqual(res.history, ['v1', 'v2', 'v3']);
+  },
+
   'listArtifacts maps audience to public and never returns it': async () => {
     const frames = [{ slug: PUB, audience: 'public', thumbImgURL: thumbUrl() }, { slug: PUB2, audience: 'owner' }, { slug: PUB3 }];
     const h = publishedHarness({ frames: () => resp(200, { json: { frames } }) });
