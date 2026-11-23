@@ -389,7 +389,7 @@ test('(b) Review Focus 1: a 1.17 combined archive and a newer 1.18 one of the sa
   assert.match(fs.readFileSync(path.join(dest, 'Chat_c/README.md'), 'utf8'), /^﻿?# c\n/, 'chat c is the newer copy');
   assertLinksResolve(dest);
   const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8'));
-  assert.deepStrictEqual(manifest.artifacts, { listed: 1, thumbs: 1 });
+  assert.deepStrictEqual(manifest.artifacts, { listed: 1, thumbs: 1, decided_at: '2026-11-10T00:00:00Z', listed_at: { [U]: '2026-11-10T00:00:00Z' } });
   const data = viewerData(dest);
   assert.strictEqual(data.listFetched, true);
   assert.deepStrictEqual(data.artifacts.map(v => [v.title, v.thumb]), [['Guide', `viewer-files/thumbs/${SID}.png`]]);
@@ -499,7 +499,7 @@ test('(e) an artifact a newer full export no longer lists is unlisted; a newer E
   assert.strictEqual(artifactJson(dest, `Guide_${SID}`).listed, true);
   assert.strictEqual(artifactJson(dest, `Other_${OID}`).listed, false, 'deleted on claude.ai: the newest full export doesn\'t list it');
   assert.strictEqual(fs.readFileSync(path.join(dest, `artifacts/Other_${OID}/v1/index.html`), 'utf8'), 'Other v1', 'its version is kept');
-  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).artifacts, { listed: 1, thumbs: 0 });
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).artifacts, { listed: 1, thumbs: 0, decided_at: '2026-11-05T00:00:00Z', listed_at: { [U]: '2026-11-05T00:00:00Z' } });
   assert.match(fs.readFileSync(path.join(dest, 'artifacts/index.md'), 'utf8'), /\*\*Listed by claude\.ai:\*\* 1[\s\S]*Guide[\s\S]*## Published from chats, not in claude\.ai's list[\s\S]*Other/);
   assert.deepStrictEqual(viewerData(dest).artifacts.map(v => v.title), ['Guide']);
 });
@@ -525,7 +525,7 @@ test('(e2) a newer Export Changes lists a new artifact and moves a changed one\'
   assert.deepStrictEqual([other.listed, other.current, other.incomplete], [true, 'w1', true], 'the new artifact is listed');
   assert.match(fs.readFileSync(path.join(dest, 'artifacts/index.md'), 'utf8'), /Other[^\n]*some versions not saved/);
   assert.strictEqual(artifactJson(dest, `Third_${uuidToBase58(THIRD)}`).listed, false, 'the full export is newer and doesn\'t list it');
-  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).artifacts, { listed: 2, thumbs: 0 });
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).artifacts, { listed: 2, thumbs: 0, decided_at: '2026-11-01T00:00:00Z', listed_at: { [U]: '2026-11-07T00:00:00Z', [OTHER]: '2026-11-07T00:00:00Z' } });
   assert.deepStrictEqual(viewerData(dest).artifacts.map(v => [v.title, v.ver]).sort(), [['Guide new', 'v2'], ['Other', 'w1']]);
 });
 
@@ -551,7 +551,7 @@ test('(e3) only Export Changes sources: their list is in the merged archive; a 1
   let r = await merge([first, second], { out: path.join(tmp, 'out'), name: 'm', now: NOW });
   assert.strictEqual(r.status, 'written', r.reason);
   let dest = path.join(tmp, 'out', 'm');
-  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).artifacts, { listed: 2, thumbs: 0 });
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8')).artifacts, { listed: 2, thumbs: 0, decided_at: null, listed_at: { [U]: '2026-11-01T00:00:00Z', [OTHER]: '2026-11-05T00:00:00Z' } });
   let data = viewerData(dest);
   assert.strictEqual(data.listFetched, true);
   assert.deepStrictEqual(data.artifacts.map(v => v.title).sort(), ['Guide', 'Other']);
@@ -913,4 +913,188 @@ test('artifactJsonV2FromDisk writes a version\'s zip as popup.js does', () => {
   const fromPopup = vm.runInContext('artifactJsonV2', sandbox)(popupRec);
   assert.strictEqual(fromPopup.versions.v1.zip, 'v1.zip');
   assert.strictEqual(JSON.stringify(require('../tools/archive-lib.js').artifactJsonV2FromDisk(diskRec)), JSON.stringify(fromPopup));
+});
+
+// ---- Merge correctness (deep review 2026-11-22, batch B) ----
+
+test('an earlier merge keeps the list it was made from: merged with an older full export, current and listed don\'t go back', async () => {
+  const tmp = tmpRoot();
+  const fnew = artifactsMega(tmp, 'fn', '2026-11-10T00:00:00Z', 'full', [[U, 'Guide', true, 'v2'], [OTHER, 'Other', true]]);
+  const first = await merge([fnew], { out: path.join(tmp, 'm1'), name: 'm', now: new Date('2026-11-20T00:00:00Z') });
+  assert.strictEqual(first.ok, true, first.reason);
+  const M = path.join(tmp, 'm1', 'm');
+  const manifest = JSON.parse(fs.readFileSync(path.join(M, 'export-manifest.json'), 'utf8'));
+  assert.strictEqual(manifest.artifacts.decided_at, '2026-11-10T00:00:00Z', 'when claude.ai\'s full list was taken');
+  assert.deepStrictEqual(manifest.artifacts.listed_at, { [U]: '2026-11-10T00:00:00Z', [OTHER]: '2026-11-10T00:00:00Z' });
+  const fold = artifactsMega(tmp, 'fo', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]);
+  const r = await merge([M, fold], { out: path.join(tmp, 'm2'), name: 'm', now: new Date('2026-11-21T00:00:00Z') });
+  assert.strictEqual(r.ok, true, r.reason);
+  const d = path.join(tmp, 'm2', 'm');
+  const g = artifactJson(d, `Guide_${SID}`);
+  assert.deepStrictEqual([g.current, g.listed], ['v2', true]);
+  assert.strictEqual(artifactJson(d, `Other_${OID}`).listed, true);
+  // An older Export Changes that listed v1 doesn't move it back either; a newer full export still decides.
+  const ch = artifactsMega(tmp, 'ch', '2026-11-05T00:00:00Z', 'changes', [[U, 'Guide', true, 'v1']]);
+  const r3 = await merge([M, ch], { out: path.join(tmp, 'm3'), name: 'm', now: new Date('2026-11-21T00:00:00Z') });
+  assert.strictEqual(artifactJson(path.join(tmp, 'm3', 'm'), `Guide_${SID}`).current, 'v2', r3.reason);
+  const fnewest = artifactsMega(tmp, 'fz', '2026-11-25T00:00:00Z', 'full', [[U, 'Guide', true, 'v3']]);
+  await merge([M, fnewest], { out: path.join(tmp, 'm4'), name: 'm', now: new Date('2026-11-26T00:00:00Z') });
+  const d4 = path.join(tmp, 'm4', 'm');
+  assert.deepStrictEqual([artifactJson(d4, `Guide_${SID}`).current, artifactJson(d4, `Other_${OID}`).listed], ['v3', false]);
+});
+
+test('a complete older copy of a version wins over a newer copy that is missing files', async () => {
+  const tmp = tmpRoot();
+  const files2 = (both) => ({ folder: 'v1', files: [{ ...fileOf('one'), verified: true }, { path: 'app.js', savedAs: both ? 'app.js' : null, size: 2, contentType: 'text/javascript', sha256: sha('js'), verified: true }],
+    start: 'index.html', startSaved: 'index.html', incomplete: !both, missing: both ? [] : ['app.js'], saved: true, publishedIn: [] });
+  const mk = (name, at, both) => {
+    const root = path.join(tmp, name);
+    mega(root, at, { [`Chat_${name}`]: chatJson(name, at) });
+    put(root, 'export-manifest.json', manifestOf(at));
+    put(root, `artifacts/Guide_${SID}/artifact.json`, format2(U, 'Guide', { current: 'v1', versions: { v1: files2(both) } }));
+    put(root, `artifacts/Guide_${SID}/v1/index.html`, 'one');
+    if (both) put(root, `artifacts/Guide_${SID}/v1/app.js`, 'js');
+    return root;
+  };
+  const r = await merge([mk('a', '2026-11-01T00:00:00Z', true), mk('b', '2026-11-05T00:00:00Z', false)], { out: path.join(tmp, 'o'), name: 'm', now: NOW });
+  assert.strictEqual(r.ok, true, r.reason);
+  const d = path.join(tmp, 'o', 'm');
+  assert.deepStrictEqual(fs.readdirSync(path.join(d, 'artifacts', `Guide_${SID}`, 'v1')).sort(), ['app.js', 'index.html']);
+  const v1 = artifactJson(d, `Guide_${SID}`).versions.v1;
+  assert.deepStrictEqual([v1.incomplete, v1.missing], [false, []]);
+});
+
+test('notes follow the merged files, and the sources\' artifacts/errors.txt are carried over', async () => {
+  const tmp = tmpRoot();
+  const full = artifactsMega(tmp, 'f', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]);
+  const c = path.join(tmp, 'c');
+  mega(c, '2026-11-07T00:00:00Z', { Chat_c: chatJson('c', '2026-11-07T00:00:00Z') });
+  put(c, 'export-manifest.json', manifestOf('2026-11-07T00:00:00Z', 'changes'));
+  const j = JSON.parse(format2(U, 'Guide', { current: 'v1', versions: { v1: v2(null, 'Guide v1') } }));
+  j.note = 'not exported: signed out of claude.ai (see errors.txt)';
+  put(c, `artifacts/Guide_${SID}/artifact.json`, JSON.stringify(j));
+  put(c, 'artifacts/errors.txt', '# Export Errors Report\n\nGuide: signed out\n');
+  const r = await merge([full, c], { out: path.join(tmp, 'o'), name: 'm', now: NOW });
+  assert.strictEqual(r.ok, true, r.reason);
+  const d = path.join(tmp, 'o', 'm');
+  const a = artifactJson(d, `Guide_${SID}`);
+  assert.ok(a.versions.v1.folder, 'the full export\'s copy is there');
+  assert.ok(!/not exported/.test(a.note), a.note);
+  const view = viewerData(d).artifacts.find((v) => v.title === 'Guide');
+  assert.strictEqual(view.notExported, false);
+  const errors = fs.readFileSync(path.join(d, 'artifacts', 'errors.txt'), 'utf8');
+  assert.match(errors, /Guide: signed out/);
+  assert.ok(errors.includes(path.basename(c)), 'says which source it came from');
+});
+
+test('a source ZIP entry that could not be extracted fails the merge', async () => {
+  const tmp = tmpRoot();
+  const z = new JSZip();
+  z.file('a/index.md', '#');
+  z.file('a/C/original.json', chatJson('q', '2026-11-01T00:00:00Z'));
+  z.file('a/C/A.md', '1');
+  z.file('a/C/a.md', '2');
+  const zp = path.join(tmp, 's.zip');
+  fs.writeFileSync(zp, await z.generateAsync({ type: 'nodebuffer', platform: 'UNIX' }));
+  const r = await merge([zp], { out: path.join(tmp, 'o'), name: 'm', now: NOW });
+  assert.strictEqual(r.ok, false);
+  assert.ok(r.warnings.some((w) => /not extracted/.test(w)), r.warnings.join('\n'));
+});
+
+test('the current version keeps a ZIP another source has for the same files', async () => {
+  const tmp = tmpRoot();
+  const older = withZip(artifactsMega(tmp, 'o', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]), U, 'Guide', 'v1');
+  const newer = artifactsMega(tmp, 'n', '2026-11-05T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]);
+  const r = await merge([older, newer], { out: path.join(tmp, 'o2'), name: 'm', now: NOW });
+  assert.strictEqual(r.ok, true, r.reason);
+  const d = path.join(tmp, 'o2', 'm');
+  assert.ok(fs.existsSync(path.join(d, 'artifacts', `Guide_${SID}`, 'v1.zip')));
+  assert.strictEqual(artifactJson(d, `Guide_${SID}`).versions.v1.zip, 'v1.zip');
+  // Not when the other source's folder holds different files.
+  const other = withZip(artifactsMega(tmp, 'x', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]), U, 'Guide', 'v1');
+  fs.writeFileSync(path.join(other, 'artifacts', `Guide_${SID}`, 'v1', 'index.html'), 'different');
+  const j = JSON.parse(fs.readFileSync(path.join(other, 'artifacts', `Guide_${SID}`, 'artifact.json'), 'utf8'));
+  j.versions.v1.files[0].sha256 = sha('different');
+  fs.writeFileSync(path.join(other, 'artifacts', `Guide_${SID}`, 'artifact.json'), JSON.stringify(j));
+  await merge([other, newer], { out: path.join(tmp, 'o3'), name: 'm', now: NOW });
+  assert.ok(!fs.existsSync(path.join(tmp, 'o3', 'm', 'artifacts', `Guide_${SID}`, 'v1.zip')));
+});
+
+test('a ZIP from a source missing files is not attached to a complete copy', async () => {
+  const tmp = tmpRoot();
+  const v1 = (both, zip) => ({ folder: 'v1', files: [{ ...fileOf('one'), verified: true }, { path: 'app.js', savedAs: 'app.js', size: 2, contentType: 'text/javascript', sha256: sha('js'), verified: true }],
+    start: 'index.html', startSaved: 'index.html', incomplete: !both, missing: both ? [] : ['app.js'], saved: true, publishedIn: [], ...(zip ? { zip: 'v1.zip' } : {}) });
+  const mk = (name, at, both) => {
+    const root = path.join(tmp, name);
+    mega(root, at, { [`Chat_${name}`]: chatJson(name, at) });
+    put(root, 'export-manifest.json', manifestOf(at));
+    put(root, `artifacts/Guide_${SID}/artifact.json`, format2(U, 'Guide', { current: 'v1', versions: { v1: v1(both, !both) } }));
+    put(root, `artifacts/Guide_${SID}/v1/index.html`, 'one');
+    if (both) put(root, `artifacts/Guide_${SID}/v1/app.js`, 'js');
+    else fs.writeFileSync(path.join(root, `artifacts/Guide_${SID}/v1.zip`), PKZIP('only index'));
+    return root;
+  };
+  const r = await merge([mk('a', '2026-11-01T00:00:00Z', true), mk('b', '2026-11-05T00:00:00Z', false)], { out: path.join(tmp, 'o'), name: 'm', now: NOW });
+  assert.strictEqual(r.ok, true, r.reason);
+  const d = path.join(tmp, 'o', 'm');
+  assert.ok(!fs.existsSync(path.join(d, 'artifacts', `Guide_${SID}`, 'v1.zip')));
+  assert.strictEqual(artifactJson(d, `Guide_${SID}`).versions.v1.zip, undefined);
+});
+
+test('a note cleared by the merge clears the record\'s incomplete too, also for a chat\'s own file', async () => {
+  const tmp = tmpRoot();
+  const notExported = (root, at) => {
+    mega(root, at, { Chat_c: chatJson('c', at) });
+    put(root, 'export-manifest.json', manifestOf(at, 'changes'));
+    const j = JSON.parse(format2(U, 'Guide', { current: 'v1', versions: { v1: v2(null, 'Guide v1') } }));
+    j.note = 'not exported: signed out of claude.ai (see errors.txt)';
+    j.incomplete = true;
+    put(root, `artifacts/Guide_${SID}/artifact.json`, JSON.stringify(j));
+    return root;
+  };
+  const full = artifactsMega(tmp, 'f', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]);
+  await merge([full, notExported(path.join(tmp, 'c'), '2026-11-07T00:00:00Z')], { out: path.join(tmp, 'o'), name: 'm', now: NOW });
+  const d = path.join(tmp, 'o', 'm');
+  const a = artifactJson(d, `Guide_${SID}`);
+  assert.deepStrictEqual([a.note, a.incomplete], ['', undefined]);
+  assert.ok(!/not saved/.test(fs.readFileSync(path.join(d, 'artifacts', 'index.md'), 'utf8')));
+  // The full export saved v1 as a pointer to its chat's own file.
+  const f2 = path.join(tmp, 'f2');
+  mega(f2, '2026-11-01T00:00:00Z', { Chat_f: chatJson('f', '2026-11-01T00:00:00Z') });
+  put(f2, 'Chat_f/artefacts/index.html', 'Guide v1');
+  put(f2, 'export-manifest.json', manifestOf('2026-11-01T00:00:00Z'));
+  const jf = JSON.parse(format2(U, 'Guide', { current: 'v1', versions: { v1: { ...v2(null, 'Guide v1', [pin('f', 't', true, 'index.html')]), sameAs: { 'index.html': 'Chat_f/artefacts/index.html' } } } }));
+  put(f2, `artifacts/Guide_${SID}/artifact.json`, JSON.stringify(jf));
+  const r2 = await merge([f2, notExported(path.join(tmp, 'c2'), '2026-11-07T00:00:00Z')], { out: path.join(tmp, 'o2'), name: 'm', now: NOW });
+  assert.strictEqual(r2.ok, true, r2.reason);
+  const b = artifactJson(path.join(tmp, 'o2', 'm'), `Guide_${SID}`);
+  assert.ok(b.versions.v1.sameAs, 'still the chat\'s file');
+  assert.deepStrictEqual([b.note, b.incomplete], ['', undefined]);
+});
+
+test('the card picture comes from the source the listing came from, not the newest archive', async () => {
+  const tmp = tmpRoot();
+  const OLD = Buffer.concat([PNG, Buffer.from('old')]);
+  const NEW = Buffer.concat([PNG, Buffer.from('new')]);
+  const withThumb = (root, bytes) => {
+    const file = path.join(root, `artifacts/Guide_${SID}/artifact.json`);
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    j.thumb = `viewer-files/thumbs/${SID}.png`;
+    fs.writeFileSync(file, JSON.stringify(j));
+    put(root, `viewer-files/thumbs/${SID}.png`, bytes);
+    return root;
+  };
+  const first = withThumb(artifactsMega(tmp, 'a', '2026-11-01T00:00:00Z', 'full', [[U, 'Guide', true, 'v1']]), OLD);
+  await merge([first], { out: path.join(tmp, 'm1'), name: 'm', now: new Date('2026-11-20T00:00:00Z') });
+  const newer = withThumb(artifactsMega(tmp, 'b', '2026-11-10T00:00:00Z', 'full', [[U, 'Guide', true, 'v2']]), NEW);
+  await merge([path.join(tmp, 'm1', 'm'), newer], { out: path.join(tmp, 'm2'), name: 'm', now: new Date('2026-11-21T00:00:00Z') });
+  const d = path.join(tmp, 'm2', 'm');
+  assert.strictEqual(artifactJson(d, `Guide_${SID}`).current, 'v2');
+  assert.deepStrictEqual(fs.readFileSync(path.join(d, `viewer-files/thumbs/${SID}.png`)), NEW);
+});
+
+test('formatReport says why a written merge did not succeed', () => {
+  const { formatReport } = require('../tools/merge_archives.js');
+  const text = formatReport({ status: 'written', ok: false, dest: '/x/m', reason: '1 source ZIP entry was not extracted (see the warnings)', sources: [], warnings: ['s.zip: entry not extracted: a/C/a.md'] });
+  assert.match(text, /^written: \/x\/m\nnot complete: 1 source ZIP entry was not extracted/);
 });

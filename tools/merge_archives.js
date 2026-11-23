@@ -83,6 +83,13 @@ const encodePath = p => String(p).split('/').map(encodeURIComponent).join('/');
 // A version with something on disk to take: files in its folder, or a chat's own files (sameAs).
 const hasFolder = v => !!(v.folder && v.files.some(f => f.abs));
 const hasCopy = v => hasFolder(v) || !!v.sameAs;
+// A copy with nothing missing: every listed file on disk, or a chat's own files.
+const wholeCopy = v => (hasFolder(v) && !v.incomplete && !(v.missing && v.missing.length) && v.files.every(f => f.abs)) || (!!v.sameAs && !v.incomplete);
+// Two versions' file lists the same (path and checksum each): a ZIP of one is a ZIP of the other.
+const sameFiles = (a, b) => {
+  const key = v => v.files.filter(f => f.savedAs && !(v.missing || []).includes(f.path)).map(f => `${f.path}\n${f.sha256}`).sort().join('\n');
+  return key(a) !== '' && key(a) === key(b);
+};
 
 // Newest source first: the later export (export-manifest.json's exported_at), then the source named later.
 function newestFirst(a, b) {
@@ -113,8 +120,17 @@ function readStores(sources, archivesOf, copies, report) {
           if (v.folder) folders.set(v.folder, { uuid: rec.uuid, ver, byFile: new Map(v.files.filter(f => f.savedAs).map(f => [f.savedAs, f.path])) });
         }
       }
+      // When claude.ai's list was asked: an export's own time; an earlier merge's from its manifest (decided_at: the full
+      // list it was decided by; listed_at: per listed artifact, the list that listed it). A merge made before these
+      // were written neither decides nor lists, as before.
+      const merged = store.kind === 'merged';
+      const arts = step ? manifest.artifacts : {};
+      const decidedAt = merged ? (typeof arts.decided_at === 'string' ? arts.decided_at : null)
+        : store.kind === 'artifacts' || (store.kind === 'full' && step) ? store.exportedAt : null;
+      const listedAt = merged ? (arts.listed_at && typeof arts.listed_at === 'object' && !Array.isArray(arts.listed_at) ? arts.listed_at : {}) : null;
       out.push({
-        store, archive, order: s.order, index, exportedAt: store.exportedAt, decides: store.kind === 'artifacts' || (store.kind === 'full' && step),
+        store, archive, order: s.order, label: s.label, index, exportedAt: store.exportedAt, decides: decidedAt !== null, decidedAt,
+        listedAtOf: rec => (!rec.listed ? null : merged ? (Object.prototype.hasOwnProperty.call(listedAt, rec.uuid) && typeof listedAt[rec.uuid] === 'string' ? listedAt[rec.uuid] : null) : store.exportedAt),
         chatOf: new Map(mine.map(c => [rel(c), c])), chatFolders: new Map(mine.filter(c => c.uuid).map(c => [c.uuid, rel(c)])), folders,
       });
     });
@@ -149,8 +165,9 @@ function mergeOrder(lists) {
 // has it. So a newer Export Changes can list an artifact and move its current version forward, never unlist it. The
 // card picture from the newest store that has one.
 function mergeRecords(stores) {
-  const decider = stores.find(st => st.decides) || null;
-  const newer = (a, b) => stores.indexOf(a) < stores.indexOf(b);
+  // The newest full list (by when it was asked, not when its archive was made), and per artifact the newest list
+  // that listed it; ties go to the newer source (stores are newest first).
+  const decider = stores.filter(st => st.decides).reduce((best, st) => (!best || time(st.decidedAt) > time(best.decidedAt) ? st : best), null);
   const byUuid = new Map();
   for (const st of stores) {
     for (const rec of st.store.records.values()) {
@@ -161,8 +178,9 @@ function mergeRecords(stores) {
   const merged = [];
   for (const [uuid, have] of byUuid) {
     const fromDecider = decider ? have.find(h => h.st === decider) : null;
-    const lister = have.find(h => h.rec.listed && h.st.store.kind !== 'merged') || null;
-    const listedLater = !!lister && (!decider || newer(lister.st, decider));
+    const lister = have.filter(h => h.st.listedAtOf(h.rec) !== null)
+      .reduce((best, h) => (!best || time(h.st.listedAtOf(h.rec)) > time(best.st.listedAtOf(best.rec)) ? h : best), null);
+    const listedLater = !!lister && (!decider || time(lister.st.listedAtOf(lister.rec)) > time(decider.decidedAt));
     const top = listedLater ? lister : fromDecider || have[0];
     const versions = new Map();
     for (const { st, rec } of have) {
@@ -173,17 +191,20 @@ function mergeRecords(stores) {
         if (hasFolder(v)) had.folders.push({ st, v });
         const seen = new Set(had.publishedIn.map(p => `${p.chat}\n${p.toolUseId}`));
         for (const p of v.publishedIn) if (!seen.has(`${p.chat}\n${p.toolUseId}`)) { seen.add(`${p.chat}\n${p.toolUseId}`); had.publishedIn.push(p); }
-        if (!hasCopy(had.v) && hasCopy(v)) Object.assign(had, { st, v });
+        // A version id's files don't change, so any whole copy will do: the newest, unless only an older one is whole.
+        if ((!hasCopy(had.v) && hasCopy(v)) || (!wholeCopy(had.v) && wholeCopy(v))) Object.assign(had, { st, v });
       }
     }
     const listed = listedLater || (decider ? !!(fromDecider && fromDecider.rec.listed) : !!top.rec.listed);
     // A page no source holds a version of, and claude.ai doesn't list, has nothing to keep.
     if (!versions.size && !listed) continue;
+    const listedAt = !listed ? null : listedLater ? lister.st.listedAtOf(lister.rec) : fromDecider ? decider.decidedAt : top.st.listedAtOf(top.rec);
     merged.push({
-      uuid, rec: top.rec, listed, thumbFrom: have.find(h => h.rec.thumb) || null,
+      uuid, rec: top.rec, listed, listedAt, thumbFrom: (top.rec.thumb ? top : have.find(h => h.rec.thumb)) || null,
       order: mergeOrder(have.slice().reverse().map(h => h.rec.order)), versions,
     });
   }
+  merged.decidedAt = decider ? decider.decidedAt : null;
   return merged;
 }
 
@@ -240,6 +261,16 @@ function repointSameAs(st, v, byChat, building) {
     out[p] = `${chosen.out}/${inChat}`;
   }
   return out;
+}
+
+// The note of the source the listing came from, as the merged current version stands: what that source couldn't
+// save, or saved with the chats, is dropped when the merged copy has it whole, or in a folder of its own.
+function mergedNote(note, cur) {
+  const parts = String(note || '').split('; ').filter(Boolean);
+  if (!cur) return parts.join('; ');
+  const whole = ((cur.folder && cur.saved !== false) || cur.sameAs) && !cur.incomplete && !(cur.missing && cur.missing.length);
+  return parts.filter(p => !(whole && (/^not exported\b/.test(p) || /not saved \(see errors\.txt\)$/.test(p)))
+    && !(cur.folder && p === 'files saved with the chats')).join('; ');
 }
 
 // Writes artifacts/ (one folder per artifact, a <ver>/ folder per version with a copy, artifact.json format 2) and the
@@ -306,10 +337,13 @@ function writeArtifacts(merged, building, chosen, report) {
       // no ZIP of their own.
       delete out.zip;
       delete out.zipAbs;
-      if (ver === m.rec.current && out.folder && copiedFrom && copiedFrom.zipAbs) {
+      // Another source's ZIP of the same files serves as well, when the copied folder's source has none.
+      const zipFrom = copiedFrom && copiedFrom.zipAbs ? copiedFrom
+        : copiedFrom ? (folders.find(f => f.v.zipAbs && wholeCopy(f.v) === wholeCopy(copiedFrom) && sameFiles(f.v, copiedFrom)) || {}).v || null : null;
+      if (ver === m.rec.current && out.folder && zipFrom) {
         const name = `${out.folder.split('/').pop()}.zip`;
-        if (isZip(copiedFrom.zipAbs)) {
-          fs.copyFileSync(copiedFrom.zipAbs, path.join(base, dir, name), fs.constants.COPYFILE_EXCL);
+        if (isZip(zipFrom.zipAbs)) {
+          fs.copyFileSync(zipFrom.zipAbs, path.join(base, dir, name), fs.constants.COPYFILE_EXCL);
           out.zip = name;
         } else report.warnings.push(`${label}: ZIP left out (not a ZIP)`);
       }
@@ -331,7 +365,13 @@ function writeArtifacts(merged, building, chosen, report) {
         thumbs++;
       }
     }
-    const rec = { uuid: m.uuid, shortId: m.rec.shortId, title: m.rec.title, listed: m.listed, current: m.rec.current, meta: m.rec.meta, thumbRel, order: m.order, versions };
+    // incomplete (a fetch failed) goes with the "not exported" note the merge dropped, when every merged version is
+    // whole; set for another reason (a chat's publish whose page info failed leaves no version), it stays.
+    const note = mergedNote(m.rec.meta.note, versions.get(m.rec.current));
+    const droppedNotExported = /(^|; )not exported\b/.test(m.rec.meta.note || '') && !/(^|; )not exported\b/.test(note);
+    const allWhole = [...versions.values()].every(v => (v.folder || v.sameAs) && !v.incomplete && !(v.missing && v.missing.length));
+    const meta = { ...m.rec.meta, note, incomplete: !!m.rec.meta.incomplete && !(droppedNotExported && allWhole) };
+    const rec = { uuid: m.uuid, shortId: m.rec.shortId, title: m.rec.title, listed: m.listed, current: m.rec.current, meta, thumbRel, order: m.order, versions };
     fs.writeFileSync(path.join(base, dir, 'artifact.json'), JSON.stringify(lib.artifactJsonV2FromDisk(rec), null, 2), { flag: 'wx' });
     // Its index row, as the extension builds one for a store record (export-core.js storeRecordRow): the record in
     // popup.js's store shape (version folders named inside the artifact folder, history its order).
@@ -576,6 +616,7 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       s.dir = path.join(scratch, String(s.order));
       const extracted = await zipLib.extractZip(s.input, s.dir);
       for (const r of extracted.rejected) report.warnings.push(`${s.label}: entry not extracted: ${r.name || r}`);
+      report.rejected = (report.rejected || 0) + extracted.rejected.length;
     }
 
     const all = [];
@@ -657,6 +698,13 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       const indexOpts = { listed: hadList ? written.listed : null, exportedAt: at, thumbs: written.thumbs, viewer: true, base: 'artifacts/' };
       fs.writeFileSync(path.join(building, 'artifacts', 'index.md'), '\uFEFF' + core.artifactsIndexMd(written.rows, indexOpts), { flag: 'wx' });
       fs.writeFileSync(path.join(building, 'artifacts', 'index.html'), core.artifactsIndexHtml(written.rows, indexOpts), { flag: 'wx' });
+      // The sources' artifact warnings, which notes still point at ("see errors.txt"), one section per source.
+      const reports = [];
+      for (const st of stores) {
+        const at = st.store.kind === 'artifacts' ? lib.realFileUnder(st.archive.root, 'errors.txt') : lib.realFileUnder(st.archive.root, 'artifacts/errors.txt');
+        if (at) reports.push(`## From ${st.label}${stores.filter(x => x.label === st.label).length > 1 ? ` (${path.basename(st.archive.root)})` : ''}\n\n${fs.readFileSync(at, 'utf8').replace(/^\uFEFF/, '').trim()}\n`);
+      }
+      if (reports.length) fs.writeFileSync(path.join(building, 'artifacts', 'errors.txt'), `# Artifact warnings from the merged archives\n\n${reports.join('\n')}`, { flag: 'wx' });
     }
     rewriteLinks(chosen, stores, written ? written.places : new Map(), building, report);
     fs.writeFileSync(path.join(building, 'index.md'), indexMd(chosen, sources, at, merged.length), { flag: 'wx' });
@@ -665,7 +713,9 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       sources: sources.map(s => s.label),
       chats: chosen.map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updatedAt, folder: c.out, from: c.source })),
       // readArtifactStore reads this key for listFetched.
-      ...(written && hadList ? { artifacts: { listed: written.listed, thumbs: written.thumbs } } : {}),
+      // decided_at and listed_at: when claude.ai's lists were asked, so a later merge ranks this one by them.
+      ...(written && hadList ? { artifacts: { listed: written.listed, thumbs: written.thumbs, decided_at: merged.decidedAt,
+        listed_at: Object.fromEntries(merged.filter(m => m.listed && m.listedAt).map(m => [m.uuid, m.listedAt])) } } : {}),
     }, null, 2), { flag: 'wx' });
     if (lstat(dest)) throw new Error(`${dest} appeared while merging, so it was left alone`);
     fs.renameSync(building, dest);
@@ -675,7 +725,9 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
     report.viewer = archive ? await writeViewer(archive) : { status: 'failed', reason: 'the merged folder was not recognized as an archive' };
     if (report.viewer.status !== 'written') report.warnings.push(`viewer.html: ${report.viewer.reason || report.viewer.status}`);
     report.status = 'written';
-    report.ok = report.viewer.status === 'written';
+    // A source file left out (refused ZIP entry) means the merge isn't whole: say so by the exit status too.
+    report.ok = report.viewer.status === 'written' && !report.rejected;
+    if (report.rejected) report.reason = `${report.rejected} source ZIP entr${report.rejected === 1 ? 'y was' : 'ies were'} not extracted (see the warnings)`;
     return report;
   } catch (e) {
     try { fs.rmSync(building, { recursive: true, force: true }); } catch (r) { report.warnings.push(`left at ${building}: ${r.message}`); }
@@ -691,6 +743,7 @@ function formatReport(r) {
   const lines = [];
   if (r.status === 'failed') lines.push(`failed: ${r.reason}`);
   else lines.push(r.dryRun ? `would write: ${r.dest}` : `written: ${r.dest}`);
+  if (r.status !== 'failed' && r.ok === false && r.reason) lines.push(`not complete: ${r.reason}`);
   if (r.chats) lines.push(`${r.chats} chats${r.replaced ? `; ${r.replaced} older ${r.replaced === 1 ? 'copy' : 'copies'} left out` : ''}`);
   for (const s of r.sources) lines.push(`  ${s.chats} from ${s.path}`);
   if (r.artifacts) lines.push(`${r.artifacts} artifact${r.artifacts === 1 ? '' : 's'} in artifacts/${r.rewrittenFiles ? `; links rewritten in ${r.rewrittenFiles} chat file${r.rewrittenFiles === 1 ? '' : 's'}` : ''}`);
