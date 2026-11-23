@@ -5083,3 +5083,51 @@ test('Claude Docs fetch no history', async () => {
   const { fetcher } = await runArtifacts({ frames, pages });
   assert.strictEqual(fetcher.calls.filter((c) => c.ver === 'v1').length, 0);
 });
+
+const histFetcher = (broken = {}) => publishedFetcher({ [U(1)]: histPage('Guide', {
+  v1: { files: { 'index.html': 'one' } },
+  v2: { files: { 'index.html': broken.v2 ? { body: 'x', error: { error: 'network' } } : 'two' } },
+  [LIVE]: { files: { 'index.html': 'live' } },
+}) });
+const changesRun = (stored, fetcher) => runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored,
+  options: { changesOnly: true }, setup: bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher }) });
+const recordOf = (store) => store.exportRecord['org-1'];
+
+test('Export Changes skips older versions an earlier Export All saved', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: 'old' }, artifactVersions: { [U(1)]: ['v1'] } } } };
+  const fetcher = histFetcher();
+  const { store } = await changesRun(stored, fetcher);
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE], [U(1), 'v2']]);
+  assert.deepStrictEqual([...recordOf(store).artifactVersions[U(1)]].sort(), [LIVE, 'v1', 'v2'].sort());
+  assert.strictEqual(recordOf(store).artifacts[U(1)], LIVE);
+});
+
+test('a failed older version keeps the artifact in the next Export Changes', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: 'old' }, artifactVersions: { [U(1)]: ['v1'] } } } };
+  const first = await changesRun(stored, histFetcher({ v2: true }));
+  assert.notStrictEqual(recordOf(first.store).artifacts[U(1)], LIVE, 'not recorded as exported');
+  assert.ok(!recordOf(first.store).artifactVersions[U(1)].includes('v2'));
+  assert.ok(recordOf(first.store).artifactVersions[U(1)].includes(LIVE));
+  const fetcher = histFetcher();
+  const second = await changesRun(first.store, fetcher);
+  assert.deepStrictEqual(infoCalls(fetcher).filter(([, v]) => v !== LIVE), [[U(1), 'v2']], 'only the failed older version is fetched again');
+  assert.strictEqual(recordOf(second.store).artifacts[U(1)], LIVE);
+});
+
+test('a record from before v1.21 fetches every version once', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: 'old' } } } };
+  const fetcher = histFetcher();
+  const { store } = await changesRun(stored, fetcher);
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE], [U(1), 'v1'], [U(1), 'v2']]);
+  assert.deepStrictEqual([...recordOf(store).artifactVersions[U(1)]].sort(), [LIVE, 'v1', 'v2'].sort());
+});
+
+test('Export Artifacts records nothing, and a full Export All fetches every version', async () => {
+  const fetcher = histFetcher();
+  const { store } = await runArtifacts({ frames: [art(U(1), 'Guide')], pages: { [U(1)]: histPage('Guide', { v1: { files: { 'index.html': 'one' } }, v2: { files: { 'index.html': 'two' } }, [LIVE]: { files: { 'index.html': 'live' } } }) } });
+  assert.ok(!store.exportRecord);
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: {}, artifacts: { [U(1)]: LIVE }, artifactVersions: { [U(1)]: ['v1', 'v2', LIVE] } } } };
+  const full = histFetcher();
+  await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored, setup: bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher: full }) });
+  assert.deepStrictEqual(infoCalls(full), [[U(1), LIVE], [U(1), 'v1'], [U(1), 'v2']], 'a full export saves every version, every time');
+});

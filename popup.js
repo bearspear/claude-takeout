@@ -4732,16 +4732,18 @@ async function loadExportRecord(org) {
 // after a 401), nor a chat or artifact with a file that could not be written to the folder (writeFailures from
 // the folder writer, paths from the export root; a chat's stores are the artifacts-store folders its published
 // pages went into). Otherwise Export Changes would skip them for good.
-function recordableExport(chats, artifacts, writeFailures = []) {
+function recordableExport(chats, artifacts, writeFailures = [], versions = []) {
   const failed = (Array.isArray(writeFailures) ? writeFailures : []).map((f) => String(f && f.path || ''));
   const hit = (folder) => typeof folder === 'string' && folder !== '' && failed.some((p) => p.startsWith(`${folder}/`));
   return {
     chats: (chats || []).filter((c) => c && c.retry !== true && !hit(c.folder) && !(Array.isArray(c.stores) && c.stores.some(hit))),
     artifacts: (artifacts || []).filter((a) => a && !hit(a.folder)),
+    // { uuid, folder, versions }: an artifact's saved versions, left out with a write failure under its folder.
+    versions: (versions || []).filter((a) => a && !hit(a.folder)),
   };
 }
 
-async function saveExportRecord(org, at, exportedChats, exportedArtifacts = []) {
+async function saveExportRecord(org, at, exportedChats, exportedArtifacts = [], exportedVersions = []) {
   try {
     const stored = await chrome.storage.local.get([EXPORT_RECORD_KEY]);
     const all = stored && stored[EXPORT_RECORD_KEY] && typeof stored[EXPORT_RECORD_KEY] === 'object' ? stored[EXPORT_RECORD_KEY] : {};
@@ -4751,7 +4753,16 @@ async function saveExportRecord(org, at, exportedChats, exportedArtifacts = []) 
     const hadArtifacts = mine.artifacts && typeof mine.artifacts === 'object';
     const artifacts = { ...(hadArtifacts ? mine.artifacts : {}) };
     for (const a of exportedArtifacts || []) artifacts[a.uuid] = a.ver;
-    const entry = hadArtifacts || (exportedArtifacts && exportedArtifacts.length) ? { at, chats, artifacts } : { at, chats };
+    // artifactVersions (v1.21): per artifact, every version an export saved whole or found gone; joined with the old.
+    const hadVersions = mine.artifactVersions && typeof mine.artifactVersions === 'object' && !Array.isArray(mine.artifactVersions);
+    const artifactVersions = { ...(hadVersions ? mine.artifactVersions : {}) };
+    for (const a of exportedVersions || []) {
+      const old = Array.isArray(artifactVersions[a.uuid]) ? artifactVersions[a.uuid] : [];
+      artifactVersions[a.uuid] = [...new Set([...old, ...a.versions])];
+    }
+    const withArtifacts = hadArtifacts || (exportedArtifacts && exportedArtifacts.length);
+    const withVersions = hadVersions || (exportedVersions && exportedVersions.length);
+    const entry = { at, chats, ...(withArtifacts ? { artifacts } : {}), ...(withVersions ? { artifactVersions } : {}) };
     await chrome.storage.local.set({ [EXPORT_RECORD_KEY]: { ...all, [org]: entry } });
   } catch (e) {
     console.warn('Could not save the export record:', e);
@@ -5040,6 +5051,10 @@ async function bulkExportZip(options = {}) {
       } catch (e) { /* no previews; the export goes on */ }
       step = await runArtifactStep(megaZip, {
         store, artifacts: includedArtifacts, paging: artifactList.paging, listed: artifactList.listed, fetchPublished, picturesAllowed,
+        // Export Changes: the versions an earlier Export All saved are not fetched again (a full export takes them all).
+        skipVersions: since && record && record.artifactVersions && typeof record.artifactVersions === 'object'
+          ? new Map(Object.entries(record.artifactVersions).filter(([, l]) => Array.isArray(l)).map(([uuid, l]) => [uuid, new Set(l.filter((x) => typeof x === 'string'))]))
+          : null,
         docChats: new Map([...docChats].map(([uuid, d]) => [uuid, d.title])), parts, run: !!run,
         collector: new ExportErrorCollector(null, null, { label: 'Export Artifacts' }),
         onProgress: (done, n) => showProgress(done, n, `${done} / ${n}`),
@@ -5066,6 +5081,10 @@ async function bulkExportZip(options = {}) {
       .map((a, i) => ({ a, i }))
       .filter(({ a, i }) => step.whole[i] === true && !(a.paged === true && !listedArtifactVer(a)))
       .map(({ a, i }) => ({ uuid: String(a.slug).toLowerCase(), ver: listedArtifactVer(a), folder: `artifacts/${step.entries[i].folder}` })) : [];
+    // Every included artifact's versions saved whole or settled now, whole or not (Export Changes skips them next time).
+    const exportedVersions = step ? includedArtifacts
+      .map((a, i) => ({ uuid: String(a.slug).toLowerCase(), folder: `artifacts/${step.entries[i].folder}`, versions: Array.isArray(step.versionsSaved[i]) ? step.versionsSaved[i] : [] }))
+      .filter((x) => x.versions.length) : [];
 
     // Create index.md at root
     const indexLines = [
@@ -5172,8 +5191,8 @@ async function bulkExportZip(options = {}) {
         megaZip.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
         await megaZip.flush();
       }
-      const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures);
-      if (org && (recordable.chats.length || recordable.artifacts.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts);
+      const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions);
+      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions);
       hideProgress();
       const failedNote = errors.length ? ` ${errors.length} conversation${errors.length > 1 ? 's' : ''} failed.` : '';
       const writeNote = writeFailures.length ? ` ${writeFailures.length} file${writeFailures.length > 1 ? 's' : ''} could not be written (see write-errors.txt).` : '';
@@ -5196,8 +5215,8 @@ async function bulkExportZip(options = {}) {
 
       download(zipBlob, megaZipName(response.accountName, kind, dateStr), 'application/zip');
       // Only chats and artifacts really in the archive are recorded, so one that failed is tried again next time.
-      const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures);
-      if (org && (recordable.chats.length || recordable.artifacts.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts);
+      const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions);
+      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions);
 
       hideProgress();
 
@@ -5834,11 +5853,15 @@ async function runArtifactStep(root, opts = {}) {
   const collector = opts.collector || new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
   const warn = (filename, message, note = null) => collector.addWarning('artifact_export', filename, message, { note });
   const state = {};
-  const ctx = { fetchPublished, state, warn, store, docChats: opts.docChats instanceof Map ? opts.docChats : null };
+  const ctx = { fetchPublished, state, warn, store, docChats: opts.docChats instanceof Map ? opts.docChats : null,
+    skipVersions: opts.skipVersions instanceof Map ? opts.skipVersions : null };
   const rows = [];
   const entries = [];
   const views = [];
   const whole = [];  // per artifact: saved with nothing missing or incomplete (Export All records only those)
+  // per artifact: the version ids now saved whole or settled (the current one when whole, its history's saved and
+  // settled), which Export All adds to its record whether or not the artifact is whole.
+  const versionsSaved = [];
   const writeFailures = [];
   let thumbs = 0;
   let partCount = 0;
@@ -5867,6 +5890,11 @@ async function runArtifactStep(root, opts = {}) {
       entries.push(saved.entry);
       whole.push(!!(saved.meta && !saved.meta.incomplete && !(saved.meta.missing && saved.meta.missing.length) && !saved.view.notExported
         && !(saved.history && saved.history.failed.length)));
+      {
+        const m = saved.meta || {};
+        const currentOk = !!(m.ver && !m.incomplete && !(m.missing && m.missing.length) && !saved.view.notExported);
+        versionsSaved.push([...(currentOk ? [m.ver] : []), ...(saved.history ? [...saved.history.saved, ...saved.history.settled] : [])]);
+      }
       let view = { ...saved.view, thumb: null, part: null, key: null };
       // The card picture and the preview part are extras: a failure leaves them out, with no warning.
       try {
@@ -5910,7 +5938,7 @@ async function runArtifactStep(root, opts = {}) {
     console.error('Artifact step stopped early:', e);
     warn('artifacts', 'Artifact step stopped early: unexpected error. Artifacts after this one were not exported.');
   }
-  return { views, rows, entries, whole, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true };
+  return { views, rows, entries, whole, versionsSaved, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true };
 }
 
 // Export Artifacts. options.directory: a folder from showDirectoryPicker; the export goes into a new folder
