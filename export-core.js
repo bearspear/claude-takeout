@@ -1671,7 +1671,7 @@ const artifactStartKind = (p) => {
 };
 
 // An artifact's record for the artifacts viewer (ArtifactView, without part and key). o: { uuid, shortId, url,
-// title, typeSlug, typeTitle, shared, public, docs, createdAt, updatedAt, folder, files (artifact.json's), missing,
+// title, typeSlug, typeTitle, shared, foreign (no local HTML/SVG links: artifactForeign; shared when absent), public, docs, createdAt, updatedAt, folder, files (artifact.json's), missing,
 // start, startSaved, startSize, needsRuntime, notExported, note, inPayload (the start's text or image is in the
 // preview payload) }. Files lists those saved; missingCount counts the listed ones not saved. A start file a preview
 // could show but whose text or image is not in the payload is tooLarge when over PREVIEW_ITEM_MAX, otherwise
@@ -1682,7 +1682,7 @@ function artifactView(o) {
   const tooLarge = !!o.start && startSize != null && startSize > PREVIEW_ITEM_MAX;
   return {
     id: o.shortId || o.uuid, title: o.title, kind: o.typeTitle || 'Page', typed: o.typeSlug !== '', docs: !!o.docs,
-    shared: !!o.shared, public: o.public === true, createdAt: o.createdAt, updatedAt: o.updatedAt, folder: o.folder,
+    shared: !!o.shared, foreign: o.foreign === undefined ? !!o.shared : !!o.foreign, public: o.public === true, createdAt: o.createdAt, updatedAt: o.updatedAt, folder: o.folder,
     start: o.start || null, startSaved: o.start ? o.startSaved || null : null, startKind: artifactStartKind(o.start || null),
     startSize: o.start ? startSize : null, tooLarge,
     startMissing: !!o.start && !tooLarge && !!previewKind(o.start) && !o.inPayload, missingCount: missing.size,

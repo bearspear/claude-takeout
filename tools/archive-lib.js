@@ -955,7 +955,7 @@ function artifactViewsFromDisk(store, chatFolders = new Map()) {
     const view = core.artifactView({
       uuid: rec.uuid, shortId: rec.shortId, url: `https://claude.ai/artifact/${rec.shortId || rec.uuid}`, title: rec.title,
       // artifact.json keeps claude.ai's type name, not its id: a typed artifact is one with a type name, other than Docs.
-      typeSlug: !docs && m.typeTitle ? 'typed' : '', typeTitle: m.typeTitle, shared: core.artifactForeign(m.rel, true), public: m.public, docs,
+      typeSlug: !docs && m.typeTitle ? 'typed' : '', typeTitle: m.typeTitle, shared, foreign: core.artifactForeign(m.rel, true), public: m.public, docs,
       createdAt: m.createdAt, updatedAt: m.updatedAt, folder, files, missing, start: m.start, startSaved, startSize, needsRuntime: m.needsRuntime,
       notExported: /(^|; )not exported/.test(note), note,
       inPayload: !!(m.start && payload && (payload.texts.some(t => t[0] === m.start) || payload.images.some(t => t[0] === m.start))), reused,

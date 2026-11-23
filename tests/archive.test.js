@@ -2210,9 +2210,10 @@ test('artifactViewsFromDisk: a listed artifact with no rel is not the owner\'s f
     put(root, `artifacts/${AF}/v2/index.html`, G2);
     return lib.artifactViewsFromDisk(lib.readArtifactStore(root)).views;
   };
-  assert.strictEqual(views('mine')[0].shared, false);
-  assert.strictEqual(views('')[0].shared, true);
-  assert.strictEqual(views('shared')[0].shared, true);
+  const flags = (rel) => { const v = views(rel)[0]; return [v.shared, v.foreign]; };
+  assert.deepStrictEqual(flags('mine'), [false, false]);
+  assert.deepStrictEqual(flags(''), [false, true]);
+  assert.deepStrictEqual(flags('shared'), [true, true]);
 });
 
 test('readArtifactStore: a 1.17 savedIn naming a chat\'s own file is that file, as 1.18\'s sameAs', () => {

@@ -3537,6 +3537,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
   }
 
   const noted = new Set();
+  const storeDirs = new Set();  // Export All: the artifacts-store folders this chat's pages went into
   let signedOutHere = false;
   // A chat after the one that met the 401 says once why its pages were not fetched.
   let skipWarned = false;
@@ -3776,7 +3777,6 @@ async function savePublishedPages(folder, data, ctx = {}) {
       const same = !!matched;
       if (same && exportAll) await keepSame(rec, v, matched);
       if (!same && !v.attempted && !state.publishedSignedOut) await fetchVersion(rec, v);
-      else if (!same && !v.attempted && !v.saved && !v.sameAs) { noteSkipped(); noted.add(rec.uuid); }
       // A version the store points at a chat's file for (sameAs) stays complete when this chat's fetch fails.
       if (!same && !v.saved && !v.sameAs) v.incomplete = true;
       const startFile = publishedStart(v.files);
@@ -3797,9 +3797,12 @@ async function savePublishedPages(folder, data, ctx = {}) {
         text: same ? (own && own.text.length <= limit ? own.text : null) : (usable ? v.text : null),
         publishes: m.publishes.slice(),
       });
+      // Left incomplete once claude.ai answered 401 (this chat or an earlier one): say why (retry below).
+      if (state.publishedSignedOut && versions[versions.length - 1].incomplete) { noteSkipped(); noted.add(rec.uuid); }
     }
     versions.sort((a, b) => a.order - b.order);
     const entry = { uuid: rec.uuid, shortId: rec.shortId, title: rec.title, url: rec.url, current: group.some((p) => p.current), dir: dirOf(rec), versions };
+    if (exportAll) storeDirs.add(`${store.prefix}${rec.store.dir}`);
     // Whether this chat's errors.txt has something about the page; not part of the entry's data.
     Object.defineProperty(entry, 'noted', { value: noted.has(rec.uuid) });
     entries.push(entry);
@@ -3814,6 +3817,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
   // again, so Export All leaves it out of its record (retry); noteSkipped told a later chat why.
   const retry = !!state.publishedSignedOut && entries.some((e) => e.versions.some((v) => v.incomplete));
   Object.defineProperty(entries, 'retry', { value: retry });
+  Object.defineProperty(entries, 'storeDirs', { value: [...storeDirs] });
   return entries;
 }
 
@@ -4719,12 +4723,13 @@ async function loadExportRecord(org) {
 // Adds the exported chats and artifacts ([{ uuid, ver }]) to the record; those not in this export keep what they had.
 // What Export All may record as exported: not a chat that must be fetched again (retry: published pages skipped
 // after a 401), nor a chat or artifact with a file that could not be written to the folder (writeFailures from
-// the folder writer, paths from the export root). Otherwise Export Changes would skip them for good.
+// the folder writer, paths from the export root; a chat's stores are the artifacts-store folders its published
+// pages went into). Otherwise Export Changes would skip them for good.
 function recordableExport(chats, artifacts, writeFailures = []) {
   const failed = (Array.isArray(writeFailures) ? writeFailures : []).map((f) => String(f && f.path || ''));
   const hit = (folder) => typeof folder === 'string' && folder !== '' && failed.some((p) => p.startsWith(`${folder}/`));
   return {
-    chats: (chats || []).filter((c) => c && c.retry !== true && !hit(c.folder)),
+    chats: (chats || []).filter((c) => c && c.retry !== true && !hit(c.folder) && !(Array.isArray(c.stores) && c.stores.some(hit))),
     artifacts: (artifacts || []).filter((a) => a && !hit(a.folder)),
   };
 }
@@ -4995,7 +5000,8 @@ async function bulkExportZip(options = {}) {
           fileWarnings: folderResult.errorCollector?.warnings?.length || 0
         });
         exportedChats.push({ uuid: conv.uuid, name: data.name || conv.name || '', updated_at: conv.updated_at || data.updated_at || null, folder: folderName,
-          ...(folderResult.published && folderResult.published.retry ? { retry: true } : {}) });
+          ...(folderResult.published && folderResult.published.retry ? { retry: true } : {}),
+          ...(folderResult.published && folderResult.published.storeDirs && folderResult.published.storeDirs.length ? { stores: folderResult.published.storeDirs } : {}) });
 
         exported++;
 
@@ -5673,7 +5679,7 @@ async function saveArtifact(root, a, ctx) {
   }
   const payload = kept ? kept.preview || null : same ? same.preview || null : keptOnFail ? keptOnFail.preview || null : got && !failed ? gotPayload || artifactPayload(got) : null;
   const view = artifactView({
-    uuid, shortId, url, title, typeSlug, typeTitle, shared: artifactForeign(rel, true), public: a.public === true, docs,
+    uuid, shortId, url, title, typeSlug, typeTitle, shared, foreign: artifactForeign(rel, true), public: a.public === true, docs,
     createdAt, updatedAt, folder: `${prefix}${filesAt}`, files: meta.files, missing: meta.missing,
     start, startSaved, startSize: kept || same || keptOnFail ? keptStartSize(kept || same || keptOnFail) : got ? got.startSize : null, needsRuntime: meta.needsRuntime, notExported: failed, note: notes.join('; '),
     inPayload: kept || same || keptOnFail ? !!(start && payload && (payload.texts.some((t) => t[0] === start) || payload.images.some((t) => t[0] === start)))
@@ -5729,7 +5735,7 @@ function unexpectedArtifactRow(root, a, ctx) {
   let view;
   try {
     view = artifactView({
-      uuid, shortId, url, title, typeSlug: artifactText(a.typeSlug), typeTitle, shared: artifactForeign(rel, true), public: a.public === true,
+      uuid, shortId, url, title, typeSlug: artifactText(a.typeSlug), typeTitle, shared: isSharedArtifact(rel), foreign: artifactForeign(rel, true), public: a.public === true,
       docs: isClaudeDocsArtifact(a), createdAt: rec.meta.createdAt, updatedAt: rec.meta.updatedAt, folder: `${prefix}${folder}`, files: [], missing: [], start: null,
       startSaved: null, startSize: null, needsRuntime: false, notExported: true, note: ARTIFACT_UNEXPECTED_NOTE,
     });

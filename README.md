@@ -400,9 +400,9 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.20.5
 
-- **Export Changes doesn't skip what wasn't saved** - In a folder export, a chat or artifact with a file that could not be written (`write-errors.txt`) is no longer recorded as exported, so the next Export Changes tries it again. The same goes for chats whose published pages were skipped after claude.ai answered 401 partway through an Export All; those chats' `errors.txt` now say why their pages are missing.
+- **Export Changes doesn't skip what wasn't saved** - In a folder export, a chat or artifact with a file that could not be written (`write-errors.txt`, including a chat's published pages in `artifacts/`) is no longer recorded as exported, so the next Export Changes tries it again. The same goes for chats whose published pages were skipped after claude.ai answered 401 partway through an Export All; those chats' `errors.txt` now say why their pages are missing.
 - **Less memory on a large account** - Each artifact's preview is let go once it is written to `viewer-files/`, instead of being held until the export ends.
-- **Unknown sharing counts as someone else's** - An artifact claude.ai lists without saying it is yours gets the same care as one shared with you: no link that would open its HTML or SVG from disk, in the viewer and in `index.html`/`index.md`. Its note doesn't claim it was shared.
+- **Unknown sharing counts as someone else's for links** - An artifact claude.ai lists without saying it is yours gets the same care as one shared with you: no link that would open its HTML or SVG from disk, in the viewer and in `index.html`/`index.md`. It stays under Yours, and nothing calls it shared.
 - **Docs** - TECHNICAL.md brought up to date (published-page tools, preview caps, the card picture route), the `delivered_file` warning in USAGE, the e2e tests in CLAUDE.md.
 
 ### v1.20.4

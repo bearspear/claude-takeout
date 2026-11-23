@@ -3303,7 +3303,7 @@ test('each artifact gets a view record', async () => {
     const game = views[1];
     const id = uuidToBase58(U(2));
     assert.deepStrictEqual(game, {
-      id, title: 'Game', kind: 'Page', typed: false, docs: false, shared: false, public: false,
+      id, title: 'Game', kind: 'Page', typed: false, docs: false, shared: false, foreign: false, public: false,
       createdAt: '2026-10-01T00:00:00Z', updatedAt: '2026-11-01T00:00:00Z', folder: artVer('Game', U(2)),
       start: 'index.html', startSaved: 'index.html', startKind: 'html', startSize: 30, tooLarge: false, startMissing: false, missingCount: 0,
       files: [{ path: 'index.html', savedAs: 'index.html', kind: 'html', verified: true }, { path: 'app.js', savedAs: 'app.js', kind: 'js', verified: true },
@@ -4271,6 +4271,30 @@ test('Export All after a sign-out mid-way: later chats say their pages were skip
   assert.deepStrictEqual(manifest.chats.map((c) => c.uuid), ['a', 'b', 'c'], 'the manifest still lists every chat exported');
 });
 
+test('a chat whose published version failed to write into the artifacts store is not recorded', async () => {
+  const pageAs = [{ as: 'page.html', path: '/home/claude/page.html' }];
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', pageAs))]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([{ uuid: 'h', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'hi' }] }]), { uuid: 'b', name: 'Chat b' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1', 'v2'], versions: { v1: { files: { 'page.html': 'old' } } } } });
+  const picked = new FakeDir('picked', (name) => name === 'page.html');
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const { store } = await runBulkZip({ list, chats: { a: chatA, b: chatB }, options: { directory: picked }, setup: bulkWithPages(fetcher, { calls: 0 }) });
+  assert.ok(diskFiles(picked)['write-errors.txt'].includes('/v1/page.html'), 'the failure is listed');
+  assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats), ['b']);
+});
+
+test('a chat after a 401 in the middle of a version\'s files says why that version is missing, and is not recorded', async () => {
+  const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
+  const chatB = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U, 'v1', guideAs))]), { uuid: 'b', name: 'Chat b' });
+  const fetcher = publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1'], versions: { v1: { files: { 'index.html': { body: 'x', error: { error: 'HTTP 401', status: 401 } } } } } } });
+  const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-02T00:00:00Z')];
+  const { zip, store } = await runBulkZip({ list, chats: { a: chatA, b: chatB }, setup: bulkWithPages(fetcher, { calls: 0 }) });
+  const readmeB = await zip.file('Chat_b/README.md').async('string');
+  assert.match(readmeB, /not saved \(see errors\.txt\)/, readmeB);
+  assert.match(await zip.file('Chat_b/errors.txt').async('string'), /an earlier request in this export was answered HTTP 401/);
+  assert.ok(!store.exportRecord || !store.exportRecord['org-1'] || !Object.keys(store.exportRecord['org-1'].chats).length);
+});
+
 test('runArtifactStep lets go of each version\'s preview once its part is written', async () => {
   const sb = exportPopup().sandbox;
   const fetcher = publishedFetcher({ [U(1)]: livePage('Guide', { 'index.html': 'live' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) });
@@ -4293,8 +4317,9 @@ test('an artifact claude.ai lists with no rel is treated as not the owner\'s for
   const pages = { [U(1)]: livePage('Mine', { 'index.html': 'm' }), [U(2)]: livePage('Unknown', { 'index.html': 'u' }) };
   const { files, views } = await runArtifacts({ frames, pages });
   const byTitle = Object.fromEntries(views.map((v) => [v.title, v]));
-  assert.strictEqual(byTitle.Mine.shared, false);
-  assert.strictEqual(byTitle.Unknown.shared, true, 'no Open file link for its HTML in the viewer');
+  assert.deepStrictEqual([byTitle.Mine.shared, byTitle.Mine.foreign], [false, false]);
+  assert.strictEqual(byTitle.Unknown.foreign, true, 'no Open file link for its HTML in the viewer');
+  assert.strictEqual(byTitle.Unknown.shared, false, 'not put under Shared with you');
   const fu = artFolder('Unknown', U(2));
   assert.ok(!files['index.md'].includes(`(${fu}/${LIVE}/index.html)`), 'no local link in the index');
   assert.ok(files['index.md'].includes(`(${artFolder('Mine', U(1))}/${LIVE}/index.html)`));

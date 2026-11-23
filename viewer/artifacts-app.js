@@ -415,11 +415,14 @@
     // Open file: any saved file of the owner's own artifacts; of any other, only what openableHref allows (never
     // HTML or SVG, which would run someone else's code from disk, unsandboxed). None inside a ZIP, where it can't open.
     // A view reused from a chat's files (Export All) has its paths from viewer.html already, not from its folder.
+    // The owner's own artifact, whose HTML or SVG may open from disk: foreign false (shared false in viewers built
+    // before v1.20.5, which have no foreign).
+    const ownArtifact = v => (typeof v.foreign === 'boolean' ? v.foreign === false : v.shared === false);
     function openHref(v, savedAs) {
       if (unzipped === false) return null;
       const href = v.reused === true ? relHref(savedAs) : relHref(v.folder, savedAs);
       if (!href) return null;
-      return v.shared === false || openableHref(href) ? href : null;
+      return ownArtifact(v) || openableHref(href) ? href : null;
     }
 
     const claudeUrl = v => `https://claude.ai/artifact/${encodeURIComponent(v.id)}`;
@@ -699,7 +702,7 @@
       if (v.startKind === 'md') return box.replaceChildren(text === null ? failedPage(v) : markdownPage(text));
       if (v.startKind === 'image') {
         // The owner's own image can also come from its saved file.
-        const src = images.has(v.start) ? images.get(v.start) : v.shared === false ? openHref(v, v.startSaved) : null;
+        const src = images.has(v.start) ? images.get(v.start) : ownArtifact(v) ? openHref(v, v.startSaved) : null;
         if (!src) return box.replaceChildren(failedPage(v));
         const frame = el('div', 'image');
         const img = document.createElement('img');
@@ -761,7 +764,7 @@
       const shown = !v.notExported && v.start && !v.tooLarge && unzipped !== false;
       if (shown && PREVIEW_KINDS.has(v.startKind) && !v.startMissing) return openPreview(v);
       // The owner's own image not in the part (too large, or past the budget) still shows from its saved file.
-      if (v.startKind === 'image' && v.shared === false && !v.notExported && v.start && unzipped !== false && openHref(v, v.startSaved)) return openPreview(v);
+      if (v.startKind === 'image' && ownArtifact(v) && !v.notExported && v.start && unzipped !== false && openHref(v, v.startSaved)) return openPreview(v);
       pageBody.replaceChildren(detailsPage(v));
     }
 
