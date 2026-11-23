@@ -4707,12 +4707,18 @@ const listedArtifactVer = (a) => {
 };
 
 // Artifacts (artifactsFromList) new or with another version since the record; all of them with no record.
-function changedArtifacts(list, recorded) {
+// versions: the record's artifactVersions (v1.21). A record without it (from before v1.21) says nothing about older
+// versions, so every artifact with a live version is included once to fetch them; with it, one whose live version
+// isn't among its recorded versions is included too.
+function changedArtifacts(list, recorded, versions) {
   const items = Array.isArray(list) ? list.filter(Boolean) : [];
   if (!recorded || typeof recorded !== 'object') return items;
+  const known = versions && typeof versions === 'object' && !Array.isArray(versions) ? versions : null;
   return items.filter((a) => {
     const uuid = String(a.slug).toLowerCase();
-    return !Object.prototype.hasOwnProperty.call(recorded, uuid) || recorded[uuid] !== listedArtifactVer(a);
+    if (!Object.prototype.hasOwnProperty.call(recorded, uuid) || recorded[uuid] !== listedArtifactVer(a)) return true;
+    if (a.paged === true || typeof a.live !== 'string' || !a.live) return false;
+    return !known || !(Array.isArray(known[uuid]) && known[uuid].includes(a.live));
   });
 }
 
@@ -4916,7 +4922,7 @@ async function bulkExportZip(options = {}) {
       }
     }
     const listNote = listError ? ' Artifacts could not be listed.' : '';
-    const includedArtifacts = artifactList ? (since ? changedArtifacts(artifactList.artifacts, record.artifacts) : artifactList.artifacts) : [];
+    const includedArtifacts = artifactList ? (since ? changedArtifacts(artifactList.artifacts, record.artifacts, record.artifactVersions) : artifactList.artifacts) : [];
     if (since && !conversations.length && !includedArtifacts.length) {
       status.className = listError ? 'status warning' : 'status ready';
       status.textContent = `Nothing changed since the last export on ${formatTimestamp(since)}.${listNote}`;
@@ -5083,7 +5089,9 @@ async function bulkExportZip(options = {}) {
       .map(({ a, i }) => ({ uuid: String(a.slug).toLowerCase(), ver: listedArtifactVer(a), folder: `artifacts/${step.entries[i].folder}` })) : [];
     // Every included artifact's versions saved whole or settled now, whole or not (Export Changes skips them next time).
     const exportedVersions = step ? includedArtifacts
-      .map((a, i) => ({ uuid: String(a.slug).toLowerCase(), folder: `artifacts/${step.entries[i].folder}`, versions: Array.isArray(step.versionsSaved[i]) ? step.versionsSaved[i] : [] }))
+      .map((a, i) => ({ a, i }))
+      .filter(({ i }) => step.entries[i] && Array.isArray(step.versionsSaved[i]))  // a step that stopped early has fewer
+      .map(({ a, i }) => ({ uuid: String(a.slug).toLowerCase(), folder: `artifacts/${step.entries[i].folder}`, versions: step.versionsSaved[i] }))
       .filter((x) => x.versions.length) : [];
 
     // Create index.md at root
@@ -5686,17 +5694,6 @@ async function saveArtifact(root, a, ctx) {
       if (meta.missing.length) notes.push(`${artifactCount(meta.missing.length, 'file')} not saved (see errors.txt)`);
       if ([...got.unverified.values()].some(Boolean)) notes.push("files not checked against claude.ai's checksum");
     }
-    // Every older version claude.ai keeps (v1.21): after the current one, oldest to newest.
-    if (!docs && !failed && !state.publishedSignedOut && rec.current) {
-      if (!rec.history.includes(rec.current)) {
-        const reply = await fetchPublished({ action: 'publishedPageInfo', uuid, ver: rec.current });
-        const info = publishedSignedOutReply(reply) ? (signOut(), null) : cleanPublishedInfo(reply);
-        if (info && !info.error && info.history.length >= rec.history.length) rec.history = info.history;
-      }
-      const skip = ctx.skipVersions instanceof Map && ctx.skipVersions.get(uuid) instanceof Set ? ctx.skipVersions.get(uuid) : new Set();
-      history = await saveHistory(root, rec, { ...ctx, signOut }, { skip, name, openNote });
-      if (history.settled.length) notes.push(`${artifactCount(history.settled.length, 'older version')} no longer on claude.ai`);
-    }
   } catch (e) {
     // Not a refusal from claude.ai (those are replies, not throws): the artifact is listed as not exported.
     warn(name, `Artifact "${name}" could not be exported: unexpected error.`, openNote);
@@ -5706,6 +5703,24 @@ async function saveArtifact(root, a, ctx) {
     startSaved = null;
     got = null;
     failed = true;
+  }
+  // Every older version claude.ai keeps (v1.21), after the current one, oldest to newest, whichever way the current
+  // one was saved (fetched, kept whole from the store, or a chat's own file). A failure here leaves the current
+  // version saved: only the older versions count as not saved.
+  if (!docs && !failed && !state.publishedSignedOut && rec.current) {
+    try {
+      if (!rec.history.includes(rec.current)) {
+        const reply = await fetchPublished({ action: 'publishedPageInfo', uuid, ver: rec.current });
+        const info = publishedSignedOutReply(reply) ? (signOut(), null) : cleanPublishedInfo(reply);
+        if (info && !info.error && info.history.length >= rec.history.length) rec.history = info.history;
+      }
+      const skip = ctx.skipVersions instanceof Map && ctx.skipVersions.get(uuid) instanceof Set ? ctx.skipVersions.get(uuid) : new Set();
+      history = await saveHistory(root, rec, { ...ctx, signOut }, { skip, name, openNote });
+      if (history.settled.length) notes.push(`${artifactCount(history.settled.length, 'older version')} no longer on claude.ai`);
+    } catch (e) {
+      warn(name, `Artifact "${name}": its older versions could not be saved: unexpected error.`, openNote);
+      history = { settled: [], saved: [], failed: ['unexpected error'] };
+    }
   }
   const note = [...(shared ? ['shared with you'] : []), ...notes].join('; ');
   const start = kept ? kept.start : same ? same.start || null : keptOnFail ? keptOnFail.start || null : got ? got.start : null;
@@ -5745,11 +5760,11 @@ async function saveArtifact(root, a, ctx) {
 // one the store has whole or as a chat's file (sameAs). claude.ai answering 404 or listing no files: settled (gone,
 // not retried). Any other failure, or a version saved short of a file: failed, warned once per artifact (codes
 // only). An older Cowork/Claude Code version listed from the live version (listFromLive) is unverified, and a file it
-// lacks is missing without failing it. A 401 stops (ctx.signOut). Returns { payloads: [[ver, payload]], settled,
-// saved, failed }.
+// lacks is missing without failing it. A 401 stops (ctx.signOut). Each saved version's preview goes to
+// ctx.placeOlder(rec, ver, payload) at once. Returns { settled, saved, failed }.
 async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNote = '' } = {}) {
   const { fetchPublished, state, warn, store } = ctx;
-  const out = { payloads: [], settled: [], saved: [], failed: [] };
+  const out = { settled: [], saved: [], failed: [] };
   const problems = [];
   for (const ver of rec.history) {
     if (ver === rec.current || skip.has(ver)) continue;
@@ -5777,7 +5792,8 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
       publishedIn: prev && Array.isArray(prev.publishedIn) ? prev.publishedIn : [],
     };
     rec.versions.set(ver, v);
-    if (got.saved) out.payloads.push([ver, artifactPayload(got)]);
+    // Its preview goes into a part now (runArtifactStep's placeOlder), so no artifact holds all its versions' previews.
+    if (got.saved && typeof ctx.placeOlder === 'function') ctx.placeOlder(rec, ver, artifactPayload(got));
     if (got.saved && !v.incomplete && (info.listFromLive || !got.missing.length)) out.saved.push(ver);
     else { out.failed.push(ver); problems.push(...(got.problems.length ? got.problems : ['not saved'])); }
     if (state.publishedSignedOut) break;
@@ -5883,6 +5899,19 @@ async function runArtifactStep(root, opts = {}) {
     }
     const thumbState = {};
     const writeParts = (list) => { for (const p of list) root.file(`viewer-files/${p.name}`, p.body); };
+    // An older version saved by saveHistory: where it is, and its own preview part while the budget's reserve allows
+    // (v1.21). Called as each is fetched, so its payload is let go at once.
+    ctx.placeOlder = (rec, ver, payload) => {
+      try {
+        const v = rec.versions.get(ver);
+        if (!v || !v.folder) return;
+        const placed = parts ? parts.add({}, payload, { reserve: CTViewer.ARTIFACT_HISTORY_RESERVE }) : { part: null };
+        if (!rec.versionPlaces) rec.versionPlaces = {};
+        rec.versionPlaces[ver] = { folder: `${store.prefix}${rec.dir}/${v.folder}`,
+          ...(placed.part != null ? { part: placed.part, key: placed.key, startKind: artifactStartKind(v.start) } : {}) };
+        if (parts) writeParts(parts.drain());
+      } catch (e) { /* the version keeps its folder; its preview is an extra */ }
+    };
     for (let i = 0; i < total; i++) {
       let saved;
       try {
@@ -5919,19 +5948,7 @@ async function runArtifactStep(root, opts = {}) {
           writeParts(parts.drain());
         }
       } catch (e) { view = { ...view, part: null, key: null }; }
-      // Its older versions: where each is, and its own preview part while the budget's reserve allows (v1.21).
-      try {
-        const rec = store.record(artifacts[i].slug);
-        for (const [ver, payload] of saved.history ? saved.history.payloads : []) {
-          const v = rec.versions.get(ver);
-          if (!v || !v.folder) continue;
-          const placed = parts ? parts.add({}, payload, { reserve: CTViewer.ARTIFACT_HISTORY_RESERVE }) : { part: null };
-          if (!rec.versionPlaces) rec.versionPlaces = {};
-          rec.versionPlaces[ver] = { folder: `${store.prefix}${rec.dir}/${v.folder}`,
-            ...(placed.part != null ? { part: placed.part, key: placed.key, startKind: artifactStartKind(v.start) } : {}) };
-        }
-        if (parts) writeParts(parts.drain());
-      } catch (e) { /* older versions keep their folders; their previews are extras */ }
+
       // The previews this artifact kept in memory (its fetch, or a chat's for the artifact step) are in its part now,
       // or never will be: let them go, so a large account doesn't hold every one until the export ends.
       try {

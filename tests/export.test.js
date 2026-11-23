@@ -2640,7 +2640,9 @@ test('runArtifactStep with a store does not fetch a version it already holds who
     const step = await runArtifactStep(__root, { store, artifacts: __arts, full: false, listed: 2, fetchPublished: __fetch, picturesAllowed: false, parts: null });
     return JSON.stringify({ views: step.views, rows: step.rows, whole: step.whole });
   })()`, sb));
-  assert.strictEqual(fetcher.count('publishedPageInfo', U(1)), 0);
+  // Guide's current version is held whole: no file fetched; its history is asked once (v1.21), with nothing older.
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(1)), 1);
+  assert.strictEqual(fetcher.count('publishedPageFile', U(1)), 0);
   assert.strictEqual(fetcher.count('publishedPageFile', U(2)), 1);
   const g = artFolder('Guide', U(1));
   const p = artFolder('Part', U(2));
@@ -4122,7 +4124,7 @@ test('a paged artifact claude.ai serves no version of gets the no-published-vers
 });
 
 test('Export Changes includes changed artifacts only and records versions', async () => {
-  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' } } } };
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' }, artifactVersions: { [U(1)]: [LIVE], [U(2)]: ['old-ver'] } } } };
   const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-09T00:00:00Z')];
   const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-09T00:00:00Z') };
   const frames = [art(U(1), 'One'), art(U(2), 'Two'), art(U(3), 'Three')];
@@ -4143,7 +4145,7 @@ test('Export Changes includes changed artifacts only and records versions', asyn
 });
 
 test('Export Changes runs when only an artifact changed', async () => {
-  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' } } } };
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' }, artifactVersions: { [U(1)]: [LIVE], [U(2)]: ['old-ver'] } } } };
   const list = [listed('a', '2026-01-01T00:00:00Z')];
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
   const fetcher = publishedFetcher({ [U(2)]: livePage('Two', { 'index.html': '2' }) });
@@ -4211,10 +4213,14 @@ test('exportAllArtifacts defaults to true and round-trips', async () => {
 test('changedArtifacts takes artifacts whose listed version differs, and all with no record', () => {
   const sb = exportPopup().sandbox;
   sb.__list = [art(U(1), 'a'), art(U(2), 'b', { live: 'v2' }), art(U(3), 'c', { live: null })];
-  const pick = (rec) => { sb.__rec = rec; return vm.runInContext('changedArtifacts(__list, __rec)', sb).map((a) => a.slug); };
+  const pick = (rec, vers = { [U(1)]: [LIVE] }) => { sb.__rec = rec; sb.__vers = vers; return vm.runInContext('changedArtifacts(__list, __rec, __vers)', sb).map((a) => a.slug); };
   assert.deepStrictEqual(pick(undefined), [U(1), U(2), U(3)]);
   assert.deepStrictEqual(pick({ [U(1)]: LIVE, [U(2)]: 'v1', [U(3)]: '' }), [U(2)]);
   assert.deepStrictEqual(pick({}), [U(1), U(2), U(3)]);
+  // v1.21: a record with no versions (from before) includes an unchanged artifact once; one whose live version isn't
+  // among its recorded versions too; one with no live version never.
+  assert.deepStrictEqual(pick({ [U(1)]: LIVE, [U(3)]: '' }, null), [U(1), U(2)]);
+  assert.deepStrictEqual(pick({ [U(1)]: LIVE, [U(3)]: '' }, { [U(1)]: ['v0'] }), [U(1), U(2)]);
 });
 
 test('an artifact saved with a file missing is not recorded, after a failed file or a 401', async () => {
@@ -4504,13 +4510,15 @@ test('a listed artifact\'s folder uses the list title from the first chat publis
 test('the artifact step adds the current version only when its folder isn\'t there', async () => {
   const chat = () => Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
   const page = () => publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1', 'v2'], versions: { v1: { files: { 'index.html': 'ONE' } }, v2: { files: { 'index.html': 'TWO' } } } } });
-  // Live v1: the chat saved it whole, so the step fetches nothing.
+  // Live v1: the chat saved it whole, so the step fetches nothing for it; v2, in claude.ai's history, is saved as
+  // another version (v1.21: every version).
   let fetcher = page();
   let out = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat() }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
   let files = await zipFiles(out.zip);
   const f = artFolder('Guide', PUB_U);
-  assert.deepStrictEqual([fetcher.count('publishedPageInfo'), fetcher.count('publishedPageFile')], [1, 1]);
-  assert.deepStrictEqual(storeFiles(files, f), [`artifacts/${f}/artifact.json`, `artifacts/${f}/v1/index.html`]);
+  assert.deepStrictEqual([fetcher.count('publishedPageInfo'), fetcher.count('publishedPageFile')], [2, 2]);
+  assert.strictEqual(fetcher.calls.filter((c) => c.ver === 'v1' && c.action === 'publishedPageFile').length, 1, 'v1 only by the chat');
+  assert.deepStrictEqual(storeFiles(files, f), [`artifacts/${f}/artifact.json`, `artifacts/${f}/v1/index.html`, `artifacts/${f}/v2/index.html`]);
   assert.deepStrictEqual(out.store.exportRecord['org-1'].artifacts, { [PUB_U]: 'v1' });
   // Live v2: the step adds it beside the chat's v1.
   fetcher = page();
@@ -4887,7 +4895,7 @@ test('a multi-file same version copied from a chat gets a ZIP of the copy', asyn
 });
 
 test('Export Changes writes no ZIP for an artifact it does not write', async () => {
-  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE } } } };
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE }, artifactVersions: { [U(1)]: [LIVE] } } } };
   const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-09T00:00:00Z')];
   const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-09T00:00:00Z') };
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
@@ -5158,4 +5166,58 @@ test('older versions get preview parts: in the standalone viewer\'s versions and
   const data = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(html)[1]);
   const e1 = data.artifacts[0].versions.find((e) => e.ver === 'v1');
   assert.ok(e1 && Number.isSafeInteger(e1.part) && e1.folder === `artifacts/${artFolder('Guide', U(1))}/v1`, JSON.stringify(e1));
+});
+
+// ---- v1.21 final review fixes ----
+const stepWithStored = async (stored, extra = '') => {
+  const sb = exportPopup().sandbox;
+  const fetcher = histFetcher();
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const v = ${JSON.stringify(stored)};
+    Object.defineProperty(v, 'preview', { value: { texts: [['index.html', 'live']], images: [] }, writable: true, configurable: true });
+    store.record('${U(1)}', { title: 'Guide' }).versions.set('${LIVE}', v);
+    ${extra}
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return JSON.stringify({ whole: step.whole, notExported: step.views[0].notExported, saved: step.versionsSaved });
+  })()`, sb));
+  return { out, fetcher, root };
+};
+
+test('older versions are fetched when the current version came whole from a chat (kept)', async () => {
+  const { out, fetcher } = await stepWithStored({ folder: LIVE, files: [{ path: 'index.html', savedAs: 'index.html', size: 4, contentType: 'text/html', sha256: 'c'.repeat(64) }],
+    start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: [] });
+  assert.ok(infoCalls(fetcher).some(([, v]) => v === 'v1') && infoCalls(fetcher).some(([, v]) => v === 'v2'), JSON.stringify(infoCalls(fetcher)));
+  assert.deepStrictEqual([out.whole[0], out.notExported], [true, false]);
+  assert.deepStrictEqual([...out.saved[0]].sort(), [LIVE, 'v1', 'v2'].sort());
+});
+
+test('older versions are fetched when the current version is a chat\'s own file (same)', async () => {
+  const { fetcher } = await stepWithStored({ folder: null, files: [{ path: 'index.html', savedAs: 'index.html', size: 4, contentType: 'text/html', sha256: 'c'.repeat(64) }],
+    start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: false, sameAs: { 'index.html': 'Chat_a/artefacts/guide.html' }, publishedIn: [] });
+  assert.ok(infoCalls(fetcher).some(([, v]) => v === 'v1'), JSON.stringify(infoCalls(fetcher)));
+});
+
+test('an unchanged artifact with a record from before v1.21 is included once for its versions', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE } } } };
+  const fetcher = histFetcher();
+  const { store } = await changesRun(stored, fetcher);
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE], [U(1), 'v1'], [U(1), 'v2']]);
+  assert.deepStrictEqual([...recordOf(store).artifactVersions[U(1)]].sort(), [LIVE, 'v1', 'v2'].sort());
+  const again = histFetcher();
+  await changesRun(store, again);
+  assert.deepStrictEqual(infoCalls(again), [], 'then left out while nothing changed');
+});
+
+test('Export All finishes when the artifact step stops early', async () => {
+  const setup = (sb) => {
+    bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher: histFetcher() })(sb);
+    vm.runInContext('const __origStep = runArtifactStep; runArtifactStep = async (...a) => { const s = await __origStep(...a); s.entries = []; s.whole = []; s.versionsSaved = []; return s; };', sb);
+  };
+  const { zip, status } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup });
+  assert.ok(zip, 'the export was written');
+  assert.notStrictEqual(status.className, 'status error', status.textContent);
 });
