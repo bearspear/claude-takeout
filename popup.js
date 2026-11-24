@@ -6446,6 +6446,65 @@ function runSteps(plan) {
   return steps;
 }
 
+// Counts for the main screen's Count button. Asked for only on a click, never when the panel opens, and kept in
+// chrome.storage.session for ten minutes: { [org]: { chats, artifacts, changedChats, changedArtifacts, at } }.
+// artifacts and changedArtifacts are null when the artifacts were not counted.
+const COUNTS_KEY = 'takeoutCounts';
+const COUNTS_MAX_AGE = 600000;
+
+async function readCountsCache() {
+  try {
+    const stored = await chrome.storage.session.get(COUNTS_KEY);
+    const all = stored && stored[COUNTS_KEY];
+    return all && typeof all === 'object' ? all : {};
+  } catch (e) {
+    return {};
+  }
+}
+
+async function cachedCounts(org) {
+  const c = (await readCountsCache())[org];
+  const age = c && typeof c.at === 'string' ? Date.now() - Date.parse(c.at) : NaN;
+  return age >= 0 && age < COUNTS_MAX_AGE ? c : null;
+}
+
+async function countEverything({ org, tabId, withArtifacts }) {
+  const hit = await cachedCounts(org);
+  if (hit && (!withArtifacts || hit.artifacts !== null)) return hit;
+  const ask = async (message) => {
+    let reply;
+    try {
+      reply = await sendToTab(tabId, message);
+    } catch (e) {
+      throw new Error('no connection to the claude.ai tab');
+    }
+    if (!reply || reply.error || reply.connectionError) throw new Error(publishedCode(reply));
+    return reply;
+  };
+  const chatsReply = await ask({ action: 'fetchAllConversations' });
+  if (!Array.isArray(chatsReply.data)) throw new Error('bad response');
+  const record = await loadExportRecord(org);
+  const counts = {
+    chats: chatsReply.data.length,
+    changedChats: changedSince(chatsReply.data, record && record.chats).length,
+    artifacts: null,
+    changedArtifacts: null,
+    at: new Date().toISOString(),
+  };
+  if (withArtifacts) {
+    const reply = await ask({ action: 'listArtifacts' });
+    if (!Array.isArray(reply.frames)) throw new Error('bad response');
+    const { artifacts } = artifactsFromList(reply);
+    counts.artifacts = artifacts.length;
+    counts.changedArtifacts = changedArtifacts(artifacts, record && record.artifacts, record && record.artifactVersions).length;
+  }
+  try {
+    const all = await readCountsCache();
+    await chrome.storage.session.set({ [COUNTS_KEY]: { ...all, [org]: counts } });
+  } catch (e) { /* the count still counts without a cache */ }
+  return counts;
+}
+
 // Event listeners with settings-aware filenames
 // One export at a time: a second click, or a shortcut, while one runs does nothing,
 // and the export buttons are disabled meanwhile.

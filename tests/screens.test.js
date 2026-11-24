@@ -375,3 +375,79 @@ test('done screen text and run steps', () => {
   assert.deepStrictEqual(j(steps(p(true, false))), ['chats', 'viewer']);
   assert.deepStrictEqual(j(steps(p(false, true))), ['artifacts', 'viewer']);
 });
+
+// Count on demand (Task 5)
+function countSetup(session, stored = {}) {
+  const popup = loadPopup({ session });
+  const sb = popup.sandbox;
+  const sent = [];
+  sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in stored).map((k) => [k, stored[k]]));
+  sb.chrome.scripting = { executeScript: async () => {} };
+  sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+    sent.push(msg.action);
+    const reply = msg.action === 'fetchAllConversations'
+      ? { data: [{ uuid: 'a', updated_at: '1' }, { uuid: 'b', updated_at: '2' }], orgId: 'o' }
+      : msg.action === 'listArtifacts' ? { frames: [{ slug: '11111111-1111-1111-1111-111111111111', title: 'T', live: 'v1' }] } : {};
+    if (cb) cb(reply);
+  };
+  return { ...popup, sent };
+}
+
+test('countEverything caches for 10 minutes', async () => {
+  const session = {};
+  const { fn, sent } = countSetup(session, { exportRecord: { o: { chats: { a: '1' } } } });
+  const first = await fn('countEverything')({ org: 'o', tabId: 1, withArtifacts: false });
+  assert.strictEqual(first.chats, 2);
+  assert.strictEqual(first.changedChats, 1);
+  assert.strictEqual(first.artifacts, null);
+  assert.strictEqual(first.changedArtifacts, null);
+  const second = await fn('countEverything')({ org: 'o', tabId: 1, withArtifacts: false });
+  assert.strictEqual(second.at, first.at);
+  assert.strictEqual(sent.filter((a) => a === 'fetchAllConversations').length, 1);
+  assert.strictEqual((await fn('cachedCounts')('o')).chats, 2);
+  assert.strictEqual(await fn('cachedCounts')('other'), null);
+});
+
+test('cache older than 10 minutes refetches', async () => {
+  const old = new Date(Date.now() - 11 * 60000).toISOString();
+  const session = { takeoutCounts: { o: { chats: 9, artifacts: null, changedChats: 9, changedArtifacts: null, at: old } } };
+  const { fn, sent } = countSetup(session);
+  assert.strictEqual(await fn('cachedCounts')('o'), null);
+  const c = await fn('countEverything')({ org: 'o', tabId: 1, withArtifacts: true });
+  assert.strictEqual(c.chats, 2);
+  assert.strictEqual(c.changedChats, 2);
+  assert.strictEqual(c.artifacts, 1);
+  assert.strictEqual(c.changedArtifacts, 1);
+  assert.deepStrictEqual(sent.sort(), ['fetchAllConversations', 'listArtifacts']);
+  assert.strictEqual(session.takeoutCounts.o.chats, 2);
+});
+
+test('a cache without artifacts does not serve a count with artifacts', async () => {
+  const session = {};
+  const { fn, sent } = countSetup(session);
+  await fn('countEverything')({ org: 'o', tabId: 1, withArtifacts: false });
+  const c = await fn('countEverything')({ org: 'o', tabId: 1, withArtifacts: true });
+  assert.strictEqual(c.artifacts, 1);
+  assert.strictEqual(sent.filter((a) => a === 'listArtifacts').length, 1);
+});
+
+test('a failed list throws a code and is not cached', async () => {
+  const session = {};
+  const { sandbox, fn } = countSetup(session);
+  sandbox.chrome.tabs.sendMessage = (id, msg, cb) => cb({ error: 'HTTP 500' });
+  await assert.rejects(fn('countEverything')({ org: 'o', tabId: 1, withArtifacts: false }), /HTTP 500/);
+  assert.ok(!session.takeoutCounts);
+});
+
+test('requestData never asks for the chat or artifact list', async () => {
+  const { sandbox, fn, sent } = countSetup({});
+  sandbox.chrome.tabs.query = async () => [{ id: 1, url: 'https://claude.ai/chat/00000000-0000-0000-0000-000000000000' }];
+  sandbox.chrome.tabs.sendMessage = (id, msg, cb) => {
+    sent.push(msg.action);
+    cb(msg.action === 'getOrgId' ? { orgId: 'o' } : { error: 'x' });
+  };
+  sent.length = 0;
+  await fn('requestData')();
+  assert.ok(sent.length > 0);
+  assert.ok(sent.every((a) => ['getOrgId', 'fetchConversation'].includes(a)), sent.join());
+});
