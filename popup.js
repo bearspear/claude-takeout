@@ -4752,7 +4752,51 @@ function recordableExport(chats, artifacts, writeFailures = [], versions = []) {
   };
 }
 
-async function saveExportRecord(org, at, exportedChats, exportedArtifacts = [], exportedVersions = []) {
+// ============================================================================
+// Run results: what Export All and Export Artifacts resolve to, for the Done / Export stopped screens
+// ============================================================================
+// { outcome: 'done' | 'stopped' | 'failed', reason ('' when done), target: { kind: 'folder' | 'zip', name },
+//   saved: { chats, artifacts, versions }, warnings, warningList: [{ type, text, chat? }], errorFiles, startedAt, endedAt }.
+// warnings is warningList.length: every chat collector's warnings and errors, chats that failed outright, files that
+// could not be written, the artifacts collector's warnings and errors, and viewer.html when it could not be built.
+
+// One line of a warning for the panel: the first line, with links and tokens left out, at most 300 characters.
+function runWarningText(text) {
+  const line = String(text == null ? '' : text).split(/\r?\n/).map((l) => l.trim()).find(Boolean) || '';
+  const clean = line
+    .replace(/\b(?:https?|wss?|file|blob|data|chrome-extension):[^\s)"'<>]*/gi, '[link]')
+    .replace(/__frame_t=[^\s&)"'<>]*/gi, '[token]')
+    .replace(/\s+/g, ' ');
+  return clean.length > 300 ? `${clean.slice(0, 299)}…` : clean;
+}
+
+// A collector's errors and warnings as warningList entries; chat names the chat they belong to, if any.
+function collectorRunWarnings(collector, chat = '') {
+  if (!collector) return [];
+  return [...(collector.errors || []), ...(collector.warnings || [])].map((w) => ({
+    type: String(w && w.type || 'unknown'),
+    text: runWarningText(w && w.error),
+    ...(chat ? { chat: String(chat) } : {}),
+  }));
+}
+
+function runResult({ outcome = 'done', reason = '', target = null, saved = null, warningList = [], errorFiles = [], startedAt = null } = {}) {
+  const list = Array.isArray(warningList) ? warningList : [];
+  return {
+    outcome,
+    reason: outcome === 'done' ? '' : String(reason || ''),
+    target: { kind: target && target.kind === 'folder' ? 'folder' : 'zip', name: String(target && target.name || '') },
+    saved: { chats: 0, artifacts: 0, versions: 0, ...(saved || {}) },
+    warnings: list.length,
+    warningList: list,
+    errorFiles: [...new Set(errorFiles)],
+    startedAt: startedAt || new Date().toISOString(),
+    endedAt: new Date().toISOString(),
+  };
+}
+
+// warnings: the run's warning count (runResult), kept on the entry for the panel's footer.
+async function saveExportRecord(org, at, exportedChats, exportedArtifacts = [], exportedVersions = [], warnings = null) {
   try {
     const stored = await chrome.storage.local.get([EXPORT_RECORD_KEY]);
     const all = stored && stored[EXPORT_RECORD_KEY] && typeof stored[EXPORT_RECORD_KEY] === 'object' ? stored[EXPORT_RECORD_KEY] : {};
@@ -4771,7 +4815,8 @@ async function saveExportRecord(org, at, exportedChats, exportedArtifacts = [], 
     }
     const withArtifacts = hadArtifacts || (exportedArtifacts && exportedArtifacts.length);
     const withVersions = hadVersions || (exportedVersions && exportedVersions.length);
-    const entry = { at, chats, ...(withArtifacts ? { artifacts } : {}), ...(withVersions ? { artifactVersions } : {}) };
+    const entry = { at, chats, ...(withArtifacts ? { artifacts } : {}), ...(withVersions ? { artifactVersions } : {}),
+      ...(Number.isFinite(warnings) && warnings >= 0 ? { warnings } : {}) };
     await chrome.storage.local.set({ [EXPORT_RECORD_KEY]: { ...all, [org]: entry } });
   } catch (e) {
     console.warn('Could not save the export record:', e);
@@ -4868,17 +4913,26 @@ function megaZipName(accountName, kind, dateStr) {
 // the "Mega-Zip exports" setting decides (settings.megaZipScope: 'all', the default, or 'changes').
 // options.directory: a folder from showDirectoryPicker; the export goes into a new folder inside it
 // instead of a ZIP download. options.withArtifacts: whether to save claude.ai's artifacts too (default: the
-// "Include artifacts in Export All" setting).
+// "Include artifacts in Export All" setting). Resolves to a run result (runResult); never throws.
 async function bulkExportZip(options = {}) {
   const changesOnly = options && typeof options.changesOnly === 'boolean' ? options.changesOnly : settings.megaZipScope === 'changes';
   const directory = options && options.directory ? options.directory : null;
   const status = document.getElementById('status');
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const runStartedAt = new Date().toISOString();
+  const target = { kind: directory ? 'folder' : 'zip', name: '' };
+  const saved = { chats: 0, artifacts: 0, versions: 0 };
+  const warningList = [];
+  const errorFiles = [];
+  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, startedAt: runStartedAt });
+  let tab;
+  try {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch (e) { tab = null; }
 
   if (!(tab?.url || '').includes('claude.ai')) {
     status.className = 'status error';
     status.textContent = 'Please navigate to claude.ai first';
-    return;
+    return result('failed', 'Please navigate to claude.ai first');
   }
 
   status.className = 'status waiting';
@@ -4886,13 +4940,14 @@ async function bulkExportZip(options = {}) {
 
   // Get all conversations
   // Awaited to the end, so the export lock holds until every file is written.
+  try {
   const response = await new Promise((resolve) => chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations', withAccountName: true },
     (r) => resolve(chrome.runtime && chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : r)));
-  await (async () => {
+  return await (async () => {
     if (!response || response.error) {
       status.className = 'status error';
       status.textContent = (response && response.error) || 'Could not fetch the conversation list.';
-      return;
+      return result('failed', runWarningText((response && response.error) || 'Could not fetch the conversation list.'));
     }
 
     const listedChats = Array.isArray(response.data) ? response.data : [];
@@ -4930,7 +4985,7 @@ async function bulkExportZip(options = {}) {
     if (since && !conversations.length && !includedArtifacts.length) {
       status.className = listError ? 'status warning' : 'status ready';
       status.textContent = `Nothing changed since the last export on ${formatTimestamp(since)}.${listNote}`;
-      return;
+      return result('done');
     }
     const total = conversations.length;
 
@@ -4942,8 +4997,9 @@ async function bulkExportZip(options = {}) {
       } catch (e) {
         status.className = 'status error';
         status.textContent = `Could not make a folder there: ${e.message}`;
-        return;
+        return result('failed', runWarningText(`Could not make a folder there: ${e && e.message}`));
       }
+      target.name = run.name;
     }
     const where = run ? `the folder ${run.name}` : 'mega-zip';
     status.textContent = `Found ${total} conversations${since ? ' changed since the last export' : ''}. Exporting to ${where}...`;
@@ -5014,6 +5070,9 @@ async function bulkExportZip(options = {}) {
         if (folderResult.errorCollector) {
           totalFileErrors += folderResult.errorCollector.errors?.length || 0;
           totalFileWarnings += folderResult.errorCollector.warnings?.length || 0;
+          const chatWarnings = collectorRunWarnings(folderResult.errorCollector, data.name || conv.name || 'Untitled');
+          warningList.push(...chatWarnings);
+          if (chatWarnings.length) errorFiles.push('errors.txt');
         }
         if (folderResult.healthIssues) incomplete++;
 
@@ -5035,6 +5094,7 @@ async function bulkExportZip(options = {}) {
 
       } catch (e) {
         errors.push(`${conv.name || conv.uuid}: ${e.message}`);
+        warningList.push({ type: 'chat', text: runWarningText(e && e.message || 'unexpected error'), chat: String(conv.name || conv.uuid || '') });
       }
       // On disk, each chat is written before the next, which keeps memory down.
       if (run) writeFailures.push(...await megaZip.flush());
@@ -5181,6 +5241,19 @@ async function bulkExportZip(options = {}) {
     const viewerBuilt = !viewerWanted || viewerWritten;
     viewerChats.length = 0;  // viewer.html holds them now, and compressing needs the memory
     const viewerNote = viewerBuilt ? '' : ' viewer.html could not be built.';
+    // The run result's counts and warnings, in the order the panel lists them: chats (above), artifacts, viewer.
+    saved.chats = exported;
+    saved.artifacts = savedArtifacts;
+    saved.versions = step ? Number(step.versionCount) || 0 : 0;
+    if (step) {
+      warningList.push(...collectorRunWarnings(step.collector));
+      if (step.collector.hasAny()) errorFiles.push('artifacts/errors.txt');
+    }
+    if (!viewerBuilt) warningList.push({ type: 'viewer', text: 'viewer.html could not be built.' });
+    const addWriteFailures = (list) => {
+      for (const f of list) warningList.push({ type: 'write', text: runWarningText(`${f && f.path}: ${f && f.error}`) });
+      if (list.length) errorFiles.push('write-errors.txt');
+    };
 
     if (artifactRows.length) {
       const indexOpts = {
@@ -5198,15 +5271,16 @@ async function bulkExportZip(options = {}) {
         megaZip.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
         await megaZip.flush();
       }
+      addWriteFailures(writeFailures);
       const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions);
-      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions);
+      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions, warningList.length);
       hideProgress();
       const failedNote = errors.length ? ` ${errors.length} conversation${errors.length > 1 ? 's' : ''} failed.` : '';
       const writeNote = writeFailures.length ? ` ${writeFailures.length} file${writeFailures.length > 1 ? 's' : ''} could not be written (see write-errors.txt).` : '';
       const issueNote = totalFileErrors || totalFileWarnings ? ' Some chats have errors.txt.' : '';
       status.className = errors.length ? 'status error' : (writeFailures.length || issueNote || !viewerBuilt || artifactNote) ? 'status warning' : 'status ready';
       status.textContent = `Exported ${exported}${errors.length ? `/${total}` : ''} ${since ? 'changed ' : ''}conversations${andArtifacts} to ${run.name}.${failedNote}${writeNote}${issueNote}${viewerNote}${artifactNote}${firstNote}`;
-      return;
+      return result('done');
     }
 
     // Generate and download
@@ -5220,10 +5294,12 @@ async function bulkExportZip(options = {}) {
         compressionOptions: { level: 6 }
       });
 
-      download(zipBlob, megaZipName(response.accountName, kind, dateStr), 'application/zip');
+      target.name = megaZipName(response.accountName, kind, dateStr);
+      download(zipBlob, target.name, 'application/zip');
+      addWriteFailures(writeFailures);
       // Only chats and artifacts really in the archive are recorded, so one that failed is tried again next time.
       const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions);
-      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions);
+      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions, warningList.length);
 
       hideProgress();
 
@@ -5259,8 +5335,19 @@ async function bulkExportZip(options = {}) {
       hideProgress();
       status.className = 'status error';
       status.textContent = `Zip generation failed: ${e.message}`;
+      // Nothing reached disk: a ZIP is written only when the export finishes.
+      Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
+      return result('failed', runWarningText(`Zip generation failed: ${e && e.message}`));
     }
+    return result('done');
   })();
+  } catch (e) {
+    console.error('Export All failed:', e);
+    hideProgress();
+    status.className = 'status error';
+    status.textContent = `Export All failed: ${e && e.message ? e.message : e}`;
+    return result('failed', runWarningText(`Export All failed: ${e && e.message ? e.message : e}`));
+  }
 }
 
 // ============================================================================
@@ -5869,7 +5956,7 @@ function unexpectedArtifactRow(root, a, ctx) {
 // fetchPublished, picturesAllowed, docChats (see saveArtifact), parts (CTViewer.artifactViewParts or null),
 // onProgress(done, total), run (truthy on disk: flush per artifact), collector (optional; otherwise one labelled
 // 'Export Artifacts') }. Each artifact's artifact.json is written through store.write once, after its picture. Never throws.
-// Returns { views, rows, entries, whole (per artifact: saved with nothing missing), thumbs, collector, writeFailures, partCount, signedOut }; rows and entries name
+// Returns { views, rows, entries, whole (per artifact: saved with nothing missing), versionsSaved, versionCount, thumbs, collector, writeFailures, partCount, signedOut }; rows and entries name
 // folders relative to prefix.
 async function runArtifactStep(root, opts = {}) {
   const { artifacts = [], paging = null, listed = artifacts.length, fetchPublished, picturesAllowed = false, parts = null, onProgress = null, run = false } = opts;
@@ -5886,6 +5973,7 @@ async function runArtifactStep(root, opts = {}) {
   // per artifact: the version ids now saved whole or settled (the current one when whole, its history's saved and
   // settled), which Export All adds to its record whether or not the artifact is whole.
   const versionsSaved = [];
+  let versionCount = 0;  // versions saved whole: each current one and every older one saveHistory saved (the run result's count)
   const writeFailures = [];
   let thumbs = 0;
   let partCount = 0;
@@ -5931,6 +6019,7 @@ async function runArtifactStep(root, opts = {}) {
         const m = saved.meta || {};
         const currentOk = !!(m.ver && !m.incomplete && !(m.missing && m.missing.length) && !saved.view.notExported);
         versionsSaved.push([...(currentOk ? [m.ver] : []), ...(saved.history ? [...saved.history.saved, ...saved.history.settled] : [])]);
+        versionCount += (currentOk ? 1 : 0) + (saved.history ? saved.history.saved.length : 0);
       }
       let view = { ...saved.view, thumb: null, part: null, key: null };
       // The card picture and the preview part are extras: a failure leaves them out, with no warning.
@@ -5976,36 +6065,49 @@ async function runArtifactStep(root, opts = {}) {
     console.error('Artifact step stopped early:', e);
     warn('artifacts', 'Artifact step stopped early: unexpected error. Artifacts after this one were not exported.');
   }
-  return { views, rows, entries, whole, versionsSaved, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true };
+  return { views, rows, entries, whole, versionsSaved, versionCount, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true };
 }
 
 // Export Artifacts. options.directory: a folder from showDirectoryPicker; the export goes into a new folder
 // inside it instead of a ZIP download. The list is fetched first: nothing is made when it fails or is empty.
+// Resolves to a run result (runResult); never throws.
 async function exportArtifacts(options = {}) {
   const directory = options && options.directory ? options.directory : null;
   const status = document.getElementById('status');
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const runStartedAt = new Date().toISOString();
+  const target = { kind: directory ? 'folder' : 'zip', name: '' };
+  const saved = { chats: 0, artifacts: 0, versions: 0 };
+  const warningList = [];
+  const errorFiles = [];
+  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, startedAt: runStartedAt });
+  let tab;
+  try {
+    [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  } catch (e) { tab = null; }
   if (!(tab?.url || '').includes('claude.ai')) {
     status.className = 'status error';
     status.textContent = 'Please navigate to claude.ai first';
-    return;
+    return result('failed', 'Please navigate to claude.ai first');
   }
   status.className = 'status waiting';
   status.textContent = 'Fetching the artifact list...';
   // The first call injects content.js if the tab needs it; the rest message it directly.
   const fetchPublished = tabPublishedFetcher(tab.id);
-  const reply = await fetchPublished({ action: 'listArtifacts', withAccountName: true });
+  let reply;
+  try {
+    reply = await fetchPublished({ action: 'listArtifacts', withAccountName: true });
+  } catch (e) { reply = null; }
   if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.frames)) {
     status.className = 'status error';
     const code = !reply || reply.error || reply.connectionError ? publishedCode(reply) : 'bad response';
     status.textContent = publishedSignedOutReply(reply) ? 'Sign in to claude.ai, then try again.' : `Could not fetch the artifact list: ${code}.`;
-    return;
+    return result('failed', runWarningText(status.textContent));
   }
   const { artifacts, paging, listed } = artifactsFromList(reply);
   if (!artifacts.length) {
     status.className = 'status ready';
     status.textContent = 'No artifacts on claude.ai.';
-    return;
+    return result('done');
   }
   const total = artifacts.length;
   const startedAt = new Date().toISOString();
@@ -6017,8 +6119,9 @@ async function exportArtifacts(options = {}) {
     } catch (e) {
       status.className = 'status error';
       status.textContent = `Could not make a folder there: ${e.message}`;
-      return;
+      return result('failed', runWarningText(`Could not make a folder there: ${e && e.message}`));
     }
+    target.name = run.name;
   }
   status.textContent = `Found ${artifactCount(total, 'artifact')}. Exporting to ${run ? `the folder ${run.name}` : 'a ZIP'}...`;
   showProgress(0, total, `0 / ${total}`);
@@ -6037,7 +6140,7 @@ async function exportArtifacts(options = {}) {
       parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
     } catch (e) { /* no previews; the export goes on */ }
     const store = artifactStore(root, { prefix: '' });
-    const { views, rows, entries, thumbs, writeFailures, partCount } = await runArtifactStep(root, {
+    const { views, rows, entries, thumbs, writeFailures, partCount, versionCount } = await runArtifactStep(root, {
       store, artifacts, paging, listed, fetchPublished, picturesAllowed, parts, collector, run,
       onProgress: (done, count) => showProgress(done, count, `${done} / ${count}`),
     });
@@ -6064,6 +6167,11 @@ async function exportArtifacts(options = {}) {
     root.file('index.html', artifactsIndexHtml(rows, indexOpts));
     root.file('export-manifest.json', JSON.stringify({ format: 1, kind: 'artifacts', exported_at: startedAt, listed, thumbs, artifacts: entries }, null, 2));
     if (collector.hasAny()) root.file('errors.txt', collector.generateErrorReport());
+    saved.artifacts = views.filter((v) => !v.notExported).length;
+    saved.versions = Number(versionCount) || 0;
+    warningList.push(...collectorRunWarnings(collector));
+    if (collector.hasAny()) errorFiles.push('errors.txt');
+    if (!viewerBuilt) warningList.push({ type: 'viewer', text: 'viewer.html could not be built.' });
 
     const withoutFiles = rows.filter((r) => r.fileCount === 0).length;
     const viewerNote = (viewerBuilt ? '' : ' viewer.html could not be built.') + (picturesAllowed ? '' : ` ${ARTIFACT_THUMB_PERMISSION_STATUS}`);
@@ -6073,10 +6181,12 @@ async function exportArtifacts(options = {}) {
       if (writeFailures.length) {
         root.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
         await root.flush();
+        errorFiles.push('write-errors.txt');
       }
+      for (const f of writeFailures) warningList.push({ type: 'write', text: runWarningText(`${f && f.path}: ${f && f.error}`) });
       status.className = writeFailures.length || warnings || !viewerBuilt ? 'status warning' : 'status ready';
       status.textContent = done(run.name) + (writeFailures.length ? ` ${artifactCount(writeFailures.length, 'file')} could not be written (see write-errors.txt).` : '') + viewerNote;
-      return;
+      return result('done');
     }
     status.textContent = 'Compressing archive...';
     showProgress(95, 100, 'Compressing...');
@@ -6086,14 +6196,20 @@ async function exportArtifacts(options = {}) {
     } catch (e) {
       status.className = 'status error';
       status.textContent = `Zip generation failed: ${e.message}`;
-      return;
+      // Nothing reached disk: a ZIP is written only when the export finishes.
+      Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
+      return result('failed', runWarningText(`Zip generation failed: ${e && e.message}`));
     }
+    target.name = zipName;
     download(blob, zipName, 'application/zip');
     status.className = warnings || !viewerBuilt ? 'status warning' : 'status ready';
     status.textContent = done('a ZIP') + viewerNote;
+    return result('done');
   } catch (e) {
     status.className = 'status error';
     status.textContent = `Export Artifacts failed: ${e && e.message ? e.message : e}`;
+    if (!run) Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
+    return result('failed', runWarningText(`Export Artifacts failed: ${e && e.message ? e.message : e}`));
   } finally {
     hideProgress();
   }

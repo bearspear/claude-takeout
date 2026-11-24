@@ -283,7 +283,8 @@ async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}
   })()`, sb);
   if (setup) setup(sb);
   sb.__opts = options;
-  await vm.runInContext('exportArtifacts(__opts)', sb);
+  const runResult = await vm.runInContext('exportArtifacts(__opts)', sb);
+  const result = runResult ? JSON.parse(JSON.stringify(runResult)) : runResult;
   const zip = saved ? await JSZip.loadAsync(await saved.blob.arrayBuffer()) : null;
   const files = {};
   const raw = {};
@@ -301,7 +302,7 @@ async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}
     if (run && typeof run.flat === 'function') for (const [n, d] of Object.entries(run.flat())) { files[n] = text(d); raw[n] = buffer(d); }
   }
   const views = sb.__views ? JSON.parse(JSON.stringify(sb.__views)) : null;
-  return { store, saved, zip, files, raw, views, status: sb.document.getElementById('status'), fetcher, listCalls, thumbCalls, frameReqs, consoleCalls, permissionRequests, popup };
+  return { result, store, saved, zip, files, raw, views, status: sb.document.getElementById('status'), fetcher, listCalls, thumbCalls, frameReqs, consoleCalls, permissionRequests, popup };
 }
 
 module.exports = { runArtifacts, assetRoutes, DOC_URL, DOC_U, OTHER_U, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };
