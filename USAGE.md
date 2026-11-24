@@ -52,15 +52,17 @@ The extension is fully local. No API keys. It uses your existing logged-in sessi
 
 1. Open a conversation on **claude.ai**.
 2. **Refresh the page** once after installing — the extension can only see API responses for fetches that happen *after* it loads. You'll only need to do this once per session.
-3. Click the **Claude Takeout** icon. The popup should say *"Ready to export!"* with the conversation title and message count.
+3. Click the **Claude Takeout** icon. Under **This chat** a green card shows the conversation title and its message count. The panel has two sections, **This chat** and **Everything on claude.ai**; the gear icon opens Settings as its own screen, with a Back arrow.
 4. Pick one button:
 
 | Button | Output | When to pick it |
 |---|---|---|
-| **Export Current (Markdown)** | `<title>.md` | Quick share / pasting. Artifacts are referenced by filename, not embedded. |
-| **Export Embedded** | `<title>_embedded.md` | Single `.md` with every artifact's source inlined as code blocks. Good for posting on GitHub gists. |
-| **Export as Zip** | `<title>_claude-chat.zip` | The full archive — every artifact as a file, every upload downloaded, full chat in multiple shapes, raw JSON. See [Inside a ZIP export](#inside-a-zip-export). |
-| **Export Current (JSON)** | `<title>.json` | Raw API payload. Backups, scripted post-processing, debugging. |
+| **Export ZIP** | `<title>_claude-chat.zip` | The full archive: every artifact as a file, every upload downloaded, full chat in multiple shapes, raw JSON. See [Inside a ZIP export](#inside-a-zip-export). |
+| **Markdown** (under *Also as*) | `<title>.md` | Quick share / pasting. Artifacts are referenced by filename, not embedded. |
+| **Markdown + files** | `<title>_embedded.md` | Single `.md` with every artifact's source inlined as code blocks. Good for posting on GitHub gists. |
+| **JSON** | `<title>.json` | Raw API payload. Backups, scripted post-processing, debugging. |
+
+A failed export turns the card red and says why; a finished one shows what was saved and how many warnings there were. If the chat can't be loaded the card says **Couldn't load this chat**, with **Try again**.
 
 If the conversation is part of a Claude Project, the filename is prefixed with `[<Project-Name>-project]_` automatically.
 
@@ -70,23 +72,32 @@ If the conversation is part of a Claude Project, the filename is prefixed with `
 
 For exporting your whole history:
 
-1. Navigate to **claude.ai** (any page works — you don't need to be inside a specific conversation).
-2. Hard-refresh once.
-3. Click the extension icon.
-4. Below the divider, pick one of:
+1. Navigate to **claude.ai** (any page works; you don't need to be inside a specific conversation).
+2. Click the extension icon.
+3. Under **Everything on claude.ai**, choose:
 
-| Button | What you get |
+| Choice | What it does |
 |---|---|
-| **Export All (Markdown)** | One `.md` file per conversation in your downloads folder. |
-| **Export All (Embedded)** | One `_embedded.md` per conversation, artifacts inlined. |
-| **Export All (Folder)** | Asks for a folder, then writes into a new folder inside it, `claude-takeout-<your name>-<YYYY-MM-DD>_<HHMM>` (lowercase, your local time), the same as the Mega-Zip below holds, chat by chat. It runs in the side panel; from the popup, the button opens the side panel, where you click it again. Files the folder refuses are listed in `write-errors.txt`. |
-| **Export All (Mega-Zip)** | With **Export All saves as: ZIP** in Settings: a single `claude-takeout-<your name>-<YYYY-MM-DD>_<HHMM>.zip` (your claude.ai display name; left out if claude.ai doesn't give one) containing one folder per conversation (full ZIP structure each), plus an `index.md` master table and an `export-manifest.json` listing every chat it holds, with each chat's `updated_at`, at the root. |
-| **Export All (JSON)** | One `.json` per conversation. |
-| **Export Artifacts (Folder)** or **(ZIP)** | Every artifact on claude.ai/artifacts, as it is now. See [Export Artifacts](#export-artifacts). |
+| **All** / **Changes only** | All chats, or only chats that are new or changed (and artifact versions not yet saved) since the last Export All made in this browser. Changes only is hidden until there is an earlier export, and disabled when only Artifacts is ticked. |
+| **Chats** | Each chat with the full ZIP structure, as in Export ZIP: its own Markdown and JSON are in its folder. |
+| **Artifacts** | What claude.ai/artifacts lists, saved into `artifacts/`. With **Chats** unticked, this is the old Export Artifacts: a standalone artifacts export (see [Export Artifacts](#export-artifacts)). Tick neither and Export selected is disabled. |
+| **Folder** / **ZIP** | Folder (the default): writes into a new folder `claude-takeout-<your name>-<YYYY-MM-DD>_<HHMM>` (lowercase, your local time) inside a folder you pick, chat by chat. ZIP: a single `.zip` with the same content, built in memory (use Folder for a large account), named the same way. Files the folder refuses are listed in `write-errors.txt`. |
+| **Count** | Asks claude.ai for the number of chats and artifacts (and how many changed since the last export) and shows them beside the checkboxes. It runs only on a click; the numbers are kept for 10 minutes. |
 
-**Only new or changed chats.** Set **Mega-Zip exports** in Settings to **Only new or changed**, and the Mega-Zip button becomes **Export Changes (Mega-Zip)**. It makes a `claude-takeout-<your name>-changes-<YYYY-MM-DD>_<HHMM>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold, nor the artifact versions an earlier Export All saved (only an artifact's new versions, and any that failed before, are fetched; merge the archives to see them all together). The first Export Changes after updating to v1.21 includes every artifact once, to save the older versions earlier exports didn't. A chat or artifact that wasn't fully saved (a file that couldn't be written to the folder, or published pages skipped after claude.ai answered 401) isn't counted as exported, so the next Export Changes tries it again. The default is **All chats**.
+4. Click **Export selected**. A sentence above it says what will happen. The panel moves to the **Exporting** screen: one step each for chats, artifacts and viewer and index, with counts, the warnings so far and a **Stop** button.
+5. The run ends on **Done** (what was saved, where, the warnings by type, and which `errors.txt` files say more) or **Export stopped**. **Back to export** returns to the main screen.
 
-**Artifacts in the same export.** With **Include artifacts in Export All** on in Settings (the default), Export All also saves what claude.ai/artifacts lists, after the chats, into `artifacts/` in the same folder or ZIP: one folder per artifact (`<Title>_<id>/`, with an `artifact.json` and a subfolder per version), `index.html`, `index.md` and, only with warnings, `errors.txt`. Pages a chat already saved are reused, not fetched again. Export All writes no `published/` folder: the pages chats published live in `artifacts/` too, see [Published pages](#published-pages). With **Include artifacts in Export All** off, `artifacts/` still holds every page a chat published, and nothing from claude.ai's list. A failed artifact step never removes or delays the chats. One `viewer.html` at the root holds both (see [The combined viewer](#the-combined-viewer)). Export All never asks for the card-picture permission, so without it cards are tiles. With **Only new or changed**, only artifacts whose version changed are included, and `index.md` says "Changed since <date>: N of M listed". An artifact saved only in part, with a file missing, is tried again next time. Export Artifacts, the separate button, works as before.
+A ZIP contains one folder per conversation, plus an `index.md` master table and an `export-manifest.json` listing every chat it holds, with each chat's `updated_at`, at the root. The name has your claude.ai display name; it is left out if claude.ai doesn't give one.
+
+**Folder from the popup.** Chrome only lets the side panel ask for a folder. From the popup, **Export selected** (Folder) opens the side panel with your choices carried over and a note; click **Export selected** there. Dismiss the note to keep your own choices.
+
+**Stop.** Stopping a folder export keeps the files already written, writes no viewer, index or manifest, and records nothing, so the next Changes only export takes those chats again. Stopping a ZIP export downloads nothing.
+
+There is no separate bulk Markdown, Embedded or JSON button any more: each chat's Markdown and JSON are in its folder.
+
+**Only new or changed chats.** Choose **Changes only**. It makes (as a ZIP) a `claude-takeout-<your name>-changes-<YYYY-MM-DD>_<HHMM>.zip` with only the chats that are new or changed since the last mega-ZIP made in this browser. The first time, or after the extension's storage is cleared, it exports everything and says so. If nothing changed, nothing downloads. Keep it with your earlier archives: it doesn't repeat the chats they hold, nor the artifact versions an earlier Export All saved (only an artifact's new versions, and any that failed before, are fetched; merge the archives to see them all together). The first Export Changes after updating to v1.21 includes every artifact once, to save the older versions earlier exports didn't. A chat or artifact that wasn't fully saved (a file that couldn't be written to the folder, or published pages skipped after claude.ai answered 401) isn't counted as exported, so the next Export Changes tries it again. The default is **All chats**.
+
+**Artifacts in the same export.** With **Artifacts** ticked (the default), Export selected also saves what claude.ai/artifacts lists, after the chats, into `artifacts/` in the same folder or ZIP: one folder per artifact (`<Title>_<id>/`, with an `artifact.json` and a subfolder per version), `index.html`, `index.md` and, only with warnings, `errors.txt`. Pages a chat already saved are reused, not fetched again. Export All writes no `published/` folder: the pages chats published live in `artifacts/` too, see [Published pages](#published-pages). With **Artifacts** unticked, `artifacts/` still holds every page a chat published, and nothing from claude.ai's list. A failed artifact step never removes or delays the chats. One `viewer.html` at the root holds both (see [The combined viewer](#the-combined-viewer)). Export All never asks for the card-picture permission, so without it cards are tiles. With **Only new or changed**, only artifacts whose version changed are included, and `index.md` says "Changed since <date>: N of M listed". An artifact saved only in part, with a file missing, is tried again next time. Export Artifacts, the separate button, works as before.
 
 Progress shows below the buttons as `X / Y`. There's a 200–300 ms pause between conversations to be polite to Claude's API. 100 conversations takes about 30 seconds; 1000 will take under 10 minutes.
 
@@ -94,7 +105,7 @@ If a single conversation fails (deleted, server hiccup, rate limit), the bulk ex
 
 ### Export Artifacts
 
-Saves what claude.ai/artifacts lists: every artifact you made in any chat, project or Claude Code session, plus artifacts shared with you. It is separate from Export All and ignores its **Export All exports** setting. Open claude.ai in a tab, signed in; the button is the one after Export All (Folder or Mega-Zip). It saves into a folder or a ZIP as **Export All and Export Artifacts save as** says; use **Folder** for a large account, since a ZIP is built in memory. In a folder, the popup opens the side panel, where you click the button again.
+Saves what claude.ai/artifacts lists: every artifact you made in any chat, project or Claude Code session, plus artifacts shared with you. It is **Everything on claude.ai** with **Chats** unticked and **Artifacts** ticked, and it is separate from a run with chats (**Changes only** is disabled for it). Open claude.ai in a tab, signed in; the button is **Export selected**. It saves into a folder or a ZIP as **Save as** says; use **Folder** for a large account, since a ZIP is built in memory. In a folder, the popup opens the side panel, where you click the button again.
 
 You get `claude-takeout-artifacts-<your name>-<YYYY-MM-DD>_<HHMM>` with:
 
@@ -148,7 +159,7 @@ What to know about artifact previews:
 | To preserve everything — uploads, attachments, every artifact version, full chat history, the raw JSON for recovery | **ZIP** |
 | To run analysis or import into another tool | **JSON** |
 | To archive your whole account | **Mega-Zip** |
-| To keep that archive current | **Mega-Zip exports: Only new or changed** in Settings, after the first Mega-Zip |
+| To keep that archive current | **Changes only**, after the first Export All |
 
 When in doubt: **ZIP**. It's the only format with the structured `errors.txt` report, the per-turn artifact snapshots, and `original.json` for full recovery.
 
@@ -456,7 +467,7 @@ node tools/build_viewer.js ~/Downloads/claude-takeout-2026-11-07 --force
 
 ### Combining archives
 
-If you back up with **Mega-Zip exports: Only new or changed**, you end up with one full archive and several smaller change archives. `tools/merge_archives.js` combines them into one new archive with one viewer, taking each chat once, from its newest copy:
+If you back up with **Changes only**, you end up with one full archive and several smaller change archives. `tools/merge_archives.js` combines them into one new archive with one viewer, taking each chat once, from its newest copy:
 
 ```bash
 # See what it would do: nothing is written
@@ -518,7 +529,7 @@ This is the canonical `replay_bash.py` case. Run it. If the image was uploaded t
 
 ### "I want to archive my whole Claude history"
 
-Use **Export All (Mega-Zip)**. After download, optionally run `replay_bash.py` on each conversation folder that has an `artifact_opaque_mutation` warning. This loop prompts for each command, so you review what runs:
+Use **Export selected** with **Chats** ticked. After download, optionally run `replay_bash.py` on each conversation folder that has an `artifact_opaque_mutation` warning. This loop prompts for each command, so you review what runs:
 
 ```bash
 unzip claude-takeout-2026-06-06.zip -d takeout/
@@ -531,7 +542,7 @@ done
 
 Avoid `--all` across a whole archive: you'd be running every command from every conversation unread.
 
-To keep that archive current without downloading everything again, set **Mega-Zip exports** to **Only new or changed**, export now and then, and combine the archives with [`tools/merge_archives.js`](#combining-archives).
+To keep that archive current without downloading everything again, choose **Changes only**, export now and then, and combine the archives with [`tools/merge_archives.js`](#combining-archives).
 
 #### The combined viewer
 
@@ -539,35 +550,35 @@ An Export All with artifacts has one `viewer.html`, with an Artifacts screen bes
 
 Previews follow the same rules as in the artifacts viewer above, with two additions. Artifact and In chats previews run inside a guard frame that blocks navigation, so a page can't send the preview to a file on disk. An In chats preview sees only its own chat's files.
 
-The Artifacts entry shows for any export with an artifact folder or any file Claude made in a chat. An archive built from older exports, or one made with **Include artifacts in Export All** off, has no claude.ai list, so All, Yours and Shared with you say "claude.ai's list isn't in this export" and only In chats and the chats' cards show artifacts. The old-archive tools can give older archives this screen (see [Adding a viewer to older archives](#adding-a-viewer-to-older-archives)).
+The Artifacts entry shows for any export with an artifact folder or any file Claude made in a chat. An archive built from older exports, or one made with **Artifacts** unticked, has no claude.ai list, so All, Yours and Shared with you say "claude.ai's list isn't in this export" and only In chats and the chats' cards show artifacts. The old-archive tools can give older archives this screen (see [Adding a viewer to older archives](#adding-a-viewer-to-older-archives)).
 
 ---
 
 ## Settings and keyboard shortcuts
 
-Click the gear icon in the popup to open the settings drawer.
+Click the gear icon to open the Settings screen; the Back arrow returns to where you were. All or changes only, Chats, Artifacts and Folder or ZIP are not here: they are on the main screen, next to Export selected, and are remembered.
 
 | Setting | What it does |
 |---|---|
-| **Filename style** | `title`, `title_date`, or `date_title`. Applies to single-chat Markdown, Embedded Markdown and JSON downloads. ZIPs and bulk exports keep their own names. |
-| **Include thinking blocks** | Whether to include Claude's `<thinking>` content in the Markdown exports and in a ZIP's `full_chat.md` and `integrated_chat.md`. The `responses/*.full.md` files always include it. |
-| **Export All and Export Artifacts save as** | **Folder** (the default) or **ZIP**: whether Export All and Export Artifacts write into a folder you choose or download one ZIP. |
-| **Export All exports** | **All chats** (the default) or **Only new or changed**: what Export All exports. With **Only new or changed**, it takes only the chats that are new or changed since the last mega-ZIP from this browser, and the button reads **Export Changes (Mega-Zip)**. |
-| **Include artifacts in Export All** | On by default. Export All also saves claude.ai's artifacts into `artifacts/`. Off: chats only, as before. |
-| **Show shortcuts** | Show keyboard shortcut hints next to buttons. |
-| **Open as sidebar by default** | Use Chrome's side panel instead of the popup, so the export UI stays open while you browse conversations. |
+| **File names** | `title`, `title_date`, or `date_title`. Applies to single-chat Markdown, Markdown + files and JSON downloads. ZIPs and bulk exports keep their own names. |
+| **Thinking blocks** | Whether to include Claude's `<thinking>` content in the Markdown exports and in a ZIP's `full_chat.md` and `integrated_chat.md`. The `responses/*.full.md` files always include it. |
+| **Web images and card pictures** | Lets Claude Takeout fetch images from other sites (web-search images, artifact card pictures). Chrome asks once, during a ZIP export. |
+| **Open as sidebar** | Use Chrome's side panel instead of the popup, so the export UI stays open while you browse conversations. |
+| **Show keyboard shortcuts** | Show keyboard shortcut hints next to buttons. |
+
+The screen also shows the version and a **What's new** link to the changelog.
 
 ### Keyboard shortcuts
 
-(While the popup or sidebar is open and focused.)
+(While the popup or sidebar is open and focused, on the main screen only.)
 
 | Key | Action |
 |---|---|
-| `Alt+M` | Export current conversation as Markdown |
-| `Alt+E` | Export current conversation as Embedded Markdown |
-| `Alt+Z` | Export current conversation as ZIP |
-| `Alt+J` | Export current conversation as JSON |
-| `Alt+A` | Export all conversations as Markdown |
+| `Alt+Z` | This chat: Export ZIP |
+| `Alt+M` | This chat: Markdown |
+| `Alt+E` | This chat: Markdown + files |
+| `Alt+J` | This chat: JSON |
+| `Alt+A` | Export selected (Everything on claude.ai); it used to be Export All (Markdown) |
 | `Alt+R` | Refresh the active claude.ai tab |
 
 Optional: assign a system-wide shortcut to open the extension at `chrome://extensions/shortcuts`.
@@ -579,7 +590,7 @@ Optional: assign a system-wide shortcut to open the extension at `chrome://exten
 | Symptom | Cause / fix |
 |---|---|
 | Popup says **"Sign in to claude.ai and open a chat"** | The extension couldn't find your organization. Sign in and open a chat. |
-| Popup says **"Open a chat to export it"** | You're on claude.ai but not in a specific conversation. Click into a chat first. Export All still works. |
+| Popup says **"Open a chat to export it"** | You're on claude.ai but not in a specific conversation. Click into a chat first. Everything on claude.ai still works. |
 | Export buttons all greyed out | The selected chat is loading or couldn't be loaded, or you're not on a chat page. The status message says which. |
 | Bulk export feels slow | A ~300 ms gap between conversations is intentional rate-limit hygiene. 100 conversations ≈ 30 seconds. |
 | Some conversations failed in bulk export | Common: deleted conversations, network blips. Re-run; the failures are listed at the end. |

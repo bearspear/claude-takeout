@@ -6,7 +6,7 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
 
 - **Multiple Export Formats** - Markdown, Embedded Markdown, ZIP Archive, JSON
 - **ZIP Archive Export** - Full archive with responses, artifacts, metadata, code snippets
-- **Bulk Export** - Export all your Claude conversations at once
+- **Bulk Export** - Export all your Claude conversations, or only what changed, and your claude.ai artifacts, into a folder or one ZIP, with progress and a Stop button
 - **Project Support** - Exports project files, system prompts, and prefixes filenames with project name
 - **Keyboard Shortcuts** - Quick export with Alt+key combinations
 - **Branched Conversation Handling** - Correctly follows conversation tree
@@ -14,6 +14,7 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
 - **Thinking Blocks** - Preserves Claude's reasoning with proper summaries
 - **Tool Use Display** - Formatted display of web search, bash, file operations
 - **Offline Viewer** - Every ZIP includes `viewer.html`, a page for reading the exported chats in a browser without the extension
+- **Two sections** - **This chat** and **Everything on claude.ai**, each with its own buttons; a Settings screen holds the few preferences
 - **Sidebar Mode** - Keep the exporter open while browsing conversations
 - **No Configuration Required** - Auto-detects your organization ID
 
@@ -33,33 +34,35 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
 2. Click the Claude Takeout extension icon
 3. Choose your export format
 
-### Export All Conversations
+### Export Everything on claude.ai
 
 1. Navigate to [claude.ai](https://claude.ai) (any page)
 2. Click the Claude Takeout extension icon
-3. Choose your bulk export format:
-   - **Export All (Markdown)** - One `.md` file per conversation
-   - **Export All (Embedded)** - One `.md` file per conversation with artifacts inline
-   - **Export All (Mega-Zip)** - Single zip containing all conversations
-   - **Export All (JSON)** - One `.json` file per conversation
-   - **Export Artifacts (Folder or ZIP)** - Every artifact on claude.ai (your own and any shared with you), as it is now, with an `index.html` to browse them
-5. Watch the progress bar as conversations are exported
+3. Under **Everything on claude.ai**, choose:
+   - **All** or **Changes only** (what is new or changed since your last export from this browser)
+   - **Chats** and/or **Artifacts** (tick one or both; Artifacts alone is what Export Artifacts was)
+   - **Folder** or **ZIP**
+4. Click **Export selected**. The panel shows each step with a count and a **Stop** button. When it finishes, **Done** says what was saved and where, and lists any warnings.
+
+**Count** is optional: it asks claude.ai how many chats and artifacts there are (and how many changed) and shows the numbers beside the checkboxes. It runs only when you click it, and the numbers are kept for 10 minutes.
+
+Every chat in an Export All already has its own Markdown, JSON and ZIP files, so there are no separate bulk Markdown or JSON buttons.
 
 ## Export Formats
 
 ### Markdown
-**"Export Current (Markdown)"**
+**"Markdown"** (under Also as)
 - Single `.md` file with full conversation
 - Artifacts referenced (compatible with `replace_filepaths.py`)
 - Includes thinking blocks, tool use, timestamps
 
 ### Embedded Markdown
-**"Export Embedded (Artifacts Inline)"**
+**"Markdown + files"** (artifacts inline)
 - Single `.md` file with artifacts embedded in code blocks
 - Self-contained, no external file references
 
 ### ZIP Archive
-**"Export as Zip (Full Archive)"**
+**"Export ZIP"** (full archive)
 
 Creates a comprehensive archive:
 
@@ -114,13 +117,13 @@ Creates a comprehensive archive:
 **Offline viewer:** unzip the archive, then open `viewer.html` in Chrome. It lists the chats, searches across them, and shows messages, thinking, tool calls, artifacts, uploads and project files. A mega-ZIP has one `viewer.html` at its root covering every chat. It needs no network. Previews of generated HTML files run their scripts in a sandbox, cut off from the viewer, other chats and your disk, and normal web requests are blocked. The browser doesn't let the viewer block every route, though, so a generated file containing injected code could send out its own text and the `.js` and `.css` files from that chat when previewed. Be careful previewing files from someone else's export.
 
 ### JSON
-**"Export Current (JSON)"**
+**"JSON"**
 - Raw API response with complete data
 - Useful for backup or custom processing
 
 ### Export Artifacts
 
-**"Export Artifacts (Folder)"** or **"(ZIP)"**, following **Export All and Export Artifacts save as** in Settings. It saves every artifact on claude.ai/artifacts, whichever chat or project made it:
+Untick **Chats** and leave **Artifacts** ticked under **Everything on claude.ai**, pick **Folder** or **ZIP**, and click **Export selected**. It saves every artifact on claude.ai/artifacts, whichever chat or project made it:
 
 ```
 claude-takeout-artifacts-<your name>-2026-11-16_1530/
@@ -140,7 +143,7 @@ claude-takeout-artifacts-<your name>-2026-11-16_1530/
 A Claude Docs document is listed with a link, not saved: its text isn't available as a file. Open `viewer.html` in Chrome, from the unzipped folder.
 
 ### Mega-Zip (Bulk Export)
-**"Export All (Mega-Zip)"**
+**Everything on claude.ai with Chats ticked, as ZIP**
 
 Creates a single archive containing all your conversations:
 
@@ -177,13 +180,14 @@ Each conversation folder has the identical structure to individual ZIP exports, 
 
 | Shortcut | Action |
 |----------|--------|
-| `Alt+M` | Export Current (Markdown) |
-| `Alt+E` | Export Embedded |
-| `Alt+Z` | Export as Zip |
-| `Alt+J` | Export Current (JSON) |
+| `Alt+Z` | This chat: Export ZIP |
+| `Alt+M` | This chat: Markdown |
+| `Alt+E` | This chat: Markdown + files (artifacts inline) |
+| `Alt+J` | This chat: JSON |
+| `Alt+A` | Export selected (Everything on claude.ai); was Export All (Markdown) |
 | `Alt+R` | Refresh |
 
-*Shortcuts work when the popup or sidebar is open*
+*Shortcuts work when the popup or sidebar is open and showing the main screen, not Settings, Exporting, Done or Export stopped*
 
 ## Sidebar Mode
 
@@ -347,7 +351,7 @@ You're on Claude but not viewing a specific conversation. Click into a chat. Exp
 The extension couldn't connect to the page. Reload the Claude tab.
 
 ### Export buttons disabled
-The selected chat is loading, couldn't be loaded, or you're not on a chat page. Check the status message.
+The selected chat is loading, couldn't be loaded, or you're not on a chat page. The **This chat** card says which; **Try again** reloads it. Export selected stays available on any claude.ai page.
 
 ### Bulk export is slow
 Each conversation requires a separate API request. A 300ms delay is added between requests to avoid rate limiting. For 100 conversations, expect ~30 seconds.
@@ -397,6 +401,16 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.22.0
+
+- **A new panel** - The popup and sidebar now have two sections. **This chat** has **Export ZIP** and three smaller buttons, Markdown, **Markdown + files** (the old Embedded) and JSON, beside a card showing which chat is loaded. **Everything on claude.ai** has **All** or **Changes only**, **Chats** and **Artifacts** checkboxes, **Folder** or **ZIP**, and **Export selected**. Settings is its own screen (file names, thinking blocks, web images and card pictures, open as sidebar, show shortcuts), with the version and a What's new link.
+- **Progress, Done and Stop** - A running export shows a step each for chats, artifacts and the viewer and index, with counts, the warnings so far and a **Stop** button. It ends on **Done** (what was saved, where, the warnings and the files that explain them) or **Export stopped**. Stopping a folder export keeps the files already written and writes no viewer, index or manifest, and nothing is recorded, so the next Changes only export takes those chats again. Stopping a ZIP export downloads nothing.
+- **Count on demand** - **Count** shows how many chats and artifacts claude.ai has, and how many changed since your last export. It runs only when you click it; the numbers are kept for 10 minutes. The panel footer shows your last export and its warnings.
+- **Export All (Markdown), (Embedded) and (JSON) are gone** - Every Export All already writes each chat's Markdown and JSON in its own folder, so use those, or **Markdown**, **Markdown + files** and **JSON** under This chat for one chat. **Export Artifacts** is now **Everything on claude.ai** with Chats unticked and Artifacts ticked.
+- **Shortcuts** - `Alt+A` now runs **Export selected** (it was Export All (Markdown)); `Alt+E` is Markdown + files. Shortcuts work on the main screen only.
+- **Folder export from the popup** - Chrome lets only the sidebar pick a folder, so the popup opens the sidebar with your choices (Changes only, Chats, Artifacts) carried over; click **Export selected** there.
+- **Smaller changes** - Settings no longer holds All or changes, Chats, Artifacts and Folder or ZIP; they are on the main screen. A failed reload of the chat now shows **Couldn't load this chat** with **Try again**.
 
 ### v1.21.0
 
