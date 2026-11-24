@@ -4,7 +4,7 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
 
 ## Features
 
-- **Multiple Export Formats** - Markdown, Embedded Markdown, ZIP Archive, JSON
+- **Multiple Export Formats** - Markdown, Markdown + files, ZIP Archive, JSON
 - **ZIP Archive Export** - Full archive with responses, artifacts, metadata, code snippets
 - **Bulk Export** - Export all your Claude conversations, or only what changed, and your claude.ai artifacts, into a folder or one ZIP, with progress and a Stop button
 - **Project Support** - Exports project files, system prompts, and prefixes filenames with project name
@@ -56,7 +56,7 @@ Every chat in an Export All already has its own Markdown, JSON and ZIP files, so
 - Artifacts referenced (compatible with `replace_filepaths.py`)
 - Includes thinking blocks, tool use, timestamps
 
-### Embedded Markdown
+### Markdown + files
 **"Markdown + files"** (artifacts inline)
 - Single `.md` file with artifacts embedded in code blocks
 - Self-contained, no external file references
@@ -142,7 +142,7 @@ claude-takeout-artifacts-<your name>-2026-11-16_1530/
 
 A Claude Docs document is listed with a link, not saved: its text isn't available as a file. Open `viewer.html` in Chrome, from the unzipped folder.
 
-### Mega-Zip (Bulk Export)
+### ZIP of everything (Bulk Export)
 **Everything on claude.ai with Chats ticked, as ZIP**
 
 Creates a single archive containing all your conversations:
@@ -174,7 +174,7 @@ claude-takeout-2026-01-01.zip
 
 Each conversation folder has the identical structure to individual ZIP exports, except that pages Claude published are saved once, in the shared `artifacts/` folder at the root, and each chat's README links there.
 
-`artifacts/` holds one folder per artifact, `<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version (every version claude.ai keeps, since v1.21, and each version a chat published; the current version also as `<version>.zip` when it has two or more files), plus `index.html`, `index.md` and, if something failed, `errors.txt`. Every page a chat published gets a folder, also with **Include artifacts in Export All** off; with it on (the default), the artifacts claude.ai lists are added, and the index lists pages claude.ai no longer lists under "Published from chats, not in claude.ai's list". Export All writes no `published/` folder. `artifacts` is a reserved name (and `published` stays one), so no chat folder takes it. One `viewer.html` at the root covers the chats and the artifacts.
+`artifacts/` holds one folder per artifact, `<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version (every version claude.ai keeps, since v1.21, and each version a chat published; the current version also as `<version>.zip` when it has two or more files), plus `index.html`, `index.md` and, if something failed, `errors.txt`. Every page a chat published gets a folder, also with **Artifacts** unticked; with it ticked (the default), the artifacts claude.ai lists are added, and the index lists pages claude.ai no longer lists under "Published from chats, not in claude.ai's list". Export All writes no `published/` folder. `artifacts` is a reserved name (and `published` stays one), so no chat folder takes it. One `viewer.html` at the root covers the chats and the artifacts.
 
 ## Keyboard Shortcuts
 
@@ -468,7 +468,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.18.0
 
-- **One folder per artifact** - Export All now keeps every artifact in one folder, `artifacts/<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version, the current one and each older version a chat published. `published/` is gone from Export All (a single chat's ZIP keeps it), so nothing is saved twice. Every page a chat published gets a folder, also pages claude.ai no longer lists and exports made with **Include artifacts in Export All** off; `artifacts/index.html` and `index.md` list those under "Published from chats, not in claude.ai's list". Export Artifacts uses the same per-version layout. The viewer reads it: an Artifacts entry shows for any artifact folder or any file Claude made in a chat, the version menu follows claude.ai's history order, and All, Yours and Shared with you say "claude.ai's list isn't in this export" when the list wasn't fetched. A Claude Docs row says "Text rebuilt from the chat <title>." when that chat is in the export.
+- **One folder per artifact** - Export All now keeps every artifact in one folder, `artifacts/<Title>_<id>/`, with an `artifact.json` (format 2) and one subfolder per version, the current one and each older version a chat published. `published/` is gone from Export All (a single chat's ZIP keeps it), so nothing is saved twice. Every page a chat published gets a folder, also pages claude.ai no longer lists and exports made with **Artifacts** unticked; `artifacts/index.html` and `index.md` list those under "Published from chats, not in claude.ai's list". Export Artifacts uses the same per-version layout. The viewer reads it: an Artifacts entry shows for any artifact folder or any file Claude made in a chat, the version menu follows claude.ai's history order, and All, Yours and Shared with you say "claude.ai's list isn't in this export" when the list wasn't fetched. A Claude Docs row says "Text rebuilt from the chat <title>." when that chat is in the export.
 - **The old-archive tools handle artifacts** - `build_viewer.js` and `merge_archives.js` no longer refuse an archive with artifacts. They read every layout (chat archives with `published/`, 1.17 combined archives, 1.18 archives, standalone Export Artifacts exports). `merge_archives.js` always writes the new layout: one `artifacts/` store with each version taken whole from its newest source, and the links in the merged chats' Markdown rewritten from `published/` to it.
 
 ### v1.17.1

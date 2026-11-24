@@ -4848,10 +4848,10 @@ function exportProgress(options, { phase, done, total, sub = '', warnings = 0 })
 
 // Bulk export all conversations as a single mega-zip.
 // options.changesOnly: only chats new or updated since the last mega-ZIP from this browser. Without it,
-// the "Mega-Zip exports" setting decides (settings.megaZipScope: 'all', the default, or 'changes').
+// the main screen's All / Changes only choice decides (settings.megaZipScope: 'all', the default, or 'changes').
 // options.directory: a folder from showDirectoryPicker; the export goes into a new folder inside it
 // instead of a ZIP download. options.withArtifacts: whether to save claude.ai's artifacts too (default: the
-// "Include artifacts in Export All" setting). options.onProgress: progress events (exportProgress). options.signal:
+// Artifacts checkbox, settings.exportAllArtifacts). options.onProgress: progress events (exportProgress). options.signal:
 // { stopped }, checked before each chat, artifact and older version; when set, the run ends as 'stopped' (stoppedRun).
 // Resolves to a run result (runResult); never throws.
 async function bulkExportZip(options = {}) {
