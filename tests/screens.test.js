@@ -721,3 +721,64 @@ test('a cancelled folder picker says No folder picked. on the main screen', asyn
   assert.strictEqual(p.el('screen-main').hidden, false);
   assert.strictEqual(p.el('summary').textContent, 'No folder picked.');
 });
+
+// ---- Task 6 review fixes ----
+
+test('the Exporting card names the run folder or ZIP once it is known', async () => {
+  const targets = [];
+  const { list, chats } = twoChats();
+  const { result } = await bulkRun({ list, chats, options: { onTarget: (t) => targets.push(JSON.parse(JSON.stringify(t))) } });
+  assert.strictEqual(result.outcome, 'done');
+  assert.deepStrictEqual(targets, [{ kind: 'zip', name: result.target.name }]);
+  assert.match(result.target.name, /^claude-takeout-.*\.zip$/);
+  const disk = await runArtifacts({ frames: [{ slug: P_U, title: 'Report', typeSlug: '', typeTitle: '', sourceSurface: 'chat', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }],
+    pages: { [P_U]: { title: 'Report', live: P_LIVE, versions: { [P_LIVE]: { files: { 'index.html': '<p>x</p>' } } } } },
+    options: { directory: new FakeDir(), onTarget: (t) => targets.push(JSON.parse(JSON.stringify(t))) } });
+  assert.deepStrictEqual(targets[1], { kind: 'folder', name: disk.result.target.name });
+
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.fn("settings.megaFormat = 'zip'");
+  let shown = null;
+  p.sandbox.bulkExportZip = async (o) => {
+    o.onTarget({ kind: 'zip', name: 'claude-takeout-2026-11-24_1102.zip' });
+    shown = p.el('runTarget').textContent;
+    return { outcome: 'done', reason: '', target: { kind: 'zip', name: 'claude-takeout-2026-11-24_1102.zip' }, saved: { chats: 0, artifacts: 0, versions: 0 },
+      warnings: 0, warningList: [], errorFiles: [], notes: [], startedAt: '2026-11-24T11:02:00', endedAt: '2026-11-24T11:02:01' };
+  };
+  await p.el('exportSelected').handlers.click();
+  assert.strictEqual(shown, 'Saving to claude-takeout-2026-11-24_1102.zip');
+});
+
+test('popup.html uses only the spec colours', () => {
+  const html = fs.readFileSync(path.join(REPO_DIR, 'popup.html'), 'utf8');
+  for (const c of ['#2e4a30', '#15803d', '#374151', '#6d28d9', '#9ca3af', '#f9fafb']) assert.ok(!html.includes(c), c);
+  assert.doesNotMatch(html, /[^-]color: #d1d5db/);
+});
+
+test('Settings opened from Done goes back to Done', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  for (const from of ['done', 'stopped']) {
+    p.fn('showScreen')(from);
+    p.el('settingsOpen').handlers.click();
+    assert.strictEqual(p.el('screen-settings').hidden, false);
+    await p.el('settingsBack').handlers.click();
+    assert.strictEqual(p.el(`screen-${from}`).hidden, false, from);
+    assert.strictEqual(p.el('screen-main').hidden, true, from);
+  }
+  p.fn('showScreen')('main');
+  p.el('settingsOpen').handlers.click();
+  await p.el('settingsBack').handlers.click();
+  assert.strictEqual(p.el('screen-main').hidden, false);
+});
+
+test('not on claude.ai: every Everything control is disabled', async () => {
+  const off = panelOn('https://example.com/');
+  await sleep(50);
+  const ids = ['scopeAll', 'scopeChanges', 'pickChats', 'pickArtifacts', 'formatFolder', 'formatZip', 'exportSelected', 'countBtn'];
+  for (const id of ids) assert.strictEqual(off.el(id).disabled, true, id);
+  const on = panelOn('https://claude.ai/new');
+  await sleep(50);
+  for (const id of ['scopeAll', 'pickChats', 'pickArtifacts', 'formatFolder', 'formatZip', 'exportSelected', 'countBtn']) assert.strictEqual(on.el(id).disabled, false, id);
+});

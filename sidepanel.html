@@ -17,7 +17,7 @@
     body.sidebar .screen { flex: 1; }
     [hidden] { display: none !important; }
     :focus-visible { outline: 2px solid #4c1d95; outline-offset: 2px; }
-    a { color: #6d28d9; }
+    a { color: #5b21b6; }
     a:hover { color: #4c1d95; }
     button { font-family: inherit; cursor: pointer; }
     button:disabled { cursor: not-allowed; }
@@ -31,8 +31,8 @@
     body.sidebar .sidebar-badge { display: inline; }
     .icon-btn { width: 40px; height: 40px; border: 0; background: transparent; border-radius: 8px; color: #4b5563; display: flex; align-items: center; justify-content: center; padding: 0; }
     .icon-btn:hover:not(:disabled) { background: #f3f4f6; color: #1f2937; }
-    .icon-btn:disabled { color: #d1d5db; }
-    .icon-btn.big { width: 44px; height: 44px; color: #374151; }
+    .icon-btn:disabled { color: #4b5563; background: #f3f4f6; }
+    .icon-btn.big { width: 44px; height: 44px; color: #4b5563; }
 
     /* Sections */
     .part { padding: 14px 16px 16px; display: flex; flex-direction: column; gap: 10px; }
@@ -54,7 +54,7 @@
     .card[data-tone="ready"] { background: #e8f5e9; border-color: #c8e6c9; }
     .card[data-tone="ready"] .ico-ok { display: block; color: #1b5e20; }
     .card[data-tone="ready"] .card-state { font-size: 12px; font-weight: 650; color: #1b5e20; }
-    .card[data-tone="ready"] .card-meta { color: #2e4a30; }
+    .card[data-tone="ready"] .card-meta { color: #1b5e20; }
     .card[data-tone="ready"] .card-result { color: #1b5e20; }
     .card[data-tone="warn"] { background: #fffbeb; border-color: #fde68a; color: #78350f; }
     .card[data-tone="warn"] .ico-warn { display: block; }
@@ -64,17 +64,17 @@
     .card[data-tone="error"] .ico-warn { display: block; }
     .card[data-tone="error"] .card-state { font-size: 12px; font-weight: 650; }
     .card[data-tone="error"] .card-meta { color: #7f1d1d; }
-    .link-btn { align-self: flex-start; border: 0; background: none; padding: 6px 0; font-size: 12px; color: #6d28d9; text-decoration: underline; }
+    .link-btn { align-self: flex-start; border: 0; background: none; padding: 6px 0; font-size: 12px; color: #5b21b6; text-decoration: underline; }
 
     /* Buttons */
     .btn { height: 44px; border-radius: 10px; font-size: 14px; font-weight: 600; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; width: 100%; }
     .btn.center { justify-content: center; }
     .btn.primary { border: 0; background: #7c3aed; color: #ffffff; }
-    .btn.primary:hover:not(:disabled) { background: #6d28d9; }
+    .btn.primary:hover:not(:disabled) { background: #5b21b6; }
     .btn.outline { border: 2px solid #7c3aed; background: #ffffff; color: #5b21b6; }
     .btn.outline:hover:not(:disabled) { background: #f5f3ff; }
     .btn.plain { border: 1px solid #6b7280; background: #ffffff; color: #1f2937; }
-    .btn.plain:hover:not(:disabled) { background: #f9fafb; }
+    .btn.plain:hover:not(:disabled) { background: #f3f4f6; }
     .btn:disabled, .btn.primary:disabled, .btn.outline:disabled { background: #f3f4f6; border: 1px solid #d1d5db; color: #4b5563; }
     .shortcut { font-size: 12px; font-weight: 500; }
     .also { display: flex; flex-wrap: wrap; gap: 6px; font-size: 12px; color: #4b5563; align-items: center; }
@@ -96,7 +96,8 @@
     .seg.inline { display: flex; border-radius: 8px; }
     .seg button { height: 34px; border: 0; border-radius: 8px; background: transparent; color: #4b5563; font-size: 13px; font-weight: 500; padding: 0 12px; }
     .seg button[aria-pressed="true"] { background: #ffffff; color: #1f2937; font-weight: 600; box-shadow: 0 1px 2px rgba(0,0,0,.08); }
-    .seg button:disabled { color: #4b5563; text-decoration: line-through; background: transparent; box-shadow: none; }
+    .seg button:disabled { color: #4b5563; background: transparent; box-shadow: none; }
+    #scopeChanges:disabled { text-decoration: line-through; }
     .checks { display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
     .check { display: flex; align-items: center; gap: 10px; min-height: 40px; cursor: pointer; }
     .check input { width: 18px; height: 18px; margin: 0; accent-color: #7c3aed; flex: none; }
@@ -145,11 +146,10 @@
     .strip { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #78350f; background: #fffbeb; border: 1px solid #fde68a; border-radius: 8px; padding: 8px 10px; }
     .actions { margin: 0 16px; display: flex; flex-direction: column; gap: 10px; }
     .result { margin: 16px; padding: 16px; border-radius: 12px; display: flex; flex-direction: column; gap: 10px; border: 1px solid #c8e6c9; background: #e8f5e9; font-size: 13px; line-height: 1.45; }
-    .result[data-tone="ok"] h2 { color: #1b5e20; }
-    .result[data-tone="warn"] { border-color: #fde68a; background: #fffbeb; }
-    .result[data-tone="warn"] h2, .result[data-tone="warn"] ul { color: #78350f; }
-    .result.stopped { border-color: #fecaca; background: #fef2f2; }
-    .result.stopped h2 { color: #7f1d1d; }
+    .result[data-tone="ok"] { color: #1b5e20; }
+    .result[data-tone="warn"] { border-color: #fde68a; background: #fffbeb; color: #78350f; }
+    .result.stopped { border-color: #fecaca; background: #fef2f2; color: #7f1d1d; }
+    .result .muted { color: inherit; }
     .result ul { margin: 0; padding-left: 18px; font-size: 12px; display: flex; flex-direction: column; gap: 4px; line-height: 1.4; }
     .result ul:empty { display: none; }
     .target-box { font-weight: 600; overflow-wrap: anywhere; background: #ffffff; border: 1px solid #c8e6c9; border-radius: 8px; padding: 8px 10px; }
@@ -165,7 +165,7 @@
     .row-text { display: flex; flex-direction: column; gap: 2px; }
     .row input[type="checkbox"] { width: 18px; height: 18px; margin: 0; accent-color: #7c3aed; flex: none; }
     .row select { height: 32px; border: 1px solid #6b7280; border-radius: 6px; font-size: 13px; padding: 0 6px; background: #ffffff; color: #1f2937; }
-    .note-box { margin: 16px; padding: 12px; background: #f9fafb; border-radius: 10px; font-size: 12px; color: #4b5563; line-height: 1.5; }
+    .note-box { margin: 16px; padding: 12px; background: #f3f4f6; border-radius: 10px; font-size: 12px; color: #4b5563; line-height: 1.5; }
   </style>
 </head>
 <body>
@@ -263,9 +263,9 @@
       <ol id="runSteps" class="steps">
         <li id="step-chats" class="step" data-state="pending" hidden>
           <div class="step-row">
-            <svg class="s-done" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="3"><path d="M5 12l5 5L20 7"></path></svg>
+            <svg class="s-done" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1b5e20" stroke-width="3"><path d="M5 12l5 5L20 7"></path></svg>
             <svg class="s-current" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="3"><circle cx="12" cy="12" r="8"></circle></svg>
-            <svg class="s-pending" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2"><circle cx="12" cy="12" r="8"></circle></svg>
+            <svg class="s-pending" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="8"></circle></svg>
             <span class="label">Chats</span><span class="n" id="step-chats-count"></span>
           </div>
           <div class="step-bar" id="step-chats-bar" role="progressbar" aria-label="Chats" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="step-chats-fill"></div></div>
@@ -273,9 +273,9 @@
         </li>
         <li id="step-artifacts" class="step" data-state="pending" hidden>
           <div class="step-row">
-            <svg class="s-done" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="3"><path d="M5 12l5 5L20 7"></path></svg>
+            <svg class="s-done" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1b5e20" stroke-width="3"><path d="M5 12l5 5L20 7"></path></svg>
             <svg class="s-current" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="3"><circle cx="12" cy="12" r="8"></circle></svg>
-            <svg class="s-pending" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2"><circle cx="12" cy="12" r="8"></circle></svg>
+            <svg class="s-pending" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="8"></circle></svg>
             <span class="label">Artifacts</span><span class="n" id="step-artifacts-count"></span>
           </div>
           <div class="step-bar" id="step-artifacts-bar" role="progressbar" aria-label="Artifacts" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="step-artifacts-fill"></div></div>
@@ -283,9 +283,9 @@
         </li>
         <li id="step-viewer" class="step" data-state="pending" hidden>
           <div class="step-row">
-            <svg class="s-done" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#15803d" stroke-width="3"><path d="M5 12l5 5L20 7"></path></svg>
+            <svg class="s-done" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1b5e20" stroke-width="3"><path d="M5 12l5 5L20 7"></path></svg>
             <svg class="s-current" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="3"><circle cx="12" cy="12" r="8"></circle></svg>
-            <svg class="s-pending" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#9ca3af" stroke-width="2"><circle cx="12" cy="12" r="8"></circle></svg>
+            <svg class="s-pending" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="8"></circle></svg>
             <span class="label">Viewer and index</span><span class="n" id="step-viewer-count"></span>
           </div>
           <div class="step-bar" id="step-viewer-bar" role="progressbar" aria-label="Viewer and index" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="step-viewer-fill"></div></div>

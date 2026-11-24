@@ -4829,6 +4829,14 @@ function megaZipName(accountName, kind, dateStr) {
 // One progress event to options.onProgress, for the Exporting screen: { phase: 'chats' | 'artifacts' | 'viewer',
 // done, total, sub (a chat or artifact title, or "<title> · version i of n"; frame URLs and tokens removed), warnings (so far)}.
 // A listener that throws doesn't stop the export.
+// Where the run goes, once known (the run folder made, or the ZIP's name), to options.onTarget({ kind, name }).
+function exportTarget(options, kind, name) {
+  if (!options || typeof options.onTarget !== 'function') return;
+  try {
+    options.onTarget({ kind, name: String(name || '') });
+  } catch (e) { /* the screen keeps its placeholder */ }
+}
+
 function exportProgress(options, { phase, done, total, sub = '', warnings = 0 }) {
   const listener = options && typeof options.onProgress === 'function' ? options.onProgress : null;
   if (!listener) return;
@@ -4931,6 +4939,7 @@ async function bulkExportZip(options = {}) {
       }
       target.name = run.name;
     }
+    exportTarget(options, target.kind, run ? run.name : megaZipName(response.accountName, kind, dateStr));
 
     // A ZIP, or a folder on disk taking the same calls.
     const megaZip = run ? createDiskFolder(run.handle) : new JSZip();
@@ -6068,6 +6077,7 @@ async function exportArtifacts(options = {}) {
     }
     target.name = run.name;
   }
+  exportTarget(options, target.kind, run ? run.name : zipName);
   try {
     const root = run ? createDiskFolder(run.handle) : new JSZip();
     collector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
@@ -6573,6 +6583,9 @@ function renderEverything() {
   const zip = settings.megaFormat === 'zip';
   setPressed($('formatFolder'), !zip);
   setPressed($('formatZip'), zip);
+  // Off claude.ai everything here is disabled.
+  for (const id of ['scopeAll', 'pickChats', 'pickArtifacts', 'formatFolder', 'formatZip']) $(id).disabled = !panel.onClaude;
+  if (!panel.onClaude) scopeChanges.disabled = true;
 
   const count = $('countBtn');
   count.disabled = !panel.onClaude || panel.counting;
@@ -6705,6 +6718,12 @@ function runProgress(ev) {
   strip.textContent = ev.warnings ? `${plural(ev.warnings, 'warning')} so far` : '';
 }
 
+// The run folder or ZIP name, as soon as the export knows it.
+function runTarget(target) {
+  if (!activeRun || !target || !target.name) return;
+  document.getElementById('runTarget').textContent = `Saving to ${artifactText(target.name)}`;
+}
+
 document.getElementById('stopBtn').addEventListener('click', () => {
   if (!activeRun) return;
   activeRun.signal.stopped = true;
@@ -6762,8 +6781,8 @@ async function runSelected(options = {}) {
   let result;
   try {
     result = plan.run === 'bulk'
-      ? await bulkExportZip({ changesOnly: plan.changesOnly, directory, withArtifacts: plan.withArtifacts, onProgress: runProgress, signal: run.signal })
-      : await exportArtifacts({ directory, onProgress: runProgress, signal: run.signal, ask: options ? options.ask : null });
+      ? await bulkExportZip({ changesOnly: plan.changesOnly, directory, withArtifacts: plan.withArtifacts, onProgress: runProgress, onTarget: runTarget, signal: run.signal })
+      : await exportArtifacts({ directory, onProgress: runProgress, onTarget: runTarget, signal: run.signal, ask: options ? options.ask : null });
   } catch (e) {
     result = runResult({ outcome: 'failed', reason: runWarningText((e && e.message) || String(e)), target: { kind: directory ? 'folder' : 'zip', name: '' } });
   }
@@ -6916,8 +6935,19 @@ if (webImagesBox) {
 }
 
 // The Settings screen
-document.getElementById('settingsOpen').addEventListener('click', () => showScreen('settings'));
-document.getElementById('settingsBack').addEventListener('click', () => backToMain({ always: false }));
+// Settings returns to the screen it was opened from: Done and Export stopped stay until Back to export.
+let screenBeforeSettings = 'main';
+document.getElementById('settingsOpen').addEventListener('click', () => {
+  if (currentScreen !== 'settings') screenBeforeSettings = currentScreen;
+  showScreen('settings');
+});
+document.getElementById('settingsBack').addEventListener('click', () => {
+  if (screenBeforeSettings === 'done' || screenBeforeSettings === 'stopped') {
+    showScreen(screenBeforeSettings);
+    return Promise.resolve();
+  }
+  return backToMain({ always: false });
+});
 {
   const manifest = chrome.runtime && typeof chrome.runtime.getManifest === 'function' ? chrome.runtime.getManifest() : null;
   document.getElementById('versionText').textContent = manifest && manifest.version ? `Version ${manifest.version}` : '';
