@@ -332,13 +332,13 @@ const tests = {
   'selection during an export waits, then keeps the result status': async () => {
     const e = makeEnv();
     await sleep(SETTLE);
-    e.el('progress').style.display = 'block';
+    vm.runInContext('exportRunning = true', e.ctx);
     e.el('status').textContent = 'Creating zip archive...';
     e.navigate(chatUrl(B));
     await sleep(SETTLE);
     assert.strictEqual(e.current()?.uuid, A, 'chat must not change mid-export');
     assert.strictEqual(e.status(), 'Creating zip archive...');
-    vm.runInContext('hideProgress()', e.ctx);
+    vm.runInContext('exportRunning = false; finishRun()', e.ctx);
     e.el('status').textContent = 'Exported zip';
     await sleep(SETTLE);
     assert.strictEqual(e.current()?.uuid, B);

@@ -4428,6 +4428,10 @@ function showProgress(current, total, text) {
 
 function hideProgress() {
   document.getElementById('progress').style.display = 'none';
+}
+
+// Runs once an export has ended: a tab change that came in meanwhile is followed now.
+function finishRun() {
   if (refreshDeferred) {
     refreshDeferred = false;
     requestData({ preserveStatus: true });
@@ -4569,12 +4573,11 @@ async function loadConversationForExport({ withTab = false } = {}) {
   return withTab ? { data: result.data, tabId: tab.id } : result.data;
 }
 
-// Coalesce bursts of tab events. An export shows the progress bar
-// while it runs, so wait for it to finish rather than change chats underneath it.
+// Coalesce bursts of tab events. While an export runs (exportRunning), wait for it to finish rather than change chats underneath it.
 function scheduleRefresh() {
   clearTimeout(refreshTimer);
   refreshTimer = setTimeout(() => {
-    if (document.getElementById('progress').style.display === 'block') {
+    if (exportRunning) {
       refreshDeferred = true;
       return;
     }
@@ -4864,7 +4867,8 @@ function megaZipName(accountName, kind, dateStr) {
 // options.changesOnly: only chats new or updated since the last mega-ZIP from this browser. Without it,
 // the "Mega-Zip exports" setting decides (settings.megaZipScope: 'all', the default, or 'changes').
 // options.directory: a folder from showDirectoryPicker; the export goes into a new folder inside it
-// instead of a ZIP download.
+// instead of a ZIP download. options.withArtifacts: whether to save claude.ai's artifacts too (default: the
+// "Include artifacts in Export All" setting).
 async function bulkExportZip(options = {}) {
   const changesOnly = options && typeof options.changesOnly === 'boolean' ? options.changesOnly : settings.megaZipScope === 'changes';
   const directory = options && options.directory ? options.directory : null;
@@ -4905,7 +4909,7 @@ async function bulkExportZip(options = {}) {
     const fetchPublished = tabPublishedFetcher(tab.id);
     // claude.ai's artifacts, listed before the chats so a changes run knows whether any changed. A failed list
     // only leaves the artifacts out (listError: its code); the chats export as usual.
-    const withArtifacts = settings.exportAllArtifacts !== false;
+    const withArtifacts = options && typeof options.withArtifacts === 'boolean' ? options.withArtifacts : settings.exportAllArtifacts !== false;
     let artifactList = null;
     let listError = null;
     if (withArtifacts) {
@@ -6119,6 +6123,7 @@ function exclusiveExport(run) {
     } finally {
       exportRunning = false;
       buttons.forEach((b, i) => { b.disabled = before[i]; });
+      finishRun();
     }
   };
 }
