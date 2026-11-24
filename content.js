@@ -143,7 +143,8 @@
     const entry = { token, expires: publishedExpiry(token, Date.now()), ver: resolved, files };
     publishedTokens.set(uuid + ':' + resolved, entry);
     publishedTokens.set(uuid + ':' + ver, entry);
-    return { entry, title: body.title, history: body.history };
+    // claude.ai lists history newest first (observed 2026-11-23); everything after this reads it oldest first.
+    return { entry, title: body.title, history: Array.isArray(body.history) ? body.history.slice().reverse() : body.history };
   }
 
   async function publishedToken(uuid, ver, org, force) {
@@ -187,9 +188,9 @@
   // With no files in the frame info, the error stands.
   async function publishedFileList(uuid, ver, org) {
     let entry = await publishedToken(uuid, ver, org, false);
-    const fromInfo = () => {
+    const fromInfo = (list = entry.files) => {
       const files = Object.create(null);
-      for (const f of entry.files || []) {
+      for (const f of list || []) {
         files[f.path] = { contentType: f.contentType, size: null, sha256: null, fromInfo: true };
       }
       return files;
@@ -206,8 +207,16 @@
         files = body && body.files && typeof body.files === 'object' ? body.files : {};
       } catch (e) {
         entry = publishedTokens.get(uuid + ':' + ver) || entry;
-        if (!(e instanceof PublishedError) || e.status !== 404 || !entry.files || !entry.files.length) throw e;
-        files = fromInfo();
+        if (!(e instanceof PublishedError) || e.status !== 404) throw e;
+        if (entry.files && entry.files.length) files = fromInfo();
+        else {
+          // An older version of such a page: claude.ai lists files only for the live version, and the older one's
+          // own content sits at the same paths (observed 2026-11-23). Its files are fetched at those, unverified.
+          const live = ver !== '' ? await publishedToken(uuid, '', org, false) : null;
+          if (!live || !live.files || !live.files.length) throw e;
+          files = fromInfo(live.files);
+          Object.defineProperty(files, 'fromLive', { value: true });
+        }
       }
     }
     publishedFileLists.set(uuid + ':' + entry.ver, files);
@@ -230,7 +239,7 @@
       const f = listing[p] || {};
       files.push({ path: p, size: f.size, contentType: f.contentType, sha256: f.sha256 });
     }
-    return { ver: info.entry.ver, title: info.title, history: info.history, files, rejected, runtimeSkipped };
+    return { ver: info.entry.ver, title: info.title, history: info.history, files, rejected, runtimeSkipped, ...(listing.fromLive ? { listFromLive: true } : {}) };
   }
 
   // Every artifact claude.ai lists for the account. Only the fields an export keeps leave this function

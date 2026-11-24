@@ -629,6 +629,9 @@ function recordFromV2(root, dir, json) {
   const keys = Object.keys(versions).filter(k => VER_KEY.test(k) && versions[k] && typeof versions[k] === 'object');
   const order = Array.isArray(json.order) ? json.order.filter(k => typeof k === 'string' && keys.includes(k)) : [];
   rec.order = [...new Set([...order, ...keys])];
+  // Up to v1.20.7 the order was claude.ai's history as sent, newest first: the current version (claude.ai's newest)
+  // first is read back oldest first.
+  if (rec.current && rec.order.length > 1 && rec.order[0] === rec.current) rec.order.reverse();
   for (const ver of rec.order) {
     const v = versions[ver];
     const at = v.folder ? versionFolder(root, dir, v.folder) : null;
@@ -917,7 +920,8 @@ function artifactViewsFromDisk(store, chatFolders = new Map()) {
     for (const ver of rec.order) {
       const v = versions.get(ver);
       if (v.folder) places[ver] = { folder: v.folder };
-      if (ver !== currentKey && store.layout !== 'standalone-v18' && store.layout !== 'standalone-flat') {
+      // An Export Artifacts export keeps older versions since v1.21; a flat one (before 1.18) has none.
+      if (ver !== currentKey && store.layout !== 'standalone-flat') {
         const payload = payloadFromDisk(versionDiskFiles(v), v.start);
         if (payload) versionPayloads.push({ uuid: rec.uuid, ver, payload, startKind: core.artifactStartKind(v.start) });
       }

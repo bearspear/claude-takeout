@@ -2203,6 +2203,19 @@ test('readArtifactStore reads every layout into the same records', () => {
   }
 });
 
+test('an artifact.json from before v1.21 with its current version first is read oldest first', () => {
+  const orderOf = (order, current) => {
+    const root = megaWith(tmpRoot(), FULL);
+    const json = format2(order.map(v => [v, v === 'v1' ? G1 : G2]));
+    put(root, `artifacts/${AF}/artifact.json`, JSON.stringify({ ...json, current }));
+    for (const v of order) put(root, `artifacts/${AF}/${v}/index.html`, v === 'v1' ? G1 : G2);
+    return lib.readArtifactStore(root).records.get(G_U).order;
+  };
+  assert.deepStrictEqual(orderOf(['v2', 'v1'], 'v2'), ['v1', 'v2'], 'written newest first by v1.20.7 and before');
+  assert.deepStrictEqual(orderOf(['v1', 'v2'], 'v2'), ['v1', 'v2']);
+  assert.deepStrictEqual(orderOf(['v2'], 'v2'), ['v2']);
+});
+
 test('artifactViewsFromDisk: a listed artifact with no rel is not the owner\'s for local links', () => {
   const views = (rel) => {
     const root = megaWith(tmpRoot(), FULL);

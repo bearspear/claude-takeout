@@ -2640,7 +2640,9 @@ test('runArtifactStep with a store does not fetch a version it already holds who
     const step = await runArtifactStep(__root, { store, artifacts: __arts, full: false, listed: 2, fetchPublished: __fetch, picturesAllowed: false, parts: null });
     return JSON.stringify({ views: step.views, rows: step.rows, whole: step.whole });
   })()`, sb));
-  assert.strictEqual(fetcher.count('publishedPageInfo', U(1)), 0);
+  // Guide's current version is held whole: no file fetched; its history is asked once (v1.21), with nothing older.
+  assert.strictEqual(fetcher.count('publishedPageInfo', U(1)), 1);
+  assert.strictEqual(fetcher.count('publishedPageFile', U(1)), 0);
   assert.strictEqual(fetcher.count('publishedPageFile', U(2)), 1);
   const g = artFolder('Guide', U(1));
   const p = artFolder('Part', U(2));
@@ -3300,7 +3302,9 @@ test('each artifact gets a view record', async () => {
   for (const options of [{}, { directory: new FakeDir() }]) {
     const { views } = await runArtifacts({ frames, pages, options });
     assert.strictEqual(views.length, 6);
-    const game = views[1];
+    // Every view carries its versions for the version menu (v1.21); the rest of the record is pinned below.
+    assert.ok(views.every((v) => Array.isArray(v.versions)));
+    const game = (({ versions, ...rest }) => rest)(views[1]);
     const id = uuidToBase58(U(2));
     assert.deepStrictEqual(game, {
       id, title: 'Game', kind: 'Page', typed: false, docs: false, shared: false, foreign: false, public: false,
@@ -4120,7 +4124,7 @@ test('a paged artifact claude.ai serves no version of gets the no-published-vers
 });
 
 test('Export Changes includes changed artifacts only and records versions', async () => {
-  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' } } } };
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' }, artifactVersions: { [U(1)]: [LIVE], [U(2)]: ['old-ver'] } } } };
   const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-09T00:00:00Z')];
   const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-09T00:00:00Z') };
   const frames = [art(U(1), 'One'), art(U(2), 'Two'), art(U(3), 'Three')];
@@ -4141,7 +4145,7 @@ test('Export Changes includes changed artifacts only and records versions', asyn
 });
 
 test('Export Changes runs when only an artifact changed', async () => {
-  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' } } } };
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE, [U(2)]: 'old-ver' }, artifactVersions: { [U(1)]: [LIVE], [U(2)]: ['old-ver'] } } } };
   const list = [listed('a', '2026-01-01T00:00:00Z')];
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
   const fetcher = publishedFetcher({ [U(2)]: livePage('Two', { 'index.html': '2' }) });
@@ -4209,10 +4213,14 @@ test('exportAllArtifacts defaults to true and round-trips', async () => {
 test('changedArtifacts takes artifacts whose listed version differs, and all with no record', () => {
   const sb = exportPopup().sandbox;
   sb.__list = [art(U(1), 'a'), art(U(2), 'b', { live: 'v2' }), art(U(3), 'c', { live: null })];
-  const pick = (rec) => { sb.__rec = rec; return vm.runInContext('changedArtifacts(__list, __rec)', sb).map((a) => a.slug); };
+  const pick = (rec, vers = { [U(1)]: [LIVE] }) => { sb.__rec = rec; sb.__vers = vers; return vm.runInContext('changedArtifacts(__list, __rec, __vers)', sb).map((a) => a.slug); };
   assert.deepStrictEqual(pick(undefined), [U(1), U(2), U(3)]);
   assert.deepStrictEqual(pick({ [U(1)]: LIVE, [U(2)]: 'v1', [U(3)]: '' }), [U(2)]);
   assert.deepStrictEqual(pick({}), [U(1), U(2), U(3)]);
+  // v1.21: a record with no versions (from before) includes an unchanged artifact once; one whose live version isn't
+  // among its recorded versions too; one with no live version never.
+  assert.deepStrictEqual(pick({ [U(1)]: LIVE, [U(3)]: '' }, null), [U(1), U(2)]);
+  assert.deepStrictEqual(pick({ [U(1)]: LIVE, [U(3)]: '' }, { [U(1)]: ['v0'] }), [U(1), U(2)]);
 });
 
 test('an artifact saved with a file missing is not recorded, after a failed file or a 401', async () => {
@@ -4502,13 +4510,15 @@ test('a listed artifact\'s folder uses the list title from the first chat publis
 test('the artifact step adds the current version only when its folder isn\'t there', async () => {
   const chat = () => Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
   const page = () => publishedFetcher({ [PUB_U]: { title: 'Guide', history: ['v1', 'v2'], versions: { v1: { files: { 'index.html': 'ONE' } }, v2: { files: { 'index.html': 'TWO' } } } } });
-  // Live v1: the chat saved it whole, so the step fetches nothing.
+  // Live v1: the chat saved it whole, so the step fetches nothing for it; v2, in claude.ai's history, is saved as
+  // another version (v1.21: every version).
   let fetcher = page();
   let out = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat() }, setup: bulkWithArtifacts({ frames: [art(PUB_U, 'Guide', { live: 'v1' })], fetcher }) });
   let files = await zipFiles(out.zip);
   const f = artFolder('Guide', PUB_U);
-  assert.deepStrictEqual([fetcher.count('publishedPageInfo'), fetcher.count('publishedPageFile')], [1, 1]);
-  assert.deepStrictEqual(storeFiles(files, f), [`artifacts/${f}/artifact.json`, `artifacts/${f}/v1/index.html`]);
+  assert.deepStrictEqual([fetcher.count('publishedPageInfo'), fetcher.count('publishedPageFile')], [2, 2]);
+  assert.strictEqual(fetcher.calls.filter((c) => c.ver === 'v1' && c.action === 'publishedPageFile').length, 1, 'v1 only by the chat');
+  assert.deepStrictEqual(storeFiles(files, f), [`artifacts/${f}/artifact.json`, `artifacts/${f}/v1/index.html`, `artifacts/${f}/v2/index.html`]);
   assert.deepStrictEqual(out.store.exportRecord['org-1'].artifacts, { [PUB_U]: 'v1' });
   // Live v2: the step adds it beside the chat's v1.
   fetcher = page();
@@ -4885,7 +4895,7 @@ test('a multi-file same version copied from a chat gets a ZIP of the copy', asyn
 });
 
 test('Export Changes writes no ZIP for an artifact it does not write', async () => {
-  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE } } } };
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE }, artifactVersions: { [U(1)]: [LIVE] } } } };
   const list = [listed('a', '2026-01-01T00:00:00Z'), listed('b', '2026-01-09T00:00:00Z')];
   const chats = { a: chatFor('a', '2026-01-01T00:00:00Z'), b: chatFor('b', '2026-01-09T00:00:00Z') };
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
@@ -4968,4 +4978,246 @@ test('a Design artifact\'s boards are kept ahead of its other files in the previ
   vm.runInNewContext(out[`viewer-files/part-${String(views[0].part).padStart(4, '0')}.js`], { window: { __archivePart: (n, o) => { held = o; } } });
   const kept = [...held[views[0].key].texts.map((t) => t[0])];
   assert.deepStrictEqual(kept.slice(0, 3), ['index.html', 'project/canvas.json', 'project/Main.dc.html'], kept.join());
+});
+
+test('cleanPublishedInfo keeps listFromLive only as true', () => {
+  const clean = vm.runInContext('cleanPublishedInfo', exportPopup().sandbox);
+  const base = { ver: 'v1', title: 'T', history: ['v1'], files: [{ path: 'index.html', size: null, contentType: 'text/html', sha256: null }], rejected: [], runtimeSkipped: 0 };
+  assert.strictEqual(clean({ ...base, listFromLive: true }).listFromLive, true);
+  for (const v of [false, 'true', 1, undefined]) assert.strictEqual(clean({ ...base, listFromLive: v }).listFromLive, false, String(v));
+});
+
+// ---- Every version of every artifact (v1.21) ----
+const histPage = (title, versions, extra = {}) => ({ title, live: LIVE, history: Object.keys(versions), versions, ...extra });
+const infoCalls = (fetcher) => fetcher.calls.filter((c) => c.action === 'publishedPageInfo').map((c) => [c.uuid, c.ver]);
+
+test('every older version is saved in its own folder, oldest first in artifact.json', async () => {
+  const frames = [art(U(1), 'Guide')];
+  const pages = { [U(1)]: histPage('Guide', { v1: { files: { 'index.html': 'one' } }, v2: { files: { 'index.html': 'two' } }, [LIVE]: { files: { 'index.html': 'live' } } }) };
+  const { files, fetcher } = await runArtifacts({ frames, pages });
+  const f = artFolder('Guide', U(1));
+  assert.deepStrictEqual([files[`${f}/v1/index.html`], files[`${f}/v2/index.html`], files[`${f}/${LIVE}/index.html`]], ['one', 'two', 'live']);
+  const json = JSON.parse(files[`${f}/artifact.json`]);
+  assert.deepStrictEqual([json.order, json.current], [['v1', 'v2', LIVE], LIVE]);
+  for (const v of ['v1', 'v2']) {
+    assert.strictEqual(json.versions[v].saved, true, v);
+    assert.ok(json.versions[v].files.every((x) => x.verified === true && /^[0-9a-f]{64}$/.test(x.sha256)), v);
+  }
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE], [U(1), 'v1'], [U(1), 'v2']], 'the current version first, then oldest to newest');
+  assert.ok(!files['errors.txt'], files['errors.txt']);
+});
+
+test('a version the store already has whole is not fetched again', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: histPage('Guide', { v1: { files: { 'index.html': 'one' } }, [LIVE]: { files: { 'index.html': 'live' } } }) });
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const whole = { folder: 'v1', files: [{ path: 'index.html', savedAs: 'index.html', size: 3, contentType: 'text/html', sha256: '${'c'.repeat(64)}' }],
+      start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: [] };
+    store.record('${U(1)}', { title: 'Guide' }).versions.set('v1', whole);
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return JSON.stringify({ whole: step.whole });
+  })()`, sb));
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE]]);
+  assert.deepStrictEqual(out.whole, [true]);
+});
+
+test('an older version claude.ai no longer serves is settled and noted, not warned', async () => {
+  const frames = [art(U(1), 'Guide')];
+  const page = histPage('Guide', { v1: { files: { 'index.html': 'one' } }, v2: { files: { 'index.html': 'two' } }, [LIVE]: { files: { 'index.html': 'live' } } });
+  delete page.versions.v1;
+  const { files } = await runArtifacts({ frames, pages: { [U(1)]: page } });
+  const json = JSON.parse(files[`${artFolder('Guide', U(1))}/artifact.json`]);
+  assert.match(json.note, /1 older version no longer on claude\.ai/);
+  assert.ok(!files['errors.txt'], files['errors.txt']);
+  assert.ok(!json.incomplete);
+});
+
+test('older versions that fail are warned once and leave the artifact not whole', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: histPage('Guide', {
+    v1: { files: { 'index.html': { body: 'tampered', sha256: sha('original') } } },
+    v2: { files: { 'index.html': { body: 'x', error: { error: 'network' } } } },
+    [LIVE]: { files: { 'index.html': 'live' } },
+  }) });
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: '' });
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return JSON.stringify({ whole: step.whole, warnings: step.collector.warnings.map((w) => w.error) });
+  })()`, sb));
+  assert.deepStrictEqual(out.whole, [false]);
+  const mine = out.warnings.filter((w) => /older versions? could not be saved/.test(w));
+  assert.strictEqual(mine.length, 1, JSON.stringify(out.warnings));
+  assert.match(mine[0], /2 older versions could not be saved/);
+  assert.ok(!/https?:/.test(mine[0]), 'codes only');
+  const json = JSON.parse(root.written[`${artFolder('Guide', U(1))}/artifact.json`]);
+  assert.deepStrictEqual([json.versions.v1.incomplete, json.versions.v2.incomplete], [true, true]);
+});
+
+test('a 401 in an artifact\'s history stops fetching', async () => {
+  const frames = [art(U(1), 'Guide'), art(U(2), 'Next')];
+  const pages = {
+    [U(1)]: histPage('Guide', { v1: { files: { 'index.html': { body: 'x', error: { error: 'HTTP 401', status: 401 } } } }, v2: { files: { 'index.html': 'two' } }, [LIVE]: { files: { 'index.html': 'live' } } }),
+    [U(2)]: livePage('Next', { 'index.html': 'n' }),
+  };
+  const { files, fetcher } = await runArtifacts({ frames, pages });
+  assert.strictEqual(files[`${artFolder('Guide', U(1))}/${LIVE}/index.html`], 'live', 'the current version stays saved');
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE], [U(1), 'v1']]);
+  assert.strictEqual((files['errors.txt'].match(/signed out|HTTP 401/g) || []).length >= 1, true);
+});
+
+test('an older Cowork version takes the live version\'s paths, unverified, a path it lacks missing', async () => {
+  const frames = [art(U(1), 'Notes', { sourceSurface: 'cowork' })];
+  const pages = { [U(1)]: histPage('Notes', {
+    v1: { listFromLive: true, files: { 'index.html': { body: 'old', unverified: true }, 'app.js': { body: 'x', unverified: true, error: { error: 'HTTP 404', status: 404 } } } },
+    [LIVE]: { files: { 'index.html': { body: 'new', unverified: true }, 'app.js': { body: 'go()', unverified: true } } },
+  }) };
+  const { files } = await runArtifacts({ frames, pages });
+  const f = artFolder('Notes', U(1));
+  assert.strictEqual(files[`${f}/v1/index.html`], 'old');
+  const v1 = JSON.parse(files[`${f}/artifact.json`]).versions.v1;
+  assert.ok(v1.files.every((x) => x.verified === false));
+  assert.deepStrictEqual(v1.missing, ['app.js']);
+  assert.strictEqual(v1.folder, 'v1');
+});
+
+test('Claude Docs fetch no history', async () => {
+  const frames = [art(U(1), 'Doc', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' })];
+  const pages = { [U(1)]: histPage('Doc', { v1: { files: {} }, [LIVE]: { files: {} } }) };
+  const { fetcher } = await runArtifacts({ frames, pages });
+  assert.strictEqual(fetcher.calls.filter((c) => c.ver === 'v1').length, 0);
+});
+
+const histFetcher = (broken = {}) => publishedFetcher({ [U(1)]: histPage('Guide', {
+  v1: { files: { 'index.html': 'one' } },
+  v2: { files: { 'index.html': broken.v2 ? { body: 'x', error: { error: 'network' } } : 'two' } },
+  [LIVE]: { files: { 'index.html': 'live' } },
+}) });
+const changesRun = (stored, fetcher) => runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored,
+  options: { changesOnly: true }, setup: bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher }) });
+const recordOf = (store) => store.exportRecord['org-1'];
+
+test('Export Changes skips older versions an earlier Export All saved', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: 'old' }, artifactVersions: { [U(1)]: ['v1'] } } } };
+  const fetcher = histFetcher();
+  const { store } = await changesRun(stored, fetcher);
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE], [U(1), 'v2']]);
+  assert.deepStrictEqual([...recordOf(store).artifactVersions[U(1)]].sort(), [LIVE, 'v1', 'v2'].sort());
+  assert.strictEqual(recordOf(store).artifacts[U(1)], LIVE);
+});
+
+test('a failed older version keeps the artifact in the next Export Changes', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: 'old' }, artifactVersions: { [U(1)]: ['v1'] } } } };
+  const first = await changesRun(stored, histFetcher({ v2: true }));
+  assert.notStrictEqual(recordOf(first.store).artifacts[U(1)], LIVE, 'not recorded as exported');
+  assert.ok(!recordOf(first.store).artifactVersions[U(1)].includes('v2'));
+  assert.ok(recordOf(first.store).artifactVersions[U(1)].includes(LIVE));
+  const fetcher = histFetcher();
+  const second = await changesRun(first.store, fetcher);
+  assert.deepStrictEqual(infoCalls(fetcher).filter(([, v]) => v !== LIVE), [[U(1), 'v2']], 'only the failed older version is fetched again');
+  assert.strictEqual(recordOf(second.store).artifacts[U(1)], LIVE);
+});
+
+test('a record from before v1.21 fetches every version once', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: 'old' } } } };
+  const fetcher = histFetcher();
+  const { store } = await changesRun(stored, fetcher);
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE], [U(1), 'v1'], [U(1), 'v2']]);
+  assert.deepStrictEqual([...recordOf(store).artifactVersions[U(1)]].sort(), [LIVE, 'v1', 'v2'].sort());
+});
+
+test('Export Artifacts records nothing, and a full Export All fetches every version', async () => {
+  const fetcher = histFetcher();
+  const { store } = await runArtifacts({ frames: [art(U(1), 'Guide')], pages: { [U(1)]: histPage('Guide', { v1: { files: { 'index.html': 'one' } }, v2: { files: { 'index.html': 'two' } }, [LIVE]: { files: { 'index.html': 'live' } } }) } });
+  assert.ok(!store.exportRecord);
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: {}, artifacts: { [U(1)]: LIVE }, artifactVersions: { [U(1)]: ['v1', 'v2', LIVE] } } } };
+  const full = histFetcher();
+  await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored, setup: bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher: full }) });
+  assert.deepStrictEqual(infoCalls(full), [[U(1), LIVE], [U(1), 'v1'], [U(1), 'v2']], 'a full export saves every version, every time');
+});
+
+test('artifactViewParts: a reserve keeps room for what comes later', () => {
+  const { artifactViewParts, ARTIFACT_HISTORY_RESERVE } = require('../takeout-viewer.js');
+  assert.strictEqual(ARTIFACT_HISTORY_RESERVE, 64 * 1024 * 1024);
+  const older = { texts: [['a.html', 'x'.repeat(650)]], images: [] };
+  const current = { texts: [['b.html', 'y'.repeat(400)]], images: [] };
+  const parts = artifactViewParts({ budget: 1000, partLimit: 1e6 });
+  assert.strictEqual(parts.add({}, older, { reserve: 400 }).part, null, 'an older preview past budget - reserve is left out');
+  assert.notStrictEqual(parts.add({}, current).part, null, 'and the budget is not marked full');
+  assert.notStrictEqual(artifactViewParts({ budget: 1000, partLimit: 1e6 }).add({}, older).part, null);
+});
+
+test('older versions get preview parts: in the standalone viewer\'s versions and Export All\'s viewer data', async () => {
+  const pages = { [U(1)]: histPage('Guide', { v1: { files: { 'index.html': '<h1>one</h1><!--V1-->' } }, [LIVE]: { files: { 'index.html': 'live' } } }) };
+  const { views } = await runArtifacts({ frames: [art(U(1), 'Guide')], pages });
+  const vs = views[0].versions;
+  assert.deepStrictEqual(vs.map((e) => [e.ver, e.current]), [['v1', false], [LIVE, true]]);
+  assert.ok(Number.isSafeInteger(vs[0].part) && vs[0].part > 0 && typeof vs[0].key === 'string', JSON.stringify(vs[0]));
+  assert.strictEqual(vs[0].folder, `${artFolder('Guide', U(1))}/v1`);
+  const { zip } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') },
+    setup: bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher: publishedFetcher(pages) }), assets: true });
+  const html = await zip.file('viewer.html').async('string');
+  const data = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(html)[1]);
+  const e1 = data.artifacts[0].versions.find((e) => e.ver === 'v1');
+  assert.ok(e1 && Number.isSafeInteger(e1.part) && e1.folder === `artifacts/${artFolder('Guide', U(1))}/v1`, JSON.stringify(e1));
+});
+
+// ---- v1.21 final review fixes ----
+const stepWithStored = async (stored, extra = '') => {
+  const sb = exportPopup().sandbox;
+  const fetcher = histFetcher();
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const v = ${JSON.stringify(stored)};
+    Object.defineProperty(v, 'preview', { value: { texts: [['index.html', 'live']], images: [] }, writable: true, configurable: true });
+    store.record('${U(1)}', { title: 'Guide' }).versions.set('${LIVE}', v);
+    ${extra}
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return JSON.stringify({ whole: step.whole, notExported: step.views[0].notExported, saved: step.versionsSaved });
+  })()`, sb));
+  return { out, fetcher, root };
+};
+
+test('older versions are fetched when the current version came whole from a chat (kept)', async () => {
+  const { out, fetcher } = await stepWithStored({ folder: LIVE, files: [{ path: 'index.html', savedAs: 'index.html', size: 4, contentType: 'text/html', sha256: 'c'.repeat(64) }],
+    start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: [] });
+  assert.ok(infoCalls(fetcher).some(([, v]) => v === 'v1') && infoCalls(fetcher).some(([, v]) => v === 'v2'), JSON.stringify(infoCalls(fetcher)));
+  assert.deepStrictEqual([out.whole[0], out.notExported], [true, false]);
+  assert.deepStrictEqual([...out.saved[0]].sort(), [LIVE, 'v1', 'v2'].sort());
+});
+
+test('older versions are fetched when the current version is a chat\'s own file (same)', async () => {
+  const { fetcher } = await stepWithStored({ folder: null, files: [{ path: 'index.html', savedAs: 'index.html', size: 4, contentType: 'text/html', sha256: 'c'.repeat(64) }],
+    start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: false, sameAs: { 'index.html': 'Chat_a/artefacts/guide.html' }, publishedIn: [] });
+  assert.ok(infoCalls(fetcher).some(([, v]) => v === 'v1'), JSON.stringify(infoCalls(fetcher)));
+});
+
+test('an unchanged artifact with a record from before v1.21 is included once for its versions', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '2026-01-01T00:00:00Z' }, artifacts: { [U(1)]: LIVE } } } };
+  const fetcher = histFetcher();
+  const { store } = await changesRun(stored, fetcher);
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE], [U(1), 'v1'], [U(1), 'v2']]);
+  assert.deepStrictEqual([...recordOf(store).artifactVersions[U(1)]].sort(), [LIVE, 'v1', 'v2'].sort());
+  const again = histFetcher();
+  await changesRun(store, again);
+  assert.deepStrictEqual(infoCalls(again), [], 'then left out while nothing changed');
+});
+
+test('Export All finishes when the artifact step stops early', async () => {
+  const setup = (sb) => {
+    bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher: histFetcher() })(sb);
+    vm.runInContext('const __origStep = runArtifactStep; runArtifactStep = async (...a) => { const s = await __origStep(...a); s.entries = []; s.whole = []; s.versionsSaved = []; return s; };', sb);
+  };
+  const { zip, status } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup });
+  assert.ok(zip, 'the export was written');
+  assert.notStrictEqual(status.className, 'status error', status.textContent);
 });

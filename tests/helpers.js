@@ -179,6 +179,7 @@ function publishedFetcher(pages) {
       return {
         ver, title: page.title, history: page.history || Object.keys(page.versions), rejected: v.rejected || [],
         ...(page.runtimeSkipped !== undefined ? { runtimeSkipped: page.runtimeSkipped } : {}),
+        ...(v.listFromLive ? { listFromLive: true } : {}),
         files: Object.entries(v.files).map(([path, raw]) => {
           const f = fileOf(raw);
           const body = Buffer.from(f.body);

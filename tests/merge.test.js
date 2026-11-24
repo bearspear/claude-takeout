@@ -1098,3 +1098,40 @@ test('formatReport says why a written merge did not succeed', () => {
   const text = formatReport({ status: 'written', ok: false, dest: '/x/m', reason: '1 source ZIP entry was not extracted (see the warnings)', sources: [], warnings: ['s.zip: entry not extracted: a/C/a.md'] });
   assert.match(text, /^written: \/x\/m\nnot complete: 1 source ZIP entry was not extracted/);
 });
+
+test('merging a reversed-order archive with an oldest-first one keeps one order', async () => {
+  const tmp = tmpRoot();
+  const mk = (name, at, order, current) => {
+    const root = path.join(tmp, name);
+    mega(root, at, { [`Chat_${name}`]: chatJson(name, at) });
+    put(root, 'export-manifest.json', manifestOf(at));
+    put(root, `artifacts/Guide_${SID}/artifact.json`, format2(U, 'Guide', { current, versions: Object.fromEntries(order.map(v => [v, v2(v, `Guide ${v}`)])) }));
+    for (const v of order) put(root, `artifacts/Guide_${SID}/${v}/index.html`, `Guide ${v}`);
+    return root;
+  };
+  const old = mk('o', '2026-11-01T00:00:00Z', ['v2', 'v1'], 'v2');
+  const newer = mk('n', '2026-11-05T00:00:00Z', ['v1', 'v2', 'v3'], 'v3');
+  const r = await merge([old, newer], { out: path.join(tmp, 'out'), name: 'm', now: NOW });
+  assert.strictEqual(r.ok, true, r.reason);
+  assert.deepStrictEqual(artifactJson(path.join(tmp, 'out', 'm'), `Guide_${SID}`).order, ['v1', 'v2', 'v3']);
+});
+
+test('a v1.21 export merges and rebuilds with every version', async () => {
+  const tmp = tmpRoot();
+  const mk = (name, at, vers, current) => {
+    const root = path.join(tmp, name);
+    mega(root, at, { [`Chat_${name}`]: chatJson(name, at) });
+    put(root, 'export-manifest.json', manifestOf(at));
+    put(root, `artifacts/Guide_${SID}/artifact.json`, format2(U, 'Guide', { current, versions: Object.fromEntries(vers.map(v => [v, v2(v, `Guide ${v}`)])) }));
+    for (const v of vers) put(root, `artifacts/Guide_${SID}/${v}/index.html`, `Guide ${v}`);
+    return root;
+  };
+  const r = await merge([mk('a', '2026-11-01T00:00:00Z', ['v1', 'v2'], 'v2'), mk('b', '2026-11-05T00:00:00Z', ['v1', 'v2', 'v3'], 'v3')], { out: path.join(tmp, 'o'), name: 'm', now: NOW });
+  assert.strictEqual(r.ok, true, r.reason);
+  const d = path.join(tmp, 'o', 'm');
+  assert.deepStrictEqual(fs.readdirSync(path.join(d, 'artifacts', `Guide_${SID}`)).sort(), ['artifact.json', 'v1', 'v2', 'v3']);
+  assert.deepStrictEqual(artifactJson(d, `Guide_${SID}`).order, ['v1', 'v2', 'v3']);
+  const versions = viewerData(d).artifacts[0].versions;
+  assert.deepStrictEqual(versions.map(e => [e.ver, e.current]), [['v1', false], ['v2', false], ['v3', true]]);
+  assert.ok(versions.filter(e => !e.current).every(e => Number.isSafeInteger(e.part)), JSON.stringify(versions));
+});
