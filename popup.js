@@ -8,7 +8,7 @@ let refreshSkipped = false;
 // The Everything section's state: this org's export record, the counts (Count button; kept for the panel's
 // life), whether Count is running or failed (its code), a short-lived summary message, and whether the tab is
 // on claude.ai.
-const panel = { record: null, counts: null, countsOrg: null, counting: false, countError: '', flash: '', flashTimer: null, onClaude: false };
+const panel = { record: null, counts: null, countsOrg: null, counting: false, countError: '', flash: '', flashTimer: null, staleTimer: null, onClaude: false };
 
 // ============================================================================
 // Error Collector: Structured error tracking for comprehensive error reporting
@@ -4446,7 +4446,12 @@ function hideProgress() {
 }
 
 // Runs once an export has ended: a tab change that came in meanwhile is followed now.
+// The export buttons come back as the choices and the loaded chat now stand, not as they were at the click.
 function finishRun() {
+  if (typeof document !== 'undefined') {
+    for (const id of CHAT_BUTTONS) document.getElementById(id).disabled = !conversationData || exportRunning;
+    renderEverything();
+  }
   if (refreshDeferred) {
     refreshDeferred = false;
     requestData({ preserveStatus: true });
@@ -6212,7 +6217,8 @@ function nothingChanged(plan, counts) {
   return !counts.changedChats && !(plan.withArtifacts && counts.changedArtifacts);
 }
 
-function everythingSummary({ plan, counts, format, since, isPopup }) {
+// stale: counts older than the cache limit, which show their numbers but not "Nothing changed".
+function everythingSummary({ plan, counts, format, since, isPopup, stale = false }) {
   if (!plan.run) return 'Tick Chats or Artifacts.';
   const parts = [];
   const chats = plan.run === 'bulk';
@@ -6225,7 +6231,7 @@ function everythingSummary({ plan, counts, format, since, isPopup }) {
   }
   parts.push(plan.changesOnly ? `Only what changed since the last Export All, ${since}.` : 'Everything, whatever was exported before.');
   if (!chats && since) parts.push('Changes only needs Chats ticked.');
-  if (nothingChanged(plan, counts)) parts.push(`Nothing changed since ${since}.`);
+  if (!stale && nothingChanged(plan, counts)) parts.push(`Nothing changed since ${since}.`);
   parts.push(format === 'zip'
     ? 'One ZIP download when it finishes.'
     : `Into a new folder inside one you pick, written as it goes.${isPopup ? ' From the popup, this continues in the sidebar.' : ''}`);
@@ -6238,6 +6244,24 @@ function exportDisabledReason(plan, counts, since) {
   return '';
 }
 
+// What the Done list calls each warning type, [one, more]; any other type is "<type> warning(s)".
+const WARNING_NOUNS = {
+  upload: ['upload could not be downloaded', 'uploads could not be downloaded'],
+  published_page: ['artifact problem', 'artifact problems'],
+  artifact_export: ['artifact problem', 'artifact problems'],
+  export_health: ['chat looks incomplete', 'chats look incomplete'],
+  str_replace_failed: ['edit could not be replayed', 'edits could not be replayed'],
+  artifact_opaque_mutation: ["file changed by a command the export can't follow", "files changed by a command the export can't follow"],
+  write: ['file could not be written', 'files could not be written'],
+  chat: ['chat could not be exported', 'chats could not be exported'],
+  viewer: ['viewer could not be built', 'viewer problems'],
+  web_image: ['web image not saved', 'web images not saved'],
+  tool_image: ['image Claude looked at not saved', 'images Claude looked at not saved'],
+  presented_file: ['file Claude made could not be downloaded', 'files Claude made could not be downloaded'],
+  delivered_file: ['file Claude made could not be downloaded', 'files Claude made could not be downloaded'],
+  project_doc: ['project document not saved', 'project documents not saved'],
+};
+
 // Warnings grouped by type, one line each: "<count> <noun phrase> (<example>)".
 function warningGroups(list, max = 5) {
   const groups = new Map();
@@ -6247,9 +6271,8 @@ function warningGroups(list, max = 5) {
   }
   const lines = [...groups].map(([type, g]) => {
     const s = g.n === 1 ? '' : 's';
-    const noun = type === 'upload' ? `upload${s} could not be downloaded`
-      : type === 'published_page' || type === 'artifact_export' ? `artifact problem${s}`
-        : `${type} warning${s}`;
+    const words = WARNING_NOUNS[type];
+    const noun = words ? words[g.n === 1 ? 0 : 1] : `${type} warning${s}`;
     return `${g.n} ${noun} (${g.example})`;
   });
   return { lines: lines.slice(0, max), more: Math.max(0, lines.length - max) };
@@ -6345,7 +6368,9 @@ function stoppedSavedText(result, plan) {
   if (!result.target.name) return 'Nothing was saved.';
   if (!(Number(s.chats) || Number(s.artifacts))) return `Nothing was saved into ${result.target.name}.`;
   const one = (Number(s.chats) || 0) + (Number(s.artifacts) || 0) === 1;
-  return `${savedText(result, plan)} ${one ? 'was' : 'were'} saved into ${result.target.name}. They are not recorded, so the next Changes only export takes them again.`;
+  // Changes only needs Chats, so an artifacts-only run says nothing about it.
+  const recorded = plan && plan.run === 'bulk' ? ' They are not recorded, so the next Changes only export takes them again.' : '';
+  return `${savedText(result, plan)} ${one ? 'was' : 'were'} saved into ${result.target.name}.${recorded}`;
 }
 
 function stoppedFixText(result) {
@@ -6373,14 +6398,33 @@ async function readCountsCache() {
   }
 }
 
+// True while counts are younger than the cache limit; older ones are still shown but disable nothing.
+function countsFresh(c, now = Date.now()) {
+  const age = c && typeof c.at === 'string' ? now - Date.parse(c.at) : NaN;
+  return age >= 0 && age < COUNTS_MAX_AGE;
+}
+
+// A finished export changes what changed: the org's counts are dropped, shown and cached.
+async function forgetCounts(org) {
+  panel.counts = null;
+  try {
+    const all = await readCountsCache();
+    if (org in all) {
+      delete all[org];
+      await chrome.storage.session.set({ [COUNTS_KEY]: all });
+    }
+  } catch (e) { /* nothing cached */ }
+}
+
 async function cachedCounts(org) {
   const c = (await readCountsCache())[org];
   const age = c && typeof c.at === 'string' ? Date.now() - Date.parse(c.at) : NaN;
   return age >= 0 && age < COUNTS_MAX_AGE ? c : null;
 }
 
-async function countEverything({ org, tabId, withArtifacts }) {
-  const hit = await cachedCounts(org);
+// force: a Count click, which always asks claude.ai; the cache only serves the panel opening.
+async function countEverything({ org, tabId, withArtifacts, force = false }) {
+  const hit = force ? null : await cachedCounts(org);
   if (hit && (!withArtifacts || hit.artifacts !== null)) return hit;
   const ask = async (message) => {
     let reply;
@@ -6529,7 +6573,9 @@ function showScreen(name) {
     if (section) section.hidden = s !== currentScreen;
   }
   document.getElementById('appHeader').hidden = currentScreen === 'settings';
-  for (const id of ['refresh', 'settingsOpen']) document.getElementById(id).disabled = currentScreen === 'exporting';
+  // Refresh repaints only the main screen, so it is off wherever it would do nothing.
+  document.getElementById('refresh').disabled = ['exporting', 'done', 'stopped'].includes(currentScreen);
+  document.getElementById('settingsOpen').disabled = currentScreen === 'exporting';
 }
 
 // Back to the main screen; it asks for the tab's chat again (requestData skipped tab changes meanwhile).
@@ -6592,9 +6638,17 @@ function renderEverything() {
   count.textContent = panel.counting ? 'Counting…' : c ? `Counted ${formatStamp(c.at).slice(11)}` : 'Count';
   count.className = c && !panel.counting ? 'small-btn counted' : 'small-btn';
 
-  const reason = panel.onClaude ? exportDisabledReason(plan, counts, since) : 'Open claude.ai to export.';
+  // Counts older than the cache limit still show their numbers, but no longer say Nothing changed or disable Export.
+  const fresh = countsFresh(counts);
+  const reason = panel.onClaude ? exportDisabledReason(plan, fresh ? counts : null, since) : 'Open claude.ai to export.';
   $('exportSelected').disabled = !!reason || exportRunning;
-  const text = panel.onClaude ? everythingSummary({ plan, counts, format: zip ? 'zip' : 'folder', since, isPopup: IS_POPUP }) : reason;
+  const text = panel.onClaude ? everythingSummary({ plan, counts, format: zip ? 'zip' : 'folder', since, isPopup: IS_POPUP, stale: !fresh }) : reason;
+  clearTimeout(panel.staleTimer);
+  if (counts && fresh) {
+    panel.staleTimer = setTimeout(renderEverything, Math.max(0, Date.parse(counts.at) + COUNTS_MAX_AGE - Date.now()) + 1000);
+    // Under Node (the tests) the timer must not keep the process alive; browsers have no unref.
+    if (panel.staleTimer && typeof panel.staleTimer.unref === 'function') panel.staleTimer.unref();
+  }
   $('summary').textContent = panel.flash || (panel.countError ? `Couldn't count (${panel.countError}). ${text}` : text);
 
   const last = $('lastExport');
@@ -6641,7 +6695,7 @@ document.getElementById('countBtn').addEventListener('click', async () => {
   panel.countError = '';
   renderEverything();
   try {
-    panel.counts = await countEverything({ org: orgId, tabId: currentTabId, withArtifacts: plan.withArtifacts });
+    panel.counts = await countEverything({ org: orgId, tabId: currentTabId, withArtifacts: plan.withArtifacts, force: true });
     panel.countsOrg = orgId;
   } catch (e) {
     panel.countError = (e && e.message) || 'unknown';
@@ -6676,7 +6730,7 @@ function setStep(name, state) {
 
 function beginRunScreen(plan, directory) {
   const $ = (id) => document.getElementById(id);
-  activeRun = { plan, steps: runSteps(plan), totals: {}, signal: { stopped: false } };
+  activeRun = { plan, steps: runSteps(plan), totals: {}, signal: { stopped: false }, zip: !directory };
   for (const name of ['chats', 'artifacts', 'viewer']) {
     $(`step-${name}`).hidden = !activeRun.steps.includes(name);
     setStep(name, 'pending');
@@ -6711,7 +6765,9 @@ function runProgress(ev) {
   bar.setAttribute('aria-valuemax', String(ev.total));
   bar.setAttribute('aria-valuenow', String(ev.done));
   $(`step-${ev.phase}-fill`).style.width = `${ev.total ? Math.min(100, (ev.done / ev.total) * 100) : 0}%`;
-  $(`step-${ev.phase}-sub`).textContent = ev.sub || '';
+  // The last Stop check is passed when the viewer step starts: from here the run finishes, so Stop goes.
+  if (ev.phase === 'viewer') $('stopBtn').disabled = true;
+  $(`step-${ev.phase}-sub`).textContent = ev.phase === 'viewer' ? (run.zip ? 'Compressing…' : 'Writing the viewer…') : ev.sub || '';
   $('runTitle').textContent = runTitleText(run.plan, run.totals);
   const strip = $('runWarnings');
   strip.hidden = !ev.warnings;
@@ -6756,7 +6812,9 @@ function showDone(result, plan) {
   fillList($('doneWarnings'), [...groups.lines, ...(groups.more ? [`and ${groups.more} more`] : [])]);
   $('doneNotes').textContent = (result.notes || []).join(' ');
   const files = (result.errorFiles || []).filter((f) => f === 'errors.txt' || f === 'artifacts/errors.txt');
-  $('doneErrorFiles').textContent = files.length && named ? `What to do about each is in ${files.join(' and ')} in that ${folder ? 'folder' : 'ZIP'}.` : '';
+  // Export All writes a chat's errors.txt in that chat's folder; Export Artifacts writes one at the root.
+  const where = plan.run === 'bulk' ? files.map((f) => (f === 'errors.txt' ? "errors.txt in each affected chat's folder" : f)) : files;
+  $('doneErrorFiles').textContent = files.length && named ? `What to do about each is in ${where.join(' and in ')} in that ${folder ? 'folder' : 'ZIP'}.` : '';
   $('doneTook').textContent = `Took ${durationText(result.startedAt, result.endedAt)}`;
   showScreen('done');
 }
@@ -6787,7 +6845,10 @@ async function runSelected(options = {}) {
     result = runResult({ outcome: 'failed', reason: runWarningText((e && e.message) || String(e)), target: { kind: directory ? 'folder' : 'zip', name: '' } });
   }
   activeRun = null;
-  if (result && result.outcome === 'done') showDone(result, plan);
+  if (result && result.outcome === 'done') {
+    forgetCounts(orgId);
+    showDone(result, plan);
+  }
   else showStopped(result || runResult({ outcome: 'failed', reason: 'unknown error' }), plan);
   return result;
 }
@@ -6829,17 +6890,18 @@ function folderExport(name, run, ask = null) {
 }
 const exportSelectedClick = exclusiveExport(folderExport('Export selected', (options) => runSelected(options),
   () => (currentPlan().run === 'artifacts' ? askForCardPictures() : null)));
-document.getElementById('exportSelected').addEventListener('click', () => {
-  endHandoff();
-  return exportSelectedClick();
-});
+// The handoff note stays until a run starts (runSelected ends it): a cancelled picker leaves it up.
+document.getElementById('exportSelected').addEventListener('click', () => exportSelectedClick());
 
 document.getElementById('doneBack').addEventListener('click', () => backToMain());
 document.getElementById('stoppedBack').addEventListener('click', () => backToMain());
 // Try again: a new run with the same choices (folder mode opens the picker again, from this click).
-document.getElementById('tryAgain').addEventListener('click', () => {
+// When no run starts (a cancelled picker), the main screen asks for the tab's chat if a tab change was skipped.
+document.getElementById('tryAgain').addEventListener('click', async () => {
   showScreen('main');
-  return exportSelectedClick();
+  const result = await exportSelectedClick();
+  if (currentScreen === 'main') await backToMain({ always: false });
+  return result;
 });
 
 // Opened from the popup's Export selected: take over its choices and say what to do next.
@@ -6856,6 +6918,13 @@ function handoffFrom(note) {
   if (!c || typeof c !== 'object' || (c.scope !== 'all' && c.scope !== 'changes') || c.format !== 'folder') return null;
   if (typeof c.chats !== 'boolean' || typeof c.artifacts !== 'boolean' || (!c.chats && !c.artifacts)) return null;
   return { scope: c.scope, chats: c.chats, artifacts: c.artifacts, format: 'folder' };
+}
+
+// An open sidebar takes a note the popup writes later, the same way.
+if (!IS_POPUP && chrome.storage && chrome.storage.session && chrome.storage.session.onChanged) {
+  chrome.storage.session.onChanged.addListener((changes) => {
+    if (changes && changes.folderExportNote && changes.folderExportNote.newValue !== undefined) takeHandoff();
+  });
 }
 
 async function takeHandoff() {

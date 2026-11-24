@@ -353,7 +353,7 @@ test('warningGroups groups by type and caps lines', () => {
   assert.deepStrictEqual(j(g([{ type: 'upload', text: 'a.png', chat: 'Trip notes' }])), { lines: ['1 upload could not be downloaded (Trip notes)'], more: 0 });
   assert.deepStrictEqual(j(g([{ type: 'upload', text: 'a.png' }, { type: 'upload', text: 'b.png' }])), { lines: ['2 uploads could not be downloaded (a.png)'], more: 0 });
   assert.deepStrictEqual(j(g([{ type: 'published_page', text: 'x' }, { type: 'artifact_export', text: 'y' }])), { lines: ['1 artifact problem (x)', '1 artifact problem (y)'], more: 0 });
-  assert.deepStrictEqual(j(g([{ type: 'viewer', text: 'v' }, { type: 'viewer', text: 'w' }])), { lines: ['2 viewer warnings (v)'], more: 0 });
+  assert.deepStrictEqual(j(g([{ type: 'viewer', text: 'v' }, { type: 'viewer', text: 'w' }])), { lines: ['2 viewer problems (v)'], more: 0 });
   const seven = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((t) => ({ type: t, text: t }));
   const r = j(g(seven));
   assert.strictEqual(r.lines.length, 5);
@@ -696,7 +696,7 @@ test('Export selected runs the plan and shows Done, then Stop and Stopped', asyn
   assert.strictEqual(p.el('doneHeadline').textContent, 'Done, with 1 warning');
   assert.strictEqual(p.el('doneSummary').textContent, '2 chats and 3 artifacts (5 versions) saved.');
   assert.strictEqual(p.el('doneWhere').textContent, 'Saved to Downloads as claude-takeout-2026-11-24_1102.zip.');
-  assert.strictEqual(p.el('doneErrorFiles').textContent, 'What to do about each is in errors.txt in that ZIP.');
+  assert.strictEqual(p.el('doneErrorFiles').textContent, "What to do about each is in errors.txt in each affected chat's folder in that ZIP.");
   assert.strictEqual(p.el('doneTook').textContent, 'Took 4 min 12 s');
 
   // Stop sets the signal; the run ends on the Stopped screen.
@@ -870,4 +870,198 @@ test('the handoff CSS folds This chat and rings Export selected', () => {
   assert.match(html, /body\.handoff \.this-chat \{ display: none; \}/);
   assert.match(html, /body\.handoff #exportSelected[^{]*\{[^}]*#7c3aed[^}]*0 0 0 4px #ddd6fe/);
   assert.match(html, /id="handoffNote" class="handoff-note"/);
+});
+
+// ---- Final review fixes ----
+
+const doneRun = (extra = {}) => ({ outcome: 'done', reason: '', target: { kind: 'zip', name: 'claude-takeout-2026-11-24_1102.zip' }, saved: { chats: 1, artifacts: 0, versions: 0 },
+  warnings: 0, warningList: [], errorFiles: [], notes: [], startedAt: '2026-11-24T11:02:00', endedAt: '2026-11-24T11:02:01', ...extra });
+
+test('Count skips the cache on a click', async () => {
+  const fresh = new Date().toISOString();
+  const session = { takeoutCounts: { o: { chats: 9, artifacts: null, changedChats: 9, changedArtifacts: null, at: fresh } } };
+  const { fn, sent } = countSetup(session);
+  assert.strictEqual((await fn('countEverything')({ org: 'o', tabId: 1, withArtifacts: false })).chats, 9, 'the cache serves the panel opening');
+  assert.strictEqual(sent.length, 0);
+  const c = await fn('countEverything')({ org: 'o', tabId: 1, withArtifacts: false, force: true });
+  assert.strictEqual(c.chats, 2);
+  assert.strictEqual(session.takeoutCounts.o.chats, 2);
+
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  const store = { takeoutCounts: { 'org-1': { chats: 9, artifacts: 9, changedChats: 0, changedArtifacts: 0, at: fresh } } };
+  p.sandbox.chrome.storage.session = { get: async (k) => (k in store ? { [k]: store[k] } : {}), set: async (o) => { Object.assign(store, o); } };
+  const asked = [];
+  p.sandbox.chrome.tabs.sendMessage = (id, msg, cb) => {
+    asked.push(msg.action);
+    if (msg.action === 'fetchAllConversations') cb({ data: [{ uuid: 'a', updated_at: '1' }, { uuid: 'b', updated_at: '1' }] });
+    else if (msg.action === 'listArtifacts') cb({ frames: [] });
+    else cb({});
+  };
+  await p.el('countBtn').handlers.click();
+  assert.ok(asked.includes('fetchAllConversations'), asked.join());
+  assert.strictEqual(p.el('chatCount').textContent, '2');
+});
+
+test('a run that ends Done clears the counts and their cache', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  const store = { takeoutCounts: { 'org-1': { chats: 2, artifacts: 0, changedChats: 0, changedArtifacts: 0, at: new Date().toISOString() }, other: { chats: 1, artifacts: null, changedChats: 0, changedArtifacts: null, at: new Date().toISOString() } } };
+  p.sandbox.chrome.storage.session = { get: async (k) => (k in store ? { [k]: JSON.parse(JSON.stringify(store[k])) } : {}), set: async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); } };
+  p.fn("settings.megaFormat = 'zip'");
+  p.fn("panel.counts = { chats: 2, artifacts: 0, changedChats: 0, changedArtifacts: 0, at: new Date().toISOString() }");
+  p.sandbox.bulkExportZip = async () => doneRun();
+  await p.el('exportSelected').handlers.click();
+  await sleep(10);
+  assert.strictEqual(p.fn('panel.counts'), null);
+  assert.ok(!('org-1' in store.takeoutCounts), JSON.stringify(store));
+  assert.ok('other' in store.takeoutCounts, 'another org keeps its counts');
+});
+
+test('counts older than 10 minutes do not disable Export selected', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-11-23T09:51:00', chats: { a: '1' } } } };
+  const p = panelOn('https://claude.ai/new', { stored });
+  await sleep(50);
+  p.fn("settings.megaZipScope = 'changes'");
+  p.fn("panel.counts = { chats: 2, artifacts: 0, changedChats: 0, changedArtifacts: 0, at: new Date().toISOString() }");
+  p.fn('renderEverything')();
+  assert.strictEqual(p.el('exportSelected').disabled, true, 'fresh counts say nothing changed');
+  p.fn("panel.counts = { chats: 2, artifacts: 0, changedChats: 0, changedArtifacts: 0, at: new Date(Date.now() - 11 * 60000).toISOString() }");
+  p.fn('renderEverything')();
+  assert.strictEqual(p.el('exportSelected').disabled, false);
+  assert.doesNotMatch(p.el('summary').textContent, /Nothing changed/);
+});
+
+test('the viewer step disables Stop and says what it does', async () => {
+  for (const format of ['zip', 'folder']) {
+    const p = panelOn('https://claude.ai/new');
+    await sleep(50);
+    p.fn(`settings.megaFormat = '${format}'`);
+    p.sandbox.window.showDirectoryPicker = async () => new FakeDir();
+    let seen = null;
+    p.sandbox.bulkExportZip = async (o) => {
+      o.onProgress({ phase: 'chats', done: 1, total: 1, sub: 'Alpha', warnings: 0 });
+      const before = p.el('stopBtn').disabled;
+      o.onProgress({ phase: 'viewer', done: 0, total: 1, sub: 'Viewer and index', warnings: 0 });
+      seen = { before, after: p.el('stopBtn').disabled, sub: p.el('step-viewer-sub').textContent };
+      return doneRun({ target: { kind: format, name: 'x' } });
+    };
+    await p.el('exportSelected').handlers.click();
+    assert.deepStrictEqual(seen, { before: false, after: true, sub: format === 'zip' ? 'Compressing…' : 'Writing the viewer…' }, format);
+  }
+});
+
+test('an open sidebar takes a handoff note written after it loaded', async () => {
+  const session = {};
+  const listeners = [];
+  const p = loadPopup({ location: '/sidepanel.html', session, before: (sb) => {
+    NOTE_QUERY(sb);
+    sb.chrome.storage.session.onChanged = { addListener: (f) => listeners.push(f) };
+  } });
+  await sleep(20);
+  const doc = p.sandbox.document;
+  assert.ok(!doc.body.classList.contains('handoff'));
+  assert.ok(listeners.length >= 1, 'listens for a note');
+  const note = { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: false, format: 'folder' } };
+  session.folderExportNote = note;
+  listeners.forEach((f) => f({ folderExportNote: { newValue: note } }, 'session'));
+  await sleep(20);
+  assert.ok(doc.body.classList.contains('handoff'));
+  assert.strictEqual(doc.getElementById('handoffNote').hidden, false);
+  assert.ok(!('folderExportNote' in session), 'the note is taken');
+  assert.strictEqual(vm.runInContext('settings.exportAllArtifacts', p.sandbox), false);
+});
+
+test('after a run the Everything controls follow choices changed meanwhile', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.fn("settings.megaFormat = 'zip'");
+  p.sandbox.bulkExportZip = async () => {
+    for (const id of ['pickChats', 'pickArtifacts']) { p.el(id).checked = false; p.el(id).handlers.change({ target: p.el(id) }); }
+    return doneRun();
+  };
+  await p.el('exportSelected').handlers.click();
+  assert.strictEqual(p.el('exportSelected').disabled, true, 'nothing ticked now');
+});
+
+test('warningGroups uses plain words for the common types', () => {
+  const { fn } = loadPopup();
+  const g = fn('warningGroups');
+  const line = (type, n = 1) => g(Array.from({ length: n }, () => ({ type, text: 'x' }))).lines[0];
+  assert.strictEqual(line('export_health'), '1 chat looks incomplete (x)');
+  assert.strictEqual(line('export_health', 2), '2 chats look incomplete (x)');
+  assert.strictEqual(line('str_replace_failed', 2), '2 edits could not be replayed (x)');
+  assert.strictEqual(line('artifact_opaque_mutation'), "1 file changed by a command the export can't follow (x)");
+  assert.strictEqual(line('write', 3), '3 files could not be written (x)');
+  assert.strictEqual(line('chat'), '1 chat could not be exported (x)');
+  assert.strictEqual(line('viewer'), '1 viewer could not be built (x)');
+  assert.strictEqual(line('web_image', 2), '2 web images not saved (x)');
+  assert.strictEqual(line('tool_image'), '1 image Claude looked at not saved (x)');
+  assert.strictEqual(line('presented_file', 2), '2 files Claude made could not be downloaded (x)');
+  assert.strictEqual(line('delivered_file'), '1 file Claude made could not be downloaded (x)');
+  assert.strictEqual(line('project_doc', 2), '2 project documents not saved (x)');
+  assert.strictEqual(line('claude_doc_unreplayed', 2), '2 claude_doc_unreplayed warnings (x)');
+});
+
+test('Done points Export All at each chat folder for errors.txt', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  const plan = p.fn('exportPlan');
+  const bulk = plan({ chats: true, artifacts: true, scope: 'all', hasRecord: false });
+  const arts = plan({ chats: false, artifacts: true, scope: 'all', hasRecord: false });
+  const show = (pl, errorFiles, kind = 'zip') => {
+    p.fn('showDone')(doneRun({ warnings: 1, warningList: [{ type: 'upload', text: 'x' }], errorFiles, target: { kind, name: 'n' } }), pl);
+    return p.el('doneErrorFiles').textContent;
+  };
+  assert.strictEqual(show(bulk, ['errors.txt']), "What to do about each is in errors.txt in each affected chat's folder in that ZIP.");
+  assert.strictEqual(show(bulk, ['errors.txt', 'artifacts/errors.txt'], 'folder'), "What to do about each is in errors.txt in each affected chat's folder and in artifacts/errors.txt in that folder.");
+  assert.strictEqual(show(bulk, ['artifacts/errors.txt']), 'What to do about each is in artifacts/errors.txt in that ZIP.');
+  assert.strictEqual(show(arts, ['errors.txt']), 'What to do about each is in errors.txt in that ZIP.');
+});
+
+test('Refresh is disabled on Done and Export stopped', () => {
+  const p = panelOn('https://claude.ai/new');
+  for (const s of ['done', 'stopped']) {
+    p.fn('showScreen')(s);
+    assert.strictEqual(p.el('refresh').disabled, true, s);
+    assert.strictEqual(p.el('settingsOpen').disabled, false, s);
+  }
+  p.fn('showScreen')('main');
+  assert.strictEqual(p.el('refresh').disabled, false);
+});
+
+test('Try again with a cancelled picker runs the refresh it skipped', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.fn('showScreen')('stopped');
+  p.seen.activated.forEach((f) => f({ tabId: 1 }));
+  await sleep(300);
+  assert.strictEqual(p.fn('refreshSkipped'), true);
+  const before = p.seen.queries;
+  p.sandbox.window.showDirectoryPicker = async () => { const e = new Error('cancel'); e.name = 'AbortError'; throw e; };
+  await p.el('tryAgain').handlers.click();
+  await sleep(20);
+  assert.strictEqual(p.el('screen-main').hidden, false);
+  assert.ok(p.seen.queries > before, 'the skipped refresh runs');
+  assert.strictEqual(p.fn('refreshSkipped'), false);
+});
+
+test('an artifacts-only stop does not mention Changes only', () => {
+  const { fn } = loadPopup();
+  const plan = fn('exportPlan');
+  const stopped = (pl) => fn('stoppedSavedText')({ target: { kind: 'folder', name: 'run' }, saved: { chats: 0, artifacts: 2, versions: 3 } }, pl);
+  assert.strictEqual(stopped(plan({ chats: false, artifacts: true, scope: 'all', hasRecord: true })), '2 artifacts (3 versions) were saved into run.');
+  assert.match(stopped(plan({ chats: true, artifacts: true, scope: 'all', hasRecord: true })), /They are not recorded, so the next Changes only export takes them again\.$/);
+});
+
+test('a cancelled picker keeps the handoff note', async () => {
+  const session = { folderExportNote: { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: true, format: 'folder' } } };
+  const p = loadPopup({ location: '/sidepanel.html', session, before: NOTE_QUERY });
+  await sleep(20);
+  const doc = p.sandbox.document;
+  assert.ok(doc.body.classList.contains('handoff'));
+  p.sandbox.window.showDirectoryPicker = async () => { const e = new Error('cancel'); e.name = 'AbortError'; throw e; };
+  await doc.getElementById('exportSelected').handlers.click();
+  assert.ok(doc.body.classList.contains('handoff'), 'still there after a cancelled picker');
+  assert.strictEqual(doc.getElementById('handoffNote').hidden, false);
 });
