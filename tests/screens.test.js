@@ -284,3 +284,94 @@ test('Export Artifacts reports each version and stops between artifacts', async 
   assert.strictEqual(zipStop.saved, null);
   assert.deepStrictEqual(zipStop.result.saved, { chats: 0, artifacts: 0, versions: 0 });
 });
+
+// Panel view-model (Task 4): every sentence the new screens show.
+test('formatStamp is local YYYY-MM-DD HH:MM', () => {
+  const { fn } = loadPopup();
+  const d = new Date(2026, 10, 23, 9, 5);
+  assert.strictEqual(fn('formatStamp')(d.toISOString()), '2026-11-23 09:05');
+});
+
+test('exportPlan maps the checkboxes to a run', () => {
+  const { fn } = loadPopup();
+  const plan = fn('exportPlan');
+  const j = (o) => JSON.parse(JSON.stringify(o));
+  assert.deepStrictEqual(j(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true })), { run: 'bulk', changesOnly: true, withArtifacts: true, changesAllowed: true });
+  assert.deepStrictEqual(j(plan({ chats: true, artifacts: false, scope: 'all', hasRecord: true })), { run: 'bulk', changesOnly: false, withArtifacts: false, changesAllowed: true });
+  assert.deepStrictEqual(j(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: false })), { run: 'bulk', changesOnly: false, withArtifacts: true, changesAllowed: false });
+  assert.deepStrictEqual(j(plan({ chats: false, artifacts: true, scope: 'changes', hasRecord: true })), { run: 'artifacts', changesOnly: false, withArtifacts: true, changesAllowed: false });
+  assert.deepStrictEqual(j(plan({ chats: false, artifacts: false, scope: 'all', hasRecord: true })), { run: null, changesOnly: false, withArtifacts: false, changesAllowed: false });
+});
+
+test('everythingSummary builds the sentences', () => {
+  const { fn } = loadPopup();
+  const plan = fn('exportPlan'), sum = fn('everythingSummary');
+  const counts = { chats: 27, artifacts: 19, changedChats: 3, changedArtifacts: 2, at: 'x' };
+  const base = { since: '2026-11-23 09:51', isPopup: false };
+  const all = plan({ chats: true, artifacts: true, scope: 'all', hasRecord: true });
+  assert.strictEqual(sum({ ...base, plan: all, counts, format: 'zip' }), '27 chats and 19 artifacts. Everything, whatever was exported before. One ZIP download when it finishes.');
+  assert.strictEqual(sum({ ...base, plan: all, counts: null, format: 'folder', isPopup: true }),
+    'Everything, whatever was exported before. Into a new folder inside one you pick, written as it goes. From the popup, this continues in the sidebar.');
+  assert.strictEqual(sum({ ...base, plan: all, counts: null, format: 'folder' }), 'Everything, whatever was exported before. Into a new folder inside one you pick, written as it goes.');
+  const ch = plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true });
+  assert.strictEqual(sum({ ...base, plan: ch, counts, format: 'zip' }),
+    '3 changed chats and 2 changed artifacts. Only what changed since the last Export All, 2026-11-23 09:51. One ZIP download when it finishes.');
+  // Unticking artifacts drops the artifact count.
+  const chatsOnly = plan({ chats: true, artifacts: false, scope: 'all', hasRecord: true });
+  assert.ok(!/artifact/.test(sum({ ...base, plan: chatsOnly, counts, format: 'zip' })));
+  assert.ok(/^27 chats\./.test(sum({ ...base, plan: chatsOnly, counts, format: 'zip' })));
+  // Nothing changed.
+  const zero = { ...counts, changedChats: 0, changedArtifacts: 0 };
+  assert.ok(sum({ ...base, plan: ch, counts: zero, format: 'zip' }).includes('Nothing changed since 2026-11-23 09:51.'));
+  assert.ok(!sum({ ...base, plan: all, counts: zero, format: 'zip' }).includes('Nothing changed'));
+  // Artifacts only.
+  const art = plan({ chats: false, artifacts: true, scope: 'changes', hasRecord: true });
+  assert.ok(sum({ ...base, plan: art, counts, format: 'zip' }).includes('Changes only needs Chats ticked.'));
+  const artNoRec = plan({ chats: false, artifacts: true, scope: 'all', hasRecord: false });
+  assert.ok(!sum({ ...base, since: '', plan: artNoRec, counts, format: 'zip' }).includes('Changes only needs'));
+  assert.ok(sum({ ...base, plan: art, counts, format: 'zip' }).startsWith('19 artifacts.'));
+  // Nothing ticked.
+  const none = plan({ chats: false, artifacts: false, scope: 'all', hasRecord: true });
+  assert.strictEqual(sum({ ...base, plan: none, counts, format: 'zip' }), 'Tick Chats or Artifacts.');
+});
+
+test('exportDisabledReason', () => {
+  const { fn } = loadPopup();
+  const plan = fn('exportPlan'), why = fn('exportDisabledReason');
+  const zero = { chats: 5, artifacts: 5, changedChats: 0, changedArtifacts: 0, at: 'x' };
+  assert.strictEqual(why(plan({ chats: false, artifacts: false, scope: 'all', hasRecord: true }), null), 'Tick Chats or Artifacts.');
+  assert.strictEqual(why(plan({ chats: true, artifacts: true, scope: 'all', hasRecord: true }), zero), '');
+  assert.strictEqual(why(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true }), null), '');
+  assert.strictEqual(why(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true }), { ...zero, changedChats: 1 }), '');
+  assert.strictEqual(why(plan({ chats: true, artifacts: false, scope: 'changes', hasRecord: true }), { ...zero, changedArtifacts: 4 }, '2026-11-23 09:51'), 'Nothing changed since 2026-11-23 09:51.');
+});
+
+test('warningGroups groups by type and caps lines', () => {
+  const { fn } = loadPopup();
+  const g = fn('warningGroups');
+  const j = (o) => JSON.parse(JSON.stringify(o));
+  assert.deepStrictEqual(j(g([{ type: 'upload', text: 'a.png', chat: 'Trip notes' }])), { lines: ['1 upload could not be downloaded (Trip notes)'], more: 0 });
+  assert.deepStrictEqual(j(g([{ type: 'upload', text: 'a.png' }, { type: 'upload', text: 'b.png' }])), { lines: ['2 uploads could not be downloaded (a.png)'], more: 0 });
+  assert.deepStrictEqual(j(g([{ type: 'published_page', text: 'x' }, { type: 'artifact_export', text: 'y' }])), { lines: ['1 artifact problem (x)', '1 artifact problem (y)'], more: 0 });
+  assert.deepStrictEqual(j(g([{ type: 'viewer', text: 'v' }, { type: 'viewer', text: 'w' }])), { lines: ['2 viewer warnings (v)'], more: 0 });
+  const seven = ['a', 'b', 'c', 'd', 'e', 'f', 'g'].map((t) => ({ type: t, text: t }));
+  const r = j(g(seven));
+  assert.strictEqual(r.lines.length, 5);
+  assert.strictEqual(r.more, 2);
+  assert.deepStrictEqual(j(g([])), { lines: [], more: 0 });
+});
+
+test('done screen text and run steps', () => {
+  const { fn } = loadPopup();
+  const head = fn('doneHeadline'), target = fn('doneTargetText'), steps = fn('runSteps'), plan = fn('exportPlan');
+  const j = (o) => JSON.parse(JSON.stringify(o));
+  assert.deepStrictEqual(j(head({ warnings: 0 })), { tone: 'ok', text: 'Done' });
+  assert.deepStrictEqual(j(head({ warnings: 1 })), { tone: 'warn', text: 'Done, with 1 warning' });
+  assert.deepStrictEqual(j(head({ warnings: 3 })), { tone: 'warn', text: 'Done, with 3 warnings' });
+  assert.strictEqual(target({ target: { kind: 'folder', name: 'x' } }), 'inside the folder you picked. Open viewer.html in it to browse.');
+  assert.strictEqual(target({ target: { kind: 'zip', name: 'a.zip' } }), 'Saved to Downloads as a.zip.');
+  const p = (chats, artifacts) => plan({ chats, artifacts, scope: 'all', hasRecord: false });
+  assert.deepStrictEqual(j(steps(p(true, true))), ['chats', 'artifacts', 'viewer']);
+  assert.deepStrictEqual(j(steps(p(true, false))), ['chats', 'viewer']);
+  assert.deepStrictEqual(j(steps(p(false, true))), ['artifacts', 'viewer']);
+});

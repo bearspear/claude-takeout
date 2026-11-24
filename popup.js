@@ -6357,6 +6357,95 @@ async function exportArtifacts(options = {}) {
   }
 }
 
+// ==== Panel screens
+// Pure view-model functions: every sentence the panel's screens show. No DOM, no chrome.* calls.
+
+// 'YYYY-MM-DD HH:MM' in local time.
+function formatStamp(iso) {
+  const d = new Date(iso);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+// What Export selected runs for the ticked parts. Changes only needs a record and Chats.
+function exportPlan({ chats, artifacts, scope, hasRecord }) {
+  const changesAllowed = !!(hasRecord && chats);
+  return {
+    run: chats ? 'bulk' : artifacts ? 'artifacts' : null,
+    changesOnly: scope === 'changes' && changesAllowed,
+    withArtifacts: !!artifacts,
+    changesAllowed,
+  };
+}
+
+// True when Changes only is chosen, the counts are in, and the ticked parts have nothing new.
+function nothingChanged(plan, counts) {
+  if (!plan.changesOnly || !counts) return false;
+  return !counts.changedChats && !(plan.withArtifacts && counts.changedArtifacts);
+}
+
+function everythingSummary({ plan, counts, format, since, isPopup }) {
+  if (!plan.run) return 'Tick Chats or Artifacts.';
+  const parts = [];
+  const chats = plan.run === 'bulk';
+  if (counts) {
+    const word = (n, one) => `${n} ${plan.changesOnly ? 'changed ' : ''}${one}${n === 1 ? '' : 's'}`;
+    const items = [];
+    if (chats) items.push(word(plan.changesOnly ? counts.changedChats : counts.chats, 'chat'));
+    if (plan.withArtifacts) items.push(word(plan.changesOnly ? counts.changedArtifacts : counts.artifacts, 'artifact'));
+    parts.push(`${items.join(' and ')}.`);
+  }
+  parts.push(plan.changesOnly ? `Only what changed since the last Export All, ${since}.` : 'Everything, whatever was exported before.');
+  if (!chats && since) parts.push('Changes only needs Chats ticked.');
+  if (nothingChanged(plan, counts)) parts.push(`Nothing changed since ${since}.`);
+  parts.push(format === 'zip'
+    ? 'One ZIP download when it finishes.'
+    : `Into a new folder inside one you pick, written as it goes.${isPopup ? ' From the popup, this continues in the sidebar.' : ''}`);
+  return parts.join(' ');
+}
+
+function exportDisabledReason(plan, counts, since) {
+  if (!plan.run) return 'Tick Chats or Artifacts.';
+  if (nothingChanged(plan, counts)) return since ? `Nothing changed since ${since}.` : 'Nothing changed since the last Export All.';
+  return '';
+}
+
+// Warnings grouped by type, one line each: "<count> <noun phrase> (<example>)".
+function warningGroups(list, max = 5) {
+  const groups = new Map();
+  for (const w of list || []) {
+    if (!groups.has(w.type)) groups.set(w.type, { n: 0, example: w.chat || w.text });
+    groups.get(w.type).n++;
+  }
+  const lines = [...groups].map(([type, g]) => {
+    const s = g.n === 1 ? '' : 's';
+    const noun = type === 'upload' ? `upload${s} could not be downloaded`
+      : type === 'published_page' || type === 'artifact_export' ? `artifact problem${s}`
+        : `${type} warning${s}`;
+    return `${g.n} ${noun} (${g.example})`;
+  });
+  return { lines: lines.slice(0, max), more: Math.max(0, lines.length - max) };
+}
+
+function doneHeadline(result) {
+  const n = result.warnings || 0;
+  return n ? { tone: 'warn', text: `Done, with ${n} warning${n === 1 ? '' : 's'}` } : { tone: 'ok', text: 'Done' };
+}
+
+function doneTargetText(result) {
+  return result.target.kind === 'folder'
+    ? 'inside the folder you picked. Open viewer.html in it to browse.'
+    : `Saved to Downloads as ${result.target.name}.`;
+}
+
+function runSteps(plan) {
+  const steps = [];
+  if (plan.run === 'bulk') steps.push('chats');
+  if (plan.run === 'artifacts' || (plan.run === 'bulk' && plan.withArtifacts)) steps.push('artifacts');
+  if (steps.length) steps.push('viewer');
+  return steps;
+}
+
 // Event listeners with settings-aware filenames
 // One export at a time: a second click, or a shortcut, while one runs does nothing,
 // and the export buttons are disabled meanwhile.
