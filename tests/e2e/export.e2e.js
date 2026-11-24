@@ -62,10 +62,13 @@ let projectDownloads=0;
   const sm=Object.values(sv.data.chats[0].files).find(x=>x.name==='Minutes.odt');
   check('single ZIP: each delivered version links its own file',sm&&sm.versions.map(v=>v.href).join()==='artefacts/Minutes_v1.odt,artefacts/Minutes_v2.odt',JSON.stringify(sm));
   check('single ZIP: upload links its file',sv.data.chats[0].messages[0].uploads[0].href==='uploads/p01_Uploaded.odt');
-  check('single ZIP: status is clean',(await panel.$eval('#status',s=>s.className)).includes('ready'),await panel.textContent('#status'));
+  check('single ZIP: result is clean',(await panel.$eval('#chatCard',e=>e.dataset.tone))==='ready'&&/^Saved ZIP/.test(await panel.textContent('#status')),await panel.textContent('#status'));
   // Export All saves to a folder by default; this checks the Mega-Zip.
-  await panel.evaluate(()=>{const s=document.getElementById('megaFormat');s.value='zip';s.dispatchEvent(new Event('change'));});
-  [dl]=await Promise.all([panel.waitForEvent('download',{timeout:30000}),panel.click('#exportAllZip')]);
+  // The mock has no artifacts list (404), so leave Artifacts out; this checks the chats' Mega-Zip.
+  await panel.evaluate(()=>{const b=document.getElementById('pickArtifacts');if(b.checked)b.click()});
+  await panel.click('#formatZip');
+  [dl]=await Promise.all([panel.waitForEvent('download',{timeout:30000}),panel.click('#exportSelected')]);
+  await panel.waitForSelector('#doneCard',{state:'visible',timeout:15000});
   const g=await zipFiles(await dl.path());const dirs=new Set(Object.keys(g).filter(k=>k.includes('/')).map(k=>k.split('/')[0]).filter(k=>k!=='projects'));
   const shared=Object.keys(g).filter(k=>k.endsWith('Paper.pdf'));
   check('project file stored once with intact bytes',shared.length===1&&shared[0]==='projects/Shared_Project/files/Paper.pdf'&&g[shared[0]].split('|')[2]===sha(bin),shared.join());
@@ -78,7 +81,8 @@ let projectDownloads=0;
   check('mega-ZIP: a shared project is stored once in the viewer',mv.data.projects.length===1&&mv.data.chats.filter(c=>c.project===0).length===2&&JSON.stringify(mv.data).split('"Shared Project"').length===2,JSON.stringify(mv.data.chats.map(c=>c.project)));
   check('mega-ZIP: every link lands on a file',hrefs.length>=6&&hrefs.every(h=>h&&decodeURIComponent(h) in g),hrefs.join());
   check('mega-ZIP: uploaded binary unchanged',g[Object.keys(g).find(k=>k.endsWith('uploads/p01_Uploaded.odt'))].split('|')[2]===sha(bin));
-  check('mega-ZIP: status is clean',(await panel.$eval('#status',s=>s.className)).includes('ready'),await panel.textContent('#status'));
+  check('mega-ZIP: Done screen is clean',(await panel.$eval('#doneCard',e=>e.dataset.tone))==='ok'&&/^Done$/.test((await panel.textContent('#doneHeadline')).trim()),await panel.textContent('#doneCard'));
+  await panel.click('#doneBack');
   // Review Focus 4: a viewer failure leaves the ZIP complete and says so.
   const baseFiles=Object.keys(f).filter(k=>!/^viewer/.test(k)).sort().join();
   await panel.evaluate(()=>{CTViewer.assembleViewer=()=>{throw new Error('boom')}});
@@ -86,12 +90,13 @@ let projectDownloads=0;
   const nf=await zipFiles(await dl.path());
   check('broken viewer: single ZIP still complete',Object.keys(nf).sort().join()===baseFiles,Object.keys(nf).sort().join());
   await panel.waitForFunction(()=>document.getElementById('status').textContent.includes('viewer.html could not be built'),null,{timeout:5000});
-  check('broken viewer: single ZIP status is amber',(await panel.$eval('#status',s=>s.className)).includes('warning'),await panel.textContent('#status'));
-  [dl]=await Promise.all([panel.waitForEvent('download',{timeout:30000}),panel.click('#exportAllZip')]);
+  check('broken viewer: single ZIP result is amber',(await panel.$eval('#chatCard',e=>e.dataset.tone))==='warn',await panel.textContent('#status'));
+  [dl]=await Promise.all([panel.waitForEvent('download',{timeout:30000}),panel.click('#exportSelected')]);
+  await panel.waitForSelector('#doneCard',{state:'visible',timeout:15000});
   const ng=await zipFiles(await dl.path());
   check('broken viewer: mega-ZIP still complete',Object.keys(ng).filter(k=>!k.endsWith('index.md')).sort().join()===Object.keys(g).filter(k=>!/^viewer/.test(k)&&!k.endsWith('index.md')).sort().join());
-  await panel.waitForFunction(()=>document.getElementById('status').textContent.includes('viewer.html could not be built'),null,{timeout:5000});
-  check('broken viewer: mega-ZIP status is amber',(await panel.$eval('#status',s=>s.className)).includes('warning'),await panel.textContent('#status'));
+  await panel.waitForFunction(()=>document.getElementById('doneCard').textContent.includes('viewer.html could not be built'),null,{timeout:5000});
+  check('broken viewer: mega-ZIP Done screen is amber',(await panel.$eval('#doneCard',e=>e.dataset.tone))==='warn',await panel.textContent('#doneCard'));
   check('same-prefix chats get separate folders',dirs.size===3,[...dirs].join(' ; '));console.log('      folders:',[...dirs].join(' ; '));
  }catch(e){failed++;console.log('HARNESS ERROR',e.message)}
  finally{await ctx.close();fs.rmSync(dir,{recursive:true,force:true})}
