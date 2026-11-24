@@ -2976,46 +2976,6 @@ test('EXPORT_BUTTONS lists the chat buttons and Export selected, whose label is 
   }
 });
 
-test('the popup hands Export selected in folder mode to the side panel', async () => {
-  const tick = () => new Promise((r) => setTimeout(r, 5));
-  const session = {};
-  const popup = loadPopup({ location: '/popup.html', session });
-  const sb = popup.sandbox;
-  let picker = 0;
-  let opened = null;
-  let noteAtOpen = null;
-  let closed = false;
-  sb.window.showDirectoryPicker = async () => { picker++; return new FakeDir(); };
-  sb.window.close = () => { closed = true; };
-  sb.chrome.sidePanel.open = async (o) => { opened = o; noteAtOpen = session.folderExportNote; };
-  vm.runInContext("currentTabId = 7; panel.onClaude = true; settings.megaFormat = 'folder'", sb);
-  await sb.document.getElementById('exportSelected').handlers.click();
-  await tick();
-  assert.strictEqual(picker, 0, 'no picker in the popup');
-  assert.deepStrictEqual(plain(opened), { tabId: 7 });
-  assert.ok(closed);
-  assert.ok(noteAtOpen && noteAtOpen.button === 'exportSelected', 'the note is stored before the side panel opens');
-  assert.ok(Number.isFinite(session.folderExportNote.at));
-
-  const panelSession = { folderExportNote: session.folderExportNote };
-  // The tab query never answers, so loading the chat leaves the panel to the note.
-  const panel = loadPopup({ location: '/sidepanel.html', session: panelSession, before: (s) => { s.chrome.tabs.query = () => new Promise(() => {}); } });
-  await tick();
-  const doc = panel.sandbox.document;
-  assert.strictEqual(doc.getElementById('handoffNote').hidden, false);
-  assert.strictEqual(doc.getElementById('handoffText').textContent, 'Continued from the popup. Chrome lets only the sidebar pick a folder. Click Export selected to pick where it goes.');
-  assert.ok(!('folderExportNote' in panelSession));
-  let called = false;
-  panel.sandbox.window.showDirectoryPicker = () => { called = true; return new Promise(() => {}); };
-  doc.getElementById('exportSelected').handlers.click();
-  assert.strictEqual(called, true, 'the side panel opens the picker before awaiting anything');
-  // A note for a button that no longer exists falls back to Export selected.
-  const odd = { folderExportNote: { at: Date.now(), button: 'exportAllZip', label: '<b>x</b>' } };
-  const panel2 = loadPopup({ location: '/sidepanel.html', session: odd, before: (s) => { s.chrome.tabs.query = () => new Promise(() => {}); } });
-  await tick();
-  assert.match(panel2.sandbox.document.getElementById('handoffText').textContent, /Click Export selected to pick where it goes\.$/);
-});
-
 test('index.html escapes everything from claude.ai and links only local files and claude.ai', async () => {
   const frames = [
     art(U(1), 'beta <img src=x onerror=alert(1)>', { typeTitle: '<script>alert(2)</script>', sourceSurface: '"onmouseover="x' }),

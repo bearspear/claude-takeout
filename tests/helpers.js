@@ -9,11 +9,12 @@ const REPO = path.resolve(__dirname, '..');
 const FIXTURE = path.join(__dirname, 'fixtures', 'conversation.json');
 
 function element(id) {
+  const classes = new Set();
   return {
     id, disabled: false, hidden: false, textContent: '', className: '', value: '', checked: false, title: '', style: {}, dataset: {}, children: [],
     handlers: {}, addEventListener(type, fn) { this.handlers[type] = fn; }, appendChild() {}, replaceChildren(...c) { this.children = c; },
     querySelectorAll: () => [], querySelector: () => null, setAttribute() {}, getAttribute: () => null,
-    classList: { contains: () => false, add() {}, remove() {}, toggle() {} },
+    classList: { contains: (c) => classes.has(c), add: (c) => classes.add(c), remove: (c) => classes.delete(c), toggle() {} },
   };
 }
 

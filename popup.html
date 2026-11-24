@@ -109,8 +109,11 @@
     .summary { font-size: 12px; color: #4b5563; line-height: 1.45; }
 
     /* Handoff note */
-    .handoff { display: flex; flex-direction: column; gap: 6px; margin: 12px 16px 0; padding: 10px 12px; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 10px; font-size: 13px; line-height: 1.45; }
-    .handoff .link-btn { padding: 0; }
+    .handoff-note { display: flex; flex-direction: column; gap: 6px; margin: 12px 16px 0; padding: 10px 12px; background: #f5f3ff; border: 1px solid #ddd6fe; border-radius: 10px; font-size: 13px; line-height: 1.45; }
+    .handoff-note .link-btn { padding: 0; }
+
+    body.handoff .this-chat { display: none; }
+    body.handoff #exportSelected:not(:disabled) { background: #7c3aed; color: #ffffff; border: 0; box-shadow: 0 0 0 4px #ddd6fe; }
 
     /* Footer */
     .foot { margin-top: auto; padding: 4px 16px; border-top: 1px solid #e5e7eb; font-size: 12px; color: #4b5563; display: flex; justify-content: space-between; align-items: center; min-height: 40px; gap: 8px; }
@@ -181,7 +184,7 @@
 
   <!-- Main -->
   <section class="screen" data-screen="main" id="screen-main">
-    <div id="handoffNote" class="handoff" role="status" hidden>
+    <div id="handoffNote" class="handoff-note" role="status" hidden>
       <span id="handoffText"></span>
       <button id="handoffDismiss" class="link-btn" type="button">Dismiss</button>
     </div>

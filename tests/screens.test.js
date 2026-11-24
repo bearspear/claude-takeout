@@ -782,3 +782,92 @@ test('not on claude.ai: every Everything control is disabled', async () => {
   await sleep(50);
   for (const id of ['scopeAll', 'pickChats', 'pickArtifacts', 'formatFolder', 'formatZip', 'exportSelected', 'countBtn']) assert.strictEqual(on.el(id).disabled, false, id);
 });
+
+// Popup to sidebar handoff (Task 7): the choices travel in the session note, not in a label.
+const NOTE_QUERY = (s) => { s.chrome.tabs.query = () => new Promise(() => {}); };
+
+test('popup folder export stores the choices and opens the side panel', async () => {
+  const session = {};
+  const popup = loadPopup({ location: '/popup.html', session });
+  const sb = popup.sandbox;
+  let picker = 0;
+  let opened = null;
+  let noteAtOpen = null;
+  let closed = false;
+  sb.window.showDirectoryPicker = async () => { picker++; return new FakeDir(); };
+  sb.window.close = () => { closed = true; };
+  sb.chrome.sidePanel.open = async (o) => { opened = o; noteAtOpen = session.folderExportNote; };
+  vm.runInContext("currentTabId = 7; panel.onClaude = true; panel.record = { at: '2026-11-23T09:51:00Z' }; settings.megaFormat = 'folder'; settings.megaZipScope = 'changes'; settings.exportAllChats = true; settings.exportAllArtifacts = false", sb);
+  await sb.document.getElementById('exportSelected').handlers.click();
+  await sleep(5);
+  assert.strictEqual(picker, 0);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(opened)), { tabId: 7 });
+  assert.ok(closed);
+  assert.ok(noteAtOpen, 'stored before the side panel opens');
+  assert.ok(Number.isFinite(noteAtOpen.at));
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(noteAtOpen.choices)), { scope: 'changes', chats: true, artifacts: false, format: 'folder' });
+  assert.ok(!('button' in noteAtOpen) && !('label' in noteAtOpen));
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'popup.js'), 'utf8');
+  assert.ok(!/FOLDER_BUTTON_LABELS|FOLDER_LABEL_RE/.test(src));
+});
+
+test('side panel applies stored choices and runs exportArtifacts for artifacts only', async () => {
+  const session = { folderExportNote: { at: Date.now(), choices: { scope: 'all', chats: false, artifacts: true, format: 'folder' } } };
+  const panelPage = loadPopup({ location: '/sidepanel.html', session, before: NOTE_QUERY });
+  const sb = panelPage.sandbox;
+  await sleep(20);
+  const doc = sb.document;
+  assert.ok(!('folderExportNote' in session));
+  assert.strictEqual(doc.getElementById('handoffNote').hidden, false);
+  assert.strictEqual(doc.getElementById('handoffText').textContent, 'Continued from the popup. Chrome lets only the sidebar pick a folder. Your choices came along: All, artifacts, Folder. Click Export selected to pick where it goes.');
+  assert.ok(doc.body.classList.contains('handoff'));
+  assert.strictEqual(doc.getElementById('pickChats').checked, false);
+  assert.strictEqual(doc.getElementById('pickArtifacts').checked, true);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(vm.runInContext('({ a: settings.exportAllChats, b: settings.exportAllArtifacts, c: settings.megaFormat, d: settings.megaZipScope })', sb))), { a: false, b: true, c: 'folder', d: 'all' });
+  const ran = [];
+  vm.runInContext("exportArtifacts = async (o) => { globalThis.__ran.push('artifacts'); return runResult({ outcome: 'done', target: { kind: 'folder', name: 'x' } }); }; bulkExportZip = async () => { globalThis.__ran.push('bulk'); return runResult({ outcome: 'done', target: { kind: 'folder', name: 'x' } }); }", sb);
+  sb.__ran = ran;
+  sb.window.showDirectoryPicker = async () => new FakeDir();
+  await doc.getElementById('exportSelected').handlers.click();
+  await sleep(10);
+  assert.deepStrictEqual(ran, ['artifacts']);
+  assert.ok(!doc.body.classList.contains('handoff'), 'the class goes away on the click');
+  assert.strictEqual(doc.getElementById('handoffNote').hidden, true);
+});
+
+test('Dismiss ends the handoff; chats and artifacts and Changes only read in the note', async () => {
+  const session = { folderExportNote: { at: Date.now(), choices: { scope: 'changes', chats: true, artifacts: true, format: 'folder' } } };
+  const p = loadPopup({ location: '/sidepanel.html', session, before: NOTE_QUERY });
+  await sleep(20);
+  const doc = p.sandbox.document;
+  assert.match(doc.getElementById('handoffText').textContent, /came along: Changes only, chats and artifacts, Folder\. Click/);
+  doc.getElementById('handoffDismiss').handlers.click();
+  assert.ok(!doc.body.classList.contains('handoff'));
+  assert.strictEqual(doc.getElementById('handoffNote').hidden, true);
+});
+
+test('a malformed note is ignored', async () => {
+  const bad = [
+    { at: Date.now(), button: 'exportSelected', label: 'Export selected' },
+    { at: Date.now(), choices: { scope: 'x', chats: true, artifacts: true, format: 'folder' } },
+    { at: Date.now(), choices: { scope: 'all', chats: false, artifacts: false, format: 'folder' } },
+    { at: Date.now(), choices: { scope: 'all', chats: 'yes', artifacts: true, format: 'folder' } },
+    { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: true, format: 'zip' } },
+    { at: Date.now() - 61000, choices: { scope: 'all', chats: true, artifacts: true, format: 'folder' } },
+    Date.now(), 'x', null,
+  ];
+  for (const note of bad) {
+    const p = loadPopup({ location: '/sidepanel.html', session: { folderExportNote: note }, before: NOTE_QUERY });
+    await sleep(15);
+    const doc = p.sandbox.document;
+    assert.ok(!doc.body.classList.contains('handoff'), JSON.stringify(note));
+    assert.strictEqual(doc.getElementById('handoffText').textContent, '', JSON.stringify(note));
+  }
+});
+
+test('the handoff CSS folds This chat and rings Export selected', () => {
+  const html = require('fs').readFileSync(require('path').join(__dirname, '..', 'popup.html'), 'utf8');
+  assert.match(html, /body\.handoff \.this-chat \{ display: none; \}/);
+  assert.match(html, /body\.handoff #exportSelected[^{]*\{[^}]*#7c3aed[^}]*0 0 0 4px #ddd6fe/);
+  assert.match(html, /id="handoffNote" class="handoff-note"/);
+});

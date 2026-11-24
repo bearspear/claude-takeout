@@ -6775,7 +6775,7 @@ function showStopped(result, plan) {
 async function runSelected(options = {}) {
   const plan = currentPlan();
   if (!plan.run) return null;
-  document.getElementById('handoffNote').hidden = true;
+  endHandoff();
   const directory = options && options.directory ? options.directory : null;
   const run = beginRunScreen(plan, directory);
   let result;
@@ -6794,20 +6794,22 @@ async function runSelected(options = {}) {
 
 // Export selected goes to a folder unless ZIP is chosen. The folder picker must open straight from the click.
 // The popup closes when it opens, so from the popup the side panel opens instead, with a note saying what to
-// click there.
-const FOLDER_BUTTON_LABELS = { exportSelected: 'Export selected' };
+// click there. The note carries the choices: { scope, chats, artifacts, format: 'folder' }.
+function handoffChoices() {
+  const plan = currentPlan();
+  return { scope: plan.changesOnly ? 'changes' : 'all', chats: plan.run === 'bulk', artifacts: plan.withArtifacts, format: 'folder' };
+}
 // ask(): optional, called in a ZIP export's click to start a permission request; its promise reaches run as
 // options.ask. Folder mode never asks: showDirectoryPicker needs the click's activation, and a request would
 // risk it (turn the permission on in Settings instead).
-function folderExport(buttonId, name, run, ask = null) {
+function folderExport(name, run, ask = null) {
   return async () => {
     if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return ask ? run({ ask: ask() }) : run();
     if (IS_POPUP) {
       if (chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
         // The note is stored before the panel opens, in the same click task (sidePanel.open needs the user
         // gesture, so nothing is awaited first).
-        const label = FOLDER_BUTTON_LABELS[buttonId] || name;
-        if (chrome.storage.session) chrome.storage.session.set({ folderExportNote: { at: Date.now(), button: buttonId, label } }).catch(() => {});
+        if (chrome.storage.session) chrome.storage.session.set({ folderExportNote: { at: Date.now(), choices: handoffChoices() } }).catch(() => {});
         chrome.sidePanel.open({ tabId: currentTabId }).then(() => window.close())
           .catch((e) => { flashSummary(`Could not open the side panel: ${e.message}`); });
       } else {
@@ -6825,9 +6827,12 @@ function folderExport(buttonId, name, run, ask = null) {
     return run({ directory });
   };
 }
-const exportSelectedClick = exclusiveExport(folderExport('exportSelected', 'Export selected', (options) => runSelected(options),
+const exportSelectedClick = exclusiveExport(folderExport('Export selected', (options) => runSelected(options),
   () => (currentPlan().run === 'artifacts' ? askForCardPictures() : null)));
-document.getElementById('exportSelected').addEventListener('click', exportSelectedClick);
+document.getElementById('exportSelected').addEventListener('click', () => {
+  endHandoff();
+  return exportSelectedClick();
+});
 
 document.getElementById('doneBack').addEventListener('click', () => backToMain());
 document.getElementById('stoppedBack').addEventListener('click', () => backToMain());
@@ -6837,18 +6842,42 @@ document.getElementById('tryAgain').addEventListener('click', () => {
   return exportSelectedClick();
 });
 
-// Opened from the popup's Export selected: say what to do next.
-document.getElementById('handoffDismiss').addEventListener('click', () => { document.getElementById('handoffNote').hidden = true; });
-if (!IS_POPUP && chrome.storage && chrome.storage.session) {
-  chrome.storage.session.get('folderExportNote').then((got) => {
+// Opened from the popup's Export selected: take over its choices and say what to do next.
+function endHandoff() {
+  document.body.classList.remove('handoff');
+  document.getElementById('handoffNote').hidden = true;
+}
+document.getElementById('handoffDismiss').addEventListener('click', endHandoff);
+
+// The note's choices, or null when its shape is wrong (a note from an older version has no choices).
+function handoffFrom(note) {
+  if (!note || typeof note !== 'object' || !Number.isFinite(note.at) || Date.now() - note.at > 60000) return null;
+  const c = note.choices;
+  if (!c || typeof c !== 'object' || (c.scope !== 'all' && c.scope !== 'changes') || c.format !== 'folder') return null;
+  if (typeof c.chats !== 'boolean' || typeof c.artifacts !== 'boolean' || (!c.chats && !c.artifacts)) return null;
+  return { scope: c.scope, chats: c.chats, artifacts: c.artifacts, format: 'folder' };
+}
+
+async function takeHandoff() {
+  if (IS_POPUP || !chrome.storage || !chrome.storage.session) return;
+  try {
+    const got = await chrome.storage.session.get('folderExportNote');
     const note = got && got.folderExportNote;
-    const at = note && typeof note === 'object' ? note.at : note;
-    if (!Number.isFinite(at) || Date.now() - at > 60000) return;
+    if (note === undefined) return;
     chrome.storage.session.remove('folderExportNote').catch(() => {});
-    const button = note && typeof note === 'object' && Object.prototype.hasOwnProperty.call(FOLDER_BUTTON_LABELS, note.button) ? note.button : 'exportSelected';
-    document.getElementById('handoffText').textContent = `Continued from the popup. Chrome lets only the sidebar pick a folder. Click ${FOLDER_BUTTON_LABELS[button]} to pick where it goes.`;
+    const c = handoffFrom(note);
+    if (!c) return;
+    settings.megaZipScope = c.scope;
+    settings.exportAllChats = c.chats;
+    settings.exportAllArtifacts = c.artifacts;
+    settings.megaFormat = 'folder';
+    saveSettings();
+    const parts = c.chats && c.artifacts ? 'chats and artifacts' : c.chats ? 'chats' : 'artifacts';
+    document.getElementById('handoffText').textContent = `Continued from the popup. Chrome lets only the sidebar pick a folder. Your choices came along: ${c.scope === 'changes' ? 'Changes only' : 'All'}, ${parts}, Folder. Click Export selected to pick where it goes.`;
     document.getElementById('handoffNote').hidden = false;
-  }).catch(() => {});
+    document.body.classList.add('handoff');
+    renderEverything();
+  } catch (e) { /* no note, no handoff */ }
 }
 
 document.getElementById('refresh').addEventListener('click', () => scheduleRefresh());
@@ -7034,5 +7063,5 @@ function generateFilename(name, ext, projectName = null, suffix = '') {
 // Initialize
 // ============================================================================
 
-loadSettings();
+loadSettings().then(takeHandoff);
 requestData();
