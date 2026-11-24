@@ -103,7 +103,7 @@ test('a failed chat list resolves outcome failed with the error as reason', asyn
   const { result, status } = await bulkRun({ listReply: { error: 'HTTP 500' } });
   assert.strictEqual(result.outcome, 'failed');
   assert.match(result.reason, /500/);
-  assert.strictEqual(status.className, 'status error');
+  assert.strictEqual(status.textContent, '', 'the run result, not the chat card, says what happened');
   assert.deepStrictEqual(result.saved, { chats: 0, artifacts: 0, versions: 0 });
 });
 
@@ -450,4 +450,274 @@ test('requestData never asks for the chat or artifact list', async () => {
   await fn('requestData')();
   assert.ok(sent.length > 0);
   assert.ok(sent.every((a) => ['getOrgId', 'fetchConversation'].includes(a)), sent.join());
+});
+
+// ---- Task 6: the new markup and screens ----
+const fs = require('fs');
+const path = require('path');
+const REPO_DIR = path.resolve(__dirname, '..');
+const CHAT_U = 'aaaaaaaa-0000-4000-8000-000000000001';
+
+// A panel over a tab at url: getOrgId answers 'org-1', fetchConversation the chat given. Records tab queries,
+// listeners and keydown handlers.
+function panelOn(url, { chat = null, stored = {}, location = '/sidepanel.html' } = {}) {
+  const seen = { queries: 0, activated: [], keydown: null };
+  const store = JSON.parse(JSON.stringify(stored));
+  const popup = loadPopup({
+    location,
+    before: (sb) => {
+      sb.chrome.tabs.query = async () => { seen.queries++; return [{ id: 1, url, active: true }]; };
+      sb.chrome.tabs.onActivated = { addListener: (f) => seen.activated.push(f) };
+      sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+        if (msg.action === 'getOrgId') cb({ orgId: 'org-1' });
+        else if (msg.action === 'fetchConversation') cb(chat ? { data: JSON.parse(JSON.stringify(chat)) } : { error: 'HTTP 404' });
+        else cb({});
+      };
+      sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
+      sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+      const add = sb.document.addEventListener;
+      sb.document.addEventListener = (type, f) => { if (type === 'keydown') seen.keydown = f; return add.call(sb.document, type, f); };
+    },
+  });
+  return { ...popup, seen, store, el: (id) => popup.sandbox.document.getElementById(id) };
+}
+
+const NEW_IDS = ['exportZip', 'exportMd', 'exportMdEmbed', 'exportJson', 'refresh', 'status', 'progress', 'progressFill', 'progressText',
+  'filenameStyle', 'includeThinking', 'webImages', 'showShortcuts', 'useSidePanel', 'helpLink',
+  'chatCard', 'chatTitle', 'chatMeta', 'countBtn', 'scopeAll', 'scopeChanges', 'pickChats', 'pickArtifacts', 'chatsSub', 'chatCount',
+  'artifactCount', 'formatFolder', 'formatZip', 'exportSelected', 'summary', 'lastExport', 'settingsOpen', 'settingsBack', 'runTitle',
+  'runTarget', 'runSteps', 'runWarnings', 'stopBtn', 'runStarted', 'doneCard', 'doneSummary', 'doneTarget', 'doneWarnings',
+  'doneErrorFiles', 'doneBack', 'doneTook', 'stoppedReason', 'stoppedSaved', 'stoppedFix', 'tryAgain', 'stoppedBack', 'handoffNote', 'handoffDismiss'];
+const GONE_IDS = ['settingsToggle', 'settingsPanel', 'settingsClose', 'megaFormat', 'megaZipScope', 'exportAllArtifacts', 'info',
+  'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportArtifacts', 'exportAllJson'];
+
+test('popup.html and sidepanel.html are identical', () => {
+  assert.ok(fs.readFileSync(path.join(REPO_DIR, 'popup.html')).equals(fs.readFileSync(path.join(REPO_DIR, 'sidepanel.html'))));
+});
+
+test('the page has the new ids and none of the removed ones', () => {
+  const html = fs.readFileSync(path.join(REPO_DIR, 'popup.html'), 'utf8');
+  for (const id of NEW_IDS) assert.match(html, new RegExp(`id="${id}"`), id);
+  for (const id of GONE_IDS) assert.doesNotMatch(html, new RegExp(`id="${id}"`), id);
+  assert.match(html, /<a [^>]*href="https:\/\/github\.com\/bearspear\/claude-takeout#changelog"/);
+});
+
+test('no chat: chat buttons disabled, card idle with the spec text', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  for (const id of ['exportZip', 'exportMd', 'exportMdEmbed', 'exportJson']) assert.strictEqual(p.el(id).disabled, true, id);
+  assert.strictEqual(p.el('chatCard').dataset.tone, 'idle');
+  assert.strictEqual(p.el('chatState').textContent, 'Open a chat to export it');
+  assert.strictEqual(p.el('exportSelected').disabled, false);
+});
+
+test('not on claude.ai: Export selected disabled too', async () => {
+  const p = panelOn('https://example.com/');
+  await sleep(50);
+  assert.strictEqual(p.el('chatCard').dataset.tone, 'idle');
+  assert.strictEqual(p.el('chatState').textContent, 'Open claude.ai to export.');
+  assert.strictEqual(p.el('exportZip').disabled, true);
+  assert.strictEqual(p.el('exportSelected').disabled, true);
+  assert.strictEqual(p.el('countBtn').disabled, true);
+});
+
+test('a chat that fails to load shows the grey card with Try again', async () => {
+  const p = panelOn(`https://claude.ai/chat/${CHAT_U}`);
+  await sleep(50);
+  assert.strictEqual(p.el('chatCard').dataset.tone, 'idle');
+  assert.strictEqual(p.el('chatState').textContent, "Couldn't load this chat");
+  assert.match(p.el('status').textContent, /404/);
+  assert.strictEqual(p.el('chatRetry').hidden, false);
+});
+
+test('a loaded chat shows the green card', async () => {
+  const chat = Object.assign(loadFixture(), { uuid: CHAT_U, name: 'Trip notes' });
+  const p = panelOn(`https://claude.ai/chat/${CHAT_U}`, { chat });
+  await sleep(50);
+  assert.strictEqual(p.el('chatCard').dataset.tone, 'ready');
+  assert.strictEqual(p.el('chatState').textContent, 'Ready to export');
+  assert.strictEqual(p.el('chatTitle').textContent, 'Trip notes');
+  assert.strictEqual(p.el('chatTitle').title, 'Trip notes');
+  assert.match(p.el('chatMeta').textContent, /^.+ · \d+ messages? · \d+ files?$/);
+  assert.strictEqual(p.el('exportZip').disabled, false);
+});
+
+test('a tab change on the Done screen keeps it', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.fn('showScreen')('done');
+  const before = p.seen.queries;
+  p.seen.activated.forEach((f) => f({ tabId: 1 }));
+  await sleep(300);
+  assert.strictEqual(p.el('screen-done').hidden, false);
+  assert.strictEqual(p.el('screen-main').hidden, true);
+  assert.strictEqual(p.seen.queries, before, 'no repaint off the main screen');
+  await p.el('doneBack').handlers.click();
+  await sleep(50);
+  assert.strictEqual(p.el('screen-main').hidden, false);
+  assert.ok(p.seen.queries > before, 'Back to export runs requestData');
+});
+
+test('the Exporting screen disables Refresh and Settings', () => {
+  const p = panelOn('https://claude.ai/new');
+  p.fn('showScreen')('exporting');
+  assert.strictEqual(p.el('refresh').disabled, true);
+  assert.strictEqual(p.el('settingsOpen').disabled, true);
+  p.fn('showScreen')('main');
+  assert.strictEqual(p.el('refresh').disabled, false);
+  assert.strictEqual(p.el('settingsOpen').disabled, false);
+});
+
+test('Markdown export reports its size in the card', async () => {
+  const chat = Object.assign(loadFixture(), { uuid: CHAT_U, name: 'Trip notes' });
+  delete chat.project_uuid;
+  const p = panelOn(`https://claude.ai/chat/${CHAT_U}`, { chat });
+  await sleep(50);
+  p.fn('download = () => {}');
+  await p.el('exportMd').handlers.click();
+  assert.match(p.el('status').textContent, /^Saved Markdown, \d+(\.\d)? (B|KB|MB)$/);
+  assert.strictEqual(p.el('chatCard').dataset.tone, 'ready');
+});
+
+test('a single-chat failure turns the card red and stays on the main screen', async () => {
+  const chat = Object.assign(loadFixture(), { uuid: CHAT_U, name: 'Trip notes' });
+  const p = panelOn(`https://claude.ai/chat/${CHAT_U}`, { chat });
+  await sleep(50);
+  p.sandbox.chrome.tabs.sendMessage = (id, msg, cb) => cb({ error: 'HTTP 500' });
+  await p.el('exportJson').handlers.click();
+  assert.strictEqual(p.el('chatCard').dataset.tone, 'error');
+  assert.match(p.el('status').textContent, /500/);
+  assert.strictEqual(p.el('screen-main').hidden, false);
+});
+
+test('Alt+A clicks Export selected', () => {
+  const p = panelOn('https://claude.ai/new');
+  let clicked = 0;
+  p.el('exportSelected').click = () => { clicked++; };
+  p.seen.keydown({ altKey: true, key: 'A', preventDefault() {} });
+  assert.strictEqual(clicked, 1);
+});
+
+test('Changes only is hidden with no record', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  assert.strictEqual(p.el('scopeChanges').hidden, true);
+  assert.strictEqual(p.el('lastExport').hidden, true);
+});
+
+test('with a record, Changes only shows, and is disabled with only Artifacts ticked', async () => {
+  const stored = { exportRecord: { 'org-1': { at: '2026-11-23T09:51:00', chats: { a: '1' }, warnings: 2 } } };
+  const p = panelOn('https://claude.ai/new', { stored });
+  await sleep(50);
+  assert.strictEqual(p.el('scopeChanges').hidden, false);
+  assert.strictEqual(p.el('scopeChanges').disabled, false);
+  assert.strictEqual(p.el('lastExport').hidden, false);
+  assert.strictEqual(p.el('lastExport').textContent, 'Last export 2026-11-23 09:51 · 2 warnings');
+  p.el('pickChats').checked = false;
+  p.el('pickChats').handlers.change({ target: p.el('pickChats') });
+  assert.strictEqual(p.el('scopeChanges').disabled, true);
+  assert.strictEqual(p.fn('settings.exportAllChats'), false);
+  p.el('pickChats').checked = true;
+  p.el('pickChats').handlers.change({ target: p.el('pickChats') });
+  p.el('pickArtifacts').checked = false;
+  p.el('pickArtifacts').handlers.change({ target: p.el('pickArtifacts') });
+  assert.strictEqual(p.el('scopeChanges').disabled, false);
+  assert.strictEqual(p.el('chatsSub').textContent, 'Pages they published still go in artifacts/');
+});
+
+test('the summary follows the choices and Tick Chats or Artifacts disables Export selected', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  assert.strictEqual(p.el('summary').textContent, 'Everything, whatever was exported before. Into a new folder inside one you pick, written as it goes.');
+  p.el('formatZip').handlers.click();
+  assert.strictEqual(p.fn('settings.megaFormat'), 'zip');
+  assert.strictEqual(p.el('summary').textContent, 'Everything, whatever was exported before. One ZIP download when it finishes.');
+  for (const id of ['pickChats', 'pickArtifacts']) { p.el(id).checked = false; p.el(id).handlers.change({ target: p.el(id) }); }
+  assert.strictEqual(p.el('summary').textContent, 'Tick Chats or Artifacts.');
+  assert.strictEqual(p.el('exportSelected').disabled, true);
+});
+
+test('Count shows Counting… while it runs, then the counts and Counted HH:MM', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  let release;
+  p.sandbox.chrome.tabs.sendMessage = (id, msg, cb) => {
+    if (msg.action === 'fetchAllConversations') release = () => cb({ data: [{ uuid: 'a', updated_at: '1' }, { uuid: 'b', updated_at: '1' }] });
+    else if (msg.action === 'listArtifacts') cb({ frames: [] });
+    else cb({});
+  };
+  p.sandbox.chrome.storage.session = { get: async () => ({}), set: async () => {} };
+  const run = p.el('countBtn').handlers.click();
+  await sleep(10);
+  assert.strictEqual(p.el('countBtn').textContent, 'Counting…');
+  assert.strictEqual(p.el('countBtn').disabled, true);
+  release();
+  await run;
+  assert.match(p.el('countBtn').textContent, /^Counted \d{2}:\d{2}$/);
+  assert.strictEqual(p.el('countBtn').disabled, false);
+  assert.strictEqual(p.el('chatCount').textContent, '2');
+  assert.strictEqual(p.el('artifactCount').textContent, '0');
+  assert.match(p.el('summary').textContent, /^2 chats and 0 artifacts\. /);
+});
+
+test('a failed count shows its code in the summary', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.sandbox.chrome.tabs.sendMessage = (id, msg, cb) => cb({ error: 'HTTP 500', status: 500 });
+  p.sandbox.chrome.storage.session = { get: async () => ({}), set: async () => {} };
+  await p.el('countBtn').handlers.click();
+  assert.match(p.el('summary').textContent, /HTTP 500/);
+  assert.strictEqual(p.el('countBtn').textContent, 'Count');
+});
+
+test('Export selected runs the plan and shows Done, then Stop and Stopped', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.fn("settings.megaFormat = 'zip'");
+  const calls = [];
+  let progress = null;
+  p.sandbox.bulkExportZip = async (o) => {
+    calls.push({ changesOnly: o.changesOnly, withArtifacts: o.withArtifacts, directory: o.directory || null });
+    o.onProgress({ phase: 'chats', done: 1, total: 2, sub: 'Alpha', warnings: 1 });
+    progress = {
+      title: p.el('runTitle').textContent, steps: p.el('step-chats').hidden, viewer: p.el('step-viewer').hidden,
+      count: p.el('step-chats-count').textContent, sub: p.el('step-chats-sub').textContent, warn: p.el('runWarnings').textContent,
+      screen: p.el('screen-exporting').hidden,
+    };
+    return { outcome: 'done', reason: '', target: { kind: 'zip', name: 'claude-takeout-2026-11-24_1102.zip' }, saved: { chats: 2, artifacts: 3, versions: 5 },
+      warnings: 1, warningList: [{ type: 'upload', text: 'x', chat: 'Trip notes' }], errorFiles: ['errors.txt', 'write-errors.txt'], notes: [],
+      startedAt: '2026-11-24T11:02:00', endedAt: '2026-11-24T11:06:12' };
+  };
+  await p.el('exportSelected').handlers.click();
+  assert.deepStrictEqual(calls, [{ changesOnly: false, withArtifacts: true, directory: null }]);
+  assert.deepStrictEqual(progress, { title: 'Exporting 2 chats and artifacts', steps: false, viewer: false, count: '1 of 2', sub: 'Alpha', warn: '1 warning so far', screen: false });
+  assert.strictEqual(p.el('screen-done').hidden, false);
+  assert.strictEqual(p.el('doneCard').dataset.tone, 'warn');
+  assert.strictEqual(p.el('doneHeadline').textContent, 'Done, with 1 warning');
+  assert.strictEqual(p.el('doneSummary').textContent, '2 chats and 3 artifacts (5 versions) saved.');
+  assert.strictEqual(p.el('doneWhere').textContent, 'Saved to Downloads as claude-takeout-2026-11-24_1102.zip.');
+  assert.strictEqual(p.el('doneErrorFiles').textContent, 'What to do about each is in errors.txt in that ZIP.');
+  assert.strictEqual(p.el('doneTook').textContent, 'Took 4 min 12 s');
+
+  // Stop sets the signal; the run ends on the Stopped screen.
+  p.sandbox.bulkExportZip = async (o) => {
+    p.el('stopBtn').handlers.click();
+    assert.strictEqual(o.signal.stopped, true);
+    return { outcome: 'stopped', reason: 'You stopped it', target: { kind: 'zip', name: '' }, saved: { chats: 0, artifacts: 0, versions: 0 },
+      warnings: 0, warningList: [], errorFiles: [], notes: [], startedAt: '2026-11-24T11:02:00', endedAt: '2026-11-24T11:03:00' };
+  };
+  await p.el('doneBack').handlers.click();
+  await p.el('exportSelected').handlers.click();
+  assert.strictEqual(p.el('screen-stopped').hidden, false);
+  assert.strictEqual(p.el('stoppedReason').textContent, 'You stopped it');
+  assert.strictEqual(p.el('stoppedSaved').textContent, 'Nothing was saved. A ZIP is written only when the export finishes.');
+});
+
+test('a cancelled folder picker says No folder picked. on the main screen', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.sandbox.window.showDirectoryPicker = async () => { const e = new Error('cancel'); e.name = 'AbortError'; throw e; };
+  await p.el('exportSelected').handlers.click();
+  assert.strictEqual(p.el('screen-main').hidden, false);
+  assert.strictEqual(p.el('summary').textContent, 'No folder picked.');
 });

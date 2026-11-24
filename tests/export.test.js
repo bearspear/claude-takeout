@@ -1437,12 +1437,14 @@ test('an export where every upload failed is a health problem', async () => {
 });
 
 test('a single export without errors.txt turns amber when the chat looks incomplete', () => {
-  const status = { className: '', textContent: '' };
-  fn('exportedStatus')(status, chatOf([{ sender: 'human', content: [{ type: 'text', text: 'hi' }] }]), 'JSON exported successfully!');
-  assert.deepStrictEqual([status.className, status.textContent], ['status ready', 'JSON exported successfully!']);
-  fn('exportedStatus')(status, { uuid: 'x', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-03T00:00:00Z', chat_messages: [] }, 'JSON exported successfully!');
-  assert.strictEqual(status.className, 'status warning');
-  assert.match(status.textContent, /^JSON exported successfully\. But this chat looks incomplete: claude\.ai returned no messages/);
+  const popup = exportPopup();
+  const doc = popup.sandbox.document;
+  popup.fn('chatSaved')('JSON', '{}', chatOf([{ sender: 'human', content: [{ type: 'text', text: 'hi' }] }]));
+  assert.deepStrictEqual([doc.getElementById('chatCard').dataset.tone, doc.getElementById('status').textContent], ['ready', 'Saved JSON, 2 B']);
+  popup.fn('chatSaved')('JSON', '{}', { uuid: 'x', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-03T00:00:00Z', chat_messages: [] });
+  assert.strictEqual(doc.getElementById('chatCard').dataset.tone, 'warn');
+  assert.strictEqual(doc.getElementById('status').textContent, 'Saved JSON, 2 B · 1 warning');
+  assert.match(doc.getElementById('status').title, /^claude\.ai returned no messages/);
 });
 
 test('the viewer chat of an export carries its files\' warnings', async () => {
@@ -1483,9 +1485,9 @@ async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null
   vm.runInContext('orgId = "org-1"', sb);
   if (setup) setup(sb);
   sb.__opts = options;
-  await vm.runInContext('bulkExportZip(__opts)', sb);
+  const res = await vm.runInContext('bulkExportZip(__opts)', sb);
   const zip = saved ? await JSZip.loadAsync(await saved.blob.arrayBuffer()) : null;
-  return { store, saved, zip, status: sb.document.getElementById('status') };
+  return { store, saved, zip, result: res ? JSON.parse(JSON.stringify(res)) : res };
 }
 const listed = (uuid, updated) => ({ uuid, name: `Chat ${uuid}`, updated_at: updated });
 const chatFor = (uuid, updated) => Object.assign(chatOf([{ sender: 'human', content: [{ type: 'text', text: `hello ${uuid}` }] }]), { uuid, name: `Chat ${uuid}`, created_at: updated, updated_at: updated });
@@ -1517,15 +1519,15 @@ test('Export changes takes only new and updated chats, and says when nothing cha
 
   const again = await runBulkZip({ list, chats, stored: store, options: { changesOnly: true } });
   assert.strictEqual(again.saved, null, 'nothing to download');
-  assert.match(again.status.textContent, /Nothing changed since/);
+  assert.match(again.result.notes.join(' '), /Nothing changed since/);
 });
 
 test('Export changes with no record exports everything and says why', async () => {
   const list = [listed('a', '2026-01-01T00:00:00Z')];
-  const { saved, zip, status } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, options: { changesOnly: true } });
+  const { saved, zip, result } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, options: { changesOnly: true } });
   assert.ok(saved);
   assert.strictEqual(JSON.parse(await zip.file('export-manifest.json').async('string')).kind, 'full');
-  assert.match(status.textContent, /no earlier export/i);
+  assert.match(result.notes.join(' '), /no earlier export/i);
 });
 
 test('the Mega-Zip exports setting defaults to all chats, and "only new or changed" makes Export All export changes', async () => {
@@ -1542,7 +1544,7 @@ test('the Mega-Zip exports setting defaults to all chats, and "only new or chang
   for (const page of ['popup.html', 'sidepanel.html']) {
     const html = fs.readFileSync(path.join(REPO, page), 'utf8');
     assert.ok(!html.includes('exportChangesZip'), `${page}: no separate Export Changes button`);
-    assert.match(html, /<select id="megaZipScope"[^>]*>\s*<option value="all">All chats<\/option>/, `${page}: All chats is the first option`);
+    assert.match(html, /<button id="scopeAll"[^>]*aria-pressed="true">All<\/button>\s*<button id="scopeChanges"/, `${page}: All comes first and is pressed`);
   }
 });
 
@@ -1889,7 +1891,7 @@ test('Export All into a folder writes the same files as the mega-ZIP, in a new f
   const onDisk = Object.keys(picked.entries.get(runName).flat()).sort();
   const inZip = Object.keys(zipped.zip.files).filter((n) => !zipped.zip.files[n].dir).sort();
   assert.deepStrictEqual(onDisk, inZip);
-  assert.match(disk.status.textContent, new RegExp(`Exported 2 conversations to ${runName}\\.`));
+  assert.deepStrictEqual([disk.result.outcome, disk.result.target, disk.result.saved.chats], ['done', { kind: 'folder', name: runName }, 2]);
   assert.deepStrictEqual(Object.keys(disk.store.exportRecord['org-1'].chats).sort(), ['a', 'b']);
 });
 
@@ -1905,8 +1907,9 @@ test('a file the folder refuses is listed in write-errors.txt; the rest of the c
   const files = run.flat();
   assert.match(files['write-errors.txt'], /\/artefacts\/re:port\.md: Name is not allowed/);
   assert.ok(Object.keys(files).some((n) => /\/full_chat\.md$/.test(n)) && files['index.md'], Object.keys(files).join());
-  assert.strictEqual(disk.status.className, 'status warning');
-  assert.match(disk.status.textContent, /1 file could not be written \(see write-errors\.txt\)/);
+  assert.strictEqual(disk.result.outcome, 'done');
+  assert.deepStrictEqual(disk.result.warningList.filter((w) => w.type === 'write').length, 1);
+  assert.ok(disk.result.errorFiles.includes('write-errors.txt'));
 });
 
 test('a project document made from a PDF is saved as text with .txt, so it opens', async () => {
@@ -2630,7 +2633,7 @@ test('Export Artifacts saves each artifact\'s current files with artifact.json a
     [U(1)]: livePage('Quarterly Report', { 'index.html': '<h1>Q</h1>' }),
     [U(2)]: livePage('Game', { 'index.html': '<script src="app.js"></script>', 'app.js': 'go()', 'img/logo.svg': '<svg/>' }),
   };
-  const { saved, files, status, fetcher, listCalls } = await runArtifacts({ frames, pages });
+  const { saved, files, result, fetcher, listCalls } = await runArtifacts({ frames, pages });
   assert.match(saved.name, /^claude-takeout-artifacts-mika-\d{4}-\d{2}-\d{2}_\d{4}\.zip$/);
   assert.deepStrictEqual(plain(listCalls), [{ action: 'listArtifacts', withAccountName: true }]);
   const f1 = artFolder('Quarterly_Report', U(1));
@@ -2657,8 +2660,7 @@ test('Export Artifacts saves each artifact\'s current files with artifact.json a
   assert.ok(/\| 3 \|/.test(md) || /3 files/.test(md), md);
   assert.match(files['index.html'], /Listed by claude\.ai: 2/);
   assert.deepStrictEqual(fetcher.calls.filter((c) => c.action === 'publishedPageInfo').map((c) => [c.uuid, c.ver]), [[U(1), LIVE], [U(2), LIVE]]);
-  assert.strictEqual(status.className, 'status ready');
-  assert.match(status.textContent, /Exported 2 artifacts/);
+  assert.deepStrictEqual([result.outcome, result.warnings, result.saved.artifacts], ['done', 0, 2]);
 });
 
 test('Export Artifacts to a folder writes the same files', async () => {
@@ -2673,7 +2675,7 @@ test('Export Artifacts to a folder writes the same files', async () => {
   assert.match(runs[0], /^claude-takeout-artifacts-mika-\d{4}-\d{2}-\d{2}_\d{4}$/);
   assert.deepStrictEqual(Object.keys(disk.files).sort(), Object.keys(zipped.files).sort());
   assert.strictEqual(disk.files[`${artVer('Two', U(2))}/a.html`], 'two');
-  assert.match(disk.status.textContent, new RegExp(`Exported 2 artifacts to ${runs[0]}\\.`));
+  assert.deepStrictEqual([disk.result.outcome, disk.result.target, disk.result.saved.artifacts], ['done', { kind: 'folder', name: runs[0] }, 2]);
 });
 
 test('Export Artifacts to a folder: viewer.html that fails to write is not linked', async () => {
@@ -2686,8 +2688,7 @@ test('Export Artifacts to a folder: viewer.html that fails to write is not linke
   assert.ok(!('viewer.html' in disk.files) || disk.files['viewer.html'] === undefined);
   assert.ok(!disk.files['index.html'].includes('viewer.html'), disk.files['index.html']);
   assert.match(disk.files['write-errors.txt'], /viewer\.html/);
-  assert.match(disk.status.textContent, /viewer\.html could not be built\./);
-  assert.strictEqual(disk.status.className, 'status warning');
+  assert.ok(disk.result.warningList.some((w) => w.type === 'viewer'), JSON.stringify(disk.result.warningList));
 });
 
 test('a Claude Docs artifact is listed with a note and not fetched', async () => {
@@ -2717,7 +2718,7 @@ test('an artifact claude.ai refuses is a warning; the rest export', async () => 
     [U(3)]: { error: { error: 'HTTP 401', status: 401 } },
     [U(4)]: livePage('Last', { 'index.html': 'last' }),
   };
-  const { files, fetcher, status } = await runArtifacts({ frames, pages });
+  const { files, fetcher, result } = await runArtifacts({ frames, pages });
   assert.strictEqual(files[`${artVer('Mine', U(2))}/index.html`], 'mine');
   assert.strictEqual(fetcher.count('publishedPageInfo', U(4)), 0, 'nothing is fetched after a 401');
   assert.strictEqual(fetcher.count('publishedPageInfo', U(3)), 1);
@@ -2733,7 +2734,7 @@ test('an artifact claude.ai refuses is a warning; the rest export', async () => 
   assert.match(last.note, /not exported/i);
   const row = files['index.md'].split('\n').find((l) => l.includes('Theirs'));
   assert.match(row, /not exported/i);
-  assert.strictEqual(status.className, 'status warning');
+  assert.deepStrictEqual([result.outcome, result.warnings > 0], ['done', true]);
 });
 
 test('same-titled artifacts get distinct folders, and unsafe titles and paths stay inside', async () => {
@@ -2878,26 +2879,28 @@ test('shared artifacts are exported and labelled shared with you', async () => {
 
 test('an empty list or a failed list writes nothing and says why', async () => {
   const cases = [
-    [{ frames: [] }, 'status ready', /^No artifacts on claude\.ai\.$/],
-    [{ list: { frames: [{ slug: 'not-a-uuid', title: 'x' }], orgId: 'o' } }, 'status ready', /^No artifacts on claude\.ai\.$/],
-    [{ list: { error: 'HTTP 401', status: 401 } }, 'status error', /^Sign in to claude\.ai, then try again\.$/],
-    [{ list: { error: 'network' } }, 'status error', /artifact list.*network/],
-    [{ list: { connectionError: 'x' } }, 'status error', /artifact list/],
+    [{ frames: [] }, 'done', /^No artifacts on claude\.ai\.$/],
+    [{ list: { frames: [{ slug: 'not-a-uuid', title: 'x' }], orgId: 'o' } }, 'done', /^No artifacts on claude\.ai\.$/],
+    [{ list: { error: 'HTTP 401', status: 401 } }, 'failed', /^Sign in to claude\.ai, then try again\.$/],
+    [{ list: { error: 'network' } }, 'failed', /artifact list.*network/],
+    [{ list: { connectionError: 'x' } }, 'failed', /artifact list/],
   ];
-  for (const [run, cls, text] of cases) {
+  // What it says: the Done screen's notes, or the Export stopped screen's reason.
+  const says = (r) => (r.outcome === 'done' ? r.notes.join(' ') : r.reason);
+  for (const [run, outcome, text] of cases) {
     const picked = new FakeDir();
     const zip = await runArtifacts(run);
     assert.strictEqual(zip.saved, null);
-    assert.strictEqual(zip.status.className, cls);
-    assert.match(zip.status.textContent, text);
+    assert.strictEqual(zip.result.outcome, outcome);
+    assert.match(says(zip.result), text);
     const disk = await runArtifacts({ ...run, options: { directory: picked } });
     assert.strictEqual(picked.entries.size, 0, 'no folder made');
-    assert.match(disk.status.textContent, text);
+    assert.match(says(disk.result), text);
   }
   const off = await runArtifacts({ frames: [art(U(1), 'x')], setup: (sb) => { sb.chrome.tabs.query = async () => [{ id: 1, url: 'https://example.com/' }]; } });
   assert.strictEqual(off.saved, null);
   assert.strictEqual(off.listCalls.length, 0);
-  assert.match(off.status.textContent, /navigate to claude\.ai/);
+  assert.match(off.result.reason, /navigate to claude\.ai/);
 });
 
 test('Export Artifacts leaves the export record alone', async () => {
@@ -2906,7 +2909,8 @@ test('Export Artifacts leaves the export record alone', async () => {
   const { store, saved } = await runArtifacts({
     frames: [art(U(1), 'One')], pages: { [U(1)]: livePage('One', { 'index.html': 'one' }) }, stored,
     setup: (sb) => {
-      vm.runInContext("settings.megaZipScope = 'changes'", sb);
+      // The panel reads the record for its footer; this checks only the export.
+      vm.runInContext("settings.megaZipScope = 'changes'; loadEverything = async () => {}", sb);
       const get = sb.chrome.storage.local.get;
       sb.chrome.storage.local.get = async (keys) => { reads.push(keys); return get(keys); };
     },
@@ -2960,59 +2964,56 @@ test('the recovery hint for artifact_export names Export Artifacts, and errors.t
   assert.match(chat.generateErrorReport(), /\*\*Conversation:\*\* Chat/);
 });
 
-test('EXPORT_BUTTONS includes exportArtifacts; both pages label it from the setting', () => {
+test('EXPORT_BUTTONS lists the chat buttons and Export selected, whose label is fixed', () => {
   const fs = require('fs');
   const popup = exportPopup();
   const sb = popup.sandbox;
-  assert.ok(vm.runInContext('EXPORT_BUTTONS', sb).includes('exportArtifacts'));
-  const span = { textContent: '' };
-  sb.document.getElementById('exportArtifacts').querySelector = () => span;
-  vm.runInContext("settings.megaFormat = 'zip'; applySettings()", sb);
-  assert.strictEqual(span.textContent, 'Export Artifacts (ZIP)');
-  vm.runInContext("settings.megaFormat = 'folder'; applySettings()", sb);
-  assert.strictEqual(span.textContent, 'Export Artifacts (Folder)');
+  assert.deepStrictEqual(plain(vm.runInContext('EXPORT_BUTTONS', sb)), ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportSelected']);
   for (const page of ['popup.html', 'sidepanel.html']) {
     const html = fs.readFileSync(path.join(REPO, page), 'utf8');
-    assert.match(html, /<button id="exportAllZip"[\s\S]*?<\/button>\s*<button id="exportArtifacts"[^>]*>\s*<span>Export Artifacts \(Folder\)<\/span>/, page);
-    assert.match(html, /<label for="megaFormat">Export All and Export Artifacts save as:<\/label>/, page);
+    assert.match(html, /<button id="exportSelected"[^>]*>\s*<span>Export selected<\/span><span class="shortcut">Alt\+A<\/span>/, page);
+    assert.ok(!/The current version of every artifact/.test(html), `${page}: the stale tooltip is gone`);
   }
-  const src = fs.readFileSync(path.join(REPO, 'popup.js'), 'utf8');
-  assert.ok(!/case '[a-z]':\s*document\.getElementById\('exportArtifacts'\)/.test(src), 'no keyboard shortcut');
 });
 
-test('the popup hands Export Artifacts and Export All in folder mode to the side panel', async () => {
+test('the popup hands Export selected in folder mode to the side panel', async () => {
   const tick = () => new Promise((r) => setTimeout(r, 5));
-  for (const [button, label] of [['exportArtifacts', 'Export Artifacts (Folder)'], ['exportAllZip', 'Export All (Folder)']]) {
-    const session = {};
-    const popup = loadPopup({ location: '/popup.html', session });
-    const sb = popup.sandbox;
-    let picker = 0;
-    let opened = null;
-    let closed = false;
-    sb.window.showDirectoryPicker = async () => { picker++; return new FakeDir(); };
-    sb.window.close = () => { closed = true; };
-    sb.chrome.sidePanel.open = async (o) => { opened = o; };
-    vm.runInContext('currentTabId = 7', sb);
-    await sb.document.getElementById(button).handlers.click();
-    await tick();
-    assert.strictEqual(picker, 0, `${button}: no picker in the popup`);
-    assert.deepStrictEqual(plain(opened), { tabId: 7 });
-    assert.ok(closed);
-    assert.strictEqual(session.folderExportNote.button, button);
-    assert.ok(Number.isFinite(session.folderExportNote.at));
+  const session = {};
+  const popup = loadPopup({ location: '/popup.html', session });
+  const sb = popup.sandbox;
+  let picker = 0;
+  let opened = null;
+  let noteAtOpen = null;
+  let closed = false;
+  sb.window.showDirectoryPicker = async () => { picker++; return new FakeDir(); };
+  sb.window.close = () => { closed = true; };
+  sb.chrome.sidePanel.open = async (o) => { opened = o; noteAtOpen = session.folderExportNote; };
+  vm.runInContext("currentTabId = 7; panel.onClaude = true; settings.megaFormat = 'folder'", sb);
+  await sb.document.getElementById('exportSelected').handlers.click();
+  await tick();
+  assert.strictEqual(picker, 0, 'no picker in the popup');
+  assert.deepStrictEqual(plain(opened), { tabId: 7 });
+  assert.ok(closed);
+  assert.ok(noteAtOpen && noteAtOpen.button === 'exportSelected', 'the note is stored before the side panel opens');
+  assert.ok(Number.isFinite(session.folderExportNote.at));
 
-    const panelSession = { folderExportNote: session.folderExportNote };
-    // The tab query never answers, so loading the chat leaves the status to the note.
-    const panel = loadPopup({ location: '/sidepanel.html', session: panelSession, before: (sb) => { sb.chrome.tabs.query = () => new Promise(() => {}); } });
-    await tick();
-    const status = panel.sandbox.document.getElementById('status');
-    assert.strictEqual(status.textContent, `Click ${label} here to choose where to save it.`);
-    assert.ok(!('folderExportNote' in panelSession));
-    let called = false;
-    panel.sandbox.window.showDirectoryPicker = () => { called = true; return new Promise(() => {}); };
-    panel.sandbox.document.getElementById(button).handlers.click();
-    assert.strictEqual(called, true, `${button}: the side panel opens the picker before awaiting anything`);
-  }
+  const panelSession = { folderExportNote: session.folderExportNote };
+  // The tab query never answers, so loading the chat leaves the panel to the note.
+  const panel = loadPopup({ location: '/sidepanel.html', session: panelSession, before: (s) => { s.chrome.tabs.query = () => new Promise(() => {}); } });
+  await tick();
+  const doc = panel.sandbox.document;
+  assert.strictEqual(doc.getElementById('handoffNote').hidden, false);
+  assert.strictEqual(doc.getElementById('handoffText').textContent, 'Continued from the popup. Chrome lets only the sidebar pick a folder. Click Export selected to pick where it goes.');
+  assert.ok(!('folderExportNote' in panelSession));
+  let called = false;
+  panel.sandbox.window.showDirectoryPicker = () => { called = true; return new Promise(() => {}); };
+  doc.getElementById('exportSelected').handlers.click();
+  assert.strictEqual(called, true, 'the side panel opens the picker before awaiting anything');
+  // A note for a button that no longer exists falls back to Export selected.
+  const odd = { folderExportNote: { at: Date.now(), button: 'exportAllZip', label: '<b>x</b>' } };
+  const panel2 = loadPopup({ location: '/sidepanel.html', session: odd, before: (s) => { s.chrome.tabs.query = () => new Promise(() => {}); } });
+  await tick();
+  assert.match(panel2.sandbox.document.getElementById('handoffText').textContent, /Click Export selected to pick where it goes\.$/);
 });
 
 test('index.html escapes everything from claude.ai and links only local files and claude.ai', async () => {
@@ -3064,7 +3065,7 @@ test('an artifact whose export throws unexpectedly still gets a row, a manifest 
   const frames = [art(U(1), 'Fine'), art(U(2), 'Throws'), art(U(3), 'Boom')];
   const pages = { [U(1)]: livePage('Fine', { 'index.html': 'fine' }), [U(2)]: livePage('Throws', { 'index.html': 'x' }), [U(3)]: livePage('Boom', { 'index.html': 'y' }) };
   const NOTE = 'not exported: unexpected error (see errors.txt)';
-  const { files, status } = await runArtifacts({
+  const { files, result } = await runArtifacts({
     frames, pages, setup: (sb) => vm.runInContext(`(() => {
       const orig = fetchPublishedFiles;
       fetchPublishedFiles = async (o) => { if (o.uuid === '${U(2)}') throw new TypeError('boom'); return orig(o); };
@@ -3088,7 +3089,7 @@ test('an artifact whose export throws unexpectedly still gets a row, a manifest 
     assert.ok(htmlRow && htmlRow.includes(NOTE), htmlRow);
   }
   assert.strictEqual((files['errors.txt'].match(/unexpected error/g) || []).length, 2, files['errors.txt']);
-  assert.strictEqual(status.className, 'status warning');
+  assert.deepStrictEqual([result.outcome, result.warnings > 0], ['done', true]);
 });
 
 test('an artifact with an empty rel is not labelled shared', async () => {
@@ -3154,48 +3155,22 @@ test('an artifact folder\'s title part is at most 200 UTF-8 bytes', async () => 
   assert.strictEqual(files[`${folder}/${LIVE}/index.html`], 'a', Object.keys(files).join());
 });
 
-test('a throw mid-export hides the progress, sets an error status and re-enables the buttons', async () => {
+test('a throw mid-export ends the run failed, shows Export stopped and re-enables the buttons', async () => {
   const frames = [art(U(1), 'One')];
   const pages = { [U(1)]: livePage('One', { 'index.html': 'a' }) };
-  const setup = (sb) => vm.runInContext("settings.megaFormat = 'zip'; artifactsIndexMd = () => { throw new Error('boom'); }", sb);
-  const { status, popup, saved } = await runArtifacts({ frames, pages, setup });
+  const setup = (sb) => vm.runInContext("settings.megaFormat = 'zip'; settings.exportAllChats = false; artifactsIndexMd = () => { throw new Error('boom'); }", sb);
+  const { result, popup, saved } = await runArtifacts({ frames, pages, setup });
   const sb = popup.sandbox;
   assert.strictEqual(saved, null);
-  assert.strictEqual(sb.document.getElementById('progress').style.display, 'none');
-  assert.strictEqual(status.className, 'status error');
-  assert.match(status.textContent, /boom/);
-  sb.document.getElementById('progress').style.display = 'block';
-  await sb.document.getElementById('exportArtifacts').handlers.click();
-  assert.strictEqual(sb.document.getElementById('progress').style.display, 'none');
-  assert.strictEqual(sb.document.getElementById('exportArtifacts').disabled, false);
-  assert.strictEqual(sb.document.getElementById('exportAllZip').disabled, false);
-});
-
-test('the popup stores the side-panel note before opening the panel, and names the button\'s current label', async () => {
-  const tick = () => new Promise((r) => setTimeout(r, 5));
-  const session = {};
-  const popup = loadPopup({ location: '/popup.html', session });
-  const sb = popup.sandbox;
-  const span = { textContent: '' };
-  sb.document.getElementById('exportAllZip').querySelector = () => span;
-  vm.runInContext("settings.megaZipScope = 'changes'; settings.megaFormat = 'folder'; applySettings()", sb);
-  assert.strictEqual(span.textContent, 'Export Changes (Folder)');
-  let noteAtOpen = null;
-  sb.window.showDirectoryPicker = async () => new FakeDir();
-  sb.chrome.sidePanel.open = (o) => { noteAtOpen = session.folderExportNote; return Promise.resolve(); };
-  vm.runInContext('currentTabId = 7', sb);
-  await sb.document.getElementById('exportAllZip').handlers.click();
-  await tick();
-  assert.ok(noteAtOpen && noteAtOpen.button === 'exportAllZip', 'the note is stored before the side panel opens');
-  const panelSession = { folderExportNote: session.folderExportNote };
-  const panel = loadPopup({ location: '/sidepanel.html', session: panelSession, before: (s) => { s.chrome.tabs.query = () => new Promise(() => {}); } });
-  await tick();
-  assert.strictEqual(panel.sandbox.document.getElementById('status').textContent, 'Click Export Changes (Folder) here to choose where to save it.');
-  // A stored label that isn't a button label falls back to the fixed one.
-  const odd = { folderExportNote: { at: Date.now(), button: 'exportAllZip', label: '<b>x</b>' } };
-  const panel2 = loadPopup({ location: '/sidepanel.html', session: odd, before: (s) => { s.chrome.tabs.query = () => new Promise(() => {}); } });
-  await tick();
-  assert.strictEqual(panel2.sandbox.document.getElementById('status').textContent, 'Click Export All (Folder) here to choose where to save it.');
+  assert.strictEqual(result.outcome, 'failed');
+  assert.match(result.reason, /boom/);
+  assert.notStrictEqual(sb.document.getElementById('progress').style.display, 'block', 'the chat card\'s progress bar is not used');
+  vm.runInContext('panel.onClaude = true; renderEverything()', sb);
+  assert.strictEqual(sb.document.getElementById('exportSelected').disabled, false);
+  await sb.document.getElementById('exportSelected').handlers.click();
+  assert.strictEqual(sb.document.getElementById('screen-stopped').hidden, false);
+  assert.match(sb.document.getElementById('stoppedReason').textContent, /boom/);
+  assert.strictEqual(sb.document.getElementById('exportSelected').disabled, false);
 });
 
 test('Cowork and Code artifacts listed without checksums are saved unverified', async () => {
@@ -3354,7 +3329,7 @@ test('card pictures are saved outside artifact folders', async () => {
   const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'index.html': 'two' }), [U(3)]: livePage('Three', { 'index.html': 'three' }) };
   const thumbs = { [U(1)]: pic(), [U(2)]: { error: 'no picture' }, [U(3)]: { status: 401 }, [U(4)]: pic() };
   for (const options of [{}, { directory: new FakeDir() }]) {
-    const { files, raw, views, status, fetcher, thumbCalls, frameReqs } = await runArtifacts({ frames, pages, thumbs, options });
+    const { files, raw, views, result, fetcher, thumbCalls, frameReqs } = await runArtifacts({ frames, pages, thumbs, options });
     assert.deepStrictEqual(thumbCalls, [U(1), U(2), U(3), U(4)], 'one after another, Docs included');
     assert.deepStrictEqual(frameReqs.map((r) => r.url.slice(8, 44)), [U(1), U(3), U(4)]);
     for (const r of frameReqs) {
@@ -3372,7 +3347,7 @@ test('card pictures are saved outside artifact folders', async () => {
     assert.ok(!('thumb' in JSON.parse(files[`${artFolder('Three', U(3))}/artifact.json`])));
     assert.deepStrictEqual(views.map((v) => v.thumb), [p1, null, null, p4]);
     assert.ok(!files['errors.txt'], files['errors.txt']);
-    assert.strictEqual(status.className, 'status ready');
+    assert.strictEqual(result.warnings, 0);
     assert.strictEqual(fetcher.count('publishedPageInfo', U(3)), 1, 'a 401 picture does not sign the export out');
     assert.strictEqual(files[`${artVer('Three', U(3))}/index.html`], 'three');
   }
@@ -3381,17 +3356,17 @@ test('card pictures are saved outside artifact folders', async () => {
 test('the Settings checkbox names web images and artifact card pictures', () => {
   for (const page of ['popup.html', 'sidepanel.html']) {
     const html = fs.readFileSync(path.join(__dirname, '..', page), 'utf8');
-    const label = /<label for="webImages" title="([^"]*)">([^<]*)<\/label>/.exec(html);
+    const label = /<label class="row">\s*<span class="row-text"><span>([^<]*)<\/span><span class="sub">([^<]*)<\/span><\/span>\s*<input type="checkbox" id="webImages">/.exec(html);
     assert.ok(label, page);
-    assert.strictEqual(label[2], 'Save web images and artifact card pictures:');
-    assert.match(label[1], /card pictures/);
+    assert.strictEqual(label[1], 'Web images and card pictures');
+    assert.strictEqual(label[2], 'Chrome asks once, during a ZIP export. If you say no, cards show tiles.');
   }
 });
 
 test('without the optional permission no picture is asked for or fetched', async () => {
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
   const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) };
-  const { files, views, status, thumbCalls, frameReqs, permissionRequests } = await runArtifacts({ frames, pages, thumbs: { [U(1)]: pic(), [U(2)]: pic() }, granted: false });
+  const { files, views, result, thumbCalls, frameReqs, permissionRequests } = await runArtifacts({ frames, pages, thumbs: { [U(1)]: pic(), [U(2)]: pic() }, granted: false });
   assert.deepStrictEqual(thumbCalls, []);
   assert.deepStrictEqual(frameReqs, []);
   assert.deepStrictEqual(permissionRequests, [], 'the export itself never asks; the click does');
@@ -3402,13 +3377,13 @@ test('without the optional permission no picture is asked for or fetched', async
   assert.ok(files['index.html'].includes(`Card pictures: ${need}`));
   assert.strictEqual(JSON.parse(files['export-manifest.json']).thumbs, 0);
   assert.ok(!files['errors.txt'], files['errors.txt']);
-  assert.strictEqual(status.className, 'status ready');
-  assert.ok(status.textContent.endsWith(' Card pictures need the web images permission (Settings).'), status.textContent);
+  assert.strictEqual(result.warnings, 0);
+  assert.ok(result.notes.includes('Card pictures need the web images permission (Settings).'), JSON.stringify(result.notes));
   const disk = await runArtifacts({ frames, pages, granted: false, options: { directory: new FakeDir() } });
-  assert.ok(disk.status.textContent.endsWith(' Card pictures need the web images permission (Settings).'), disk.status.textContent);
+  assert.ok(disk.result.notes.includes('Card pictures need the web images permission (Settings).'), JSON.stringify(disk.result.notes));
   assert.ok(disk.files['index.md'].includes(`**Card pictures:** ${need}`));
   const ok = await runArtifacts({ frames, pages, thumbs: { [U(1)]: pic() } });
-  assert.ok(!ok.status.textContent.includes('permission'), ok.status.textContent);
+  assert.ok(!ok.result.notes.join(' ').includes('permission'), JSON.stringify(ok.result.notes));
   assert.ok(!ok.files['index.md'].includes('permission') && !ok.files['index.html'].includes('needs the web images'));
 });
 
@@ -3427,11 +3402,11 @@ test('Export Artifacts asks for the permission in a ZIP export\'s click, only wh
     });
     const sb = popup.sandbox;
     await tick();
-    vm.runInContext(`settings.megaFormat = '${format}'`, sb);
+    vm.runInContext(`settings.megaFormat = '${format}'; settings.exportAllChats = false`, sb);
     let ran = null;
     vm.runInContext('exportArtifacts = async (o) => { globalThis.__ran = o; }', sb);
     sb.window.showDirectoryPicker = async () => { order.push(['picker']); return new FakeDir(); };
-    const clicked = sb.document.getElementById('exportArtifacts').handlers.click();
+    const clicked = sb.document.getElementById('exportSelected').handlers.click();
     // Synchronously in the click: the request (ZIP, when not granted). Folder mode only opens the picker, which
     // needs the click's activation.
     const want = format === 'folder' ? [['picker']] : granted ? [] : [['request', 'https://*/*']];
@@ -3547,10 +3522,10 @@ test('no picture URL or token reaches any file, status or console', async () => 
     [U(4)]: (url) => { throw new Error(`failed ${url}`); }, [U(5)]: pic(Buffer.from('<p>not a picture</p>'), 'text/html'),
   };
   for (const options of [{}, { directory: new FakeDir() }]) {
-    const { files, views, status, frameReqs, consoleCalls } = await runArtifacts({ frames, pages, thumbs, options });
+    const { files, views, result, frameReqs, consoleCalls } = await runArtifacts({ frames, pages, thumbs, options });
     assert.ok(frameReqs.length >= 5, 'the URL went through the popup');
     assert.ok(Object.keys(files).some((n) => n.startsWith('viewer-files/part-')));
-    const all = { ...files, 'views.json': JSON.stringify(views), status: status.textContent + status.className, console: JSON.stringify(consoleCalls) };
+    const all = { ...files, 'views.json': JSON.stringify(views), result: JSON.stringify(result), console: JSON.stringify(consoleCalls) };
     for (const [name, text] of Object.entries(all)) {
       for (const bad of ['claudeusercontent', '__frame_t', '_thumb.img', 'TOKEN0', 'TOKEN1']) assert.ok(!name.includes(bad) && !text.includes(bad), `${name} holds ${bad}`);
     }
@@ -3577,7 +3552,7 @@ test('an artifact that throws unexpectedly still gets a view', async () => {
 test('a throwing parts step or picture step leaves the artifact exported', async () => {
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
   const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) };
-  const { views, files, status } = await runArtifacts({
+  const { views, files, result } = await runArtifacts({
     frames, pages, thumbs: { [U(2)]: pic() },
     setup: (sb) => vm.runInContext(`(() => {
       const orig = CTViewer.artifactViewParts;
@@ -3588,7 +3563,7 @@ test('a throwing parts step or picture step leaves the artifact exported', async
   });
   assert.deepStrictEqual(views.map((v) => [v.notExported, v.part, v.key, v.thumb]), [[false, null, null, null], [false, null, null, null]]);
   assert.ok(!files['errors.txt'], files['errors.txt']);
-  assert.strictEqual(status.className, 'status ready');
+  assert.strictEqual(result.warnings, 0);
   assert.ok(!JSON.parse(files[`${artFolder('One', U(1))}/artifact.json`]).incomplete);
 });
 
@@ -3713,7 +3688,7 @@ test('Export Artifacts writes viewer.html and viewer-check.gif', async () => {
   const frames = [art(U(1), 'Quarterly Report'), art(U(2), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' })];
   const pages = { [U(1)]: livePage('Quarterly Report', { 'index.html': '<h1>Q</h1>' }) };
   for (const options of [{}, { directory: new FakeDir() }]) {
-    const { files, raw, views, status } = await runArtifacts({ frames, pages, options });
+    const { files, raw, views, result } = await runArtifacts({ frames, pages, options });
     const html = files['viewer.html'];
     assert.ok(html, 'viewer.html written');
     assert.ok(/^<!doctype html>/i.test(html));
@@ -3730,8 +3705,7 @@ test('Export Artifacts writes viewer.html and viewer-check.gif', async () => {
     assert.ok(!/\/\*(DATA_JSON|MARKED_JS|LOGIC_JS|APP_JS)\*\//.test(html.replace(/<script id="data"[\s\S]*?<\/script>/, '')));
     assert.deepStrictEqual(raw['viewer-check.gif'], Buffer.from(CTV.VIEWER_CHECK_BASE64, 'base64'));
     assert.match(files['index.html'], /<a href="viewer\.html">/);
-    assert.strictEqual(status.className, 'status ready');
-    assert.ok(!/viewer\.html could not be built/.test(status.textContent), status.textContent);
+    assert.deepStrictEqual([result.outcome, result.warnings], ['done', 0]);
     for (const s of ['claudeusercontent', '__frame_t', '_thumb']) assert.ok(!html.includes(s), s);
   }
 });
@@ -3749,17 +3723,16 @@ test('a viewer build failure leaves the artifacts export complete', async () => 
   const pages = { [U(1)]: livePage('One', { 'index.html': 'one' }), [U(2)]: livePage('Two', { 'index.html': 'two' }) };
   const throwing = [[/^chrome-extension:/, () => { throw new Error('asset gone'); }]];
   for (const options of [{}, { directory: new FakeDir() }]) {
-    const { files, status } = await runArtifacts({ frames, pages, options, routes: throwing });
+    const { files, result } = await runArtifacts({ frames, pages, options, routes: throwing });
     assert.ok(!files['viewer.html'] && !files['viewer-check.gif']);
     assert.strictEqual(files[`${artVer('Two', U(2))}/index.html`], 'two');
     assert.ok(files['index.md'] && files['export-manifest.json']);
     assert.ok(!files['index.html'].includes('viewer.html'), 'no viewer link');
-    assert.match(status.textContent, /Exported 2 artifacts to .*\. viewer\.html could not be built\.$/);
-    assert.strictEqual(status.className, 'status warning');
+    assert.deepStrictEqual([result.outcome, result.saved.artifacts, result.warningList.map((w) => w.type)], ['done', 2, ['viewer']]);
   }
   const failed = await runArtifacts({ frames, pages, assets: false });
   assert.ok(!failed.files['viewer.html']);
-  assert.match(failed.status.textContent, /viewer\.html could not be built\./);
+  assert.ok(failed.result.warningList.some((w) => w.type === 'viewer'));
 });
 
 test('viewer.html holds no artifact texts', async () => {
@@ -3943,8 +3916,7 @@ test('Export All with artifacts on writes artifacts/ beside the chats', async ()
   assert.ok(index.indexOf('## Conversations') < index.indexOf('## Artifacts'));
   assert.ok(Object.keys(files).some((n) => /^viewer-files\/part-\d{4}\.js$/.test(n)), 'preview parts at the root');
   assert.deepStrictEqual(out.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: LIVE });
-  assert.ok(!/errors\.txt|could not be listed/.test(out.status.textContent), out.status.textContent);
-  assert.match(out.status.textContent, /Exported 1 conversations and 2 artifacts to /);
+  assert.deepStrictEqual([out.result.outcome, out.result.warnings, out.result.saved.chats, out.result.saved.artifacts], ['done', 0, 1, 2]);
   // The viewer's artifacts carry their current version and where claude.ai says they were made.
   const viewerData = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(files['viewer.html'])[1].replace(/<\\\//g, '</'));
   assert.deepStrictEqual(viewerData.artifacts.map((v) => [v.title, v.ver, v.sourceSurface]), [['Quarterly Report', LIVE, 'chat'], ['Game', LIVE, 'cowork']]);
@@ -3972,14 +3944,14 @@ test('the setting off writes no artifacts and makes no listArtifacts call', asyn
 test('a list failure leaves the chats complete and says so', async () => {
   for (const [reply, code] of [[{ error: 'HTTP 401', status: 401 }, 'HTTP 401'], [{ connectionError: 'gone' }, 'no connection to the claude.ai tab'], [{ frames: 'x' }, 'bad response']]) {
     const list = [listed('a', '2026-01-01T00:00:00Z')];
-    const { zip, status, store } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup: bulkWithArtifacts({ list: reply }) });
+    const { zip, result, store } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup: bulkWithArtifacts({ list: reply }) });
     const files = await zipFiles(zip);
     assert.ok(files['Chat_a/README.md'] && files['Chat_a/full_chat.md'], code);
     assert.ok(files['index.md'].includes(`Artifacts: not exported (${code})`), files['index.md']);
     assert.ok(!Object.keys(files).some((n) => n.startsWith('artifacts/')), 'no half-written artifacts/');
     assert.ok(!('artifacts' in JSON.parse(files['export-manifest.json'])));
-    assert.match(status.textContent, / Artifacts could not be listed\./);
-    assert.strictEqual(status.className, 'status warning');
+    assert.strictEqual(result.outcome, 'done');
+    assert.ok(result.warningList.some((w) => w.type === 'artifact_export' && w.text.includes(code)), JSON.stringify(result.warningList));
     assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats), ['a']);
   }
 });
@@ -4117,30 +4089,30 @@ test('Export Changes runs when only an artifact changed', async () => {
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
   const fetcher = publishedFetcher({ [U(2)]: livePage('Two', { 'index.html': '2' }) });
   const first = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored, options: { changesOnly: true }, setup: bulkWithArtifacts({ frames, fetcher }), assets: true });
-  assert.ok(first.saved, first.status.textContent);
+  assert.ok(first.saved, JSON.stringify(first.result));
   const files = await zipFiles(first.zip);
   const manifest = JSON.parse(files['export-manifest.json']);
   assert.deepStrictEqual([manifest.chats.length, manifest.artifacts.items.map((e) => e.uuid)], [0, [U(2)]]);
   assert.ok(files['viewer.html'], 'artifacts alone still get a viewer');
   assert.ok(files[`artifacts/${artVer('Two', U(2))}/index.html`]);
   assert.deepStrictEqual(first.store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE, [U(2)]: LIVE });
-  assert.match(first.status.textContent, /Exported 0 changed conversations and 1 artifact to mega-zip/);
+  assert.deepStrictEqual([first.result.outcome, first.result.saved.chats, first.result.saved.artifacts], ['done', 0, 1]);
 
   const again = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, stored: first.store, options: { changesOnly: true }, setup: bulkWithArtifacts({ frames, fetcher }) });
   assert.strictEqual(again.saved, null);
-  assert.match(again.status.textContent, /Nothing changed since/);
+  assert.match(again.result.notes.join(' '), /Nothing changed since/);
 });
 
 test('an artifact that could not be exported is not recorded, so the next Export Changes tries it again', async () => {
   const list = [listed('a', '2026-01-01T00:00:00Z')];
   const frames = [art(U(1), 'One'), art(U(2), 'Two')];
   const fetcher = publishedFetcher({ [U(1)]: livePage('One', { 'index.html': '1' }) });
-  const { zip, store, status } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup: bulkWithArtifacts({ frames, fetcher }) });
+  const { zip, store, result } = await runBulkZip({ list, chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup: bulkWithArtifacts({ frames, fetcher }) });
   const files = await zipFiles(zip);
   assert.deepStrictEqual(store.exportRecord['org-1'].artifacts, { [U(1)]: LIVE });
   assert.match(files['artifacts/errors.txt'], /Two/);
-  assert.match(status.textContent, / See artifacts\/errors\.txt\./);
-  assert.strictEqual(status.className, 'status warning');
+  assert.ok(result.errorFiles.includes('artifacts/errors.txt'));
+  assert.ok(result.warnings > 0);
 });
 
 test('Export All never asks for the web permission', async () => {
@@ -4155,25 +4127,28 @@ test('Export All never asks for the web permission', async () => {
   }
 });
 
-test('exportAllArtifacts defaults to true and round-trips', async () => {
-  const sb = exportPopup().sandbox;
-  assert.strictEqual(vm.runInContext('defaultSettings.exportAllArtifacts', sb), true);
-  const box = sb.document.getElementById('exportAllArtifacts');
-  vm.runInContext('applySettings()', sb);
-  assert.strictEqual(box.checked, true);
-  const store = {};
-  sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
-  sb.chrome.storage.local.get = async (keys) => Object.fromEntries(keys.filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
-  box.handlers.change({ target: { checked: false } });
-  await new Promise((r) => setTimeout(r, 5));
-  assert.strictEqual(store.exporterSettings.exportAllArtifacts, false);
-  vm.runInContext('settings = { ...defaultSettings }', sb);
-  await vm.runInContext('loadSettings()', sb);
-  assert.strictEqual(vm.runInContext('settings.exportAllArtifacts', sb), false);
-  assert.strictEqual(box.checked, false);
+test('exportAllChats and exportAllArtifacts default to true and round-trip through the main screen\'s boxes', async () => {
+  for (const [key, id] of [['exportAllChats', 'pickChats'], ['exportAllArtifacts', 'pickArtifacts']]) {
+    const sb = exportPopup().sandbox;
+    assert.strictEqual(vm.runInContext(`defaultSettings.${key}`, sb), true);
+    const box = sb.document.getElementById(id);
+    vm.runInContext('applySettings()', sb);
+    assert.strictEqual(box.checked, true);
+    const store = {};
+    sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+    sb.chrome.storage.local.get = async (keys) => Object.fromEntries(keys.filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
+    box.handlers.change({ target: { checked: false } });
+    await new Promise((r) => setTimeout(r, 5));
+    assert.strictEqual(store.exporterSettings[key], false);
+    vm.runInContext('settings = { ...defaultSettings }', sb);
+    await vm.runInContext('loadSettings()', sb);
+    assert.strictEqual(vm.runInContext(`settings.${key}`, sb), false);
+    assert.strictEqual(box.checked, false);
+  }
   for (const page of ['popup.html', 'sidepanel.html']) {
     const html = fs.readFileSync(path.join(REPO, page), 'utf8');
-    assert.match(html, /<label for="exportAllArtifacts"[^>]*>Include artifacts in Export All:<\/label>\s*<input type="checkbox" id="exportAllArtifacts" checked>/, page);
+    assert.match(html, /<input type="checkbox" id="pickChats" checked>\s*<span class="check-text"><span>Chats<\/span>/, page);
+    assert.match(html, /<input type="checkbox" id="pickArtifacts" checked>\s*<span class="check-text"><span>Artifacts<\/span><span class="sub">Every version claude\.ai keeps<\/span>/, page);
   }
 });
 
@@ -4413,14 +4388,14 @@ test('a combined Export All writes no frame URL, asset token or picture URL into
     };
     sb.console = Object.fromEntries(['log', 'warn', 'error', 'info', 'debug'].map((k) => [k, (...a) => consoleCalls.push(a.map(String).join(' '))]));
   };
-  const { zip, status } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup, assets: true });
+  const { zip, result } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chat }, setup, assets: true });
   assert.ok(thumbFetches.length >= 1, 'the picture URL was used');
   const files = await zipFiles(zip);
   assert.ok(files['viewer.html'] && files['artifacts/index.md'] && files[`artifacts/${artFolder('Guide', PUB_U)}/v1/index.html`], Object.keys(files).join());
   assert.ok(!Object.keys(files).some((n) => n.startsWith('published/')), 'no published/ in Export All');
   assert.strictEqual(files[`artifacts/${artFolder('Gone', PUB_U2)}/v1/index.html`], 'UNLISTED-PAGE');
   assert.ok(Object.keys(files).some((n) => /^viewer-files\/thumbs\//.test(n)), 'a card picture was saved');
-  const all = { ...files, status: status.textContent + status.className, console: consoleCalls.join('\n') };
+  const all = { ...files, result: JSON.stringify(result), console: consoleCalls.join('\n') };
   for (const [name, text] of Object.entries(all)) {
     for (const bad of ['__frame_t', 'claudeusercontent', '_thumb.img', TOKEN, thumbUrl(U(1))]) assert.ok(!name.includes(bad) && !text.includes(bad), `${name} holds ${bad}`);
   }
@@ -5184,7 +5159,7 @@ test('Export All finishes when the artifact step stops early', async () => {
     bulkWithArtifacts({ frames: [art(U(1), 'Guide')], fetcher: histFetcher() })(sb);
     vm.runInContext('const __origStep = runArtifactStep; runArtifactStep = async (...a) => { const s = await __origStep(...a); s.entries = []; s.whole = []; s.versionsSaved = []; return s; };', sb);
   };
-  const { zip, status } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup });
+  const { zip, result } = await runBulkZip({ list: [listed('a', '2026-01-01T00:00:00Z')], chats: { a: chatFor('a', '2026-01-01T00:00:00Z') }, setup });
   assert.ok(zip, 'the export was written');
-  assert.notStrictEqual(status.className, 'status error', status.textContent);
+  assert.strictEqual(result.outcome, 'done', JSON.stringify(result));
 });

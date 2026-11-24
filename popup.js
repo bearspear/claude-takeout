@@ -2,6 +2,13 @@
 
 let conversationData = null;
 let orgId = null;
+// The screen shown (showScreen) and whether requestData skipped a repaint because another screen was up.
+let currentScreen = 'main';
+let refreshSkipped = false;
+// The Everything section's state: this org's export record, the counts (Count button; kept for the panel's
+// life), whether Count is running or failed (its code), a short-lived summary message, and whether the tab is
+// on claude.ai.
+const panel = { record: null, counts: null, countsOrg: null, counting: false, countError: '', flash: '', flashTimer: null, onClaude: false };
 
 // ============================================================================
 // Error Collector: Structured error tracking for comprehensive error reporting
@@ -2956,7 +2963,8 @@ async function createZipExport(data, onProgress = null, fetchPublished = null) {
     warningCount: result.errorCollector?.warnings?.length || 0,
     hasErrors: result.errorCollector?.hasAny() || false,
     healthIssues: result.healthIssues || 0,
-    viewerBuilt
+    viewerBuilt,
+    size: zipBlob.size
   };
 }
 
@@ -4366,53 +4374,60 @@ function safeFilename(name) {
   return Array.from((name || 'conversation').replace(/[^\p{L}\p{N}\p{M}]/gu, '_')).slice(0, 50).join('');
 }
 
-// Update UI based on data availability
-// preserveStatus leaves the status pill alone, so a refresh that was deferred
-// until an export finished doesn't overwrite that export's result message.
-function updateUI(data, org, { preserveStatus = false } = {}) {
-  const status = document.getElementById('status');
-  const info = document.getElementById('info');
-  const exportMd = document.getElementById('exportMd');
-  const exportMdEmbed = document.getElementById('exportMdEmbed');
-  const exportZip = document.getElementById('exportZip');
-  const exportJson = document.getElementById('exportJson');
+// The This chat card. state, when there is no chat to export: 'nochat' (on claude.ai, no chat in the URL),
+// 'offsite' (not on claude.ai), 'loading', or 'failed' (detail: what went wrong, shown in the card's result line).
+// preserveStatus leaves the result line and its tone alone, so a refresh that was deferred until an export
+// finished doesn't overwrite that export's result.
+const CHAT_CARD_TEXT = {
+  ready: 'Ready to export',
+  nochat: 'Open a chat to export it',
+  offsite: 'Open claude.ai to export.',
+  loading: 'Loading this chat…',
+  failed: "Couldn't load this chat",
+};
+const CHAT_BUTTONS = ['exportZip', 'exportMd', 'exportMdEmbed', 'exportJson'];
+const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
 
+function updateUI(data, org, { preserveStatus = false, state = null, detail = '' } = {}) {
+  const $ = (id) => document.getElementById(id);
   if (org) {
     orgId = org;
   }
-
-  if (data && data.chat_messages) {
-    conversationData = data;
-    const messages = getMessageChain(data);
-    const msgCount = messages.length;
-    const artifacts = extractArtifacts(data);
-    const artifactCount = Object.keys(artifacts).length;
-    const title = data.name || 'Untitled';
-
-    if (!preserveStatus) {
-      status.className = 'status ready';
-      status.textContent = 'Ready to export!';
-    }
-    const artifactInfo = artifactCount > 0 ? `, ${artifactCount} artifacts` : '';
-    info.textContent = `Current: "${title}" (${msgCount} messages${artifactInfo})`;
-
-    exportMd.disabled = false;
-    exportMdEmbed.disabled = false;
-    exportZip.disabled = false;
-    exportJson.disabled = false;
+  const ready = !!(data && data.chat_messages);
+  // Without a chat, drop the old conversation so nothing can export it by mistake.
+  conversationData = ready ? data : null;
+  const which = ready ? 'ready' : (state && CHAT_CARD_TEXT[state] ? state : (org ? 'nochat' : 'offsite'));
+  const card = $('chatCard');
+  const title = $('chatTitle');
+  const meta = $('chatMeta');
+  $('chatState').textContent = CHAT_CARD_TEXT[which];
+  if (ready) {
+    const name = data.name || 'Untitled';
+    title.textContent = name;
+    title.title = name;
+    // "Files" are what extractArtifacts finds in the chat; "artifacts" stays the word for claude.ai's artifacts.
+    meta.textContent = `${getModelName(data)} · ${plural(getMessageChain(data).length, 'message')} · ${plural(Object.keys(extractArtifacts(data)).length, 'file')}`;
   } else {
-    // Drop the old conversation so nothing can export it by mistake.
-    conversationData = null;
-    if (!preserveStatus) {
-      status.className = 'status waiting';
-      status.textContent = org ? 'Open a chat to export it.' : 'Sign in to claude.ai and open a chat.';
-    }
-    info.textContent = org ? `Org ID: ${org.substring(0, 8)}...` : '';
-    exportMd.disabled = true;
-    exportMdEmbed.disabled = true;
-    exportZip.disabled = true;
-    exportJson.disabled = true;
+    title.textContent = '';
+    title.title = '';
+    meta.textContent = '';
   }
+  title.hidden = !ready;
+  meta.hidden = !ready;
+  $('chatRetry').hidden = which !== 'failed';
+  for (const id of CHAT_BUTTONS) $(id).disabled = !ready || exportRunning;
+  const status = $('status');
+  if (!preserveStatus) {
+    status.textContent = which === 'failed' ? detail : '';
+    status.title = '';
+    card.dataset.tone = ready ? 'ready' : 'idle';
+  } else if (!ready) {
+    card.dataset.tone = 'idle';
+  } else if (card.dataset.tone !== 'warn' && card.dataset.tone !== 'error') {
+    card.dataset.tone = 'ready';
+  }
+  panel.onClaude = which !== 'offsite';
+  loadEverything();
 }
 
 // Show progress
@@ -4492,15 +4507,15 @@ async function sendToTab(tabId, message) {
 let currentTabId = null;
 
 async function requestData({ preserveStatus = false } = {}) {
+  // Off the main screen (Done, Export stopped, Settings) nothing is repainted; going back asks again.
+  if (currentScreen !== 'main') {
+    refreshSkipped = true;
+    return;
+  }
+  refreshSkipped = false;
   const refreshId = ++latestRefreshId;
   const isStale = () => refreshId !== latestRefreshId;
-  const status = document.getElementById('status');
-  const uiOptions = { preserveStatus };
-  const setStatus = (className, text) => {
-    if (preserveStatus) return;
-    status.className = className;
-    status.textContent = text;
-  };
+  const show = (data, org, state = null, detail = '') => updateUI(data, org, { preserveStatus, state, detail });
 
   try {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -4510,8 +4525,7 @@ async function requestData({ preserveStatus = false } = {}) {
     // tab.url is undefined for sites outside the extension's host permissions.
     const url = tab?.url || '';
     if (!url.includes('claude.ai')) {
-      updateUI(null, null, uiOptions);
-      setStatus('status error', 'Please navigate to claude.ai');
+      show(null, null, 'offsite');
       return;
     }
 
@@ -4520,8 +4534,7 @@ async function requestData({ preserveStatus = false } = {}) {
 
     if (response.connectionError) {
       console.log('Error:', response.connectionError);
-      updateUI(null, null, uiOptions);
-      setStatus('status error', `Can't reach this tab: ${response.connectionError}`);
+      show(null, null, 'failed', `Can't reach this tab: ${response.connectionError}`);
       return;
     }
 
@@ -4529,29 +4542,27 @@ async function requestData({ preserveStatus = false } = {}) {
     const chatId = getChatIdFromUrl(url);
 
     if (!chatId) {
-      updateUI(null, org, uiOptions);
+      show(null, org);
       return;
     }
 
     // Export stays disabled until a different chat has loaded.
     if (conversationData?.uuid !== chatId) {
-      updateUI(null, org, uiOptions);
-      setStatus('status waiting', 'Loading selected conversation...');
+      show(null, org, 'loading');
     }
 
     const result = await sendToTab(tab.id, { action: 'fetchConversation', conversationId: chatId, orgId: org });
     if (isStale()) return;
 
     if (result.data?.chat_messages) {
-      updateUI(result.data, org, uiOptions);
+      show(result.data, org);
     } else {
-      setStatus('status error', `Could not load this conversation: ${result.error || result.connectionError || 'no data returned'}`);
+      show(null, org, 'failed', `Could not load this conversation: ${result.error || result.connectionError || 'no data returned'}`);
     }
   } catch (e) {
     console.error(e);
     if (!isStale()) {
-      updateUI(null, null, uiOptions);
-      setStatus('status error', `Could not load this conversation: ${e.message}`);
+      show(null, null, 'failed', `Could not load this conversation: ${e.message}`);
     }
   }
 }
@@ -4593,101 +4604,6 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     scheduleRefresh();
   }
 });
-
-// Bulk export
-async function bulkExport(format) {
-  const status = document.getElementById('status');
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-
-  if (!(tab?.url || '').includes('claude.ai')) {
-    status.className = 'status error';
-    status.textContent = 'Please navigate to claude.ai first';
-    return;
-  }
-
-  status.className = 'status waiting';
-  status.textContent = 'Fetching conversation list...';
-
-  // Get all conversations
-  // Awaited to the end, so the export lock holds until every file is written.
-  const response = await new Promise((resolve) => chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations' },
-    (r) => resolve(chrome.runtime && chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : r)));
-  await (async () => {
-    if (!response || response.error) {
-      status.className = 'status error';
-      status.textContent = (response && response.error) || 'Could not fetch the conversation list.';
-      return;
-    }
-
-    const conversations = response.data;
-    const total = conversations.length;
-
-    status.textContent = `Found ${total} conversations. Exporting...`;
-    showProgress(0, total, `0 / ${total}`);
-
-    let exported = 0;
-    let errors = [];
-    let incomplete = 0;  // chats whose data looks incomplete (see chatHealth)
-
-    for (const conv of conversations) {
-      try {
-        // Fetch full conversation
-        const result = await new Promise((resolve) => {
-          chrome.tabs.sendMessage(tab.id, {
-            action: 'fetchConversation',
-            conversationId: conv.uuid
-          }, resolve);
-        });
-
-        if (result.error) {
-          throw new Error(result.error);
-        }
-
-        const data = result.data;
-        await ensureProjectName(data, orgId);
-        let content, filename;
-        const projectPrefix = data.project?.name ? `[${safeFilename(data.project.name)}-project]_` : '';
-
-        if (format === 'json') {
-          content = JSON.stringify(data, null, 2);
-          filename = `${projectPrefix}${safeFilename(data.name)}.json`;
-        } else if (format === 'embedded') {
-          content = convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking });
-          filename = `${projectPrefix}${safeFilename(data.name)}_embedded.md`;
-        } else {
-          content = convertToMarkdown(data, { includeThinking: settings.includeThinking });
-          filename = `${projectPrefix}${safeFilename(data.name)}.md`;
-        }
-
-        download(content, filename, format === 'json' ? 'application/json' : 'text/markdown');
-        exported++;
-        if (chatHealth(data).length) incomplete++;
-
-      } catch (e) {
-        errors.push(`${conv.name || conv.uuid}: ${e.message}`);
-      }
-
-      showProgress(exported + errors.length, total, `${exported} / ${total}`);
-
-      // Small delay to avoid overwhelming
-      await new Promise(r => setTimeout(r, 300));
-    }
-
-    hideProgress();
-
-    if (errors.length > 0) {
-      status.className = 'status error';
-      status.textContent = `Exported ${exported}/${total}. ${errors.length} failed.`;
-      console.error('Export errors:', errors);
-    } else if (incomplete) {
-      status.className = 'status warning';
-      status.textContent = `Exported ${exported} conversations, but ${incomplete} look${incomplete === 1 ? 's' : ''} incomplete; claude.ai's data may have changed. Export one as a ZIP for details in errors.txt.`;
-    } else {
-      status.className = 'status ready';
-      status.textContent = `Exported ${exported} conversations!`;
-    }
-  })();
-}
 
 // ---- Incremental export ----
 // chrome.storage.local.exportRecord: { <org id>: { at, chats: { <chat uuid>: updated_at as the chat list gave it },
@@ -4780,7 +4696,8 @@ function collectorRunWarnings(collector, chat = '') {
   }));
 }
 
-function runResult({ outcome = 'done', reason = '', target = null, saved = null, warningList = [], errorFiles = [], startedAt = null } = {}) {
+// notes: plain sentences beyond the counts ("Nothing changed since …"), shown on the Done screen.
+function runResult({ outcome = 'done', reason = '', target = null, saved = null, warningList = [], errorFiles = [], notes = [], startedAt = null } = {}) {
   const list = Array.isArray(warningList) ? warningList : [];
   return {
     outcome,
@@ -4790,6 +4707,7 @@ function runResult({ outcome = 'done', reason = '', target = null, saved = null,
     warnings: list.length,
     warningList: list,
     errorFiles: [...new Set(errorFiles)],
+    notes: (Array.isArray(notes) ? notes : []).map(String),
     startedAt: startedAt || new Date().toISOString(),
     endedAt: new Date().toISOString(),
   };
@@ -4931,13 +4849,13 @@ function exportProgress(options, { phase, done, total, sub = '', warnings = 0 })
 async function bulkExportZip(options = {}) {
   const changesOnly = options && typeof options.changesOnly === 'boolean' ? options.changesOnly : settings.megaZipScope === 'changes';
   const directory = options && options.directory ? options.directory : null;
-  const status = document.getElementById('status');
   const runStartedAt = new Date().toISOString();
   const target = { kind: directory ? 'folder' : 'zip', name: '' };
   const saved = { chats: 0, artifacts: 0, versions: 0 };
   const warningList = [];
   const errorFiles = [];
-  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, startedAt: runStartedAt });
+  const notes = [];  // sentences the Done screen adds to its counts (runResult)
+  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, notes, startedAt: runStartedAt });
   // The Exporting screen's events (exportProgress) and its Stop button (options.signal.stopped).
   const signal = options && options.signal && typeof options.signal === 'object' ? options.signal : null;
   const stopRequested = () => !!(signal && signal.stopped);
@@ -4950,13 +4868,8 @@ async function bulkExportZip(options = {}) {
   } catch (e) { tab = null; }
 
   if (!(tab?.url || '').includes('claude.ai')) {
-    status.className = 'status error';
-    status.textContent = 'Please navigate to claude.ai first';
     return result('failed', 'Please navigate to claude.ai first');
   }
-
-  status.className = 'status waiting';
-  status.textContent = 'Fetching conversation list...';
 
   // Get all conversations
   // Awaited to the end, so the export lock holds until every file is written.
@@ -4965,8 +4878,6 @@ async function bulkExportZip(options = {}) {
     (r) => resolve(chrome.runtime && chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : r)));
   return await (async () => {
     if (!response || response.error) {
-      status.className = 'status error';
-      status.textContent = (response && response.error) || 'Could not fetch the conversation list.';
       return result('failed', runWarningText((response && response.error) || 'Could not fetch the conversation list.'));
     }
 
@@ -4979,7 +4890,7 @@ async function bulkExportZip(options = {}) {
     const since = record && record.at ? record.at : null;
     const conversations = since ? changedSince(listedChats, record.chats) : listedChats;
     const kind = since ? 'changes' : 'full';
-    const firstNote = changesOnly && !since ? ' There is no earlier export from this browser, so every chat is exported.' : '';
+    if (changesOnly && !since) notes.push('There is no earlier export from this browser, so every chat is exported.');
     // The first call injects content.js if the tab needs it; the rest message it directly.
     const fetchPublished = tabPublishedFetcher(tab.id);
     // claude.ai's artifacts, listed before the chats so a changes run knows whether any changed. A failed list
@@ -4988,7 +4899,6 @@ async function bulkExportZip(options = {}) {
     let artifactList = null;
     let listError = null;
     if (withArtifacts) {
-      status.textContent = 'Fetching the artifact list...';
       try {
         const reply = await fetchPublished({ action: 'listArtifacts' });
         if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.frames)) {
@@ -5000,14 +4910,12 @@ async function bulkExportZip(options = {}) {
         listError = 'unexpected error';
       }
     }
-    const listNote = listError ? ' Artifacts could not be listed.' : '';
     // The artifact step's warnings go to artifacts/errors.txt.
     const artifactCollector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
     pendingWarnings = () => (listError ? 1 : 0) + artifactCollector.warnings.length + artifactCollector.errors.length;
     const includedArtifacts = artifactList ? (since ? changedArtifacts(artifactList.artifacts, record.artifacts, record.artifactVersions) : artifactList.artifacts) : [];
     if (since && !conversations.length && !includedArtifacts.length) {
-      status.className = listError ? 'status warning' : 'status ready';
-      status.textContent = `Nothing changed since the last export on ${formatTimestamp(since)}.${listNote}`;
+      notes.push(`Nothing changed since the last Export All, ${formatStamp(since)}.`);
       if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
       return result('done');
     }
@@ -5019,15 +4927,10 @@ async function bulkExportZip(options = {}) {
       try {
         run = await makeRunFolder(directory, megaZipName(response.accountName, kind, dateStr));
       } catch (e) {
-        status.className = 'status error';
-        status.textContent = `Could not make a folder there: ${e.message}`;
         return result('failed', runWarningText(`Could not make a folder there: ${e && e.message}`));
       }
       target.name = run.name;
     }
-    const where = run ? `the folder ${run.name}` : 'mega-zip';
-    status.textContent = `Found ${total} conversations${since ? ' changed since the last export' : ''}. Exporting to ${where}...`;
-    showProgress(0, total, `0 / ${total}`);
 
     // A ZIP, or a folder on disk taking the same calls.
     const megaZip = run ? createDiskFolder(run.handle) : new JSZip();
@@ -5080,11 +4983,6 @@ async function bulkExportZip(options = {}) {
       } else {
         Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
       }
-      hideProgress();
-      status.className = 'status error';
-      status.textContent = run
-        ? `Export stopped. ${saved.chats} conversation${saved.chats === 1 ? '' : 's'}${saved.artifacts ? ` and ${artifactCount(saved.artifacts, 'artifact')}` : ''} saved to ${run.name}, not recorded.`
-        : 'Export stopped. Nothing was saved: a ZIP is written only when the export finishes.';
       return result('stopped', 'You stopped it');
     };
 
@@ -5165,7 +5063,6 @@ async function bulkExportZip(options = {}) {
         saved.chats = exported;
       }
 
-      showProgress(exported + errors.length, total, `${exported} / ${total}`);
       emit('chats', exported + errors.length, total, conv.name || 'Untitled');
 
       // Small delay to avoid overwhelming
@@ -5180,8 +5077,6 @@ async function bulkExportZip(options = {}) {
     let parts = null;
     if (includedArtifacts.length) {
       const count = includedArtifacts.length;
-      status.textContent = `Exporting ${artifactCount(count, 'artifact')}...`;
-      showProgress(0, count, `0 / ${count}`);
       emit('artifacts', 0, count, '');
       try { picturesAllowed = await webImagesAllowed(); } catch (e) { picturesAllowed = false; }
       try {
@@ -5196,7 +5091,6 @@ async function bulkExportZip(options = {}) {
         docChats: new Map([...docChats].map(([uuid, d]) => [uuid, d.title])), parts, run: !!run,
         collector: artifactCollector, signal,
         onProgress: (done, n, info = {}) => {
-          showProgress(done, n, `${done} / ${n}`);
           // On disk, each artifact is written as it is done: the run result counts it now.
           if (run && info.versions !== undefined) Object.assign(saved, { artifacts: info.saved, versions: info.versions });
           emit('artifacts', done, n, info.sub || '');
@@ -5217,9 +5111,7 @@ async function bulkExportZip(options = {}) {
     }
     const artifactRows = [...(step ? step.rows : []), ...chatRows];
     const artifactWarnings = step ? step.collector.warnings.length + step.collector.errors.length : 0;
-    const artifactNote = `${listNote}${artifactWarnings ? ' See artifacts/errors.txt.' : ''}`;
     const savedArtifacts = step ? step.views.filter((v) => !v.notExported).length : 0;
-    const andArtifacts = savedArtifacts ? ` and ${artifactCount(savedArtifacts, 'artifact')}` : '';
     // Recorded with the chats after the write: artifacts saved whole (one with a missing file is tried again next time).
     // One found only by paging is recorded by its update time; with none, it is left out and included next time too.
     const exportedArtifacts = step ? includedArtifacts
@@ -5299,7 +5191,6 @@ async function bulkExportZip(options = {}) {
       ...(step ? { artifacts: { listed: artifactList.listed, thumbs: step.thumbs, items: step.entries } } : {}),
     }, null, 2));
 
-    status.textContent = 'Building viewer...';
     // The combined viewer also needs each artifact's current version (to tell it from older ones chats published)
     // and where claude.ai says it was made (its card's source line); views, entries and rows are one per artifact.
     const combinedViews = step ? step.views.map((v, i) => ({ ...v, ver: (step.entries[i] && step.entries[i].ver) || '', sourceSurface: (step.rows[i] && step.rows[i].sourceSurface) || '' })) : [];
@@ -5315,7 +5206,6 @@ async function bulkExportZip(options = {}) {
     const viewerWritten = viewerWanted && await writeViewer(megaZip, viewerChats, viewerOpts);
     const viewerBuilt = !viewerWanted || viewerWritten;
     viewerChats.length = 0;  // viewer.html holds them now, and compressing needs the memory
-    const viewerNote = viewerBuilt ? '' : ' viewer.html could not be built.';
     // The run result's counts and warnings, in the order the panel lists them: chats (above), artifacts, viewer.
     saved.chats = exported;
     saved.artifacts = savedArtifacts;
@@ -5348,18 +5238,10 @@ async function bulkExportZip(options = {}) {
       addWriteFailures(writeFailures);
       const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions);
       if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions, warningList.length);
-      hideProgress();
-      const failedNote = errors.length ? ` ${errors.length} conversation${errors.length > 1 ? 's' : ''} failed.` : '';
-      const writeNote = writeFailures.length ? ` ${writeFailures.length} file${writeFailures.length > 1 ? 's' : ''} could not be written (see write-errors.txt).` : '';
-      const issueNote = totalFileErrors || totalFileWarnings ? ' Some chats have errors.txt.' : '';
-      status.className = errors.length ? 'status error' : (writeFailures.length || issueNote || !viewerBuilt || artifactNote) ? 'status warning' : 'status ready';
-      status.textContent = `Exported ${exported}${errors.length ? `/${total}` : ''} ${since ? 'changed ' : ''}conversations${andArtifacts} to ${run.name}.${failedNote}${writeNote}${issueNote}${viewerNote}${artifactNote}${firstNote}`;
       return result('done');
     }
 
     // Generate and download
-    status.textContent = 'Compressing archive...';
-    showProgress(95, 100, 'Compressing...');
 
     try {
       const zipBlob = await megaZip.generateAsync({
@@ -5374,41 +5256,8 @@ async function bulkExportZip(options = {}) {
       // Only chats and artifacts really in the archive are recorded, so one that failed is tried again next time.
       const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions);
       if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions, warningList.length);
-
-      hideProgress();
-
-      // Determine status based on errors
-      const hasConvErrors = errors.length > 0;
-      const hasFileIssues = totalFileErrors > 0 || totalFileWarnings > 0;
-
-      if (hasConvErrors) {
-        // Conversation-level failures (couldn't fetch/process entire conversations)
-        status.className = 'status error';
-        let msg = `Exported ${exported}/${total}${andArtifacts} to mega-zip. ${errors.length} conversation${errors.length > 1 ? 's' : ''} failed.`;
-        if (hasFileIssues) {
-          msg += ` Also ${totalFileErrors} file error${totalFileErrors !== 1 ? 's' : ''}.`;
-        }
-        status.textContent = msg + viewerNote + artifactNote;
-        console.error('Export errors:', errors);
-      } else if (hasFileIssues) {
-        // File-level issues but all conversations exported
-        const issueParts = [];
-        if (totalFileErrors > 0) issueParts.push(`${totalFileErrors} file error${totalFileErrors > 1 ? 's' : ''}`);
-        if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
-        status.className = 'status warning';
-        const looks = incomplete ? ` ${incomplete} chat${incomplete === 1 ? ' looks' : 's look'} incomplete.` : '';
-        status.textContent = `Exported ${exported} conversations${andArtifacts} - ${issueParts.join(', ')}.${looks} See errors.txt${viewerBuilt && !artifactNote ? '' : `.${viewerNote}${artifactNote}`}${firstNote}`;
-      } else if (!viewerBuilt || artifactNote) {
-        status.className = 'status warning';
-        status.textContent = `Exported ${exported} conversations${andArtifacts} to mega-zip.${viewerNote}${artifactNote}${firstNote}`;
-      } else {
-        status.className = 'status ready';
-        status.textContent = `Exported ${exported} ${since ? 'changed ' : ''}conversations${andArtifacts} to mega-zip!${firstNote}`;
-      }
+      if (errors.length) console.error('Export errors:', errors);
     } catch (e) {
-      hideProgress();
-      status.className = 'status error';
-      status.textContent = `Zip generation failed: ${e.message}`;
       // Nothing reached disk: a ZIP is written only when the export finishes.
       Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
       return result('failed', runWarningText(`Zip generation failed: ${e && e.message}`));
@@ -5419,9 +5268,6 @@ async function bulkExportZip(options = {}) {
     console.error('Export All failed:', e);
     // A ZIP reaches disk only at the end; a folder keeps what was written (saved counts it as it goes).
     if (!directory) Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
-    hideProgress();
-    status.className = 'status error';
-    status.textContent = `Export All failed: ${e && e.message ? e.message : e}`;
     return result('failed', runWarningText(`Export All failed: ${e && e.message ? e.message : e}`));
   }
 }
@@ -6176,13 +6022,13 @@ async function runArtifactStep(root, opts = {}) {
 // options.onProgress and options.signal as for bulkExportZip. Resolves to a run result (runResult); never throws.
 async function exportArtifacts(options = {}) {
   const directory = options && options.directory ? options.directory : null;
-  const status = document.getElementById('status');
   const runStartedAt = new Date().toISOString();
   const target = { kind: directory ? 'folder' : 'zip', name: '' };
   const saved = { chats: 0, artifacts: 0, versions: 0 };
   const warningList = [];
   const errorFiles = [];
-  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, startedAt: runStartedAt });
+  const notes = [];  // sentences the Done screen adds to its counts (runResult)
+  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, notes, startedAt: runStartedAt });
   // The Exporting screen's events (exportProgress) and its Stop button (options.signal.stopped).
   const signal = options && options.signal && typeof options.signal === 'object' ? options.signal : null;
   let collector = null;
@@ -6193,12 +6039,8 @@ async function exportArtifacts(options = {}) {
     [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   } catch (e) { tab = null; }
   if (!(tab?.url || '').includes('claude.ai')) {
-    status.className = 'status error';
-    status.textContent = 'Please navigate to claude.ai first';
     return result('failed', 'Please navigate to claude.ai first');
   }
-  status.className = 'status waiting';
-  status.textContent = 'Fetching the artifact list...';
   // The first call injects content.js if the tab needs it; the rest message it directly.
   const fetchPublished = tabPublishedFetcher(tab.id);
   let reply;
@@ -6206,15 +6048,12 @@ async function exportArtifacts(options = {}) {
     reply = await fetchPublished({ action: 'listArtifacts', withAccountName: true });
   } catch (e) { reply = null; }
   if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.frames)) {
-    status.className = 'status error';
     const code = !reply || reply.error || reply.connectionError ? publishedCode(reply) : 'bad response';
-    status.textContent = publishedSignedOutReply(reply) ? 'Sign in to claude.ai, then try again.' : `Could not fetch the artifact list: ${code}.`;
-    return result('failed', runWarningText(status.textContent));
+    return result('failed', runWarningText(publishedSignedOutReply(reply) ? 'Sign in to claude.ai, then try again.' : `Could not fetch the artifact list: ${code}.`));
   }
   const { artifacts, paging, listed } = artifactsFromList(reply);
   if (!artifacts.length) {
-    status.className = 'status ready';
-    status.textContent = 'No artifacts on claude.ai.';
+    notes.push('No artifacts on claude.ai.');
     return result('done');
   }
   const total = artifacts.length;
@@ -6225,14 +6064,10 @@ async function exportArtifacts(options = {}) {
     try {
       run = await makeRunFolder(directory, zipName);
     } catch (e) {
-      status.className = 'status error';
-      status.textContent = `Could not make a folder there: ${e.message}`;
       return result('failed', runWarningText(`Could not make a folder there: ${e && e.message}`));
     }
     target.name = run.name;
   }
-  status.textContent = `Found ${artifactCount(total, 'artifact')}. Exporting to ${run ? `the folder ${run.name}` : 'a ZIP'}...`;
-  showProgress(0, total, `0 / ${total}`);
   try {
     const root = run ? createDiskFolder(run.handle) : new JSZip();
     collector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
@@ -6252,7 +6087,6 @@ async function exportArtifacts(options = {}) {
     const { views, rows, entries, thumbs, writeFailures, partCount, versionCount } = await runArtifactStep(root, {
       store, artifacts, paging, listed, fetchPublished, picturesAllowed, parts, collector, run, signal,
       onProgress: (done, count, info = {}) => {
-        showProgress(done, count, `${done} / ${count}`);
         // On disk, each artifact is written as it is done: the run result counts it now.
         if (run && info.versions !== undefined) Object.assign(saved, { artifacts: info.saved, versions: info.versions });
         emit('artifacts', done, count, info.sub || '');
@@ -6277,10 +6111,6 @@ async function exportArtifacts(options = {}) {
       } else {
         Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
       }
-      status.className = 'status error';
-      status.textContent = run
-        ? `Export stopped. ${artifactCount(saved.artifacts, 'artifact')} saved to ${run.name}.`
-        : 'Export stopped. Nothing was saved: a ZIP is written only when the export finishes.';
       return result('stopped', 'You stopped it');
     }
     emit('viewer', 0, 1, 'Viewer and index');
@@ -6316,8 +6146,8 @@ async function exportArtifacts(options = {}) {
     emit('viewer', 1, 1, 'Viewer and index');
 
     const withoutFiles = rows.filter((r) => r.fileCount === 0).length;
-    const viewerNote = (viewerBuilt ? '' : ' viewer.html could not be built.') + (picturesAllowed ? '' : ` ${ARTIFACT_THUMB_PERMISSION_STATUS}`);
-    const done = (where) => `Exported ${artifactCount(total, 'artifact')} to ${where}.${withoutFiles ? ` ${withoutFiles} without files (see index.md).` : ''}${warnings ? ' See errors.txt.' : ''}`;
+    if (withoutFiles) notes.push(`${withoutFiles} without files (see index.md).`);
+    if (!picturesAllowed) notes.push(ARTIFACT_THUMB_PERMISSION_STATUS);
     if (run) {
       writeFailures.push(...await root.flush());
       if (writeFailures.length) {
@@ -6326,34 +6156,22 @@ async function exportArtifacts(options = {}) {
         errorFiles.push('write-errors.txt');
       }
       for (const f of writeFailures) warningList.push({ type: 'write', text: runWarningText(`${f && f.path}: ${f && f.error}`) });
-      status.className = writeFailures.length || warnings || !viewerBuilt ? 'status warning' : 'status ready';
-      status.textContent = done(run.name) + (writeFailures.length ? ` ${artifactCount(writeFailures.length, 'file')} could not be written (see write-errors.txt).` : '') + viewerNote;
       return result('done');
     }
-    status.textContent = 'Compressing archive...';
-    showProgress(95, 100, 'Compressing...');
     let blob;
     try {
       blob = await root.generateAsync({ type: 'blob', compression: 'DEFLATE', compressionOptions: { level: 6 } });
     } catch (e) {
-      status.className = 'status error';
-      status.textContent = `Zip generation failed: ${e.message}`;
       // Nothing reached disk: a ZIP is written only when the export finishes.
       Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
       return result('failed', runWarningText(`Zip generation failed: ${e && e.message}`));
     }
     target.name = zipName;
     download(blob, zipName, 'application/zip');
-    status.className = warnings || !viewerBuilt ? 'status warning' : 'status ready';
-    status.textContent = done('a ZIP') + viewerNote;
     return result('done');
   } catch (e) {
-    status.className = 'status error';
-    status.textContent = `Export Artifacts failed: ${e && e.message ? e.message : e}`;
     if (!run) Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
     return result('failed', runWarningText(`Export Artifacts failed: ${e && e.message ? e.message : e}`));
-  } finally {
-    hideProgress();
   }
 }
 
@@ -6446,6 +6264,89 @@ function runSteps(plan) {
   return steps;
 }
 
+// Bytes in what a single-chat export downloads: a Blob's size, or a string's UTF-8 length.
+function byteSize(content) {
+  if (content && typeof content.size === 'number') return content.size;
+  return new TextEncoder().encode(String(content == null ? '' : content)).length;
+}
+
+// "84 B", "84 KB", "2.1 MB": one decimal below 10, none above.
+function sizeText(bytes) {
+  const n = Number(bytes) || 0;
+  const round = (x) => (x < 10 ? Math.round(x * 10) / 10 : Math.round(x));
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${round(n / 1024)} KB`;
+  return `${round(n / (1024 * 1024))} MB`;
+}
+
+// The This chat card's result line: "Saved Markdown, 84 KB", amber with " · N warnings".
+function chatSavedLine(label, bytes, warnings = 0) {
+  const text = `Saved ${label}, ${sizeText(bytes)}`;
+  return warnings ? { tone: 'warn', text: `${text} · ${warnings} warning${warnings === 1 ? '' : 's'}` } : { tone: 'ready', text };
+}
+
+// "Exporting 27 chats and 19 artifacts"; a part whose total isn't known yet goes without a number.
+function runTitleText(plan, totals = {}) {
+  const part = (key, one) => (Number.isFinite(totals[key]) ? `${totals[key]} ${one}${totals[key] === 1 ? '' : 's'}` : `${one}s`);
+  const parts = [];
+  if (plan.run === 'bulk') parts.push(part('chats', 'chat'));
+  if (plan.run === 'artifacts' || (plan.run === 'bulk' && plan.withArtifacts)) parts.push(part('artifacts', 'artifact'));
+  return `Exporting ${parts.join(' and ')}`;
+}
+
+// "27 chats and 19 artifacts (49 versions)", from a run result's saved counts.
+function savedText(result, plan) {
+  const s = result.saved || {};
+  const n = (x) => Number(x) || 0;
+  const items = [];
+  if (plan.run === 'bulk') items.push(`${n(s.chats)} chat${n(s.chats) === 1 ? '' : 's'}`);
+  if (plan.run === 'artifacts' || plan.withArtifacts || n(s.artifacts)) {
+    const v = n(s.versions);
+    items.push(`${n(s.artifacts)} artifact${n(s.artifacts) === 1 ? '' : 's'}${v ? ` (${v} version${v === 1 ? '' : 's'})` : ''}`);
+  }
+  return items.join(' and ');
+}
+
+// "Took 4 min 12 s" / "Took 12 s".
+function durationText(startedAt, endedAt) {
+  const secs = Math.max(0, Math.round((Date.parse(endedAt) - Date.parse(startedAt)) / 1000)) || 0;
+  const m = Math.floor(secs / 60);
+  return m ? `${m} min ${secs % 60} s` : `${secs} s`;
+}
+
+// Export stopped: the reason in words, with the code.
+function stoppedReasonText(result, plan) {
+  const r = String(result.reason || '').trim() || 'unknown error';
+  let m;
+  if (r === 'You stopped it') return r;
+  if (/^Please navigate to claude\.ai/.test(r)) return 'This tab is not on claude.ai';
+  if ((m = /^Could not make a folder there: (.*)$/.exec(r))) return `The folder could not be written (${m[1]})`;
+  if ((m = /^Zip generation failed: (.*)$/.exec(r))) return `The ZIP could not be made (${m[1]})`;
+  if ((m = /^Export (?:All|Artifacts) failed: (.*)$/.exec(r))) return `The export ran into an error (${m[1]})`;
+  if (/^Sign in to claude\.ai/.test(r)) return 'claude.ai says you are signed out';
+  if ((m = /^Could not fetch the artifact list: (.*?)\.?$/.exec(r))) return `claude.ai's artifact list could not be loaded (${m[1]})`;
+  if (plan && plan.run === 'bulk') return `claude.ai's chat list could not be loaded (${r.replace(/\.$/, '')})`;
+  return r;
+}
+
+function stoppedSavedText(result, plan) {
+  if (result.target.kind === 'zip') return 'Nothing was saved. A ZIP is written only when the export finishes.';
+  const s = result.saved || {};
+  if (!result.target.name) return 'Nothing was saved.';
+  if (!(Number(s.chats) || Number(s.artifacts))) return `Nothing was saved into ${result.target.name}.`;
+  const one = (Number(s.chats) || 0) + (Number(s.artifacts) || 0) === 1;
+  return `${savedText(result, plan)} ${one ? 'was' : 'were'} saved into ${result.target.name}. They are not recorded, so the next Changes only export takes them again.`;
+}
+
+function stoppedFixText(result) {
+  const r = String(result.reason || '');
+  if (r === 'You stopped it') return 'Try again starts a new export with the same choices.';
+  if (/^Could not make a folder there|write/i.test(r)) return 'Check the folder is still there and writable, then try again.';
+  if (/^Please navigate to claude\.ai/.test(r)) return 'Open claude.ai in this tab, then try again.';
+  if (/^Zip generation failed/.test(r)) return 'The export may be too large for one ZIP. Try Folder, or try again.';
+  return 'Check you are signed in to claude.ai and keep its tab open, then try again.';
+}
+
 // Counts for the main screen's Count button. Asked for only on a click, never when the panel opens, and kept in
 // chrome.storage.session for ten minutes: { [org]: { chats, artifacts, changedChats, changedArtifacts, at } }.
 // artifacts and changedArtifacts are null when the artifacts were not counted.
@@ -6508,14 +6409,7 @@ async function countEverything({ org, tabId, withArtifacts }) {
 // Event listeners with settings-aware filenames
 // One export at a time: a second click, or a shortcut, while one runs does nothing,
 // and the export buttons are disabled meanwhile.
-// A finished single-chat export without errors.txt: ready, or amber when claude.ai's data looks incomplete.
-function exportedStatus(status, data, done) {
-  const problems = chatHealth(data);
-  status.className = problems.length ? 'status warning' : 'status ready';
-  status.textContent = problems.length ? `${done.replace(/!$/, '.')} But this chat looks incomplete: ${problems[0].message}` : done;
-}
-
-const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportAllMd', 'exportAllEmbed', 'exportAllZip', 'exportArtifacts', 'exportAllJson'];
+const EXPORT_BUTTONS = ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson', 'exportSelected'];
 let exportRunning = false;
 function exclusiveExport(run) {
   return async (...args) => {
@@ -6535,136 +6429,370 @@ function exclusiveExport(run) {
 }
 const onExport = (id, run) => document.getElementById(id).addEventListener('click', exclusiveExport(run));
 
-onExport('exportMd', async () => {
-  if (!conversationData) return;
+// The result line in the This chat card, and the card's tone: 'ready' (green), 'warn' (amber), 'error' (red).
+function chatResult(tone, text, detail = '') {
   const status = document.getElementById('status');
-  try {
-    const data = await loadConversationForExport();
-    await ensureProjectName(data, orgId);
-    const md = convertToMarkdown(data, { includeThinking: settings.includeThinking });
-    const filename = generateFilename(data.name, 'md', data.project?.name);
-    download(md, filename, 'text/markdown');
-    exportedStatus(status, data, 'Markdown exported successfully!');
-  } catch (e) {
-    console.error('Markdown export error:', e);
-    status.className = 'status error';
-    status.textContent = 'Export failed: ' + e.message;
-  }
-});
+  status.textContent = text;
+  status.title = detail;
+  document.getElementById('chatCard').dataset.tone = tone;
+}
 
-onExport('exportMdEmbed', async () => {
+// A single-chat Markdown or JSON export: its size, and amber when claude.ai's data looks incomplete (chatHealth).
+function chatSaved(label, content, data) {
+  const problems = chatHealth(data);
+  const line = chatSavedLine(label, byteSize(content), problems.length);
+  chatResult(line.tone, line.text, problems.map((p) => p.message).join('\n'));
+}
+
+async function exportSingle(label, make, errorLabel) {
   if (!conversationData) return;
-  const status = document.getElementById('status');
   try {
     const data = await loadConversationForExport();
     await ensureProjectName(data, orgId);
-    const md = convertToMarkdown(data, {
-      embedArtifacts: true,
-      includeThinking: settings.includeThinking
-    });
-    const filename = generateFilename(data.name, 'md', data.project?.name, '_embedded');
-    download(md, filename, 'text/markdown');
-    exportedStatus(status, data, 'Embedded markdown exported successfully!');
+    const { content, filename, type } = make(data);
+    download(content, filename, type);
+    chatSaved(label, content, data);
   } catch (e) {
-    console.error('Embedded export error:', e);
-    status.className = 'status error';
-    status.textContent = 'Export failed: ' + e.message;
+    console.error(`${errorLabel} export error:`, e);
+    chatResult('error', 'Export failed: ' + e.message);
   }
-});
+}
+
+onExport('exportMd', () => exportSingle('Markdown', (data) => ({
+  content: convertToMarkdown(data, { includeThinking: settings.includeThinking }),
+  filename: generateFilename(data.name, 'md', data.project?.name),
+  type: 'text/markdown',
+}), 'Markdown'));
+
+onExport('exportMdEmbed', () => exportSingle('Markdown + files', (data) => ({
+  content: convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking }),
+  filename: generateFilename(data.name, 'md', data.project?.name, '_embedded'),
+  type: 'text/markdown',
+}), 'Embedded'));
+
+onExport('exportJson', () => exportSingle('JSON', (data) => ({
+  content: JSON.stringify(data, null, 2),
+  filename: generateFilename(data.name, 'json', data.project?.name),
+  type: 'application/json',
+}), 'JSON'));
 
 onExport('exportZip', async () => {
   if (!conversationData) return;
   // Chrome asks for the web-image permission only during a click, so before anything is awaited.
   const webAsk = webImagesOf(conversationData).length ? requestWebImages() : null;
-  const status = document.getElementById('status');
   if (webAsk) await webAsk;
 
-  // Show progress
   showProgress(0, 100, 'Initializing...');
-
   try {
-    status.className = 'status waiting';
-    status.textContent = 'Creating zip archive...';
-
+    document.getElementById('status').textContent = 'Creating ZIP…';
     const { data, tabId } = await loadConversationForExport({ withTab: true });
     await ensureProjectName(data, orgId);
     const result = await createZipExport(data, (step, total, message) => {
       showProgress(step, total, message);
     }, tabPublishedFetcher(tabId));
-
     hideProgress();
-
-    // Show success with error/warning indicator if applicable
-    const viewerNote = result.viewerBuilt ? '' : ' viewer.html could not be built.';
-    if (result.healthIssues) {
-      status.className = 'status warning';
-      status.textContent = `Exported zip, but this chat looks incomplete; claude.ai's data may have changed. See errors.txt.${viewerNote}`;
-    } else if (result.hasErrors) {
-      const errorParts = [];
-      if (result.errorCount > 0) errorParts.push(`${result.errorCount} error${result.errorCount > 1 ? 's' : ''}`);
-      if (result.warningCount > 0) errorParts.push(`${result.warningCount} warning${result.warningCount > 1 ? 's' : ''}`);
-      status.className = 'status warning';
-      status.textContent = `Exported zip (${result.responseCount} responses) - ${errorParts.join(', ')}. See errors.txt${result.viewerBuilt ? '' : `.${viewerNote}`}`;
-    } else if (!result.viewerBuilt) {
-      status.className = 'status warning';
-      status.textContent = `Exported zip (${result.responseCount} responses).${viewerNote}`;
-    } else {
-      status.className = 'status ready';
-      status.textContent = `Exported zip (${result.responseCount} responses, ${result.artifactCount} artifacts)`;
-    }
+    // Warnings: errors.txt's entries (chatHealth's among them) and a viewer that could not be built.
+    const warnings = (result.errorCount || 0) + (result.warningCount || 0) + (result.viewerBuilt ? 0 : 1);
+    const line = chatSavedLine('ZIP', result.size || 0, warnings);
+    const why = result.hasErrors ? ' (see errors.txt)' : warnings ? ' (viewer.html could not be built)' : '';
+    chatResult(line.tone, line.text + why);
   } catch (e) {
     hideProgress();
     console.error('Zip export error:', e);
-    status.className = 'status error';
-    status.textContent = 'Zip export failed: ' + e.message;
+    chatResult('error', 'ZIP export failed: ' + e.message);
   }
 });
 
-onExport('exportJson', async () => {
-  if (!conversationData) return;
-  const status = document.getElementById('status');
-  try {
-    const data = await loadConversationForExport();
-    await ensureProjectName(data, orgId);
-    const json = JSON.stringify(data, null, 2);
-    const filename = generateFilename(data.name, 'json', data.project?.name);
-    download(json, filename, 'application/json');
-    exportedStatus(status, data, 'JSON exported successfully!');
-  } catch (e) {
-    console.error('JSON export error:', e);
-    status.className = 'status error';
-    status.textContent = 'Export failed: ' + e.message;
-  }
-});
-
-onExport('exportAllMd', () => bulkExport('markdown'));
-onExport('exportAllEmbed', () => bulkExport('embedded'));
-// Export All and Export Artifacts go to a folder unless Settings say ZIP. The folder picker must open straight
-// from the click. The popup closes when it opens, so from the popup the side panel opens instead, with a note
-// naming the button to click there.
+// The page's width comes from where it runs: 340 px in the popup, the panel's width in the side panel.
 const IS_POPUP = typeof location !== 'undefined' && /popup\.html$/.test(location.pathname);
-const FOLDER_BUTTON_LABELS = { exportAllZip: 'Export All (Folder)', exportArtifacts: 'Export Artifacts (Folder)' };
-// A label the popup stored with its note, read from the clicked button; anything else falls back to the above.
-const FOLDER_LABEL_RE = /^Export (?:All|Changes|Artifacts) \(Folder\)$/;
+if (typeof document !== 'undefined' && document.body && document.body.classList) document.body.classList.add(IS_POPUP ? 'popup' : 'sidebar');
+
+// ============================================================================
+// Screens: main, settings, exporting, done, stopped
+// ============================================================================
+
+const SCREENS = ['main', 'settings', 'exporting', 'done', 'stopped'];
+function showScreen(name) {
+  currentScreen = SCREENS.includes(name) ? name : 'main';
+  for (const s of SCREENS) {
+    const section = document.getElementById(`screen-${s}`);
+    if (section) section.hidden = s !== currentScreen;
+  }
+  document.getElementById('appHeader').hidden = currentScreen === 'settings';
+  for (const id of ['refresh', 'settingsOpen']) document.getElementById(id).disabled = currentScreen === 'exporting';
+}
+
+// Back to the main screen; it asks for the tab's chat again (requestData skipped tab changes meanwhile).
+function backToMain({ always = true } = {}) {
+  showScreen('main');
+  if (always || refreshSkipped) return requestData();
+  return Promise.resolve();
+}
+
+// ---- Everything on claude.ai ----
+
+function currentPlan() {
+  return exportPlan({
+    chats: settings.exportAllChats !== false,
+    artifacts: settings.exportAllArtifacts !== false,
+    scope: settings.megaZipScope,
+    hasRecord: !!panel.record,
+  });
+}
+
+// The counts for the summary: none until counted, and none when artifacts are ticked but were not counted.
+function summaryCounts(plan) {
+  const c = panel.counts;
+  if (!c) return null;
+  return plan.withArtifacts && c.artifacts === null ? null : c;
+}
+
+function setPressed(button, on) {
+  button.setAttribute('aria-pressed', on ? 'true' : 'false');
+}
+
+function renderEverything() {
+  const $ = (id) => document.getElementById(id);
+  const plan = currentPlan();
+  const since = panel.record && panel.record.at ? formatStamp(panel.record.at) : '';
+  const counts = summaryCounts(plan);
+  const artifactsOn = settings.exportAllArtifacts !== false;
+
+  // Changes only: hidden with no record of an Export All here, disabled (struck through) with only Artifacts.
+  const scopeChanges = $('scopeChanges');
+  scopeChanges.hidden = !panel.record;
+  scopeChanges.disabled = !!panel.record && !plan.changesAllowed;
+  setPressed($('scopeAll'), !plan.changesOnly);
+  setPressed(scopeChanges, plan.changesOnly);
+  $('pickChats').checked = settings.exportAllChats !== false;
+  $('pickArtifacts').checked = artifactsOn;
+  $('chatsSub').textContent = artifactsOn ? 'With their files and pages' : 'Pages they published still go in artifacts/';
+  const c = panel.counts;
+  $('chatCount').textContent = c ? String(plan.changesOnly ? c.changedChats : c.chats) : '–';
+  $('artifactCount').textContent = c && c.artifacts !== null ? String(plan.changesOnly ? c.changedArtifacts : c.artifacts) : '–';
+  const zip = settings.megaFormat === 'zip';
+  setPressed($('formatFolder'), !zip);
+  setPressed($('formatZip'), zip);
+
+  const count = $('countBtn');
+  count.disabled = !panel.onClaude || panel.counting;
+  count.textContent = panel.counting ? 'Counting…' : c ? `Counted ${formatStamp(c.at).slice(11)}` : 'Count';
+  count.className = c && !panel.counting ? 'small-btn counted' : 'small-btn';
+
+  const reason = panel.onClaude ? exportDisabledReason(plan, counts, since) : 'Open claude.ai to export.';
+  $('exportSelected').disabled = !!reason || exportRunning;
+  const text = panel.onClaude ? everythingSummary({ plan, counts, format: zip ? 'zip' : 'folder', since, isPopup: IS_POPUP }) : reason;
+  $('summary').textContent = panel.flash || (panel.countError ? `Couldn't count (${panel.countError}). ${text}` : text);
+
+  const last = $('lastExport');
+  const rec = panel.record;
+  last.hidden = !rec || !rec.at;
+  const n = rec && Number.isFinite(rec.warnings) ? rec.warnings : null;
+  last.textContent = rec && rec.at ? `Last export ${since}${n === null ? '' : ` · ${n ? plural(n, 'warning') : 'no warnings'}`}` : '';
+}
+
+// The export record and any cached counts for the tab's org: storage only, never claude.ai.
+async function loadEverything() {
+  const org = orgId;
+  if (org !== panel.countsOrg) {
+    panel.counts = null;
+    panel.countError = '';
+  }
+  if (org) {
+    const [record, counts] = await Promise.all([loadExportRecord(org), cachedCounts(org)]);
+    if (org !== orgId) return;
+    panel.record = record;
+    if (counts && !panel.counts) panel.counts = counts;
+    panel.countsOrg = org;
+  } else {
+    panel.record = null;
+  }
+  renderEverything();
+}
+
+// A message in place of the summary for 5 seconds ("No folder picked.").
+function flashSummary(text) {
+  clearTimeout(panel.flashTimer);
+  panel.flash = text;
+  renderEverything();
+  panel.flashTimer = setTimeout(() => {
+    panel.flash = '';
+    renderEverything();
+  }, 5000);
+}
+
+document.getElementById('countBtn').addEventListener('click', async () => {
+  if (panel.counting || !panel.onClaude || !orgId || currentTabId == null) return;
+  const plan = currentPlan();
+  panel.counting = true;
+  panel.countError = '';
+  renderEverything();
+  try {
+    panel.counts = await countEverything({ org: orgId, tabId: currentTabId, withArtifacts: plan.withArtifacts });
+    panel.countsOrg = orgId;
+  } catch (e) {
+    panel.countError = (e && e.message) || 'unknown';
+  } finally {
+    panel.counting = false;
+    renderEverything();
+  }
+});
+
+const setChoice = (change) => {
+  change();
+  saveSettings();
+  renderEverything();
+};
+document.getElementById('scopeAll').addEventListener('click', () => setChoice(() => { settings.megaZipScope = 'all'; }));
+document.getElementById('scopeChanges').addEventListener('click', () => {
+  if (document.getElementById('scopeChanges').disabled) return;
+  setChoice(() => { settings.megaZipScope = 'changes'; });
+});
+document.getElementById('pickChats').addEventListener('change', (e) => setChoice(() => { settings.exportAllChats = !!e.target.checked; }));
+document.getElementById('pickArtifacts').addEventListener('change', (e) => setChoice(() => { settings.exportAllArtifacts = !!e.target.checked; }));
+document.getElementById('formatFolder').addEventListener('click', () => setChoice(() => { settings.megaFormat = 'folder'; }));
+document.getElementById('formatZip').addEventListener('click', () => setChoice(() => { settings.megaFormat = 'zip'; }));
+
+// ---- Exporting, Done and Export stopped ----
+
+let activeRun = null;  // { plan, steps, totals, signal } while Export selected runs
+
+function setStep(name, state) {
+  document.getElementById(`step-${name}`).setAttribute('data-state', state);
+}
+
+function beginRunScreen(plan, directory) {
+  const $ = (id) => document.getElementById(id);
+  activeRun = { plan, steps: runSteps(plan), totals: {}, signal: { stopped: false } };
+  for (const name of ['chats', 'artifacts', 'viewer']) {
+    $(`step-${name}`).hidden = !activeRun.steps.includes(name);
+    setStep(name, 'pending');
+    $(`step-${name}-count`).textContent = '';
+    $(`step-${name}-sub`).textContent = '';
+    $(`step-${name}-fill`).style.width = '0%';
+  }
+  $('runTitle').textContent = runTitleText(plan, activeRun.totals);
+  $('runTarget').textContent = directory
+    ? `Saving to a new folder in ${artifactText(String(directory.name || 'the folder you picked'))}`
+    : 'Saving to one ZIP in Downloads when it finishes';
+  $('runWarnings').hidden = true;
+  $('runWarnings').textContent = '';
+  $('stopBtn').disabled = false;
+  $('stopBtn').textContent = 'Stop';
+  $('runStarted').textContent = `Started ${formatStamp(new Date().toISOString()).slice(11)}`;
+  showScreen('exporting');
+  return activeRun;
+}
+
+function runProgress(ev) {
+  const run = activeRun;
+  if (!run || !ev) return;
+  const $ = (id) => document.getElementById(id);
+  const at = run.steps.indexOf(ev.phase);
+  if (at < 0) return;
+  if (ev.phase !== 'viewer') run.totals[ev.phase] = ev.total;
+  const finished = ev.phase === 'viewer' && ev.done >= ev.total;
+  run.steps.forEach((name, i) => setStep(name, i < at || (i === at && finished) ? 'done' : i === at ? 'current' : 'pending'));
+  if (ev.phase !== 'viewer') $(`step-${ev.phase}-count`).textContent = `${ev.done} of ${ev.total}`;
+  const bar = $(`step-${ev.phase}-bar`);
+  bar.setAttribute('aria-valuemax', String(ev.total));
+  bar.setAttribute('aria-valuenow', String(ev.done));
+  $(`step-${ev.phase}-fill`).style.width = `${ev.total ? Math.min(100, (ev.done / ev.total) * 100) : 0}%`;
+  $(`step-${ev.phase}-sub`).textContent = ev.sub || '';
+  $('runTitle').textContent = runTitleText(run.plan, run.totals);
+  const strip = $('runWarnings');
+  strip.hidden = !ev.warnings;
+  strip.textContent = ev.warnings ? `${plural(ev.warnings, 'warning')} so far` : '';
+}
+
+document.getElementById('stopBtn').addEventListener('click', () => {
+  if (!activeRun) return;
+  activeRun.signal.stopped = true;
+  const stop = document.getElementById('stopBtn');
+  stop.disabled = true;
+  stop.textContent = 'Stopping…';
+});
+
+function fillList(list, lines) {
+  list.replaceChildren(...lines.map((line) => {
+    const li = document.createElement('li');
+    li.textContent = line;
+    return li;
+  }));
+}
+
+function showDone(result, plan) {
+  const $ = (id) => document.getElementById(id);
+  const head = doneHeadline(result);
+  $('doneCard').dataset.tone = head.tone;
+  $('doneHeadline').textContent = head.text;
+  const folder = result.target.kind === 'folder';
+  const named = !!result.target.name;
+  const what = savedText(result, plan);
+  $('doneSummary').textContent = !named ? 'Nothing new to save.' : folder ? `${what} saved to` : `${what} saved.`;
+  $('doneTarget').textContent = folder && named ? result.target.name : '';
+  $('doneTarget').hidden = !(folder && named);
+  $('doneWhere').textContent = named ? doneTargetText(result) : '';
+  const groups = warningGroups(result.warningList);
+  fillList($('doneWarnings'), [...groups.lines, ...(groups.more ? [`and ${groups.more} more`] : [])]);
+  $('doneNotes').textContent = (result.notes || []).join(' ');
+  const files = (result.errorFiles || []).filter((f) => f === 'errors.txt' || f === 'artifacts/errors.txt');
+  $('doneErrorFiles').textContent = files.length && named ? `What to do about each is in ${files.join(' and ')} in that ${folder ? 'folder' : 'ZIP'}.` : '';
+  $('doneTook').textContent = `Took ${durationText(result.startedAt, result.endedAt)}`;
+  showScreen('done');
+}
+
+function showStopped(result, plan) {
+  const $ = (id) => document.getElementById(id);
+  $('stoppedReason').textContent = stoppedReasonText(result, plan);
+  $('stoppedSaved').textContent = stoppedSavedText(result, plan);
+  $('stoppedFix').textContent = stoppedFixText(result);
+  $('stoppedTook').textContent = `Ran ${durationText(result.startedAt, result.endedAt)}`;
+  showScreen('stopped');
+}
+
+// Export selected: the plan from the main screen's choices, run with the Exporting screen, ending on Done or
+// Export stopped. options: { directory } in folder mode, { ask } (card pictures) for an artifacts-only ZIP.
+async function runSelected(options = {}) {
+  const plan = currentPlan();
+  if (!plan.run) return null;
+  document.getElementById('handoffNote').hidden = true;
+  const directory = options && options.directory ? options.directory : null;
+  const run = beginRunScreen(plan, directory);
+  let result;
+  try {
+    result = plan.run === 'bulk'
+      ? await bulkExportZip({ changesOnly: plan.changesOnly, directory, withArtifacts: plan.withArtifacts, onProgress: runProgress, signal: run.signal })
+      : await exportArtifacts({ directory, onProgress: runProgress, signal: run.signal, ask: options ? options.ask : null });
+  } catch (e) {
+    result = runResult({ outcome: 'failed', reason: runWarningText((e && e.message) || String(e)), target: { kind: directory ? 'folder' : 'zip', name: '' } });
+  }
+  activeRun = null;
+  if (result && result.outcome === 'done') showDone(result, plan);
+  else showStopped(result || runResult({ outcome: 'failed', reason: 'unknown error' }), plan);
+  return result;
+}
+
+// Export selected goes to a folder unless ZIP is chosen. The folder picker must open straight from the click.
+// The popup closes when it opens, so from the popup the side panel opens instead, with a note saying what to
+// click there.
+const FOLDER_BUTTON_LABELS = { exportSelected: 'Export selected' };
 // ask(): optional, called in a ZIP export's click to start a permission request; its promise reaches run as
 // options.ask. Folder mode never asks: showDirectoryPicker needs the click's activation, and a request would
 // risk it (turn the permission on in Settings instead).
 function folderExport(buttonId, name, run, ask = null) {
   return async () => {
     if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return ask ? run({ ask: ask() }) : run();
-    const status = document.getElementById('status');
     if (IS_POPUP) {
       if (chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
         // The note is stored before the panel opens, in the same click task (sidePanel.open needs the user
-        // gesture, so nothing is awaited first), and names the button as it reads now (Export Changes too).
-        const span = document.getElementById(buttonId).querySelector('span');
-        const label = span && typeof span.textContent === 'string' ? span.textContent.trim() : '';
+        // gesture, so nothing is awaited first).
+        const label = FOLDER_BUTTON_LABELS[buttonId] || name;
         if (chrome.storage.session) chrome.storage.session.set({ folderExportNote: { at: Date.now(), button: buttonId, label } }).catch(() => {});
         chrome.sidePanel.open({ tabId: currentTabId }).then(() => window.close())
-          .catch((e) => { status.className = 'status error'; status.textContent = `Could not open the side panel: ${e.message}`; });
+          .catch((e) => { flashSummary(`Could not open the side panel: ${e.message}`); });
       } else {
-        status.className = 'status error';
-        status.textContent = `${name} to a folder runs in the side panel. Open it, or choose ZIP in Settings.`;
+        flashSummary(`${name} to a folder runs in the side panel. Open it, or choose ZIP.`);
       }
       return;
     }
@@ -6672,44 +6800,52 @@ function folderExport(buttonId, name, run, ask = null) {
     try {
       directory = await window.showDirectoryPicker({ mode: 'readwrite', id: 'claude-takeout' });
     } catch (e) {
-      if (e.name !== 'AbortError') { status.className = 'status error'; status.textContent = e.message; }
+      flashSummary(e.name === 'AbortError' ? 'No folder picked.' : e.message);
       return;
     }
     return run({ directory });
   };
 }
-onExport('exportAllZip', folderExport('exportAllZip', 'Export All', (options) => bulkExportZip(options)));
-onExport('exportArtifacts', folderExport('exportArtifacts', 'Export Artifacts', (options) => exportArtifacts(options), askForCardPictures));
+const exportSelectedClick = exclusiveExport(folderExport('exportSelected', 'Export selected', (options) => runSelected(options),
+  () => (currentPlan().run === 'artifacts' ? askForCardPictures() : null)));
+document.getElementById('exportSelected').addEventListener('click', exportSelectedClick);
 
-// Opened from the popup's Export All or Export Artifacts: say what to do next.
+document.getElementById('doneBack').addEventListener('click', () => backToMain());
+document.getElementById('stoppedBack').addEventListener('click', () => backToMain());
+// Try again: a new run with the same choices (folder mode opens the picker again, from this click).
+document.getElementById('tryAgain').addEventListener('click', () => {
+  showScreen('main');
+  return exportSelectedClick();
+});
+
+// Opened from the popup's Export selected: say what to do next.
+document.getElementById('handoffDismiss').addEventListener('click', () => { document.getElementById('handoffNote').hidden = true; });
 if (!IS_POPUP && chrome.storage && chrome.storage.session) {
   chrome.storage.session.get('folderExportNote').then((got) => {
     const note = got && got.folderExportNote;
     const at = note && typeof note === 'object' ? note.at : note;
     if (!Number.isFinite(at) || Date.now() - at > 60000) return;
     chrome.storage.session.remove('folderExportNote').catch(() => {});
-    const button = note && typeof note === 'object' && Object.prototype.hasOwnProperty.call(FOLDER_BUTTON_LABELS, note.button) ? note.button : 'exportAllZip';
-    const stored = note && typeof note === 'object' && typeof note.label === 'string' ? note.label : '';
-    const label = FOLDER_LABEL_RE.test(stored) ? stored : FOLDER_BUTTON_LABELS[button];
-    const status = document.getElementById('status');
-    status.className = 'status waiting';
-    status.textContent = `Click ${label} here to choose where to save it.`;
+    const button = note && typeof note === 'object' && Object.prototype.hasOwnProperty.call(FOLDER_BUTTON_LABELS, note.button) ? note.button : 'exportSelected';
+    document.getElementById('handoffText').textContent = `Continued from the popup. Chrome lets only the sidebar pick a folder. Click ${FOLDER_BUTTON_LABELS[button]} to pick where it goes.`;
+    document.getElementById('handoffNote').hidden = false;
   }).catch(() => {});
 }
-onExport('exportAllJson', () => bulkExport('json'));
 
 document.getElementById('refresh').addEventListener('click', () => scheduleRefresh());
+document.getElementById('chatRetry').addEventListener('click', () => scheduleRefresh());
 
 // ============================================================================
-// Settings Panel
+// Settings
 // ============================================================================
 
 const defaultSettings = {
   filenameStyle: 'title',
   includeThinking: true,
-  megaZipScope: 'all',  // 'all' | 'changes': what Export All exports
-  megaFormat: 'folder',  // 'folder' | 'zip': where Export All goes
-  exportAllArtifacts: true,  // Export All also saves claude.ai's artifacts into artifacts/
+  megaZipScope: 'all',  // 'all' | 'changes': what Export selected exports (main screen)
+  megaFormat: 'folder',  // 'folder' | 'zip': where Export selected goes (main screen)
+  exportAllChats: true,  // Export selected takes the chats (main screen)
+  exportAllArtifacts: true,  // Export selected takes claude.ai's artifacts (main screen)
   showShortcuts: true,
   useSidePanel: false
 };
@@ -6750,24 +6886,6 @@ async function saveSettings() {
 function applySettings() {
   document.getElementById('filenameStyle').value = settings.filenameStyle;
   document.getElementById('includeThinking').checked = settings.includeThinking;
-  const changes = settings.megaZipScope === 'changes';
-  document.getElementById('megaZipScope').value = changes ? 'changes' : 'all';
-  const toZip = settings.megaFormat === 'zip';
-  const formatSelect = document.getElementById('megaFormat');
-  if (formatSelect) formatSelect.value = toZip ? 'zip' : 'folder';
-  const megaZip = document.getElementById('exportAllZip');
-  const megaLabel = megaZip && megaZip.querySelector('span');
-  const target = toZip ? 'Mega-Zip' : 'Folder';
-  if (megaLabel) megaLabel.textContent = changes ? `Export Changes (${target})` : `Export All (${target})`;
-  if (megaZip) megaZip.title = (toZip ? 'Every chat in one ZIP download' : 'Every chat into a new folder in a folder you choose')
-    + (changes ? ', only the chats that are new or changed since the last Export All from this browser (see Settings)' : '');
-  const artifactsButton = document.getElementById('exportArtifacts');
-  const artifactsLabel = artifactsButton && artifactsButton.querySelector('span');
-  if (artifactsLabel) artifactsLabel.textContent = `Export Artifacts (${toZip ? 'ZIP' : 'Folder'})`;
-  if (artifactsButton) artifactsButton.title = 'The current version of every artifact on claude.ai/artifacts, with an index, '
-    + (toZip ? 'in one ZIP download' : 'into a new folder in a folder you choose');
-  const artifactsBox = document.getElementById('exportAllArtifacts');
-  if (artifactsBox) artifactsBox.checked = settings.exportAllArtifacts !== false;
   document.getElementById('showShortcuts').checked = settings.showShortcuts;
 
   // Side panel checkbox (may not exist in all views)
@@ -6781,6 +6899,7 @@ function applySettings() {
   shortcuts.forEach(el => {
     el.style.display = settings.showShortcuts ? 'inline' : 'none';
   });
+  renderEverything();
 }
 
 // Save web images and artifact card pictures: not a stored setting but Chrome's permission, shown as it stands.
@@ -6796,13 +6915,16 @@ if (webImagesBox) {
   });
 }
 
-// Settings toggle
-document.getElementById('settingsToggle').addEventListener('click', () => {
-  document.getElementById('settingsPanel').classList.toggle('visible');
-});
-
-document.getElementById('settingsClose').addEventListener('click', () => {
-  document.getElementById('settingsPanel').classList.remove('visible');
+// The Settings screen
+document.getElementById('settingsOpen').addEventListener('click', () => showScreen('settings'));
+document.getElementById('settingsBack').addEventListener('click', () => backToMain({ always: false }));
+{
+  const manifest = chrome.runtime && typeof chrome.runtime.getManifest === 'function' ? chrome.runtime.getManifest() : null;
+  document.getElementById('versionText').textContent = manifest && manifest.version ? `Version ${manifest.version}` : '';
+}
+document.getElementById('whatsNew').addEventListener('click', (e) => {
+  e.preventDefault();
+  chrome.tabs.create({ url: 'https://github.com/bearspear/claude-takeout#changelog' });
 });
 
 // Settings change handlers
@@ -6813,25 +6935,6 @@ document.getElementById('filenameStyle').addEventListener('change', (e) => {
 
 document.getElementById('includeThinking').addEventListener('change', (e) => {
   settings.includeThinking = e.target.checked;
-  saveSettings();
-});
-
-const megaFormatSelect = document.getElementById('megaFormat');
-if (megaFormatSelect) megaFormatSelect.addEventListener('change', (e) => {
-  settings.megaFormat = e.target.value === 'zip' ? 'zip' : 'folder';
-  saveSettings();
-  applySettings();
-});
-
-document.getElementById('megaZipScope').addEventListener('change', (e) => {
-  settings.megaZipScope = e.target.value === 'changes' ? 'changes' : 'all';
-  saveSettings();
-  applySettings();
-});
-
-const exportAllArtifactsBox = document.getElementById('exportAllArtifacts');
-if (exportAllArtifactsBox) exportAllArtifactsBox.addEventListener('change', (e) => {
-  settings.exportAllArtifacts = !!e.target.checked;
   saveSettings();
 });
 
@@ -6867,38 +6970,14 @@ document.getElementById('helpLink').addEventListener('click', (e) => {
 // Keyboard Shortcuts
 // ============================================================================
 
+// Only on the main screen: the other screens' buttons are hidden.
+const SHORTCUT_BUTTONS = { m: 'exportMd', e: 'exportMdEmbed', z: 'exportZip', j: 'exportJson', a: 'exportSelected', r: 'refresh' };
 document.addEventListener('keydown', (e) => {
-  if (!e.altKey) return;
-
-  const key = e.key.toLowerCase();
-  let handled = true;
-
-  switch (key) {
-    case 'm':
-      document.getElementById('exportMd').click();
-      break;
-    case 'e':
-      document.getElementById('exportMdEmbed').click();
-      break;
-    case 'z':
-      document.getElementById('exportZip').click();
-      break;
-    case 'j':
-      document.getElementById('exportJson').click();
-      break;
-    case 'a':
-      document.getElementById('exportAllMd').click();
-      break;
-    case 'r':
-      document.getElementById('refresh').click();
-      break;
-    default:
-      handled = false;
-  }
-
-  if (handled) {
-    e.preventDefault();
-  }
+  if (!e.altKey || currentScreen !== 'main') return;
+  const id = SHORTCUT_BUTTONS[String(e.key || '').toLowerCase()];
+  if (!id) return;
+  document.getElementById(id).click();
+  e.preventDefault();
 });
 
 // ============================================================================

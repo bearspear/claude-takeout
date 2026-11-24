@@ -10,8 +10,8 @@ const FIXTURE = path.join(__dirname, 'fixtures', 'conversation.json');
 
 function element(id) {
   return {
-    id, disabled: false, textContent: '', className: '', value: '', checked: false, style: {},
-    handlers: {}, addEventListener(type, fn) { this.handlers[type] = fn; }, appendChild() {},
+    id, disabled: false, hidden: false, textContent: '', className: '', value: '', checked: false, title: '', style: {}, dataset: {}, children: [],
+    handlers: {}, addEventListener(type, fn) { this.handlers[type] = fn; }, appendChild() {}, replaceChildren(...c) { this.children = c; },
     querySelectorAll: () => [], querySelector: () => null, setAttribute() {}, getAttribute: () => null,
     classList: { contains: () => false, add() {}, remove() {}, toggle() {} },
   };
@@ -33,6 +33,7 @@ function loadPopup({ fetch = async () => ({ ok: false, status: 404 }), location 
     document: {
       getElementById: (id) => elements[id] || (elements[id] = element(id)),
       querySelectorAll: () => [], querySelector: () => null, addEventListener() {},
+      createElement: (tag) => element(tag), body: element('body'),
     },
     window: { close() {} },
     setTimeout, clearTimeout, URL, encodeURIComponent, btoa, atob, TextEncoder, TextDecoder, crypto: require('crypto').webcrypto,

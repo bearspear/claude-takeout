@@ -22,8 +22,8 @@ function event() {
 function makeEnv({ url = chatUrl(A), captured = conv(A, 'Chat A') } = {}) {
   const elements = {};
   const el = (id) => elements[id] || (elements[id] = {
-    id, disabled: false, textContent: '', className: '', value: '', checked: false, style: {},
-    handlers: {}, addEventListener(t, f) { this.handlers[t] = f; }, appendChild() {}, querySelectorAll: () => [],
+    id, disabled: false, hidden: false, textContent: '', className: '', value: '', checked: false, title: '', style: {}, dataset: {},
+    handlers: {}, addEventListener(t, f) { this.handlers[t] = f; }, appendChild() {}, querySelectorAll: () => [], replaceChildren() {},
     classList: { contains: () => false, add() {}, remove() {}, toggle() {} },
     setAttribute() {}, getAttribute: () => null,
   });
@@ -83,7 +83,8 @@ function makeEnv({ url = chatUrl(A), captured = conv(A, 'Chat A') } = {}) {
   env.downloads = sandbox.__downloads;
   env.click = (id) => el(id).handlers.click();
   env.current = () => vm.runInContext('conversationData', env.ctx);
-  env.title = () => el('info').textContent;
+  env.title = () => el('chatTitle').textContent;
+  env.cardState = () => el('chatState').textContent;
   env.status = () => el('status').textContent;
   env.exportDisabled = () => ['exportMd', 'exportMdEmbed', 'exportZip', 'exportJson'].every((i) => el(i).disabled);
   env.navigate = (u) => {
@@ -236,7 +237,7 @@ const tests = {
     delete e.server[A];
     await e.click('exportJson');
     assert.strictEqual(e.downloads.length, 0);
-    assert.match(e.el('status').className, /error/);
+    assert.strictEqual(e.el('chatCard').dataset.tone, 'error');
     assert.match(e.status(), /404/);
   },
 
@@ -305,7 +306,7 @@ const tests = {
     e.chrome.tabs.onActivated.fire({ tabId: 3, windowId: 1 });
     await sleep(SETTLE);
     assert.strictEqual(e.exportDisabled(), true);
-    assert.match(e.status(), /navigate to claude\.ai/i);
+    assert.strictEqual(e.cardState(), 'Open claude.ai to export.');
   },
 
   'a failed fetch reports an error and keeps export disabled': async () => {
@@ -314,7 +315,7 @@ const tests = {
     e.navigate(chatUrl('dddddddd-0000-4000-8000-000000000004'));
     await sleep(SETTLE);
     assert.strictEqual(e.exportDisabled(), true);
-    assert.match(e.el('status').className, /error/);
+    assert.strictEqual(e.cardState(), "Couldn't load this chat");
     assert.match(e.status(), /404/);
   },
 
@@ -325,7 +326,7 @@ const tests = {
     e.navigate(chatUrl(B));
     await sleep(SETTLE);
     assert.strictEqual(e.exportDisabled(), true);
-    assert.match(e.el('status').className, /error/);
+    assert.strictEqual(e.cardState(), "Couldn't load this chat");
     assert.match(e.status(), /Cannot access this tab/);
   },
 
