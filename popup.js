@@ -4908,12 +4908,26 @@ function megaZipName(accountName, kind, dateStr) {
   return `claude-takeout-${kind === 'artifacts' ? 'artifacts-' : ''}${name ? `${name}-` : ''}${kind === 'changes' ? 'changes-' : ''}${dateStr}.zip`;
 }
 
+// One progress event to options.onProgress, for the Exporting screen: { phase: 'chats' | 'artifacts' | 'viewer',
+// done, total, sub (a chat or artifact title, or "<title> · version i of n"; frame URLs and tokens removed), warnings (so far)}.
+// A listener that throws doesn't stop the export.
+function exportProgress(options, { phase, done, total, sub = '', warnings = 0 }) {
+  const listener = options && typeof options.onProgress === 'function' ? options.onProgress : null;
+  if (!listener) return;
+  const n = (x) => (Number.isFinite(Number(x)) ? Number(x) : 0);
+  try {
+    listener({ phase, done: n(done), total: n(total), sub: artifactText(String(sub || '')), warnings: n(warnings) });
+  } catch (e) { /* the screen misses one update */ }
+}
+
 // Bulk export all conversations as a single mega-zip.
 // options.changesOnly: only chats new or updated since the last mega-ZIP from this browser. Without it,
 // the "Mega-Zip exports" setting decides (settings.megaZipScope: 'all', the default, or 'changes').
 // options.directory: a folder from showDirectoryPicker; the export goes into a new folder inside it
 // instead of a ZIP download. options.withArtifacts: whether to save claude.ai's artifacts too (default: the
-// "Include artifacts in Export All" setting). Resolves to a run result (runResult); never throws.
+// "Include artifacts in Export All" setting). options.onProgress: progress events (exportProgress). options.signal:
+// { stopped }, checked before each chat, artifact and older version; when set, the run ends as 'stopped' (stoppedRun).
+// Resolves to a run result (runResult); never throws.
 async function bulkExportZip(options = {}) {
   const changesOnly = options && typeof options.changesOnly === 'boolean' ? options.changesOnly : settings.megaZipScope === 'changes';
   const directory = options && options.directory ? options.directory : null;
@@ -4924,6 +4938,12 @@ async function bulkExportZip(options = {}) {
   const warningList = [];
   const errorFiles = [];
   const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, startedAt: runStartedAt });
+  // The Exporting screen's events (exportProgress) and its Stop button (options.signal.stopped).
+  const signal = options && options.signal && typeof options.signal === 'object' ? options.signal : null;
+  const stopRequested = () => !!(signal && signal.stopped);
+  // Warnings not yet in warningList: the artifact list's failure and the artifact step's, added at the end.
+  let pendingWarnings = () => 0;
+  const emit = (phase, done, total, sub) => exportProgress(options, { phase, done, total, sub, warnings: warningList.length + pendingWarnings() });
   let tab;
   try {
     [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -4981,6 +5001,9 @@ async function bulkExportZip(options = {}) {
       }
     }
     const listNote = listError ? ' Artifacts could not be listed.' : '';
+    // The artifact step's warnings go to artifacts/errors.txt.
+    const artifactCollector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
+    pendingWarnings = () => (listError ? 1 : 0) + artifactCollector.warnings.length + artifactCollector.errors.length;
     const includedArtifacts = artifactList ? (since ? changedArtifacts(artifactList.artifacts, record.artifacts, record.artifactVersions) : artifactList.artifacts) : [];
     if (since && !conversations.length && !includedArtifacts.length) {
       status.className = listError ? 'status warning' : 'status ready';
@@ -5028,8 +5051,47 @@ async function bulkExportZip(options = {}) {
     const docChats = new Map();
     const viewerChats = [];
     const exportedChats = [];  // { uuid, name, updated_at (as listed), folder, retry?, stores? }, for the manifest and the record (recordableExport)
+    let step = null;
+    const addWriteFailures = (list) => {
+      for (const f of list) warningList.push({ type: 'write', text: runWarningText(`${f && f.path}: ${f && f.error}`) });
+      if (list.length) errorFiles.push('write-errors.txt');
+    };
+    // Stop: what is on disk stays, with its artifact.json and error files; no index, manifest or viewer is written
+    // and nothing is recorded, so the next Changes only export takes it all again. A ZIP is discarded.
+    const stoppedRun = async () => {
+      if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
+      pendingWarnings = () => 0;
+      warningList.push(...collectorRunWarnings(artifactCollector));
+      if (run) {
+        for (const rec of store.records()) {
+          if (store.written(rec) || !rec.versions.size) continue;
+          try { store.write(rec); } catch (e) { /* the chats' links and errors.txt still say what was saved */ }
+        }
+        if (artifactCollector.hasAny()) {
+          megaZip.file('artifacts/errors.txt', artifactCollector.generateErrorReport());
+          errorFiles.push('artifacts/errors.txt');
+        }
+        writeFailures.push(...await megaZip.flush());
+        if (writeFailures.length) {
+          megaZip.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
+          await megaZip.flush();
+        }
+        addWriteFailures(writeFailures);
+      } else {
+        Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
+      }
+      hideProgress();
+      status.className = 'status error';
+      status.textContent = run
+        ? `Export stopped. ${saved.chats} conversation${saved.chats === 1 ? '' : 's'}${saved.artifacts ? ` and ${artifactCount(saved.artifacts, 'artifact')}` : ''} saved to ${run.name}, not recorded.`
+        : 'Export stopped. Nothing was saved: a ZIP is written only when the export finishes.';
+      return result('stopped', 'You stopped it');
+    };
 
-    for (const conv of conversations) {
+    for (let ci = 0; ci < conversations.length; ci++) {
+      const conv = conversations[ci];
+      if (stopRequested()) break;
+      emit('chats', exported + errors.length, total, conv.name || 'Untitled');
       try {
         // Fetch full conversation
         const result = await new Promise((resolve) => {
@@ -5097,10 +5159,14 @@ async function bulkExportZip(options = {}) {
         errors.push(`${conv.name || conv.uuid}: ${e.message}`);
         warningList.push({ type: 'chat', text: runWarningText(e && e.message || 'unexpected error'), chat: String(conv.name || conv.uuid || '') });
       }
-      // On disk, each chat is written before the next, which keeps memory down.
-      if (run) writeFailures.push(...await megaZip.flush());
+      // On disk, each chat is written before the next, which keeps memory down; the run result counts it now.
+      if (run) {
+        writeFailures.push(...await megaZip.flush());
+        saved.chats = exported;
+      }
 
       showProgress(exported + errors.length, total, `${exported} / ${total}`);
+      emit('chats', exported + errors.length, total, conv.name || 'Untitled');
 
       // Small delay to avoid overwhelming
       await new Promise(r => setTimeout(r, 200));
@@ -5109,13 +5175,14 @@ async function bulkExportZip(options = {}) {
     // claude.ai's artifacts into the store, after the chats: a version a chat saved is not fetched again. Card
     // pictures only when the optional permission is already there: Export All never asks. The step never throws,
     // and its warnings go to artifacts/errors.txt.
-    let step = null;
+    if (stopRequested()) return await stoppedRun();
     let picturesAllowed = false;
     let parts = null;
     if (includedArtifacts.length) {
       const count = includedArtifacts.length;
       status.textContent = `Exporting ${artifactCount(count, 'artifact')}...`;
       showProgress(0, count, `0 / ${count}`);
+      emit('artifacts', 0, count, '');
       try { picturesAllowed = await webImagesAllowed(); } catch (e) { picturesAllowed = false; }
       try {
         parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
@@ -5127,11 +5194,18 @@ async function bulkExportZip(options = {}) {
           ? new Map(Object.entries(record.artifactVersions).filter(([, l]) => Array.isArray(l)).map(([uuid, l]) => [uuid, new Set(l.filter((x) => typeof x === 'string'))]))
           : null,
         docChats: new Map([...docChats].map(([uuid, d]) => [uuid, d.title])), parts, run: !!run,
-        collector: new ExportErrorCollector(null, null, { label: 'Export Artifacts' }),
-        onProgress: (done, n) => showProgress(done, n, `${done} / ${n}`),
+        collector: artifactCollector, signal,
+        onProgress: (done, n, info = {}) => {
+          showProgress(done, n, `${done} / ${n}`);
+          // On disk, each artifact is written as it is done: the run result counts it now.
+          if (run && info.versions !== undefined) Object.assign(saved, { artifacts: info.saved, versions: info.versions });
+          emit('artifacts', done, n, info.sub || '');
+        },
       });
       writeFailures.push(...step.writeFailures);
     }
+    if (stopRequested()) return await stoppedRun();
+    emit('viewer', 0, 1, 'Viewer and index');
     // artifact.json of every other page the chats saved something of (the step wrote its own), and their index rows.
     const chatRows = [];
     for (const rec of store.records()) {
@@ -5252,10 +5326,7 @@ async function bulkExportZip(options = {}) {
       if (step.collector.hasAny()) errorFiles.push('artifacts/errors.txt');
     }
     if (!viewerBuilt) warningList.push({ type: 'viewer', text: 'viewer.html could not be built.' });
-    const addWriteFailures = (list) => {
-      for (const f of list) warningList.push({ type: 'write', text: runWarningText(`${f && f.path}: ${f && f.error}`) });
-      if (list.length) errorFiles.push('write-errors.txt');
-    };
+    pendingWarnings = () => 0;
 
     if (artifactRows.length) {
       const indexOpts = {
@@ -5266,6 +5337,7 @@ async function bulkExportZip(options = {}) {
       megaZip.file('artifacts/index.html', artifactsIndexHtml(artifactRows, indexOpts));
     }
     if (step && step.collector.hasAny()) megaZip.file('artifacts/errors.txt', step.collector.generateErrorReport());
+    emit('viewer', 1, 1, 'Viewer and index');
 
     if (run) {
       writeFailures.push(...await megaZip.flush());
@@ -5345,6 +5417,8 @@ async function bulkExportZip(options = {}) {
   })();
   } catch (e) {
     console.error('Export All failed:', e);
+    // A ZIP reaches disk only at the end; a folder keeps what was written (saved counts it as it goes).
+    if (!directory) Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
     hideProgress();
     status.className = 'status error';
     status.textContent = `Export All failed: ${e && e.message ? e.message : e}`;
@@ -5854,16 +5928,22 @@ async function saveArtifact(root, a, ctx) {
 // not retried). Any other failure, or a version saved short of a file: failed, warned once per artifact (codes
 // only). An older Cowork/Claude Code version listed from the live version (listFromLive) is unverified, and a file it
 // lacks is missing without failing it. A 401 stops (ctx.signOut). Each saved version's preview goes to
-// ctx.placeOlder(rec, ver, payload) at once. Returns { settled, saved, failed }.
+// ctx.placeOlder(rec, ver, payload) at once. ctx.onVersion(i, n) (optional) is told before each version is fetched,
+// i counting from 1 in rec.history (n long); ctx.stopped() (optional) true ends the loop before the next version.
+// Returns { settled, saved, failed }.
 async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNote = '' } = {}) {
   const { fetchPublished, state, warn, store } = ctx;
   const out = { settled: [], saved: [], failed: [] };
   const problems = [];
-  for (const ver of rec.history) {
+  for (let i = 0; i < rec.history.length; i++) {
+    const ver = rec.history[i];
     if (ver === rec.current || skip.has(ver)) continue;
     if (state.publishedSignedOut) break;
+    // Stop (ctx.stopped): the versions saved so far stay.
+    if (typeof ctx.stopped === 'function' && ctx.stopped()) break;
     const prev = rec.versions.get(ver);
     if (storeVersionWhole(prev) || (prev && prev.sameAs)) { out.saved.push(ver); continue; }
+    if (typeof ctx.onVersion === 'function') ctx.onVersion(i + 1, rec.history.length);
     const reply = await fetchPublished({ action: 'publishedPageInfo', uuid: rec.uuid, ver });
     if (publishedSignedOutReply(reply)) { ctx.signOut(); break; }
     const info = cleanPublishedInfo(reply);
@@ -5956,9 +6036,12 @@ function unexpectedArtifactRow(root, a, ctx) {
 // and view paths carry the prefix, so a viewer at the root finds them; card pictures and preview parts stay in the
 // root's viewer-files/. opts: { store (optional: a new one at opts.prefix otherwise), artifacts, paging (artifactsFromList: how claude.ai's full list was paged; warns when it failed, was capped or found more), listed,
 // fetchPublished, picturesAllowed, docChats (see saveArtifact), parts (CTViewer.artifactViewParts or null),
-// onProgress(done, total), run (truthy on disk: flush per artifact), collector (optional; otherwise one labelled
-// 'Export Artifacts') }. Each artifact's artifact.json is written through store.write once, after its picture. Never throws.
-// Returns { views, rows, entries, whole (per artifact: saved with nothing missing), versionsSaved, versionCount, thumbs, collector, writeFailures, partCount, signedOut }; rows and entries name
+// onProgress(done, total, { sub, saved?, versions? }): before each artifact and each older version (sub: its title,
+// or "<title> · version i of n") and after each artifact (saved: artifacts saved so far, versions: versionCount so far),
+// run (truthy on disk: flush per artifact), collector (optional; otherwise one labelled 'Export Artifacts'),
+// signal ({ stopped }: checked before each artifact and each older version; the artifact in hand is finished) }.
+// Each artifact's artifact.json is written through store.write once, after its picture. Never throws.
+// Returns { views, rows, entries, whole (per artifact: saved with nothing missing), versionsSaved, versionCount, thumbs, collector, writeFailures, partCount, signedOut, stopped }; rows and entries name
 // folders relative to prefix.
 async function runArtifactStep(root, opts = {}) {
   const { artifacts = [], paging = null, listed = artifacts.length, fetchPublished, picturesAllowed = false, parts = null, onProgress = null, run = false } = opts;
@@ -5966,8 +6049,18 @@ async function runArtifactStep(root, opts = {}) {
   const collector = opts.collector || new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
   const warn = (filename, message, note = null) => collector.addWarning('artifact_export', filename, message, { note });
   const state = {};
+  const signal = opts.signal && typeof opts.signal === 'object' ? opts.signal : null;
+  const stopped = () => !!(signal && signal.stopped);
+  // Reports before an artifact or a version: a listener that throws misses one update. The report after each artifact
+  // is not guarded, as before: a throw there ends the step early (its collector says so).
+  const report = (done, n, info) => {
+    if (typeof onProgress !== 'function') return;
+    try { onProgress(done, n, info); } catch (e) { /* the screen misses one update */ }
+  };
+  let current = { i: 0, title: '' };
   const ctx = { fetchPublished, state, warn, store, docChats: opts.docChats instanceof Map ? opts.docChats : null,
-    skipVersions: opts.skipVersions instanceof Map ? opts.skipVersions : null };
+    skipVersions: opts.skipVersions instanceof Map ? opts.skipVersions : null, stopped,
+    onVersion: (vi, vn) => report(current.i, total, { sub: `${current.title} · version ${vi} of ${vn}` }) };
   const rows = [];
   const entries = [];
   const views = [];
@@ -5979,6 +6072,8 @@ async function runArtifactStep(root, opts = {}) {
   const writeFailures = [];
   let thumbs = 0;
   let partCount = 0;
+  let savedArtifacts = 0;
+  let wasStopped = false;
   const total = artifacts.length;
   try {
     const compare = 'Compare index.md with claude.ai/artifacts.';
@@ -6007,6 +6102,9 @@ async function runArtifactStep(root, opts = {}) {
       } catch (e) { /* the version keeps its folder; its preview is an extra */ }
     };
     for (let i = 0; i < total; i++) {
+      if (stopped()) { wasStopped = true; break; }
+      current = { i, title: artifactText(artifacts[i] && artifacts[i].title) || 'Untitled' };
+      report(i, total, { sub: current.title });
       let saved;
       try {
         saved = await saveArtifact(root, artifacts[i], ctx);
@@ -6052,13 +6150,16 @@ async function runArtifactStep(root, opts = {}) {
       // A start file the preview would show that ended up in no part.
       if (view.part == null && view.start && !view.tooLarge && previewKind(view.start)) view = { ...view, startMissing: true };
       views.push(view);
+      if (!view.notExported) savedArtifacts++;
       // On disk, each artifact is written before the next, which keeps memory down.
       if (run) writeFailures.push(...await root.flush());
-      if (typeof onProgress === 'function') onProgress(i + 1, total);
+      if (typeof onProgress === 'function') onProgress(i + 1, total, { sub: current.title, saved: savedArtifacts, versions: versionCount });
       if (i + 1 < total) await new Promise((r) => setTimeout(r, 200));
     }
+    // A stop during the last artifact's versions ends the step as stopped too.
+    if (stopped()) wasStopped = true;
     try {
-      if (parts) {
+      if (parts && !wasStopped) {
         writeParts(parts.flush());
         partCount = parts.count;
       }
@@ -6067,12 +6168,12 @@ async function runArtifactStep(root, opts = {}) {
     console.error('Artifact step stopped early:', e);
     warn('artifacts', 'Artifact step stopped early: unexpected error. Artifacts after this one were not exported.');
   }
-  return { views, rows, entries, whole, versionsSaved, versionCount, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true };
+  return { views, rows, entries, whole, versionsSaved, versionCount, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true, stopped: wasStopped };
 }
 
 // Export Artifacts. options.directory: a folder from showDirectoryPicker; the export goes into a new folder
 // inside it instead of a ZIP download. The list is fetched first: nothing is made when it fails or is empty.
-// Resolves to a run result (runResult); never throws.
+// options.onProgress and options.signal as for bulkExportZip. Resolves to a run result (runResult); never throws.
 async function exportArtifacts(options = {}) {
   const directory = options && options.directory ? options.directory : null;
   const status = document.getElementById('status');
@@ -6082,6 +6183,11 @@ async function exportArtifacts(options = {}) {
   const warningList = [];
   const errorFiles = [];
   const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, startedAt: runStartedAt });
+  // The Exporting screen's events (exportProgress) and its Stop button (options.signal.stopped).
+  const signal = options && options.signal && typeof options.signal === 'object' ? options.signal : null;
+  let collector = null;
+  const emit = (phase, done, total, sub) => exportProgress(options, { phase, done, total, sub,
+    warnings: warningList.length + (collector ? collector.warnings.length + collector.errors.length : 0) });
   let tab;
   try {
     [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -6129,7 +6235,7 @@ async function exportArtifacts(options = {}) {
   showProgress(0, total, `0 / ${total}`);
   try {
     const root = run ? createDiskFolder(run.handle) : new JSZip();
-    const collector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
+    collector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
     // Card pictures only with the optional https permission (asked in a ZIP export's click: options.ask); without
     // it, tiles, and the status line and indexes say the permission is needed.
     let picturesAllowed = false;
@@ -6142,10 +6248,42 @@ async function exportArtifacts(options = {}) {
       parts = CTViewer.artifactViewParts({ partLimit: CTViewer.PART_LIMIT, budget: CTViewer.ARTIFACT_PARTS_BUDGET });
     } catch (e) { /* no previews; the export goes on */ }
     const store = artifactStore(root, { prefix: '' });
+    emit('artifacts', 0, total, '');
     const { views, rows, entries, thumbs, writeFailures, partCount, versionCount } = await runArtifactStep(root, {
-      store, artifacts, paging, listed, fetchPublished, picturesAllowed, parts, collector, run,
-      onProgress: (done, count) => showProgress(done, count, `${done} / ${count}`),
+      store, artifacts, paging, listed, fetchPublished, picturesAllowed, parts, collector, run, signal,
+      onProgress: (done, count, info = {}) => {
+        showProgress(done, count, `${done} / ${count}`);
+        // On disk, each artifact is written as it is done: the run result counts it now.
+        if (run && info.versions !== undefined) Object.assign(saved, { artifacts: info.saved, versions: info.versions });
+        emit('artifacts', done, count, info.sub || '');
+      },
     });
+    // Stop: the artifact folders written stay, with errors.txt and write-errors.txt; no viewer, index or manifest.
+    // A ZIP is discarded. Export Artifacts records nothing either way.
+    if (signal && signal.stopped) {
+      warningList.push(...collectorRunWarnings(collector));
+      if (run) {
+        if (collector.hasAny()) {
+          root.file('errors.txt', collector.generateErrorReport());
+          errorFiles.push('errors.txt');
+        }
+        writeFailures.push(...await root.flush());
+        if (writeFailures.length) {
+          root.file('write-errors.txt', ['These files could not be written to the folder:', '', ...writeFailures.map((f) => `${f.path}: ${f.error}`), ''].join('\n'));
+          await root.flush();
+          errorFiles.push('write-errors.txt');
+        }
+        for (const f of writeFailures) warningList.push({ type: 'write', text: runWarningText(`${f && f.path}: ${f && f.error}`) });
+      } else {
+        Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
+      }
+      status.className = 'status error';
+      status.textContent = run
+        ? `Export stopped. ${artifactCount(saved.artifacts, 'artifact')} saved to ${run.name}.`
+        : 'Export stopped. Nothing was saved: a ZIP is written only when the export finishes.';
+      return result('stopped', 'You stopped it');
+    }
+    emit('viewer', 0, 1, 'Viewer and index');
     // Each view's versions for the version menu, as Export All's viewer data has them (v1.21: every version).
     const recordOf = new Map(store.records().filter((rec) => store.written(rec)).map((rec) => [String(rec.shortId || rec.uuid), rec]));
     const viewsWithVersions = views.map((view) => {
@@ -6174,6 +6312,8 @@ async function exportArtifacts(options = {}) {
     warningList.push(...collectorRunWarnings(collector));
     if (collector.hasAny()) errorFiles.push('errors.txt');
     if (!viewerBuilt) warningList.push({ type: 'viewer', text: 'viewer.html could not be built.' });
+    collector = null;  // its warnings are in warningList now
+    emit('viewer', 1, 1, 'Viewer and index');
 
     const withoutFiles = rows.filter((r) => r.fileCount === 0).length;
     const viewerNote = (viewerBuilt ? '' : ' viewer.html could not be built.') + (picturesAllowed ? '' : ` ${ARTIFACT_THUMB_PERMISSION_STATUS}`);

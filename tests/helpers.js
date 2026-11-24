@@ -305,4 +305,38 @@ async function runArtifacts({ frames = [], pages = {}, options = {}, stored = {}
   return { result, store, saved, zip, files, raw, views, status: sb.document.getElementById('status'), fetcher, listCalls, thumbCalls, frameReqs, consoleCalls, permissionRequests, popup };
 }
 
-module.exports = { runArtifacts, assetRoutes, DOC_URL, DOC_U, OTHER_U, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };
+// An in-memory stand-in for the File System Access handles showDirectoryPicker gives.
+class FakeDir {
+  constructor(name = 'picked', refuse = () => false) { this.name = name; this.entries = new Map(); this.refuse = refuse; }
+  async getDirectoryHandle(name, { create = false } = {}) {
+    let e = this.entries.get(name);
+    if (!e) {
+      if (!create) { const err = new Error('not found'); err.name = 'NotFoundError'; throw err; }
+      e = new FakeDir(name, this.refuse);
+      this.entries.set(name, e);
+    }
+    if (!(e instanceof FakeDir)) { const err = new Error('a file'); err.name = 'TypeMismatchError'; throw err; }
+    return e;
+  }
+  async getFileHandle(name, { create = false } = {}) {
+    if (this.refuse(name)) throw new TypeError(`Name is not allowed: ${name}`);
+    let e = this.entries.get(name);
+    if (!e) {
+      if (!create) { const err = new Error('not found'); err.name = 'NotFoundError'; throw err; }
+      e = { kind: 'file', data: undefined, createWritable: async () => { let next; return { write: async (d) => { next = d; }, close: async () => { e.data = next; }, abort: async () => {} }; } };
+      this.entries.set(name, e);
+    }
+    return e;
+  }
+  // path -> data, for every file below.
+  flat(prefix = '') {
+    const out = {};
+    for (const [name, e] of this.entries) {
+      const p = prefix ? `${prefix}/${name}` : name;
+      if (e instanceof FakeDir) Object.assign(out, e.flat(p)); else out[p] = e.data;
+    }
+    return out;
+  }
+}
+
+module.exports = { FakeDir, runArtifacts, assetRoutes, DOC_URL, DOC_U, OTHER_U, docTools, REPO, loadPopup, loadFixture, pythonArtifacts, use, result, oneMessage, twoMessages, textBlob, projectResponses, zipStub, exportPopup, runFolder, withUploads, publishedFetcher };

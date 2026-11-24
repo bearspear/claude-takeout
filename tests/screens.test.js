@@ -34,7 +34,7 @@ test('bulkExportZip honours withArtifacts over the setting', async () => {
 
 // Run results (Task 2): bulkExportZip and exportArtifacts resolve what the Done / Export stopped screens show.
 const vm = require('vm');
-const { exportPopup, loadFixture, withUploads, runArtifacts } = require('./helpers');
+const { exportPopup, loadFixture, withUploads, runArtifacts, publishedFetcher, FakeDir } = require('./helpers');
 
 // A ZIP that keeps what is written by path (the fixture's fake blobs can't go through JSZip).
 function fakeZip(written = {}, prefix = '') {
@@ -46,16 +46,22 @@ function fakeZip(written = {}, prefix = '') {
   };
 }
 
-async function bulkRun({ list, chats, failing = [], options = {}, listReply = null, stored = {} }) {
+async function bulkRun({ list, chats, failing = [], options = {}, listReply = null, stored = {}, frames = null, pages = {}, setup = null }) {
   const popup = exportPopup({ failing });
   const sb = popup.sandbox;
   const store = JSON.parse(JSON.stringify(stored));
   sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
   sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
   sb.chrome.tabs.query = async () => [{ id: 1, url: 'https://claude.ai/chat/x' }];
+  const sets = [];
+  const plainSet = sb.chrome.storage.local.set;
+  sb.chrome.storage.local.set = async (o) => { sets.push(Object.keys(o)); return plainSet(o); };
+  const fetcher = publishedFetcher(pages);
   sb.chrome.tabs.sendMessage = (id, msg, cb) => {
     if (msg.action === 'fetchAllConversations') cb(listReply || { data: list, orgId: 'org-1' });
     else if (msg.action === 'fetchConversation') cb({ data: chats[msg.conversationId] });
+    else if (msg.action === 'listArtifacts' && frames) cb({ frames: JSON.parse(JSON.stringify(frames)) });
+    else if (frames && /^publishedPage/.test(msg.action)) fetcher.fetch(msg).then(cb);
     else cb({ error: 'no' });
   };
   const zip = fakeZip();
@@ -64,9 +70,10 @@ async function bulkRun({ list, chats, failing = [], options = {}, listReply = nu
   sb.download = (blob, name) => { saved = { blob, name, written: zip.written }; };
   sb.setTimeout = (f) => setTimeout(f, 0);
   vm.runInContext('orgId = "org-1"', sb);
+  if (setup) setup(sb);
   sb.__opts = { withArtifacts: false, ...options };
   const result = await vm.runInContext('bulkExportZip(__opts)', sb);
-  return { result: result && JSON.parse(JSON.stringify(result)), saved, store, status: sb.document.getElementById('status') };
+  return { result: result && JSON.parse(JSON.stringify(result)), saved, store, sets, zip, status: sb.document.getElementById('status') };
 }
 
 test('bulkExportZip resolves a done RunResult with counts and warnings', async () => {
@@ -155,4 +162,125 @@ test('Export Changes with nothing changed still counts a failed artifact list', 
   assert.strictEqual(saved, null);
   assert.strictEqual(result.outcome, 'done');
   assert.deepStrictEqual(result.warningList.map((w) => w.type), ['artifact_export']);
+});
+
+// Progress and Stop (Task 3): onProgress events for the Exporting screen, and options.signal to stop.
+const P_LIVE = '1794783850-4a6e';
+const P_OLD = '1794783000-1b2c';
+const P_U = 'c3c3c3c3-1111-4111-8111-111111111111';
+const twoChats = () => {
+  const a = Object.assign(loadFixture(), { uuid: 'c-a', name: 'Alpha' });
+  const b = Object.assign(loadFixture(), { uuid: 'c-b', name: 'Beta' });
+  const list = [{ uuid: 'c-a', name: 'Alpha', updated_at: '2026-01-01T00:00:00Z' }, { uuid: 'c-b', name: 'Beta', updated_at: '2026-01-02T00:00:00Z' }];
+  return { list, chats: { 'c-a': a, 'c-b': b } };
+};
+const runFiles = (picked) => {
+  const runs = [...picked.entries.values()];
+  return runs.length ? runs[runs.length - 1].flat() : {};
+};
+
+test('progress events name the phase in order', async () => {
+  const { list, chats } = twoChats();
+  const frames = [{ slug: P_U, title: 'Report', typeSlug: '', typeTitle: '', sourceSurface: 'chat', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }];
+  const pages = { [P_U]: { title: 'Report', live: P_LIVE, versions: { [P_OLD]: { files: { 'index.html': '<p>old</p>' } }, [P_LIVE]: { files: { 'index.html': '<p>new</p>' } } } } };
+  const events = [];
+  const { result } = await bulkRun({ list, chats, frames, pages, options: { withArtifacts: true, onProgress: (e) => events.push(JSON.parse(JSON.stringify(e))) } });
+  assert.strictEqual(result.outcome, 'done');
+  const phases = events.map((e) => e.phase).filter((p, i, all) => p !== all[i - 1]);
+  assert.deepStrictEqual(phases, ['chats', 'artifacts', 'viewer']);
+  for (const e of events) {
+    assert.deepStrictEqual(Object.keys(e).sort(), ['done', 'phase', 'sub', 'total', 'warnings']);
+    assert.ok(Number.isFinite(e.done) && Number.isFinite(e.total) && Number.isFinite(e.warnings), JSON.stringify(e));
+    assert.ok(!/https?:\/\/|__frame_t/.test(e.sub), e.sub);
+  }
+  const chatEvents = events.filter((e) => e.phase === 'chats');
+  assert.ok(chatEvents.every((e) => e.total === 2));
+  assert.ok(chatEvents.some((e) => e.sub === 'Alpha') && chatEvents.some((e) => e.sub === 'Beta'));
+  assert.deepStrictEqual(chatEvents[chatEvents.length - 1].done, 2);
+  const versionEvent = events.find((e) => e.phase === 'artifacts' && /· version \d+ of 2$/.test(e.sub));
+  assert.ok(versionEvent, JSON.stringify(events));
+  assert.match(versionEvent.sub, /^Report · version 1 of 2$/);
+  assert.strictEqual(events[events.length - 1].warnings, result.warnings);
+});
+
+test('Stop in folder mode keeps files, writes no viewer and no record', async () => {
+  const { list, chats } = twoChats();
+  const picked = new FakeDir();
+  const signal = { stopped: false };
+  const onProgress = (e) => { if (e.phase === 'chats' && e.done === 1) signal.stopped = true; };
+  const { result, sets, saved } = await bulkRun({ list, chats, options: { changesOnly: true, directory: picked, signal, onProgress } });
+  assert.strictEqual(result.outcome, 'stopped');
+  assert.strictEqual(result.reason, 'You stopped it');
+  assert.strictEqual(result.saved.chats, 1);
+  assert.strictEqual(saved, null, 'nothing downloaded');
+  const files = runFiles(picked);
+  assert.ok(files['Alpha/README.md'], Object.keys(files).join());
+  assert.ok(!Object.keys(files).some((n) => n.startsWith('Beta/')), 'the second chat was not started');
+  for (const n of ['viewer.html', 'index.md', 'export-manifest.json']) assert.ok(!(n in files), n);
+  assert.ok(!sets.some((keys) => keys.includes('exportRecord')), JSON.stringify(sets));
+});
+
+test('Stop in ZIP mode downloads nothing', async () => {
+  const { list, chats } = twoChats();
+  const signal = { stopped: false };
+  const onProgress = (e) => { if (e.phase === 'chats' && e.done === 1) signal.stopped = true; };
+  const { result, sets, saved } = await bulkRun({ list, chats, options: { changesOnly: true, signal, onProgress } });
+  assert.strictEqual(result.outcome, 'stopped');
+  assert.strictEqual(saved, null, 'no download');
+  assert.deepStrictEqual(result.saved, { chats: 0, artifacts: 0, versions: 0 });
+  assert.ok(!sets.some((keys) => keys.includes('exportRecord')));
+});
+
+test('an exception mid-run in folder mode reports the chats already written', async () => {
+  const { list, chats } = twoChats();
+  const picked = new FakeDir();
+  const setup = (sb) => vm.runInContext('writeViewer = async () => { throw new Error("boom"); }', sb);
+  const { result } = await bulkRun({ list, chats, setup, options: { directory: picked } });
+  assert.strictEqual(result.outcome, 'failed');
+  assert.match(result.reason, /boom/);
+  assert.strictEqual(result.saved.chats, 2);
+  assert.ok(runFiles(picked)['Beta/README.md']);
+});
+
+test('an exception mid-run in ZIP mode reports nothing saved', async () => {
+  const { list, chats } = twoChats();
+  const setup = (sb) => vm.runInContext('writeViewer = async () => { throw new Error("boom"); }', sb);
+  const { result, saved } = await bulkRun({ list, chats, setup });
+  assert.strictEqual(result.outcome, 'failed');
+  assert.strictEqual(saved, null);
+  assert.deepStrictEqual(result.saved, { chats: 0, artifacts: 0, versions: 0 });
+});
+
+test('Export Artifacts reports each version and stops between artifacts', async () => {
+  const U1 = 'a1a1a1a1-1111-4111-8111-111111111111';
+  const U2 = 'b2b2b2b2-1111-4111-8111-111111111111';
+  const art = (slug, title) => ({ slug, title, typeSlug: '', typeTitle: '', sourceSurface: 'chat', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' });
+  const frames = [art(U1, 'One'), art(U2, 'Two')];
+  const page = (t) => ({ title: t, live: P_LIVE, versions: { [P_OLD]: { files: { 'index.html': `<p>${t} old</p>` } }, [P_LIVE]: { files: { 'index.html': `<p>${t}</p>` } } } });
+  const pages = { [U1]: page('One'), [U2]: page('Two') };
+  const events = [];
+  const full = await runArtifacts({ frames, pages, granted: false, options: { onProgress: (e) => events.push(JSON.parse(JSON.stringify(e))) } });
+  assert.strictEqual(full.result.outcome, 'done');
+  const phases = events.map((e) => e.phase).filter((p, i, all) => p !== all[i - 1]);
+  assert.deepStrictEqual(phases, ['artifacts', 'viewer']);
+  assert.ok(events.some((e) => e.sub === 'Two · version 1 of 2'), JSON.stringify(events));
+
+  const picked = new FakeDir();
+  const signal = { stopped: false };
+  const onProgress = (e) => { if (e.phase === 'artifacts' && e.done === 1) signal.stopped = true; };
+  const stopped = await runArtifacts({ frames, pages, granted: false, options: { directory: picked, signal, onProgress } });
+  assert.strictEqual(stopped.result.outcome, 'stopped');
+  assert.strictEqual(stopped.result.reason, 'You stopped it');
+  assert.strictEqual(stopped.result.saved.artifacts, 1);
+  assert.strictEqual(stopped.result.saved.versions, 2);
+  const files = runFiles(picked);
+  assert.ok(Object.keys(files).some((n) => n.startsWith('One_')), Object.keys(files).join());
+  assert.ok(!Object.keys(files).some((n) => n.startsWith('Two_')));
+  for (const n of ['viewer.html', 'index.md', 'index.html', 'export-manifest.json']) assert.ok(!(n in files), n);
+
+  const zipSignal = { stopped: false };
+  const zipStop = await runArtifacts({ frames, pages, granted: false, options: { signal: zipSignal, onProgress: (e) => { if (e.phase === 'artifacts' && e.done === 1) zipSignal.stopped = true; } } });
+  assert.strictEqual(zipStop.result.outcome, 'stopped');
+  assert.strictEqual(zipStop.saved, null);
+  assert.deepStrictEqual(zipStop.result.saved, { chats: 0, artifacts: 0, versions: 0 });
 });

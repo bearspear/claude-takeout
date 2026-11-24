@@ -426,7 +426,7 @@ test('a working viewer build adds no warning and no file to the folder', async (
   assert.ok(!('viewer.html' in written) && !('viewer-check.gif' in written));
 });
 
-const { assetRoutes } = require('./helpers');
+const { assetRoutes, FakeDir } = require('./helpers');
 
 test('writeViewer writes viewer.html and the check image at the root', async () => {
   const popup = exportPopup({ routes: assetRoutes() });
@@ -1854,39 +1854,6 @@ test('images Claude viewed are downloaded from claude.ai into images/ and shown 
 });
 
 // ---- Export All into a folder ----
-// An in-memory stand-in for the File System Access handles showDirectoryPicker gives.
-class FakeDir {
-  constructor(name = 'picked', refuse = () => false) { this.name = name; this.entries = new Map(); this.refuse = refuse; }
-  async getDirectoryHandle(name, { create = false } = {}) {
-    let e = this.entries.get(name);
-    if (!e) {
-      if (!create) { const err = new Error('not found'); err.name = 'NotFoundError'; throw err; }
-      e = new FakeDir(name, this.refuse);
-      this.entries.set(name, e);
-    }
-    if (!(e instanceof FakeDir)) { const err = new Error('a file'); err.name = 'TypeMismatchError'; throw err; }
-    return e;
-  }
-  async getFileHandle(name, { create = false } = {}) {
-    if (this.refuse(name)) throw new TypeError(`Name is not allowed: ${name}`);
-    let e = this.entries.get(name);
-    if (!e) {
-      if (!create) { const err = new Error('not found'); err.name = 'NotFoundError'; throw err; }
-      e = { kind: 'file', data: undefined, createWritable: async () => { let next; return { write: async (d) => { next = d; }, close: async () => { e.data = next; }, abort: async () => {} }; } };
-      this.entries.set(name, e);
-    }
-    return e;
-  }
-  // path -> data, for every file below.
-  flat(prefix = '') {
-    const out = {};
-    for (const [name, e] of this.entries) {
-      const p = prefix ? `${prefix}/${name}` : name;
-      if (e instanceof FakeDir) Object.assign(out, e.flat(p)); else out[p] = e.data;
-    }
-    return out;
-  }
-}
 
 test('the disk folder writes what the export writes, in order per path, and reports names it refuses', async () => {
   const popup = exportPopup();
@@ -3879,7 +3846,7 @@ test('runArtifactStep under artifacts/ writes folders, artifact.json and views w
   assert.strictEqual(out.views[0].folder, `artifacts/${f}/${LIVE}`);
   assert.strictEqual(out.views[0].start, 'index.html');
   assert.strictEqual(out.rows[0].folder, `${f}/${LIVE}`);
-  assert.deepStrictEqual(progress, [[1, 1]]);
+  assert.deepStrictEqual(progress, [[0, 1], [1, 1]], 'before and after the artifact');
   assert.strictEqual(out.signedOut, false);
 });
 
