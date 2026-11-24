@@ -4985,6 +4985,7 @@ async function bulkExportZip(options = {}) {
     if (since && !conversations.length && !includedArtifacts.length) {
       status.className = listError ? 'status warning' : 'status ready';
       status.textContent = `Nothing changed since the last export on ${formatTimestamp(since)}.${listNote}`;
+      if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
       return result('done');
     }
     const total = conversations.length;
@@ -5245,6 +5246,7 @@ async function bulkExportZip(options = {}) {
     saved.chats = exported;
     saved.artifacts = savedArtifacts;
     saved.versions = step ? Number(step.versionCount) || 0 : 0;
+    if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
     if (step) {
       warningList.push(...collectorRunWarnings(step.collector));
       if (step.collector.hasAny()) errorFiles.push('artifacts/errors.txt');

@@ -134,3 +134,25 @@ test('exportArtifacts resolves failed when the list fails', async () => {
   assert.strictEqual(result.outcome, 'failed');
   assert.ok(result.reason);
 });
+
+test('Export All counts a failed artifact list as a warning', async () => {
+  const fx = Object.assign(loadFixture(), { uuid: 'c-fx' });
+  const list = [{ uuid: 'c-fx', name: fx.name, updated_at: '2026-01-02T00:00:00Z' }];
+  const { result, store } = await bulkRun({ list, chats: { 'c-fx': fx }, options: { withArtifacts: true } });
+  assert.strictEqual(result.outcome, 'done');
+  assert.ok(result.warnings >= 1);
+  const hit = result.warningList.find((w) => w.type === 'artifact_export');
+  assert.ok(hit, JSON.stringify(result.warningList));
+  assert.match(hit.text, /^Artifact list could not be loaded \(.+\)$/);
+  assert.ok(!/https?:\/\//.test(hit.text));
+  assert.strictEqual(store.exportRecord['org-1'].warnings, result.warnings);
+});
+
+test('Export Changes with nothing changed still counts a failed artifact list', async () => {
+  const list = [{ uuid: 'a', name: 'A', updated_at: '1' }];
+  const stored = { exportRecord: { 'org-1': { at: '2026-01-05T00:00:00Z', chats: { a: '1' } } } };
+  const { result, saved } = await bulkRun({ list, chats: {}, stored, options: { withArtifacts: true, changesOnly: true } });
+  assert.strictEqual(saved, null);
+  assert.strictEqual(result.outcome, 'done');
+  assert.deepStrictEqual(result.warningList.map((w) => w.type), ['artifact_export']);
+});
