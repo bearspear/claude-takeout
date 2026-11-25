@@ -1825,10 +1825,12 @@ def main(argv: list[str]) -> int:
                 print(f"  {size:>10}  {name}")
 
     # Surface warnings.
+    # A renamed file is a note, not a missing piece: the same label as the export's.
     if warnings:
         lines = [f"# Extraction warnings ({len(warnings)})", ""]
         for w in warnings:
-            lines.append(f"- [{w.type}] {w.filename}: {w.message}")
+            label = "note: name_changed" if w.type == "artifact_basename_collision" else w.type
+            lines.append(f"- [{label}] {w.filename}: {w.message}")
             if w.path and w.path != w.filename:
                 lines.append(f"    path: {w.path}")
         text = "\n".join(lines)

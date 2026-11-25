@@ -1951,7 +1951,7 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
   // of them (two paths with one basename, or a file Claude itself named
   // report_v1.html), this one becomes <base>_2<ext> and so on, so nothing is
   // silently overwritten.
-  const usedNames = new Set();
+  const usedNames = new Map();  // file name -> { key, filename } of the artifact that took it
 
   for (const key of Object.keys(state)) {
     const s = state[key];
@@ -1966,14 +1966,17 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
       collision++;
       outBase = `${base}_${collision + 1}`;
     }
-    for (const n of namesFor(outBase)) usedNames.add(n);
+    // The name that was taken (the first this artifact needs that is used) and who holds it.
+    const takenName = collision > 0 ? namesFor(base).find((n) => usedNames.has(n)) : null;
+    const other = takenName ? usedNames.get(takenName) : null;
+    for (const n of namesFor(outBase)) usedNames.set(n, { key, filename: n });
     if (collision > 0 && errorCollector) {
-      errorCollector.addWarning(
-        'artifact_basename_collision',
-        `${outBase}${ext}`,
-        `Another artifact already uses a file name that "${base}${ext}" needs. This artifact was renamed to "${outBase}${ext}" to avoid overwriting.`,
-        { path: key, note: 'Check that both artifacts are intended; the renamed copy still preserves all versions.' }
-      );
+      const otherName = other ? other.filename : '?';
+      const otherPath = other ? other.key : '?';
+      const message = `Two different files were named ${base}${ext}; this one, from ${key}, was saved as ${outBase}${ext}. The other is ${otherName} from ${otherPath}.`;
+      const details = { path: key, note: `Other file: ${otherName} from ${otherPath}` };
+      if (typeof errorCollector.addNote === 'function') errorCollector.addNote('name_changed', `${outBase}${ext}`, message, details);
+      else errorCollector.addWarning('artifact_basename_collision', `${outBase}${ext}`, message, details);
     }
 
     if (index) {

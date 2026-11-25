@@ -2552,9 +2552,10 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       const base = dot > 0 ? name.substring(0, dot) : name;
       const ext = dot > 0 ? name.substring(dot) : '';
       for (let n = 2; Object.prototype.hasOwnProperty.call(artifacts, name) || presentedFrom[name]; n++) name = `${base}_${n}${ext}`;
-      errorCollector.addWarning('artifact_basename_collision', name,
-        `Another presented file is already named "${file.filename}". This one was saved as "${name}" to avoid overwriting.`,
-        { path: file.path, note: 'Check that both files are intended.' });
+      const message = `Two different files were named ${file.filename}; this one, from ${file.path}, was saved as ${name}. The other is ${file.filename} from ${presentedFrom[file.filename]}.`;
+      const details = { path: file.path, note: `Other file: ${file.filename} from ${presentedFrom[file.filename]}` };
+      if (typeof errorCollector.addNote === 'function') errorCollector.addNote('name_changed', name, message, details);
+      else errorCollector.addWarning('artifact_basename_collision', name, message, details);
     }
     const replayed = own ? !presentedFrom[name] : Object.prototype.hasOwnProperty.call(artifacts, name) && !presentedFrom[name];
     presentedNames[file.path] = name;

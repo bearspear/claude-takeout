@@ -719,7 +719,8 @@ test('a file named like another artifact\'s _vN is renamed, not overwritten', ()
   const warned = collector();
   const want = { 'report_v1.html': 'A', 'report_v2.html': 'B', 'report.html': 'B', 'report_v1_2.html': 'OTHER' };
   assert.deepStrictEqual(plain(artifacts(later, warned)), want);
-  assert.deepStrictEqual(plain(warned.warnings.map(w => [w.type, w.filename])), [['artifact_basename_collision', 'report_v1_2.html']]);
+  assert.deepStrictEqual(plain(warned.warnings), []);
+  assert.deepStrictEqual(plain(warned.notes.map(w => [w.type, w.filename])), [['name_changed', 'report_v1_2.html']]);
   assert.deepStrictEqual(pythonArtifacts(later), want);
 
   const earlier = turns(
@@ -731,6 +732,22 @@ test('a file named like another artifact\'s _vN is renamed, not overwritten', ()
   assert.deepStrictEqual(plain(artifacts(earlier, null, index)), want2);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(index['/h/report.html'])).versions, ['report_2_v1.html', 'report_2_v2.html']);
   assert.deepStrictEqual(pythonArtifacts(earlier), want2);
+});
+
+test('two files with one name give a name_changed note naming both paths', () => {
+  const data = turns([use('1', 'create_file', { path: '/a/x.html', file_text: 'A' }), use('2', 'create_file', { path: '/b/x.html', file_text: 'B' })]);
+  const c = collector();
+  assert.deepStrictEqual(plain(artifacts(data, c)), { 'x.html': 'A', 'x_2.html': 'B' });
+  assert.strictEqual(c.warnings.length, 0);
+  assert.strictEqual(c.notes.length, 1);
+  assert.strictEqual(c.notes[0].type, 'name_changed');
+  assert.strictEqual(c.notes[0].filename, 'x_2.html');
+  assert.ok(c.notes[0].message.includes('/b/x.html'), c.notes[0].message);
+  assert.ok(c.notes[0].details.note.includes('x.html') && c.notes[0].details.note.includes('/a/x.html'), c.notes[0].details.note);
+  // An old collector without addNote still hears of it, as a warning.
+  const old = { warnings: [], addWarning(type, filename, message, details) { this.warnings.push({ type, filename, message, details }); } };
+  artifacts(data, old);
+  assert.strictEqual(old.warnings.length, 1);
 });
 
 test('the artifacts tool\'s update edits and rewrite are applied', () => {
@@ -887,6 +904,8 @@ test('a presented file is downloaded when replay is known to be wrong, and same-
   const errors = written['errors.txt'] ? text('errors.txt') : '';
   assert.ok(!/page\.html/.test(errors.split('## Warnings')[1] || ''), errors);
   assert.ok(/index_2\.html/.test(errors) && /report_2\.docx/.test(errors), errors);
+  assert.ok(errors.includes('Other file: index.html from /mnt/user-data/outputs/en/index.html'), errors);
+  assert.ok(!/artifact_basename_collision/.test(errors), errors);
   const full = text('full_chat.md');
   assert.ok(!full.includes('(not found)'), full);
   assert.ok(full.includes('artefacts/report_2.docx'), 'a binary presented file links to its saved copy');
@@ -5272,6 +5291,11 @@ test('readmeNoteLines groups by kind', () => {
   assert.strictEqual(lines.slice(j).filter((l) => l.startsWith('- `')).length, 1);
   assert.ok(lines.includes('- `body_2.html`: about body_2.html'));
   assert.ok(!lines.includes('### Renamed files'));
+  const more = Array.from(readmeNoteLines([note('name_changed', 'x_2.html'), note('helper_script', 'make.py')]));
+  const h = more.indexOf('### Helper scripts');
+  const r = more.indexOf('### Renamed files');
+  assert.ok(h > 0 && r > h);
+  assert.ok(more.includes('- `x_2.html`: about x_2.html'));
 });
 
 // ---- Replay of literal sed -i and cat >> appends (spec section 3) ----
