@@ -449,23 +449,240 @@ function applySedSubstitutions(text, subs) {
   }).join('\n');
 }
 
+// ---- Python text swaps: python3 - <<'D' or python3 -c '<script>' (spec section 3) ----
+// A Python heredoc with a quoted delimiter (bash leaves its body alone): groups the quote, the
+// delimiter, the rest of its first line, the body (undefined when empty).
+const PY_HEREDOC_RE = /python3[ \t]+-[ \t]*<<[ \t]*(['"])([A-Za-z0-9_]+)\1([^\n]*)\n(?:([\s\S]*?)\n)??\2(?=\n|$)/g;
+// python3 -c with one quoted script: single quotes, or double quotes holding nothing bash changes.
+const PY_C_RE = /python3[ \t]+-c[ \t]+(?:'([^']*)'|"([^"$`\\]*)")/g;
+const PY_ESCAPES = { n: '\n', t: '\t', '\\': '\\', "'": "'", '"': '"' };
+
+// The Python string literal starting at i (an optional u or r prefix, then ' " ''' or """):
+// { value, end } (end just past it), else null. Escapes: \n \t \\ \' \" \xNN \uNNNN (not a
+// surrogate); any other backslash, an f or b prefix, or r with a backslash in it is null.
+function pyStringLiteral(src, i) {
+  const text = String(src);
+  const prefix = /^[A-Za-z]{0,2}/.exec(text.slice(i))[0];
+  if (!/^[uUrR]?$/.test(prefix)) return null;
+  const raw = /[rR]/.test(prefix);
+  let at = i + prefix.length;
+  const q = text[at];
+  if (q !== "'" && q !== '"') return null;
+  const triple = text.startsWith(q.repeat(3), at);
+  const close = triple ? q.repeat(3) : q;
+  at += close.length;
+  let value = '';
+  while (at < text.length) {
+    if (text.startsWith(close, at)) return { value, end: at + close.length };
+    const c = text[at];
+    if (c === '\n' && !triple) return null;
+    if (c === '\\') {
+      if (raw) return null;
+      const n = text[at + 1];
+      if (n !== undefined && Object.prototype.hasOwnProperty.call(PY_ESCAPES, n)) { value += PY_ESCAPES[n]; at += 2; continue; }
+      const hex = n === 'x' ? /^[0-9A-Fa-f]{2}/.exec(text.slice(at + 2)) : n === 'u' ? /^[0-9A-Fa-f]{4}/.exec(text.slice(at + 2)) : null;
+      if (!hex || hex[0].length !== (n === 'x' ? 2 : 4)) return null;
+      const code = parseInt(hex[0], 16);
+      if (code >= 0xd800 && code <= 0xdfff) return null;
+      value += String.fromCharCode(code);
+      at += 2 + hex[0].length;
+      continue;
+    }
+    value += c; at++;
+  }
+  return null;
+}
+
+// A script's logical lines as token strings: names, numbers and = ( ) [ ] , . : as themselves, a
+// string literal as S (its value in strs). indent: the line starts indented; semi: a ; ended it.
+// Comments and blank lines are skipped. null for anything else (another operator, a \ continuation,
+// an f-string, a ; inside brackets).
+function pyLines(src) {
+  const text = String(src);
+  const lines = [];
+  let cur = null, depth = 0, lineIndent = false, start = true;
+  const add = (tok, str) => {
+    if (!cur) cur = { indent: lineIndent, tokens: [], strs: [], semi: false };
+    cur.tokens.push(tok);
+    if (str !== undefined) cur.strs.push(str);
+  };
+  const end = (semi) => { if (cur) { cur.semi = semi; lines.push(cur); } cur = null; };
+  for (let i = 0; i < text.length;) {
+    if (start) {
+      const ws = /^[ \t]*/.exec(text.slice(i))[0];
+      lineIndent = ws.length > 0;
+      i += ws.length;
+      start = false;
+      continue;
+    }
+    const c = text[i];
+    if (c === ' ' || c === '\t') { i++; continue; }
+    if (c === '#') { while (i < text.length && text[i] !== '\n') i++; continue; }
+    if (c === '\n') { i++; if (depth === 0) { end(false); start = true; } continue; }
+    if (c === ';') { if (depth) return null; end(true); i++; continue; }
+    const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(i));
+    if (c === "'" || c === '"' || (name && name[0].length <= 2 && (text[i + name[0].length] === "'" || text[i + name[0].length] === '"'))) {
+      const lit = pyStringLiteral(text, i);
+      if (!lit) return null;
+      add('S', lit.value);
+      i = lit.end;
+      continue;
+    }
+    if (name) { add(name[0]); i += name[0].length; continue; }
+    const num = /^[0-9]+/.exec(text.slice(i));
+    if (num) {
+      if (!/^(?:0|[1-9][0-9]*)$/.test(num[0]) || /[A-Za-z0-9_.]/.test(text[i + num[0].length] || '')) return null;
+      add(num[0]); i += num[0].length;
+      continue;
+    }
+    if ('(['.includes(c)) depth++;
+    else if (')]'.includes(c)) { if (--depth < 0) return null; }
+    else if (!'=,.:'.includes(c)) return null;
+    add(c); i++;
+  }
+  if (depth) return null;
+  end(false);
+  return lines.map((l) => ({ indent: l.indent, semi: l.semi, text: l.tokens.join(' '), strs: l.strs }));
+}
+
+const PY_ENC = '(?: , encoding = S)?';
+const PY_COUNT = '( , 1| , count = 1)?';
+const PY_P_RE = /^p = S$/;
+const PY_READ_RE = new RegExp(`^s = open \\( (p|S)${PY_ENC} \\) \\. read \\( \\)$`);
+const PY_REPLACE_RE = new RegExp(`^s = s \\. replace \\( S , S${PY_COUNT} \\)$`);
+const PY_LIST_RE = /^r = \[(?: \( S , S \)(?: , \( S , S \))*(?: ,)?)? \]$/;
+const PY_LOOP_RE = new RegExp(`^for a , b in r :( s = s \\. replace \\( a , b${PY_COUNT} \\))?$`);
+const PY_LOOP_BODY_RE = new RegExp(`^s = s \\. replace \\( a , b${PY_COUNT} \\)$`);
+const PY_WRITE_RE = new RegExp(`^open \\( (p|S) , S${PY_ENC} \\) \\. write \\( s \\)$`);
+const PY_WITH_RE = new RegExp(`^with open \\( (p|S) , S${PY_ENC} \\) as f :( f \\. write \\( s \\))?$`);
+const PY_WITH_BODY_RE = /^f \. write \( s \)$/;
+const PY_PRINT_ARG = '(?:S|[0-9]+|len \\( s \\)|s \\. count \\( S \\))';
+const PY_PRINT_RE = new RegExp(`^print \\((?: ${PY_PRINT_ARG}(?: , ${PY_PRINT_ARG})*)? \\)$`);
+
+// A script that is only, in order: p = '<path>' (optional); s = open(p or '<path>').read(); any
+// number of s = s.replace(<lit>, <lit>[, 1 | count=1]) or r = [(<lit>, <lit>), ...] then
+// for a, b in r: s = s.replace(a, b[, ...]); open(p, 'w').write(s) or with open(p, 'w') as f:
+// f.write(s); then print(...) of literals, len(s) and s.count(<lit>). encoding='utf-8' is allowed
+// on open. { path, pairs: [[old, new, 1 | null]] }, path as written; else null. Every path is the
+// same text; no old string is empty.
+function pythonSwapScript(src) {
+  const lines = pyLines(src);
+  if (!lines) return null;
+  let i = 0;
+  const line = () => lines[i];
+  // A line that stands alone: not indented, not ended by ;.
+  const plain = (re) => { const l = line(); return l && !l.indent && re.exec(l.text); };
+  const isUtf8 = (v) => /^[uU][tT][fF]-?8$/.test(v);
+  let path = null;
+  if (plain(PY_P_RE)) { path = line().strs[0]; i++; }
+  // The file a p-or-literal operand names, its strings after it.
+  const operand = (m, l) => {
+    const usesP = m[1] === 'p';
+    if (usesP && path === null) return null;
+    const value = usesP ? path : l.strs[0];
+    return { value, rest: usesP ? l.strs : l.strs.slice(1) };
+  };
+  let m = plain(PY_READ_RE);
+  if (!m) return null;
+  const read = operand(m, line());
+  if (!read || (read.rest.length && !isUtf8(read.rest[0]))) return null;
+  const target = read.value;
+  if (path !== null && target !== path) return null;
+  i++;
+  const pairs = [];
+  const count = (c) => (c ? 1 : null);
+  for (;;) {
+    if ((m = plain(PY_REPLACE_RE))) {
+      pairs.push([line().strs[0], line().strs[1], count(m[1])]);
+      i++;
+      continue;
+    }
+    if (plain(PY_LIST_RE)) {
+      const strs = line().strs;
+      i++;
+      m = plain(PY_LOOP_RE);
+      if (!m) return null;
+      let c = m[2];
+      if (!m[1]) {
+        if (line().semi) return null;
+        i++;
+        const body = line();
+        if (!body || !body.indent || body.semi) return null;
+        const b = PY_LOOP_BODY_RE.exec(body.text);
+        if (!b) return null;
+        c = b[1];
+      } else if (line().semi) return null;
+      for (let k = 0; k < strs.length; k += 2) pairs.push([strs[k], strs[k + 1], count(c)]);
+      i++;
+      continue;
+    }
+    break;
+  }
+  const writeOk = (mm, l) => {
+    const op = operand(mm, l);
+    return op && op.value === target && op.rest[0] === 'w' && (op.rest.length === 1 || isUtf8(op.rest[1]));
+  };
+  if ((m = plain(PY_WRITE_RE))) {
+    if (!writeOk(m, line())) return null;
+    i++;
+  } else if ((m = plain(PY_WITH_RE))) {
+    if (!writeOk(m, line()) || line().semi) return null;
+    if (!m[2]) {
+      i++;
+      const body = line();
+      if (!body || !body.indent || body.semi || !PY_WITH_BODY_RE.test(body.text)) return null;
+    }
+    i++;
+  } else return null;
+  while (plain(PY_PRINT_RE)) i++;
+  if (i !== lines.length) return null;
+  if (pairs.some((p) => p[0] === '')) return null;
+  return { path: target, pairs };
+}
+
+// Python's str.replace of each pair (every occurrence, or the first with count 1) on text read in
+// Python's text mode (\r\n and \r read as \n).
+function applyPythonReplace(text, pairs) {
+  let s = String(text).replace(/\r\n?/g, '\n');
+  for (const [from, to, count] of pairs) {
+    if (count === 1) {
+      const at = s.indexOf(from);
+      if (at !== -1) s = s.slice(0, at) + to + s.slice(at + from.length);
+    } else s = s.split(from).join(to);
+  }
+  return s;
+}
+
 const READ_ONLY_TOOLS = new Set(['grep', 'head', 'tail', 'wc', 'cat', 'ls', 'echo', 'printf', 'test', '[']);
 const SED_PRINT_RE = /^(?:\d+|\$)(?:,(?:\d+|\$))?p$/;
 
 // The steps of a command made only of cd, read-only tools, sed -i with literal substitutions,
-// cat >> appends and (copies: true) cp: { steps: [{ kind: 'sed', files, subs } | { kind: 'append',
-// file, text } | { kind: 'copy', sources, dest }] }, the file words as written. null for anything else.
-function literalSteps(command, { copies = false } = {}) {
+// cat >> appends, (copies: true) cp and (python: true) Python text swaps (pythonSwapScript):
+// { steps: [{ kind: 'sed', files, subs } | { kind: 'append', file, text } | { kind: 'copy', sources,
+// dest } | { kind: 'python', file, pairs }] }, the file words as written. null for anything else.
+function literalSteps(command, { copies = false, python = false } = {}) {
   const raw = String(command || '');
   if (raw.includes(APPEND_MARK)) return null;
   const found = [];
   for (const m of raw.matchAll(APPEND_RE)) found.push({ index: m.index, length: m[0].length, word: m[1], dash: m[2], quote: m[3], body: m[5], tabs: m[6] });
   for (const m of raw.matchAll(APPEND_TARGET_LAST_RE)) found.push({ index: m.index, length: m[0].length, word: m[4], dash: m[1], quote: m[2], body: m[5], tabs: m[6] });
+  if (python) {
+    for (const m of raw.matchAll(PY_HEREDOC_RE)) found.push({ index: m.index, length: m[0].length, script: m[4] === undefined ? '' : m[4], rest: m[3] });
+    for (const m of raw.matchAll(PY_C_RE)) found.push({ index: m.index, length: m[0].length, script: m[1] !== undefined ? m[1] : m[2], rest: '' });
+  }
   found.sort((a, b) => a.index - b.index);
   const appends = [];
   let text = '', at = 0;
   for (const f of found) {
     if (f.index < at) return null;
+    if (f.script !== undefined) {
+      const swap = pythonSwapScript(f.script);
+      if (!swap) return null;
+      text += raw.slice(at, f.index) + APPEND_MARK + appends.length + APPEND_MARK + f.rest;
+      at = f.index + f.length;
+      appends.push({ kind: 'python', file: swap.path, pairs: swap.pairs });
+      continue;
+    }
     if (f.tabs && !f.dash) return null;
     let body = f.body;
     if (!f.quote && body !== undefined && /[$`\\]/.test(body)) return null;
@@ -518,11 +735,12 @@ function literalSteps(command, { copies = false } = {}) {
 
 // A bash command extractArtifacts can replay: only cd, read-only tools, sed -i with literal
 // substitutions, cat >> appends and cp onto a file that isn't one of known (the chat's files; for a
-// folder, the copy's name in it). { edits: [{ path, kind: 'sed', subs } | { path, kind: 'append',
-// text }] } in command order, each path absolute (a relative name joined to cwd); null for any other
-// command, or a relative name with no known directory.
+// folder, the copy's name in it), and Python text swaps (pythonSwapScript). { edits: [{ path, kind:
+// 'sed', subs } | { path, kind: 'append', text } | { path, kind: 'pyreplace', pairs }] } in command
+// order, each path absolute (a relative name joined to cwd); null for any other command, or a
+// relative name with no known directory.
 function literalSwapCommand(command, cwd, known = []) {
-  const parsed = literalSteps(command, { copies: true });
+  const parsed = literalSteps(command, { copies: true, python: true });
   if (!parsed) return null;
   const resolve = (word) => word.startsWith('/') ? normalizeSandboxPath(word) : cwd ? normalizeSandboxPath(cwd + '/' + word) : null;
   const isKnown = (p) => known.some((k) => normalizeSandboxPath(k) === p || (!k.startsWith('/') && p.endsWith('/' + normalizeSandboxPath(k))));
@@ -538,7 +756,8 @@ function literalSwapCommand(command, cwd, known = []) {
     for (const file of files) {
       const path = resolve(file);
       if (!path) return null;
-      edits.push(step.kind === 'sed' ? { path, kind: 'sed', subs: step.subs } : { path, kind: 'append', text: step.text });
+      edits.push(step.kind === 'sed' ? { path, kind: 'sed', subs: step.subs }
+        : step.kind === 'python' ? { path, kind: 'pyreplace', pairs: step.pairs } : { path, kind: 'append', text: step.text });
     }
   }
   return { edits };
@@ -1398,7 +1617,7 @@ function failedToolUseIds(messages) {
 // index, when given, is filled as index[key] = { path, filename, versions: [filename...],
 // messages: [msg uuid that made each version] } for the viewer; the return value is unchanged.
 // replayed, when given (a Set), gets toolUseId + '|' + path for each bash edit replayed: a literal
-// sed -i or cat >> (literalSwapCommand) on a file whose text is known, that is, created in the chat
+// sed -i, cat >> or Python text swap (literalSwapCommand) on a file whose text is known, that is, created in the chat
 // with every change since replayed. From a file's first bash command that isn't replayed
 // (commandTouches), none is replayed for it again.
 function extractArtifacts(data, errorCollector = null, index = null, replayed = null) {
@@ -1640,7 +1859,7 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
             setContent(filepath, content, filename, true);
           }
         }
-        // A literal sed -i or cat >> on known files is replayed in place; a failed command may
+        // A literal sed -i, cat >> or Python text swap on known files is replayed in place; a failed command may
         // have stopped before or after its edit, so it isn't.
         const cwd = cwds.has(block.id) ? cwds.get(block.id) : null;
         const swap = creates.length || failedIds.has(block.id) ? null : literalSwapCommand(command, cwd, pathKeys());
@@ -1650,7 +1869,13 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
             const s = state[keys[i]];
             const before = s.current;
             if (edit.kind === 'sed') s.current = applySedSubstitutions(s.current, edit.subs);
-            else {
+            else if (edit.kind === 'pyreplace') {
+              // Python reads the real file, whose last newline a heredoc-made state lacks; the
+              // export keeps that form when the newline is still there.
+              const text = applyPythonReplace(s.missingNewline ? s.current + '\n' : s.current, edit.pairs);
+              if (s.missingNewline && text.endsWith('\n')) s.current = text.slice(0, -1);
+              else { s.current = text; s.missingNewline = false; }
+            } else {
               s.current = (s.missingNewline ? s.current + '\n' : s.current) + edit.text;
               s.missingNewline = false;
             }
@@ -2478,7 +2703,7 @@ if (typeof module !== 'undefined' && module.exports) {
     escapeHtmlText, formatTimestamp, mdLinkText, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
     sortArtifactRows, artifactRowNotes, artifactSource, artifactUrl, artifactLocal, artifactVersionLinks, ARTIFACT_THUMB_PERMISSION_STATUS, artifactsChangedLine,
     artifactThumbsLine, ARTIFACTS_UNLISTED_HEADING, ARTIFACTS_NO_LIST, splitListedRows, artifactsIndexMd, artifactsIndexHtml,
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, pyStringLiteral, pythonSwapScript, applyPythonReplace, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
     publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact, artifactForeign,

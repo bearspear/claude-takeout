@@ -5430,6 +5430,10 @@ test('replay helpers: commandCwds, literalSwapCommand and commandTouches agree i
     "find /h -name '*.html' | sort", 'find /h -delete', 'grep a /h/p.html > /h/q.md', 'cat /h/p.html >> /out/q2.md 2>&1', 'cp -r /h /out', 'uniq /h/p.html /h/q.md',
     "sed 's/a/b/' /h/p.html > /tmp/x", "sed -i 's/a/b/' /h/p.html && cp /h/q.md /mnt/user-data/outputs/", "sed -i 's/a/b/' /h/p.html && cp /h/p.html /out/",
     'echo $(rm /h/p.html)', 'X=1 ls $HOME', 'echo hi > $OUT',
+    "cd /h && python3 - <<'E' && grep -c c p.html\np='p.html'\ns=open(p).read()\nr=[('a','c'),('\\u00e9\\n','x')]\nfor a,b in r: s=s.replace(a,b,1)\nwith open(p,'w') as f:\n    f.write(s)\nprint(len(s))\nE",
+    "python3 -c 's=open(\"/h/q.md\").read();s=s.replace(\"\"\"a\nb\"\"\",\"c\");open(\"/h/q.md\",\"w\").write(s)'",
+    "python3 -c \"p='/h/p.html';s=open(p).read();s=s.replace('a','b');open(p,'w').write(s)\"",
+    "python3 - <<'E'\np='/h/p.html'\ns=open(p).read()\nimport re\nopen(p,'w').write(s)\nE",
   ];
   const known = ['/h/p.html', '/h/q.md', '/out/q2.md', '/out/p.html', 'p.html'];
   const data = turns(commands.map((command, i) => use('c' + i, 'bash_tool', { command })));
@@ -5493,6 +5497,12 @@ test('replay helpers: commandCwds, literalSwapCommand and commandTouches agree i
   assert.deepStrictEqual(at('echo $(rm /h/p.html)').touches, [...known].sort());
   assert.deepStrictEqual(at('X=1 ls $HOME').touches, []);
   assert.deepStrictEqual(at('echo hi > $OUT').touches, [...known].sort());
+  const n = commands.length;
+  assert.deepStrictEqual(js[n - 4].swap, { edits: [{ path: '/h/p.html', kind: 'pyreplace', pairs: [['a', 'c', 1], ['\u00e9\n', 'x', 1]] }] });
+  assert.deepStrictEqual(js[n - 3].swap, { edits: [{ path: '/h/q.md', kind: 'pyreplace', pairs: [['a\nb', 'c', null]] }] });
+  assert.deepStrictEqual(js[n - 2].swap.edits[0].pairs, [['a', 'b', null]]);
+  assert.strictEqual(js[n - 1].swap, null);
+  assert.deepStrictEqual(js[n - 1].touches, [...known].sort(), 'a Python script not of the shape: every file');
 });
 
 test('replay: a script that may write a file without naming it stops replay of every file', () => {
@@ -5569,4 +5579,115 @@ test('replay: sed then cp to outputs replays; cp onto a known file does not', ()
   const onto = run("sed -i 's/a/b/' /h/p.html && cp /h/p.html /out/");
   bothReplay(onto, 'p.html', 'a\n');
   assert.ok(opaqueAfterReplay(onto).warnings.length >= 1);
+});
+
+// ---- Replay of simple Python text-swap scripts (spec section 3, the Python shape) ----
+
+// A Python script as lines; String.raw keeps its escapes for Python.
+const py = (...lines) => lines.join('\n');
+const pyRun = (command, content) => turns(
+  [use('w', 'Write', { file_path: '/h/page.html', content })],
+  [use('py', 'bash_tool', { command })],
+);
+const pyReplays = (command, content, want) => {
+  const data = pyRun(command, content);
+  bothReplay(data, 'page.html', want);
+  const { warnings, replayed } = opaqueAfterReplay(data);
+  assert.deepStrictEqual([...replayed], ['py|/h/page.html'], command);
+  assert.strictEqual(warnings.length, 0, command);
+};
+const pyOpaque = (command, content = 'a b a\n') => {
+  const data = pyRun(command, content);
+  bothReplay(data, 'page.html', content);
+  const { warnings, replayed } = opaqueAfterReplay(data);
+  assert.strictEqual(replayed.size, 0, command);
+  assert.strictEqual(warnings.length, 1, command);
+};
+
+test('replay: a Python read/replace/write script replays, as Python would', () => {
+  const STOP = '<svg><stop offset="0" stop-color="x"/>\n<stop offset="0" stop-color="x"/></svg>\n';
+  const command = py("cd /h && python3 - <<'E'", "p='page.html';s=open(p).read()",
+    `s=s.replace('<stop offset="0" stop-color="x"/>','<stop offset="0" style="stop-color:x"/>')`, "open(p,'w').write(s)", 'E');
+  pyReplays(command, STOP, STOP.split('stop-color="x"').join('style="stop-color:x"'));
+  bothReplay(pyRun(command, STOP), 'page_v1.html', STOP);
+  const AB = 'a b a\n';
+  // The list form, double-quoted delimiter, encoding, an absolute path.
+  pyReplays(py('python3 - <<"E"', "p = '/h/page.html'", "s = open(p, encoding='utf-8').read()", "r = [('a', 'c'), ('b', 'd')]",
+    'for a, b in r: s = s.replace(a, b)', "open(p, 'w').write(s)", 'E'), AB, 'c d c\n');
+  // The list over lines with a trailing comma, a block for, comments and blank lines.
+  pyReplays(py("python3 - <<'E'", '# swap', "p = '/h/page.html'", 's = open(p).read()', '', 'r = [', "    ('a', 'c'),  # first", "    ('c', 'e'),", ']',
+    'for a, b in r:', '    s = s.replace(a, b)', "open(p, 'w').write(s)", 'E'), AB, 'e b e\n');
+  // count 1, positional or keyword: the first occurrence only.
+  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c',1)", "open(p,'w').write(s)", 'E'), AB, 'c b a\n');
+  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c',count=1)", "open(p,'w').write(s)", 'E'), AB, 'c b a\n');
+  // with open(...) as f, inline and as a block.
+  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('b','x')", "with open(p,'w',encoding='utf-8') as f: f.write(s)", 'E'), AB, 'a x a\n');
+  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('b','x')", "with open(p, 'w') as f:", '    f.write(s)', 'E'), AB, 'a x a\n');
+  // A trailing print, and a read-only tool after it; a cd before it.
+  pyReplays(py("cd /h && python3 - <<'E' && grep -c c page.html", "p='page.html'", 's=open(p).read()', "s=s.replace('a','c')", "open(p,'w').write(s)",
+    "print(s.count('c'), len(s), 'done', 3)", 'print()', 'E'), AB, 'c b c\n');
+  // No p: the path written out twice.
+  pyReplays(py("python3 - <<'E'", "s = open('/h/page.html').read()", "s = s.replace('a', 'c')", "open('/h/page.html', 'w').write(s)", 'E'), AB, 'c b c\n');
+  // Triple quotes over lines, and escapes.
+  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('''line1", "line2''', 'one\\n\\u00e9\\x41\\t')",
+    String.raw`s=s.replace("it's", 'it\'s \"x\" \\')`, 'open(p,"w").write(s)', 'E'), 'line1\nline2 é it\'s\n', 'one\néA\t é it\'s "x" \\\n');
+  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', 's=s.replace("""a""", u"é")', "open(p,'w').write(s)", 'E'), AB, 'é b é\n');
+  // python3 -c, single-quoted, and double-quoted with nothing bash would change.
+  pyReplays(`python3 -c 'p="/h/page.html";s=open(p).read();s=s.replace("a","c");open(p,"w").write(s)'`, AB, 'c b c\n');
+  pyReplays(`cd /h && python3 -c "p='page.html'; s=open(p).read(); s=s.replace('a','c'); open(p,'w').write(s)" && wc -c page.html`, AB, 'c b c\n');
+  // Python semantics: every occurrence; a missing old string changes nothing and is no warning;
+  // $ in the replacement is plain text; Python reads \r\n as \n.
+  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('zz','y')", "open(p,'w').write(s)", 'E'), AB, AB);
+  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','$&$1$$')", "open(p,'w').write(s)", 'E'), AB, '$&$1$$ b $&$1$$\n');
+  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c')", "open(p,'w').write(s)", 'E'), 'a\r\nb\ra\n', 'c\nb\nc\n');
+});
+
+test('replay: a heredoc-made file keeps its export form after a Python swap', () => {
+  const data = turns(
+    [use('w', 'bash_tool', { command: "cat > /h/page.html << 'E'\na b\nE" })],
+    [use('py', 'bash_tool', { command: py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('b','c')", "open(p,'w').write(s)", 'E') })],
+  );
+  bothReplay(data, 'page.html', 'a c');
+});
+
+test('replay: Python scripts that are not exactly the shape stay opaque', () => {
+  const body = (...lines) => py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', ...lines, 'E');
+  const write = "open(p,'w').write(s)";
+  for (const command of [
+    py("python3 - <<'E'", 'import re', "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c')", write, 'E'),
+    body("s=re.sub('a','c',s)", write),
+    body("s=s.replace(f'a','c')", write),
+    body("s=s.replace('a','c')", write, "open('/h/other.txt','w').write(s)"),
+    body("s=s.replace('a'+'b','c')", write),
+    body("s=s.replace('a' 'b','c')", write),
+    body(String.raw`s=s.replace(r'\d','c')`, write),
+    body("t=s.replace('a','c')", "open(p,'w').write(t)"),
+    py("python3 - <<'E'", "p='/h/page.html'", 'text=open(p).read()', "text=text.replace('a','c')", "open(p,'w').write(text)", 'E'),
+    body("s=s.replace('a','c',2)", write),
+    body("s=s.replace('','c')", write),
+    body("s=s.replace('a','c')", "open(p,'a').write(s)"),
+    body("s=s.replace('a','c')", write, "print(s, file=open('/h/x','w'))"),
+    body("s=s.replace('a','c')", write, 'print(s.upper())'),
+    body("r=[('a','c')]", "for a, b in r: s=s.replace(a, b); s=s.replace('c','d')", write),
+    body("s=s.replace('a','c')", write, "s=s.replace('c','d')"),
+    body("s=s.replace('a','c')", 'if s: ' + write),
+    body(String.raw`s=s.replace('a','\r')`, write),
+    py("python3 - <<E", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c')", write, 'E'),
+    py("python3 - <<-'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c')", write, 'E'),
+    py("python3 - <<'E' > /tmp/log", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c')", write, 'E'),
+    py("python3 - <<'E'", "p='page.html'", 's=open(p).read()', "s=s.replace('a','c')", write, 'E'),  // no directory
+    `python3 -c "p='/h/page.html'; s=open(p).read(); s=s.replace('a','\\n'); open(p,'w').write(s)"`,
+    `python3 -c "p='/h/page.html'; s=open(p).read(); s=s.replace('a','$X'); open(p,'w').write(s)"`,
+    `python3 -c 'p="/h/page.html";s=open(p).read();s=s.replace("a","c");open(p,"w").write(s)' > /h/log`,
+  ]) pyOpaque(command);
+});
+
+test('replay: a Python swap after an opaque command on the file is not replayed', () => {
+  const data = turns(
+    [use('w', 'Write', { file_path: '/h/page.html', content: 'a\n' })],
+    [use('x', 'bash_tool', { command: 'python3 /h/fix.py' })],
+    [use('py', 'bash_tool', { command: py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c')", "open(p,'w').write(s)", 'E') })],
+  );
+  bothReplay(data, 'page.html', 'a\n');
+  assert.strictEqual(opaqueAfterReplay(data).replayed.size, 0);
 });

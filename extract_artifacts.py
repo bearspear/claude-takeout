@@ -343,19 +343,292 @@ def apply_sed_substitutions(text: str, subs) -> str:
     return "\n".join(out)
 
 
+# ---- Python text swaps: python3 - <<'D' or python3 -c '<script>' (twins of export-core.js) ----
+PY_HEREDOC_RE = re.compile(r"""python3[ \t]+-[ \t]*<<[ \t]*(['"])([A-Za-z0-9_]+)\1([^\n]*)\n(?:([\s\S]*?)\n)??\2(?=\n|\Z)""")
+PY_C_RE = re.compile(r"""python3[ \t]+-c[ \t]+(?:'([^']*)'|"([^"$`\\]*)")""")
+PY_ESCAPES = {"n": "\n", "t": "\t", "\\": "\\", "'": "'", '"': '"'}
+
+
+def py_string_literal(src, i) -> Optional[tuple[str, int]]:
+    """pyStringLiteral: (value, end) of the Python string literal at i, else None."""
+    text = str(src)
+    prefix = re.match(r"[A-Za-z]{0,2}", text[i:]).group(0)
+    if not re.fullmatch(r"[uUrR]?", prefix):
+        return None
+    raw = prefix in ("r", "R")
+    at = i + len(prefix)
+    q = text[at] if at < len(text) else ""
+    if q not in ("'", '"'):
+        return None
+    triple = text.startswith(q * 3, at)
+    close = q * 3 if triple else q
+    at += len(close)
+    value = ""
+    while at < len(text):
+        if text.startswith(close, at):
+            return value, at + len(close)
+        c = text[at]
+        if c == "\n" and not triple:
+            return None
+        if c == "\\":
+            if raw:
+                return None
+            n = text[at + 1] if at + 1 < len(text) else None
+            if n is not None and n in PY_ESCAPES:
+                value += PY_ESCAPES[n]
+                at += 2
+                continue
+            width = 2 if n == "x" else 4 if n == "u" else 0
+            digits = text[at + 2:at + 2 + width]
+            if not width or not re.fullmatch(r"[0-9A-Fa-f]{%d}" % width, digits):
+                return None
+            code = int(digits, 16)
+            if 0xD800 <= code <= 0xDFFF:
+                return None
+            value += chr(code)
+            at += 2 + width
+            continue
+        value += c
+        at += 1
+    return None
+
+
+def py_lines(src) -> Optional[list[dict]]:
+    """pyLines: a script's logical lines as token strings, else None."""
+    text = str(src)
+    lines: list[dict] = []
+    cur: Optional[dict] = None
+    depth = 0
+    line_indent = False
+    start = True
+    i = 0
+
+    def add(tok, s=None):
+        nonlocal cur
+        if cur is None:
+            cur = {"indent": line_indent, "tokens": [], "strs": [], "semi": False}
+        cur["tokens"].append(tok)
+        if s is not None:
+            cur["strs"].append(s)
+
+    def end(semi):
+        nonlocal cur
+        if cur is not None:
+            cur["semi"] = semi
+            lines.append(cur)
+        cur = None
+
+    while i < len(text):
+        if start:
+            ws = re.match(r"[ \t]*", text[i:]).group(0)
+            line_indent = len(ws) > 0
+            i += len(ws)
+            start = False
+            continue
+        c = text[i]
+        if c in (" ", "\t"):
+            i += 1
+            continue
+        if c == "#":
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            continue
+        if c == "\n":
+            i += 1
+            if depth == 0:
+                end(False)
+                start = True
+            continue
+        if c == ";":
+            if depth:
+                return None
+            end(True)
+            i += 1
+            continue
+        name = re.match(r"[A-Za-z_][A-Za-z0-9_]*", text[i:])
+        after = text[i + len(name.group(0))] if name and i + len(name.group(0)) < len(text) else ""
+        if c in ("'", '"') or (name and len(name.group(0)) <= 2 and after in ("'", '"')):
+            lit = py_string_literal(text, i)
+            if lit is None:
+                return None
+            add("S", lit[0])
+            i = lit[1]
+            continue
+        if name:
+            add(name.group(0))
+            i += len(name.group(0))
+            continue
+        num = re.match(r"[0-9]+", text[i:])
+        if num:
+            nxt = text[i + len(num.group(0))] if i + len(num.group(0)) < len(text) else ""
+            if not re.fullmatch(r"0|[1-9][0-9]*", num.group(0)) or (nxt and re.fullmatch(r"[A-Za-z0-9_.]", nxt)):
+                return None
+            add(num.group(0))
+            i += len(num.group(0))
+            continue
+        if c in "([":
+            depth += 1
+        elif c in ")]":
+            depth -= 1
+            if depth < 0:
+                return None
+        elif c not in "=,.:":
+            return None
+        add(c)
+        i += 1
+    if depth:
+        return None
+    end(False)
+    return [{"indent": ln["indent"], "semi": ln["semi"], "text": " ".join(ln["tokens"]), "strs": ln["strs"]} for ln in lines]
+
+
+PY_ENC = "(?: , encoding = S)?"
+PY_COUNT = "( , 1| , count = 1)?"
+PY_P_RE = re.compile(r"p = S")
+PY_READ_RE = re.compile(r"s = open \( (p|S)" + PY_ENC + r" \) \. read \( \)")
+PY_REPLACE_RE = re.compile(r"s = s \. replace \( S , S" + PY_COUNT + r" \)")
+PY_LIST_RE = re.compile(r"r = \[(?: \( S , S \)(?: , \( S , S \))*(?: ,)?)? \]")
+PY_LOOP_RE = re.compile(r"for a , b in r :( s = s \. replace \( a , b" + PY_COUNT + r" \))?")
+PY_LOOP_BODY_RE = re.compile(r"s = s \. replace \( a , b" + PY_COUNT + r" \)")
+PY_WRITE_RE = re.compile(r"open \( (p|S) , S" + PY_ENC + r" \) \. write \( s \)")
+PY_WITH_RE = re.compile(r"with open \( (p|S) , S" + PY_ENC + r" \) as f :( f \. write \( s \))?")
+PY_WITH_BODY_RE = re.compile(r"f \. write \( s \)")
+PY_PRINT_ARG = r"(?:S|[0-9]+|len \( s \)|s \. count \( S \))"
+PY_PRINT_RE = re.compile(r"print \((?: " + PY_PRINT_ARG + r"(?: , " + PY_PRINT_ARG + r")*)? \)")
+
+
+def python_swap_script(src) -> Optional[dict]:
+    """pythonSwapScript: {path, pairs: [[old, new, 1 | None]]} for a script of exactly the
+    allowed statements, else None."""
+    lines = py_lines(src)
+    if lines is None:
+        return None
+    i = 0
+
+    def line():
+        return lines[i] if i < len(lines) else None
+
+    def plain(rx):
+        ln = line()
+        return rx.fullmatch(ln["text"]) if ln is not None and not ln["indent"] else None
+
+    def is_utf8(v):
+        return re.fullmatch(r"[uU][tT][fF]-?8", v) is not None
+
+    path = None
+    if plain(PY_P_RE):
+        path = line()["strs"][0]
+        i += 1
+
+    def operand(m, ln):
+        uses_p = m.group(1) == "p"
+        if uses_p and path is None:
+            return None
+        value = path if uses_p else ln["strs"][0]
+        return value, (ln["strs"] if uses_p else ln["strs"][1:])
+
+    m = plain(PY_READ_RE)
+    if not m:
+        return None
+    read = operand(m, line())
+    if read is None or (read[1] and not is_utf8(read[1][0])):
+        return None
+    target = read[0]
+    if path is not None and target != path:
+        return None
+    i += 1
+    pairs: list[list] = []
+
+    def count(c):
+        return 1 if c else None
+
+    while True:
+        m = plain(PY_REPLACE_RE)
+        if m:
+            pairs.append([line()["strs"][0], line()["strs"][1], count(m.group(1))])
+            i += 1
+            continue
+        if plain(PY_LIST_RE):
+            strs = line()["strs"]
+            i += 1
+            m = plain(PY_LOOP_RE)
+            if not m:
+                return None
+            c = m.group(2)
+            if not m.group(1):
+                if line()["semi"]:
+                    return None
+                i += 1
+                body = line()
+                if body is None or not body["indent"] or body["semi"]:
+                    return None
+                b = PY_LOOP_BODY_RE.fullmatch(body["text"])
+                if not b:
+                    return None
+                c = b.group(1)
+            elif line()["semi"]:
+                return None
+            for k in range(0, len(strs), 2):
+                pairs.append([strs[k], strs[k + 1], count(c)])
+            i += 1
+            continue
+        break
+
+    def write_ok(mm, ln):
+        op = operand(mm, ln)
+        return op is not None and op[0] == target and op[1][:1] == ["w"] and (len(op[1]) == 1 or is_utf8(op[1][1]))
+
+    m = plain(PY_WRITE_RE)
+    if m:
+        if not write_ok(m, line()):
+            return None
+        i += 1
+    else:
+        m = plain(PY_WITH_RE)
+        if not m:
+            return None
+        if not write_ok(m, line()) or line()["semi"]:
+            return None
+        if not m.group(2):
+            i += 1
+            body = line()
+            if body is None or not body["indent"] or body["semi"] or not PY_WITH_BODY_RE.fullmatch(body["text"]):
+                return None
+        i += 1
+    while plain(PY_PRINT_RE):
+        i += 1
+    if i != len(lines):
+        return None
+    if any(p[0] == "" for p in pairs):
+        return None
+    return {"path": target, "pairs": pairs}
+
+
+def apply_python_replace(text: str, pairs) -> str:
+    """applyPythonReplace: Python's str.replace of each pair on text read in text mode."""
+    s = re.sub(r"\r\n?", "\n", str(text))
+    for frm, to, cnt in pairs:
+        s = s.replace(frm, to, 1) if cnt == 1 else s.replace(frm, to)
+    return s
+
+
 READ_ONLY_TOOLS = {"grep", "head", "tail", "wc", "cat", "ls", "echo", "printf", "test", "["}
 SED_PRINT_RE = re.compile(r"(?:[0-9]+|\$)(?:,(?:[0-9]+|\$))?p\Z")
 APPEND_MARK_RE = re.compile("\x01([0-9]+)\x01\\Z")
 
 
-def literal_steps(command, copies: bool = False) -> Optional[list[dict]]:
+def literal_steps(command, copies: bool = False, python: bool = False) -> Optional[list[dict]]:
     """literalSteps: the steps of a command made only of cd, read-only tools, literal sed -i,
-    cat >> appends and (copies) cp, else None."""
+    cat >> appends, (copies) cp and (python) Python text swaps, else None."""
     raw = str(command or "")
     if APPEND_MARK in raw:
         return None
     found = [(m.start(), m.end(), m.group(1), m.group(2), m.group(3), m.group(5), m.group(6)) for m in APPEND_RE.finditer(raw)]
     found += [(m.start(), m.end(), m.group(4), m.group(1), m.group(2), m.group(5), m.group(6)) for m in APPEND_TARGET_LAST_RE.finditer(raw)]
+    if python:
+        # (start, end, script, rest, None, None, None): a Python step.
+        found += [(m.start(), m.end(), "" if m.group(4) is None else m.group(4), m.group(3), None, None, None) for m in PY_HEREDOC_RE.finditer(raw)]
+        found += [(m.start(), m.end(), m.group(1) if m.group(1) is not None else m.group(2), "", None, None, None) for m in PY_C_RE.finditer(raw)]
     found.sort(key=lambda f: f[0])
     appends: list[dict] = []
     text = ""
@@ -363,6 +636,14 @@ def literal_steps(command, copies: bool = False) -> Optional[list[dict]]:
     for start, end, word, dash, quote, body, tabs in found:
         if start < at:
             return None
+        if tabs is None:
+            swap = python_swap_script(word)
+            if swap is None:
+                return None
+            text += raw[at:start] + APPEND_MARK + str(len(appends)) + APPEND_MARK + dash
+            at = end
+            appends.append({"kind": "python", "file": swap["path"], "pairs": swap["pairs"]})
+            continue
         if tabs and not dash:
             return None
         if not quote and body is not None and re.search(r"[$`\\]", body):
@@ -438,7 +719,7 @@ def literal_steps(command, copies: bool = False) -> Optional[list[dict]]:
 def literal_swap_command(command, cwd, known=()) -> Optional[list[dict]]:
     """literalSwapCommand: the command's edits ({path, kind, subs|text}) in order, else None.
     A cp is allowed onto a file that isn't one of known."""
-    steps = literal_steps(command, copies=True)
+    steps = literal_steps(command, copies=True, python=True)
     if steps is None:
         return None
 
@@ -464,8 +745,12 @@ def literal_swap_command(command, cwd, known=()) -> Optional[list[dict]]:
             path = resolve(file)
             if not path:
                 return None
-            edits.append({"path": path, "kind": "sed", "subs": step["subs"]} if step["kind"] == "sed"
-                         else {"path": path, "kind": "append", "text": step["text"]})
+            if step["kind"] == "sed":
+                edits.append({"path": path, "kind": "sed", "subs": step["subs"]})
+            elif step["kind"] == "python":
+                edits.append({"path": path, "kind": "pyreplace", "pairs": step["pairs"]})
+            else:
+                edits.append({"path": path, "kind": "append", "text": step["text"]})
     return edits
 
 
@@ -1155,8 +1440,8 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
     names, when given, is filled with {state key: {"filename": ..., "versions":
     [...]}}, the file names each path was written under, as the JS index is.
 
-    replayed, when given, gets "<tool use id>|<path>" for each literal sed -i or
-    cat >> replayed on a known file, as in the JS.
+    replayed, when given, gets "<tool use id>|<path>" for each literal sed -i,
+    cat >> or Python text swap replayed on a known file, as in the JS.
     """
     messages = get_message_chain(data)
     failed_ids = failed_tool_use_ids(messages)
@@ -1342,7 +1627,7 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
                     filename = basename_of(filepath)
                     if filename and content:
                         set_content(filepath, content, filename, True)
-                # A literal sed -i or cat >> on known files is replayed in place; a failed
+                # A literal sed -i, cat >> or Python text swap on known files is replayed in place; a failed
                 # command may have stopped before or after its edit, so it isn't.
                 cwd = cwds.get(block.get("id"))
                 swap = None if creates or block.get("id") in failed_ids else literal_swap_command(command, cwd, path_keys())
@@ -1353,6 +1638,15 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
                         before = s.current
                         if edit["kind"] == "sed":
                             s.current = apply_sed_substitutions(s.current, edit["subs"])
+                        elif edit["kind"] == "pyreplace":
+                            # Python reads the real file, whose last newline a heredoc-made state
+                            # lacks; the export keeps that form when the newline is still there.
+                            text = apply_python_replace(s.current + "\n" if s.missing_newline else s.current, edit["pairs"])
+                            if s.missing_newline and text.endswith("\n"):
+                                s.current = text[:-1]
+                            else:
+                                s.current = text
+                                s.missing_newline = False
                         else:
                             s.current = (s.current + "\n" if s.missing_newline else s.current) + edit["text"]
                             s.missing_newline = False

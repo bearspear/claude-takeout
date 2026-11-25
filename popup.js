@@ -796,9 +796,9 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
 
       // Python: open(p, 'w' / 'a' / 'x' / 'r+' ..., encoding=...), open(file=p, mode='w'),
       // Path(p).write_text(...) and p.write_text(...), p a literal or a variable bound to one
-      // (f = 'foo.html', or p = Path('/home/claude/foo.html')).
+      // (f = 'foo.html', or p = Path('/home/claude/foo.html'), also first in a python3 -c "..." script).
       const bindings = {};
-      const varBindingRe = /(?:^|[\s;])\s*(\w+)\s*=\s*(?:(?:pathlib\.)?Path\(\s*)?(['"])((?:\\.|(?!\2).)*)\2/g;
+      const varBindingRe = /(?:^|[\s;'"])\s*(\w+)\s*=\s*(?:(?:pathlib\.)?Path\(\s*)?(['"])((?:\\.|(?!\2).)*)\2/g;
       let vbm;
       while ((vbm = varBindingRe.exec(command)) !== null) {
         (bindings[vbm[1]] = bindings[vbm[1]] || []).push(vbm[3]);
