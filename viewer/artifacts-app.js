@@ -1112,8 +1112,8 @@
         const pinch = e.ctrlKey || e.metaKey;
         if (!(pinch || moving()) || !ours(e)) return;
         e.preventDefault();
-        if (!pinch && e.shiftKey) {
-          // Sideways, whichever way the wheel turned (a mouse gives deltaY, some systems turn it into deltaX).
+        if (!pinch && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) {
+          // Sideways: Shift with the wheel (a mouse gives deltaY, some systems turn it into deltaX), or a sideways swipe.
           const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
           pageBody.scrollLeft += d * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? pageBody.clientWidth : 1);
           return;

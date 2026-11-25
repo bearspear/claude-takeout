@@ -286,6 +286,11 @@ async function writeOut(zip) {
     const shifted = await scrollOf();
     check(`${label}: canvas: Move: Shift+wheel scrolls sideways, no zoom`, shifted[0] > 0 && shifted[1] === 0 && (await level()) === beforeShift, JSON.stringify([shifted, beforeShift, await level()]));
     await scrollTo(0, 0);
+    await page.mouse.wheel(100, 0);
+    await page.waitForTimeout(200);
+    const swiped = await scrollOf();
+    check(`${label}: canvas: Move: a sideways swipe scrolls sideways, no zoom`, swiped[0] > 0 && swiped[1] === 0 && (await level()) === beforeShift, JSON.stringify([swiped, beforeShift, await level()]));
+    await scrollTo(0, 0);
     const mb = await boxOf('Home A');
     const mstart = { x: mb.x + mb.width / 2, y: mb.y + mb.height / 2 };
     await page.mouse.move(mstart.x, mstart.y);
