@@ -39,18 +39,23 @@ Success: a reader can open any diagram, image, page or canvas in the viewer and 
 | Place | What is shown | Mode |
 |---|---|---|
 | Gallery (`openGallery`): web images, tool images, product pictures | `<img>` in `.gallery-stage` | Picture |
-| Inline `show_widget` diagram (`renderDiagram`, `figure.diagram`) | SVG as `<img>` | Click opens it in the gallery as a one-item gallery, `cursor: zoom-in`; zoom happens there. The ⋯ menu stays. See "Gallery items" below. |
+| Inline `show_widget` diagram (`renderDiagram`, `figure.diagram`) | SVG as `<img>` | The picture is wrapped in a `<button>` (keyboard: Enter/Space) that opens it as a one-item gallery, `cursor: zoom-in`; zoom happens there. The ⋯ menu stays outside that button, and opening it never opens the gallery. See "Gallery items" below. |
 | Upload popup (`popupContent`, image kinds) | `.file-paper > img.file-image` | Picture, in place |
 | Chat side panel (`previewNodes`), image kinds | `.file-paper > img.file-image` | Picture, in place |
-| Chat side panel and Artifacts screen, `.svg` files | today an iframe | Picture: the same inlining runs first (`inlineSiblings` in the chat panel, `inlineArtifact` on the Artifacts screen), then the result is shown as `<img src="data:image/svg+xml…">`. It stays an iframe page with the zoom bar (below) when the SVG text has `<script`, an `on…=` attribute, or, after inlining, still refers to anything outside itself (an `http:`/`https:`/`//` URL, or an `href`/`src`/`url(…)` that isn't a `data:` URL or a `#fragment`; the case where today's preview shows `REMOTE_NOTE`). |
+| Chat side panel and Artifacts screen, `.svg` files | today an iframe | Picture: the SVG text as-is is shown as `<img src="data:image/svg+xml…">` (no sibling inlining: `inlineSiblings`/`inlineArtifact` only touch `<script src>`, `<link rel=stylesheet>` and `<img src>`, which do nothing for a picture). It stays today's sandboxed iframe, with the page bar (below), when the text has `<script` (any case) or an `on…=` attribute: such an SVG may need its script to look right. **Fallback:** an `<img>` SVG is parsed as strict XML, while today's iframe uses the forgiving HTML parser, so an SVG with no `xmlns`, an HTML entity like `&nbsp;` or a bare `&` would show blank. On the image's `error` event, or when it loads with `naturalWidth` 0, the view switches to today's iframe with the page bar. |
 | Artifacts screen (`fillPreview`, `fillFile`), image kinds | `div.image > img` | Picture, in place |
 | Chat side panel and Artifacts screen, HTML previews (`previewFrame`) | sandboxed iframe | Page |
 | Artifacts screen, Design canvas (`openCanvas`, `canvasPage`) | boards as scaled iframes | Canvas |
 | Single Design board (`openBoard`) | one board at native size | Page |
 
+### Why an SVG as `<img>` is safe
+
+The Artifacts screen today keeps SVG data URLs out of its `<img>` elements on purpose (`SAFE_IMAGE_URI`, `viewer/artifacts-app.js:642`, `(?!svg)`). This design reverses that for `.svg` files, and the PR updates that code's comment to say why: an SVG loaded as an image is stricter than the sandbox. It runs no script, loads nothing from outside (no `<image href>`, `<use href>`, CSS `@import`, `url()` or external entities), and `<foreignObject>` renders but runs nothing. The page CSPs already allow `img-src data:`. So the "stays an iframe" rule above is about **function** (a scripted SVG may need its script), not security: a missed detection costs a picture that looks incomplete, never a leak.
+
 ## Picture mode
 
 - **Layout:** the picture sits in a scroll container (the existing stage, `.file-paper`, or `.image` box, made `overflow: auto`). Zoom sets the picture's rendered width and height; panning is that container's scroll position. This keeps native scrollbars, keyboard scrolling and two-finger trackpad panning working for free.
+- **Centring:** these containers centre today with flex (`.gallery-stage`, `viewer-template.html:352`; `.file-paper`, `:405`; `.preview .image`, `artifacts.css:127`). With `overflow: auto` a flex-centred child that grows past the box gets its top and left cut off, unreachable by scrolling. Centre with `margin: auto` on the picture instead, and give `.file-paper` `min-height: 0` so the paper scrolls rather than `#panel-body`.
 - **Start:** "Fit": the whole picture visible, never enlarged above 100% to fit (today's look). 100% means the picture's natural size; for an SVG, its `width`/`height` attributes, else its `viewBox`, else the fitted size.
 - **Range:** from the smaller of Fit and 10%, up to 800%.
 - **Zoom in and out:**
@@ -63,27 +68,31 @@ Success: a reader can open any diagram, image, page or canvas in the viewer and 
 - **Drag:** when the picture is larger than its container, press-and-drag (mouse, pen, or one finger) pans; cursor `grab`/`grabbing`. At Fit, dragging does nothing. A press that moves more than 4 px is a drag, not a click, so the gallery's click-to-close doesn't fire after a drag.
 - **The bar:** small, overlaid at the bottom right of the picture area, visible on hover and focus and always on touch screens. Buttons have `aria-label`s; the percentage is announced politely (`aria-live="polite"`). The picture area is focusable (`tabindex="0"`).
 - **Reset:** zoom goes back to Fit when a different picture or file is shown (gallery previous/next, another file in the panel). Switching **versions of the same file** keeps the zoom and scroll position (readers compare versions).
+  - Where it lives: `renderPanelBody` rebuilds the panel body and sets `scrollTop = 0` (`viewer-app.js:1683`), so the zoom state is kept outside the DOM in a variable keyed like `panelFor`'s `fileKey` (`viewer-app.js:1741`), with the zoom as a **percentage** and the scroll as the fraction of the scrollable range. On the Artifacts screen, the same keyed by artifact uuid + file path.
+  - If the new version's picture has a different natural size, the percentage is kept (clamped to the new range) and the scroll fractions are reapplied; if the reader was at Fit, it stays at Fit.
+- **Tab trap:** the popup's Tab trap selects `a[href], button` (around `viewer-app.js:785`); add `[tabindex="0"]` so the focusable picture area is in the cycle.
 
 ## Gallery items
 
-`openGallery` today takes web-image items only (`savedImage`, the site in the footer, "Image from a web search", label "Image preview"). It gets a generic item shape: `{ src, alt, caption, label }`, where the web-image, tool-image and product callers map their items onto it unchanged in what they show, and an inline diagram is `{ src: <its data URL>, alt: <title>, caption: <title>, label: 'Diagram' }`. A diagram opens a **one-item** gallery: with one item, previous/next buttons and the position counter are hidden and Left/Right do nothing. Existing gallery e2e checks (webimages, cards, steps) keep their expectations.
+`openGallery` today takes web-image items: `{ href, title, source, page }` (`viewer-app.js:331`, `:1242`), and its footer shows the site (`siteOf`), an "Open page" link (`httpsPage`), and "This image is not in this export." for a missing image (`viewer-app.js:552-567`). **Keep that shape** and add two optional fields: `label` (the dialog's label, default "Image preview") and `caption` (shown in the footer instead of site and link when set). An inline diagram is `{ href: <its data URL>, title: <title>, caption: <title>, label: 'Diagram' }`. A diagram opens a **one-item** gallery: with one item, previous/next buttons and the position counter are hidden and Left/Right do nothing. Existing gallery e2e checks (webimages, cards, steps) keep their expectations.
 
 ## Page mode
 
 - **The bar:** above or below the preview, in the panel head or preview frame's edge: −, the percentage, +, Fit width, 100%. Same steps as pictures, range 25% to 200%.
 - **Start and reset:** 100%, as pages look today. Pages never wait for a measurement to show.
-- **How it scales:** from outside the frame only. The iframe gets a layout size of (container size ÷ zoom) and `transform: scale(zoom)` with `transform-origin: 0 0`, inside a wrapper that clips to the container. The page itself is never told or touched; it scrolls inside its own frame as today.
-- **Fit width:** only for pages laid out wider than the container. Most pages are fluid and fit already; for them Fit width is 100% and the button is disabled. Rule: with the latest report's `width` and the frame's layout width when that report was taken, if `width` is not more than the layout width + 1 px, Fit is 100%; otherwise Fit = container width ÷ `width`, clamped to 25%–100%. Fit width never zooms in above 100%. Until a report arrives (or never, if the page's scripts fail), the button is disabled. The parent can't read a sandboxed frame's width, so the preview document the viewer builds (`previewDoc`, `artifactPreviewDoc`) gets a tiny measuring script that posts `{ type: 'ct-size', width: document.documentElement.scrollWidth }` to its parent on load and on resize. The viewer accepts the message only when `event.source` is that preview's own `contentWindow`, the width is a finite number, and it clamps the result to the range. A page could send a false width; the worst it can do is pick a zoom within 25%–200% for itself.
-  - In **hosted mode** the board or page sits inside the guard frame. If relaying `ct-size` through the guard needs any change to the guard's CSP or sandbox, **don't**: Fit width is then absent in hosted mode and the other buttons remain. (Builder decides whether a relay is possible without loosening anything.)
+- **How it scales:** the zoom is applied from outside the frame. The iframe gets a layout size of (container size ÷ zoom) and `transform: scale(zoom)` with `transform-origin: 0 0`, inside a wrapper that clips to the container. The page's own code is unchanged and it scrolls inside its own frame as today; the only addition to its document is the measuring script below.
+- **Fit width:** only for pages laid out wider than their frame. Most pages are fluid and fit already; for them Fit width is 100% and the button is disabled. The parent can't read a sandboxed frame's width, so the preview document the viewer builds (`previewDoc`, `artifactPreviewDoc`) gets a tiny measuring script, appended after the page's content, that posts `{ type: 'ct-size', width: document.documentElement.scrollWidth, view: document.documentElement.clientWidth }` to `window.top` on load and on resize. Each report carries its own layout width (`view`), so there is no race with the parent's layout. Rule: if `width ≤ view + 1`, Fit is 100%; otherwise Fit = container width ÷ `width`, clamped to 25%–100%. Fit width never zooms in above 100%. Until a report arrives (or never, if the page's scripts fail), the button is disabled. The viewer accepts the message only when `event.source` is that preview's window (standalone: `frame.contentWindow`; hosted: `guardFrame.contentWindow.frames[0]`, readable across origins) and both numbers are finite and positive. A page could send a false width; the worst it can do is pick a zoom within 25%–200% for itself.
+  - **Hosted mode:** the page posts straight to `window.top`, past the guard frame, so `guardDoc` stays unchanged and Fit width works hosted too.
 - **Keys:** the same `+ - 0 1` keys while the bar has focus. Keys pressed inside the page go to the page.
-- **No drag, no wheel zoom** over the page: its events are its own (and a sandboxed frame's events don't reach the viewer anyway).
+- **No drag, no wheel zoom** over the page: its events are its own (and a sandboxed frame's events don't reach the viewer anyway). A pinch over a page or a board therefore triggers Chrome's own page zoom; `USAGE.md` says so and points at the bar.
 - **Reset:** back to 100% for another file; kept across versions of the same file.
 
 ## Canvas mode (Design)
 
 - **Today:** `canvasScale` fits the canvas width to the page, never enlarging (0.1–1); the page scrolls natively; a `ResizeObserver` rescales on window changes; boards load lazily through an `IntersectionObserver` rooted at `#page-body`.
-- **New:** a zoom bar (−, percentage, +, Fit) at the canvas's top edge. Range: the smaller of Fit and 10%, up to 200%. Same steps.
-- **Wheel:** pinch and Ctrl/⌘ + wheel zoom about the pointer when the pointer is over the canvas background or a board's head or a note; plain wheel scrolls as today. Over a board's frame the events belong to the board.
+- **New:** a zoom bar (−, percentage, +, Fit) at the canvas's top edge. Range: **Fit** (never below it, so zooming out never brings more boards into view than today's fit and the lazy loader isn't swamped) up to 200%. Same steps above Fit.
+- **Wheel:** pinch and Ctrl/⌘ + wheel zoom about the pointer when the pointer is over the canvas background or a board's head or a note; plain wheel scrolls as today. Over a board's frame the events belong to the board. The canvas is centred with `margin: 0 auto` (`artifacts.css:163`); the zoom-about-a-point math takes that offset into account.
+- **Back from Open alone:** `openCanvas(v, b.name)` (`artifacts-app.js:977`) rebuilds the canvas at Fit today. Keep the zoom and centre point per canvas (in memory, keyed by artifact uuid + version) and restore them on Back.
 - **Drag:** press-and-drag on the empty canvas background, a board head or a note pans (by scrolling `#page-body`); cursor `grab` there. Dragging never starts on a board's frame. A board head's existing click (Open alone) still works after a press that didn't move more than 4 px.
 - **Resize:** while the reader is at Fit, a window resize refits (today's behaviour). After they chose a zoom, a resize keeps their zoom and the point at the centre.
 - **Lazy boards:** keep the `IntersectionObserver` and `CANVAS_MARGIN`; boards come and go as panning scrolls them in and out of view.
@@ -91,7 +100,10 @@ Success: a reader can open any diagram, image, page or canvas in the viewer and 
 
 ## Constraints
 
-Existing e2e checks keep passing, except those that pin a behaviour this design changes on purpose; those are updated, not deleted: `tests/e2e/artifacts-viewer.e2e.js` "svg: shown in the sandboxed frame" becomes "svg: shown as a picture" (with a separate check that a scripted SVG stays sandboxed).
+Existing checks keep passing, except those that pin a behaviour this design changes on purpose; those are updated, not deleted:
+- `tests/e2e/artifacts-viewer.e2e.js` "svg: shown in the sandboxed frame" becomes "svg: shown as a picture" (with a separate check that a scripted SVG stays sandboxed).
+- `tests/e2e/combined.e2e.js:366-372` reads the hosted `chart.svg` through `iframe[srcdoc]`; it now reads the `<img>`'s data URL.
+- `tests/viewer.test.js:758-768` pins `previewDoc`'s exact `srcdoc`, and `:1729` / `:1806` pin `artifactPreviewDoc`'s output; they gain the measuring script.
 
 - No change to CSPs, sandbox flags, `guardDoc`, `sanitizeHtml`, `PREVIEW_CSP` (except the measuring script in the preview document, which runs under the same `PREVIEW_CSP` and sandbox as the page).
 - CSS for the chat viewer goes in `viewer-template.html`'s `<style>`; CSS for the Artifacts screen and canvas in `viewer/artifacts.css` (it applies to the hosted mount too).
@@ -106,9 +118,10 @@ Existing e2e checks keep passing, except those that pin a behaviour this design 
 - Browser, new `tests/e2e/zoom.e2e.js` (and its row in CLAUDE.md's file map):
   - gallery: plain wheel zooms; drag pans; a drag doesn't close; double-click toggles; `+ - 0 1`; Left/Right still change picture and reset to Fit;
   - panel image: plain wheel scrolls the panel; Ctrl+wheel zooms; version switch keeps zoom; another file resets it;
-  - SVG file: shown as `<img>`; a scripted SVG stays an iframe with the page bar;
-  - HTML page: + and − change the frame's scale; Fit width uses the page's reported width; a message from another window is ignored;
-  - canvas: bar zooms past 100%; drag on the background pans; drag doesn't start on a board frame; a board head click still opens the board; standalone and hosted;
+  - SVG file: shown as `<img>`; a scripted SVG stays an iframe with the page bar; an SVG with no `xmlns` (or an `&nbsp;`) falls back to the iframe; natural size from `width="100%"` or units falls back to `viewBox`;
+  - inline diagram: Enter on it opens the one-item gallery; the ⋯ menu doesn't;
+  - HTML page: + and − change the frame's scale; Fit width uses the page's reported width, standalone and hosted; a message from another window is ignored;
+  - canvas: bar zooms past 100% and not below Fit; drag on the background pans; drag doesn't start on a board frame; a board head click still opens the board, a drag ending on it doesn't; Back from Open alone restores the zoom; standalone and hosted;
   - no network requests and no page errors, as the other e2e files check.
 
 ## Release
@@ -122,14 +135,18 @@ v1.23.0: README changelog entry and `manifest.json` 1.23.0; `TECHNICAL.md` viewe
 - SVG files become pictures (`<img>`, which also runs no scripts); a scripted SVG stays a page.
 - Ranges: pictures up to 800%, pages 25–200%, canvas up to 200%.
 - Zoom is kept when switching versions of the same file, reset for another file, never stored.
-- Fit width uses a measuring script posting the page's width; in hosted mode it is dropped if the guard can't relay it unchanged.
-- Pages start at 100%; Fit width is only for pages wider than the container and never enlarges.
-- SVGs are inlined like today's previews before becoming pictures; one that still points outside itself stays a page.
-- The gallery gets a generic item shape; a diagram is a one-item gallery with no previous/next.
+- Fit width uses a measuring script posting the page's width and its own layout width to `window.top`, which also works hosted without touching the guard frame.
+- Pages start at 100%; Fit width is only for pages wider than their frame and never enlarges.
+- SVGs become pictures as-is; only a scripted one stays a page, and one the strict XML parser rejects falls back to the page.
+- The gallery keeps its item shape and gains optional `label` and `caption`; a diagram is a one-item gallery with no previous/next.
+- The canvas never zooms out below Fit; its zoom survives Open alone and Back.
 
 ## Left to the builder
 
 - Exact bar placement and styling within the existing look.
 - Pointer-event details (pointer capture, touch-action values), how the 4 px threshold is measured.
 - How the shared helper is split between `viewer-logic.js` (pure) and each app (DOM wiring), as long as both apps use the same pure helpers.
-- Whether a `ct-size` relay through the guard frame is possible without changing it.
+
+## Review
+
+A fresh reviewer read this spec against the code on 2026-11-25 (2 critical, 6 important, 5 minor findings). All are folded in above: the SVG rule (every SVG has an `http://` namespace, so the old "refers outside" rule matched all of them), the strict-XML fallback, the `SAFE_IMAGE_URI` reversal, the extra tests that change, the `window.top` relay, the `view` width in reports, the gallery shape, flex centring, where zoom state lives, the canvas floor and Back, browser pinch over frames, the diagram button and Tab trap, and the missing tests.
