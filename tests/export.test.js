@@ -6247,6 +6247,7 @@ test('a file tool the replay does not model makes its file opaque; a read does n
     use('m', 'MultiEdit', { file_path: '/home/claude/f.html', edits: [{ old_string: 'one', new_string: 'two' }] }),
     use('m', 'str_replace_based_edit_tool', { command: 'str_replace', path: '/home/claude//f.html', old_str: 'one', new_str: 'two' }),
     use('m', 'some_new_tool', { filepath: '/home/claude/f.html' }),
+    use('m', 'NotebookEdit', { notebook_path: '/home/claude/f.html', new_source: 'x' }),
   ]) {
     const data = make(tool);
     bothReplay(data, 'f.html', 'foo one');

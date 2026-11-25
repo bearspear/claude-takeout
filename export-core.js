@@ -2145,10 +2145,10 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
           for (const key of commandTouches(command, cwd, pathKeys(), uncertainCwds.has(block.id))) opaque.add(key);
         }
       } else if (!READ_FILE_TOOLS.has(block.name) && !(input && input.command === 'view')) {
-        // A tool the replay doesn't model (MultiEdit, str_replace_based_edit_tool, anything new) that
+        // A tool the replay doesn't model (MultiEdit, NotebookEdit, str_replace_based_edit_tool, anything new) that
         // names a known file may have changed it: the file is opaque from here on, and the change is
         // recorded like a skipped edit.
-        for (const field of ['path', 'file_path', 'filepath']) {
+        for (const field of ['path', 'file_path', 'filepath', 'notebook_path']) {
           if (typeof input[field] !== 'string' || !input[field]) continue;
           const target = normalizeSandboxPath(input[field]);
           for (const key of pathKeys()) {

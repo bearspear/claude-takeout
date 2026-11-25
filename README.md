@@ -402,6 +402,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.22.2
+
+- **A notebook edit no longer hides a later change** - When Claude edited a file with `NotebookEdit` and then changed it with a `sed` command, the export replayed the `sed` onto the text from before the notebook edit, and gave no warning. That file now gets a warning pointing at `replay_bash.py`, as other edits the export can't follow do.
+
 ### v1.22.1
 
 - **A warning means something is missing** - Many exports turned amber over things that lose nothing. Those are now **notes**: they are listed in the chat's `README.md` under **About some files** and in `errors.txt` under **Notes**, but not counted on the Done screen, in the footer or in `index.md`, and the status stays green. One quiet line on Done says how many there are. Warnings stay for what is really missing.
