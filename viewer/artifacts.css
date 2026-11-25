@@ -183,7 +183,15 @@ button { font: inherit; color: inherit; }
 .files .btn.download { font-size: 11px; padding: 1px 8px; flex: none; }
 /* A Design artifact's canvas (v1.20) */
 .design-wrap { padding: 64px 24px 24px; }
-.design-canvas { position: relative; margin: 0 auto; }
+.design-canvas { position: relative; margin: 0 auto; user-select: none; -webkit-user-select: none; }
+/* Zoom (v1.23): the stage is as wide as the canvas, so its bar (sticky, at the canvas's top edge, in the padding above
+   it) stays at the view's right edge however the canvas is scrolled. */
+.design-stage { width: max-content; min-width: 100%; }
+.canvas-zoom { position: sticky; top: 64px; right: 8px; z-index: 3; width: 0; height: 0; margin-left: auto; }
+.canvas-zoom > .zoom-bar { top: -56px; right: 0; bottom: auto; opacity: 1; width: max-content; }
+.design-stage, .design-board .board-head, .design-note { cursor: grab; }
+.design-board .board-body { cursor: default; }
+.design-wrap.dragging, .design-wrap.dragging * { cursor: grabbing; }
 /* A board sits exactly at its place; its title row goes above it, as on claude.ai, so it never pushes the board down
    onto what lies below. */
 .design-board { position: absolute; }

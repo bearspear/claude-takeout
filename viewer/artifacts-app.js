@@ -716,7 +716,9 @@
     function pageFrame(v, srcdoc, key) {
       const frame = previewFrame(v, srcdoc);
       const wrapper = el('div', 'page-zoom');
-      zoomed(key, 'page', pageZoom(wrapper, frame, hosted ? { source: () => frame.contentWindow && frame.contentWindow.frames[0] } : {}));
+      // A cross-origin window throws on an index it doesn't have (the guard frame before its preview is made): ask its length first.
+      const inner = () => { const w = frame.contentWindow; try { return w && w.length > 0 ? w[0] : null; } catch (err) { return null; } };
+      zoomed(key, 'page', pageZoom(wrapper, frame, hosted ? { source: inner } : {}));
       return wrapper;
     }
 
@@ -844,6 +846,9 @@
     let canvasResize = null;
     let canvasWrap = null;
     let canvasTimer = null;
+    // A canvas's zoom and place, kept by Open alone for Back (per artifact and version; in memory only).
+    const canvasZooms = new Map();
+    const canvasKey = v => `${v.id}\n${v.part}\n${v.key}`;
     function stopCanvas() {
       releaseZoom();
       clearTimeout(canvasTimer);
@@ -871,17 +876,22 @@
         canvasWrap = wrap;
         pageBody.replaceChildren(wrap);
         canvasBadges(layout, texts);
+        // Back from Open alone: the zoom and place the reader left (else the board in view, at Fit).
+        const kept = focus ? canvasZooms.get(canvasKey(v)) : null;
+        canvasZooms.delete(canvasKey(v));
+        if (kept) wrap.restoreZoom(kept);
         if (focus) {
           // A board on the canvas, or its row in the list of boards not drawn.
           const at = pageBody.querySelector(`.design-board[data-name="${CSS.escape(focus)}"], .design-skipped li[data-name="${CSS.escape(focus)}"]`);
           if (at) {
-            at.scrollIntoView({ block: 'center' });
+            if (!kept) at.scrollIntoView({ block: 'center' });
             // Keyboard focus back where it was: the board's Open alone.
             const open = at.querySelector('button.board-open');
             if (open) open.focus({ preventScroll: true });
           }
         }
-        // The scale follows the page's width, in place (frames, focus and their scripts stay), keeping the place in it.
+        // The scale follows the page's width, in place (frames, focus and their scripts stay), keeping the middle of the
+        // view (wrap.rescale).
         if (typeof ResizeObserver === 'function') {
           // The width it was last fitted to: a change under 20 px (a scrollbar, a rounding) is let be.
           let fitted = pageBody.clientWidth;
@@ -892,10 +902,7 @@
               if (canvasWrap !== wrap || !wrap.isConnected) return;
               if (Math.abs(pageBody.clientWidth - fitted) < 20) return;
               fitted = pageBody.clientWidth;
-              const at = [pageBody.scrollTop / Math.max(1, pageBody.scrollHeight), pageBody.scrollLeft / Math.max(1, pageBody.scrollWidth)];
               wrap.rescale(pageBody.clientWidth);
-              pageBody.scrollTop = at[0] * pageBody.scrollHeight;
-              pageBody.scrollLeft = at[1] * pageBody.scrollWidth;
             }, 150);
           });
           canvasResize.observe(pageBody);
@@ -920,7 +927,10 @@
       return artifactPreviewDoc(texts.get(b.path), b.path, payload).srcdoc;
     }
 
-    // canvasPage's wrap: rescale(avail) fits it to a new width in place, so frames, focus and scripts stay.
+    // canvasPage's wrap: rescale(avail) fits it to a new width in place (at Fit; a chosen zoom stays), so frames, focus
+    // and scripts stay; zoomState() and restoreZoom(s) keep the zoom across Open alone; stopFrames() ends its observer
+    // and listeners. The bar (div.canvas-zoom) zooms from Fit to 200%; Ctrl/⌘+wheel or a pinch zooms about the
+    // pointer and a drag pans, from the background, a board's head or a note.
     function canvasPage(v, layout, payload, texts) {
       const wrap = el('div', 'design-wrap');
       const canvas = el('div', 'design-canvas');
@@ -995,16 +1005,143 @@
           }
         }
       };
-      const fit = avail => canvasScale(layout.width, Math.max(320, (avail || 1000) - 48));
-      let scale = fit(pageBody.clientWidth);
+      // The zoom (v1.23): from Fit (canvasScale, never below it, so no more boards come into view than at Fit) to 200%.
+      const MAX = 2;
+      const fitOf = avail => canvasScale(layout.width, Math.max(320, (avail || 1000) - 48));
+      let fit = fitOf(pageBody.clientWidth);
+      let scale = fit;
+      let atFit = true;
       apply(scale);
-      wrap.rescale = avail => {
-        const next = fit(avail);
-        if (next === scale) return;
-        scale = next;
-        apply(scale);
+      // The bar sits at the canvas's top edge and stays in view (sticky in #page-body); the stage is as wide as the
+      // canvas, so the bar can follow a sideways scroll too.
+      const stage = el('div', 'design-stage');
+      const holder = el('div', 'canvas-zoom');
+      const bar = el('div', 'zoom-bar');
+      const button = (cls, text, label) => { const b = el('button', cls, text); b.type = 'button'; b.setAttribute('aria-label', label); return b; };
+      const levelOut = el('output', 'zoom-level');
+      levelOut.setAttribute('aria-live', 'polite');
+      const zoomOut = button('zoom-out', '−', 'Zoom out'), zoomIn = button('zoom-in', '+', 'Zoom in'), zoomFit = button('zoom-fit', 'Fit', 'Fit');
+      bar.append(zoomOut, levelOut, zoomIn, zoomFit);
+      holder.append(bar);
+      stage.append(holder, canvas);
+      const showLevel = () => { levelOut.textContent = `${Math.round(scale * 100)}%`; };
+      showLevel();
+      // The canvas's top left in #page-body's scroll content (it is centred, so it moves as it grows), and a viewport
+      // point in #page-body's client area.
+      const origin = () => {
+        const r = canvas.getBoundingClientRect(), b = pageBody.getBoundingClientRect();
+        return { x: r.left - b.left - pageBody.clientLeft + pageBody.scrollLeft, y: r.top - b.top - pageBody.clientTop + pageBody.scrollTop };
       };
-      wrap.append(canvas);
+      const pointIn = (x, y) => { const b = pageBody.getBoundingClientRect(); return { x: x - b.left - pageBody.clientLeft, y: y - b.top - pageBody.clientTop }; };
+      const middle = () => ({ x: pageBody.clientWidth / 2, y: pageBody.clientHeight / 2 });
+      // The canvas point (in canvas units) at the middle of the view, and putting one there.
+      const centre = () => { const o = origin(), m = middle(); return { cx: (pageBody.scrollLeft + m.x - o.x) / scale, cy: (pageBody.scrollTop + m.y - o.y) / scale }; };
+      const centreOn = (cx, cy) => {
+        const o = origin(), m = middle();
+        pageBody.scrollLeft = Math.max(0, o.x + cx * scale - m.x);
+        pageBody.scrollTop = Math.max(0, o.y + cy * scale - m.y);
+      };
+      // To zoom z (clamped), keeping the canvas point under point (default: the middle of the view) in place.
+      const zoomTo = (z, point, toFit = false) => {
+        const to = toFit ? fit : clampZoom(z, fit, MAX);
+        atFit = toFit || to <= fit + 1e-6;
+        if (to !== scale) {
+          const from = scale;
+          const before = origin();
+          const scroll = { left: pageBody.scrollLeft, top: pageBody.scrollTop };
+          scale = to;
+          apply(scale);
+          const next = zoomAbout({ from, to, point: point || middle(), scroll, offsetFrom: before, offsetTo: origin() });
+          pageBody.scrollLeft = next.left;
+          pageBody.scrollTop = next.top;
+        }
+        showLevel();
+      };
+      const step = dir => zoomTo(stepZoom(scale, dir, fit, MAX));
+      const off = new AbortController();
+      const on = (target, type, fn, o = {}) => target.addEventListener(type, fn, { ...o, signal: off.signal });
+      on(zoomOut, 'click', () => step(-1));
+      on(zoomIn, 'click', () => step(1));
+      on(zoomFit, 'click', () => zoomTo(0, null, true));
+      on(bar, 'keydown', e => {
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        if (e.key === '+' || e.key === '=') step(1);
+        else if (e.key === '-') step(-1);
+        else if (e.key === '0') zoomTo(0, null, true);
+        else if (e.key === '1') zoomTo(1);
+        else return;
+        e.preventDefault();
+        e.stopPropagation();
+      });
+
+      // Wheel zoom and drag only from the canvas's background, a board's head or a note: never from a board's frame
+      // (a sandboxed frame's own events don't reach here anyway), the bar or the list of boards not drawn.
+      const ours = e => {
+        for (const n of e.composedPath()) {
+          if (n === wrap) return true;
+          if (n.classList && (n.classList.contains('board-frame') || n.classList.contains('canvas-zoom') || n.classList.contains('design-skipped'))) return false;
+        }
+        return false;
+      };
+      on(wrap, 'wheel', e => {
+        if (!(e.ctrlKey || e.metaKey) || !ours(e)) return;
+        e.preventDefault();
+        zoomTo(scale * wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey), pointIn(e.clientX, e.clientY));
+      }, { passive: false });
+      // A mouse or pen press that moves more than 4 px pans (by scrolling #page-body) and is no click; touch pans natively.
+      let drag = null;
+      let dragged = false;
+      const endDrag = () => { drag = null; wrap.classList.remove('dragging'); };
+      on(wrap, 'pointerdown', e => {
+        dragged = false;
+        if (e.pointerType === 'touch' || e.button !== 0 || !ours(e)) return;
+        drag = { id: e.pointerId, x: e.clientX, y: e.clientY, left: pageBody.scrollLeft, top: pageBody.scrollTop, moving: false };
+      });
+      on(wrap, 'pointermove', e => {
+        if (!drag || drag.id !== e.pointerId) return;
+        const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+        if (!drag.moving) {
+          if (Math.hypot(dx, dy) <= 4) return;
+          drag.moving = true;
+          dragged = true;
+          // Captured, so the drag goes on over a board's frame.
+          try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* a pointer the browser doesn't know */ }
+          wrap.classList.add('dragging');
+        }
+        pageBody.scrollLeft = drag.left - dx;
+        pageBody.scrollTop = drag.top - dy;
+      });
+      const lift = e => { if (drag && drag.id === e.pointerId) endDrag(); };
+      on(wrap, 'pointerup', lift);
+      on(wrap, 'pointercancel', lift);
+      on(wrap, 'lostpointercapture', lift);
+      // The click after a drag (on Open alone, say) is not a click.
+      on(wrap, 'click', e => {
+        if (!dragged) return;
+        dragged = false;
+        e.preventDefault();
+        e.stopPropagation();
+      }, { capture: true });
+
+      // A new width: at Fit, fit it again; zoomed, keep the zoom (never below the new Fit). The middle of the view stays.
+      wrap.rescale = avail => {
+        const c = centre();
+        fit = fitOf(avail);
+        const next = atFit ? fit : clampZoom(scale, fit, MAX);
+        if (next <= fit + 1e-6) atFit = true;
+        if (next !== scale) { scale = next; apply(scale); }
+        showLevel();
+        centreOn(c.cx, c.cy);
+      };
+      // What Back from Open alone restores: the zoom ('fit' or a number) and the canvas point at the middle of the view.
+      wrap.zoomState = () => ({ zoom: atFit ? 'fit' : scale, ...centre() });
+      wrap.restoreZoom = s => {
+        if (!s) return;
+        if (s.zoom === 'fit') zoomTo(0, null, true);
+        else if (Number.isFinite(Number(s.zoom))) zoomTo(Number(s.zoom));
+        if (Number.isFinite(s.cx) && Number.isFinite(s.cy)) centreOn(s.cx, s.cy);
+      };
+      wrap.append(stage);
       if (layout.skipped.length) {
         const more = el('div', 'design-skipped');
         more.append(el('p', 'files-head', 'Not drawn on the canvas'));
@@ -1028,12 +1165,13 @@
       }
       if (observer) queueMicrotask(() => { for (const item of frameOf.keys()) observer.observe(item); });
       else for (const [item, b] of frameOf) item.querySelector('.board-frame').append(previewFrame({ title: b.title }, boardDoc(b, payload, texts)));
-      wrap.stopFrames = () => { if (observer) observer.disconnect(); };
+      wrap.stopFrames = () => { if (observer) observer.disconnect(); off.abort(); endDrag(); };
       return wrap;
     }
 
     // One board alone, at its own size, with the way back to the canvas (no new hash: Back here, not in history).
     function openBoard(v, b, payload, texts) {
+      if (canvasWrap && canvasWrap.zoomState && canvasWrap.isConnected) canvasZooms.set(canvasKey(v), canvasWrap.zoomState());
       stopCanvas();
       const box = el('div', 'preview');
       box.dataset.id = String(v.id);
