@@ -17,7 +17,9 @@ const { fn, sandbox } = loadPopup({
   },
 });
 const artifacts = (data, collector = null, index = null) => fn('extractArtifacts')(data, collector, index);
-const collector = () => { const warnings = []; return { warnings, addWarning: (type, filename, message, details) => warnings.push({ type, filename, message, details }), addError() {} }; };
+const collector = () => { const warnings = [], notes = []; return { warnings, notes, addWarning: (type, filename, message, details) => warnings.push({ type, filename, message, details }), addNote: (type, filename, message, details) => notes.push({ type, filename, message, details }), addError() {} }; };
+// detectOpaqueMutations, then sortOpaque with nothing presented or delivered: the warnings and notes an export gives.
+const detectWarn = (data, c, options) => { const out = fn('detectOpaqueMutations')(data, c, options); fn('sortOpaque')(out.byFile, [], c); return out; };
 
 test('both implementations skip failed file tools', () => {
   const cases = [
@@ -98,7 +100,7 @@ test('Edit without replace_all rejects an ambiguous match', () => {
 test('Bash mutations warn and point at the CLI', () => {
   const warnings = collector();
   const data = oneMessage([use('1', 'Bash', { command: "cat > /t/y.md << 'EOF'\nhi\nEOF" }), use('2', 'Bash', { command: "sed -i 's/a/b/' /t/y.md" })]);
-  fn('detectOpaqueMutations')(data, warnings);
+  detectWarn(data, warnings);
   assert.strictEqual(warnings.warnings.length, 1);
   assert.match(warnings.warnings[0].details.note, /replay_bash\.py/);
 });
@@ -106,7 +108,7 @@ test('Bash mutations warn and point at the CLI', () => {
 test('a mutation beside a heredoc is still detected', () => {
   const warnings = collector();
   const data = oneMessage([use('1', 'bash_tool', { command: "cat > /t/y.md << 'XX'\nhi\nXX\nsed -i 's/a/b/' /t/y.md" })]);
-  fn('detectOpaqueMutations')(data, warnings);
+  detectWarn(data, warnings);
   assert.strictEqual(warnings.warnings.length, 1);
 });
 
@@ -775,7 +777,7 @@ test('detectOpaqueMutations catches common write forms and ignores reads', () =>
   const tracked = [use('0', 'create_file', { path: '/home/claude/page.html', file_text: 'x' })];
   const warns = command => {
     const c = collector();
-    fn('detectOpaqueMutations')(oneMessage([...tracked, use('1', 'bash_tool', { command })]), c);
+    detectWarn(oneMessage([...tracked, use('1', 'bash_tool', { command })]), c);
     return c.warnings.length;
   };
   for (const cmd of [
@@ -1036,8 +1038,8 @@ test('detectOpaqueMutations ignores heredoc bodies and flags heredocs bash would
   const tracked = [use('0', 'create_file', { path: '/home/claude/about.html', file_text: 'x' })];
   const warned = (command) => {
     const c = collector();
-    fn('detectOpaqueMutations')(oneMessage([...tracked, use('1', 'bash_tool', { command })]), c);
-    return c.warnings.map((w) => w.filename);
+    detectWarn(oneMessage([...tracked, use('1', 'bash_tool', { command })]), c);
+    return [...c.warnings, ...c.notes].map((w) => w.filename);
   };
   assert.deepStrictEqual(plain(warned("cat > /home/claude/index.html << 'EOF'\n<nav><a href=\"about.html\">about.html</a></nav>\nEOF")), []);
   assert.deepStrictEqual(plain(warned('cat /home/claude/about.html > /home/claude/about.html.bak')), []);
@@ -1334,7 +1336,7 @@ test('a presented file is matched to the artifact with its exact path', async ()
 
 test('detectOpaqueMutations: every changed file, Path variables, ./name, globs, other interpreters, and heredoc text', () => {
   const tracked = ['/home/claude/foo.html', '/home/claude/bar.html', '/home/claude/index.html'].map((p, i) => use('t' + i, 'create_file', { path: p, file_text: 'x' }));
-  const warned = (command) => { const c = collector(); fn('detectOpaqueMutations')(oneMessage([...tracked, use('1', 'bash_tool', { command })]), c); return c.warnings.map((w) => w.filename).sort().join(','); };
+  const warned = (command) => { const c = collector(); detectWarn(oneMessage([...tracked, use('1', 'bash_tool', { command })]), c); return c.warnings.map((w) => w.filename).sort().join(','); };
   assert.strictEqual(warned("sed -i 's/v1/v2/' /home/claude/foo.html /home/claude/bar.html"), 'bar.html,foo.html');
   assert.strictEqual(warned("python3 - <<'PY'\nfrom pathlib import Path\np = Path('/home/claude/foo.html')\np.write_text(p.read_text().replace('a', 'b'))\nPY"), 'foo.html');
   assert.strictEqual(warned("cd /home/claude && sed -i 's/a/b/' ./foo.html"), 'foo.html');
@@ -1390,7 +1392,7 @@ test('detectOpaqueMutations: an edit after a second cd, a cd ||, or os.chdir is 
     ['cd /a', "python3 -c \"import os;os.chdir('/b');open('page.html','w').write('x')\""],
   ]) {
     const data = turns(files, ...commands.map((command, i) => [use('c' + i, 'bash_tool', { command })]));
-    const out = fn('detectOpaqueMutations')(data, collector());
+    const out = detectWarn(data, collector());
     assert.deepStrictEqual([...out.byFile.keys()].sort(), ['/a/page.html', '/b/page.html'], commands.join(' / '));
     assert.ok([...out.byFile.values()].every((e) => e.resolved === false), commands.join(' / '));
   }
@@ -1427,7 +1429,7 @@ test('detectOpaqueMutations: names the file under cd and merges its commands', (
   artifacts(data, null, index);
   assert.strictEqual(index['/home/claude/verb/lorber/body.html'].filename, 'body_2.html');
   const c = collector();
-  const out = fn('detectOpaqueMutations')(data, c, { index });
+  const out = detectWarn(data, c, { index });
   assert.strictEqual(c.warnings.length, 1);
   assert.strictEqual(c.warnings[0].filename, 'body_2.html');
   assert.strictEqual(c.warnings[0].details.path, '/home/claude/verb/lorber/body.html');
@@ -1436,7 +1438,7 @@ test('detectOpaqueMutations: names the file under cd and merges its commands', (
   assert.deepStrictEqual(plain({ ...entry }), { path: '/home/claude/verb/lorber/body.html', filename: 'body_2.html', msgIndexes: [3, 5], lastMsgIndex: 5, count: 2, resolved: true });
   // A replayed command is skipped.
   const skipped = collector();
-  fn('detectOpaqueMutations')(data, skipped, { index, replayed: new Set(['3|/home/claude/verb/lorber/body.html']) });
+  detectWarn(data, skipped, { index, replayed: new Set(['3|/home/claude/verb/lorber/body.html']) });
   assert.match(skipped.warnings[0].message, /Changed by 1 command the export/);
 });
 
@@ -1445,14 +1447,14 @@ test('detectOpaqueMutations: a name two files share, with no cd, is filed under 
     [use('1', 'Write', { file_path: '/home/claude/a/page.html', content: 'a' }), use('2', 'Write', { file_path: '/home/claude/b/page.html', content: 'a' })],
     [use('3', 'bash_tool', { command: "sed -i 's/a/b/' page.html" })],
   );
-  const out = fn('detectOpaqueMutations')(data, collector());
+  const out = detectWarn(data, collector());
   assert.deepStrictEqual([...out.byFile.keys()].sort(), ['/home/claude/a/page.html', '/home/claude/b/page.html']);
   assert.ok([...out.byFile.values()].every((e) => e.resolved === false));
   const one = turns(
     [use('1', 'Write', { file_path: '/home/claude/a/page.html', content: 'a' }), use('2', 'Write', { file_path: '/home/claude/b/page.html', content: 'a' })],
     [use('3', 'bash_tool', { command: "cd /home/claude/b && sed -i 's/a/b/' page.html" })],
   );
-  assert.deepStrictEqual([...fn('detectOpaqueMutations')(one, collector()).byFile.keys()], ['/home/claude/b/page.html']);
+  assert.deepStrictEqual([...detectWarn(one, collector()).byFile.keys()], ['/home/claude/b/page.html']);
 });
 
 test('heredocs written as cat << EOF > path or cat >path << EOF are tracked, in every implementation', () => {
@@ -5285,7 +5287,7 @@ const opaqueAfterReplay = (data) => {
   const index = {};
   fn('extractArtifacts')(data, null, index, replayed);
   const c = collector();
-  fn('detectOpaqueMutations')(data, c, { replayed, index });
+  detectWarn(data, c, { replayed, index });
   return { warnings: c.warnings, replayed };
 };
 const PAGE = '<line y2="92" a="1"/><line y2="92"/>\nx <line y2="92"/>\n';
@@ -5745,4 +5747,188 @@ test('replay: a Python swap after an opaque command on the file is not replayed'
   );
   bothReplay(data, 'page.html', 'a\n');
   assert.strictEqual(opaqueAfterReplay(data).replayed.size, 0);
+});
+
+// ---- Sorting each file's unreplayable changes (spec section 2, rules a-d) ----
+
+const sortCollector = () => {
+  const warnings = [], notes = [];
+  return {
+    warnings, notes,
+    addWarning: (type, filename, message, details) => warnings.push({ type, filename, message, details }),
+    addNote: (type, filename, message, details) => notes.push({ type, filename, message, details }),
+    addError() {},
+  };
+};
+const opaqueEntry = (path, lastMsgIndex, extra = {}) => ({ path, filename: path.split('/').pop(), msgIndexes: [lastMsgIndex], lastMsgIndex, count: 1, resolved: true, ...extra });
+const sortOne = (entry, saved) => {
+  const c = sortCollector();
+  fn('sortOpaque')(new Map([[entry.path, entry]]), saved, c);
+  return c;
+};
+
+test('sortOpaque rule a: the same path saved at the last change or later leaves no entry', () => {
+  for (const at of [7, 9]) {
+    const c = sortOne(opaqueEntry('/h/c/page.html', 7), [{ path: '/h/c/page.html', filename: 'page.html', msgIndex: at }]);
+    assert.deepStrictEqual([c.warnings.length, c.notes.length], [0, 0], String(at));
+  }
+});
+
+test('sortOpaque rule a: a download saved under the file\'s own name counts as the file', () => {
+  const c = sortOne(opaqueEntry('/home/claude/page.html', 2), [{ path: '/mnt/user-data/outputs/page.html', filename: 'page.html', msgIndex: 2 }]);
+  assert.deepStrictEqual([c.warnings.length, c.notes.length], [0, 0]);
+});
+
+test('sortOpaque rule a needs the save at or after the last change', () => {
+  const c = sortOne(opaqueEntry('/h/c/page.html', 7), [{ path: '/h/c/page.html', filename: 'page.html', msgIndex: 5 }]);
+  assert.strictEqual(c.warnings.length, 1);
+  assert.strictEqual(c.warnings[0].type, 'artifact_opaque_mutation');
+});
+
+test('sortOpaque rule b: a file saved from the same folder afterwards makes the draft a note', () => {
+  const c = sortOne(opaqueEntry('/h/c/de-luce/draft.html', 7, { msgIndexes: [3, 7], count: 2 }), [{ path: '/h/c/de-luce/Final.html', filename: 'Final.html', msgIndex: 7 }]);
+  assert.strictEqual(c.warnings.length, 0);
+  assert.strictEqual(c.notes.length, 1);
+  assert.strictEqual(c.notes[0].type, 'draft_superseded');
+  assert.strictEqual(c.notes[0].filename, 'draft.html');
+  assert.strictEqual(c.notes[0].message, "Draft changed by a command the export can't follow (2 commands; messages 4, 8). The files Claude delivered from this folder afterwards are in the export: Final.html. This draft is likely an earlier state of one of them.");
+  assert.strictEqual(c.notes[0].details.path, '/h/c/de-luce/draft.html');
+});
+
+test('sortOpaque rule b: a folder below counts, up to 3 names', () => {
+  const c = sortOne(opaqueEntry('/a/s/build.py', 2), ['M.odt', 'N.odt', 'O.odt', 'P.odt'].map((f) => ({ path: '/a/s/out/' + f, filename: f, msgIndex: 4 })));
+  assert.strictEqual(c.notes.length, 1);
+  assert.strictEqual(c.notes[0].type, 'draft_superseded');
+  assert.match(c.notes[0].message, /\(1 command; message 3\)/);
+  assert.match(c.notes[0].message, /in the export: M\.odt, N\.odt, O\.odt and 1 more\. /);
+});
+
+test('sortOpaque rule b compares whole folder names', () => {
+  const c = sortOne(opaqueEntry('/h/c/de/x.html', 2), [{ path: '/h/c/de-luce/y.html', filename: 'y.html', msgIndex: 4 }]);
+  assert.strictEqual(c.notes.length, 0);
+  assert.strictEqual(c.warnings.length, 1);
+});
+
+test('sortOpaque rule c: a script never delivered is a helper note', () => {
+  const c = sortOne(opaqueEntry('/h/c/build3.py', 9), [{ path: '/h/c/build3.py', filename: 'build3.py', msgIndex: 4 }].slice(1));
+  assert.strictEqual(c.warnings.length, 0);
+  assert.strictEqual(c.notes.length, 1);
+  assert.strictEqual(c.notes[0].type, 'helper_script');
+  assert.strictEqual(c.notes[0].message, "Helper script Claude ran; changed by a command the export can't follow (1 command; message 10), so this copy may be older than the one Claude ran. Scripts are not what Claude delivered.");
+  for (const ext of ['.sh', '.bash', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl', '.r', '.sql', '.awk', '.sed']) {
+    assert.strictEqual(sortOne(opaqueEntry('/h/c/x' + ext, 1), []).notes[0].type, 'helper_script', ext);
+  }
+  // A script that was presented before its last change is not a helper.
+  const shown = sortOne(opaqueEntry('/h/c/build3.py', 9), [{ path: '/h/c/build3.py', filename: 'build3.py', msgIndex: 4 }]);
+  assert.strictEqual(shown.warnings.length, 1);
+});
+
+test('sortOpaque rule d: anything else is a warning, and an unresolved file always is', () => {
+  const c = sortOne(opaqueEntry('/h/c/page.html', 7, { msgIndexes: [5, 7], count: 3 }), []);
+  assert.strictEqual(c.notes.length, 0);
+  assert.strictEqual(c.warnings.length, 1);
+  assert.strictEqual(c.warnings[0].type, 'artifact_opaque_mutation');
+  assert.strictEqual(c.warnings[0].message, "Changed by 3 commands the export can't replay (messages 6, 8).");
+  assert.match(c.warnings[0].details.note, /replay_bash\.py/);
+  for (const saved of [[{ path: '/h/c/page.html', filename: 'page.html', msgIndex: 9 }], [{ path: '/h/c/Final.html', filename: 'Final.html', msgIndex: 9 }]]) {
+    const u = sortOne(opaqueEntry('/h/c/page.html', 7, { resolved: false }), saved);
+    assert.strictEqual(u.warnings.length, 1);
+  }
+  assert.strictEqual(sortOne(opaqueEntry('/h/c/run.py', 7, { resolved: false }), []).warnings.length, 1);
+});
+
+test('extractArtifacts records replay-shaped edits it did not apply', () => {
+  const data = turns(
+    [use('w', 'Write', { file_path: '/h/page.html', content: 'a\n' })],
+    [use('x', 'bash_tool', { command: 'python3 /h/fix.py' })],
+    [use('s', 'bash_tool', { command: "sed -i 's/a/b/' /h/page.html" })],
+    [use('t', 'bash_tool', { command: "sed -i 's/a/c/' /h/other.html" })],
+  );
+  const index = {};
+  artifacts(data, null, index);
+  assert.deepStrictEqual(plain(index['/h/page.html'].skipped), [5]);
+  const failed = turns(
+    [use('w', 'Write', { file_path: '/h/page.html', content: 'a\n' })],
+    [use('s', 'bash_tool', { command: "sed -i 's/a/b/' /h/page.html" }), { type: 'tool_result', tool_use_id: 's', is_error: true, content: [] }],
+  );
+  const index2 = {};
+  artifacts(failed, null, index2);
+  assert.deepStrictEqual(plain(index2['/h/page.html'].skipped), [3]);
+  const clean = turns([use('w', 'Write', { file_path: '/h/page.html', content: 'a\n' })], [use('s', 'bash_tool', { command: "sed -i 's/a/b/' /h/page.html" })]);
+  const index3 = {};
+  artifacts(clean, null, index3);
+  assert.deepStrictEqual(plain(index3['/h/page.html'].skipped), []);
+});
+
+test('extractPresentedFiles keeps the latest presentation on the current branch, with its message', () => {
+  const data = turns(
+    [use('p1', 'present_files', { filepaths: ['/o/a.html'] }), { type: 'tool_result', tool_use_id: 'p1', name: 'present_files', content: [{ type: 'local_resource', file_path: '/o/a.html', uuid: 'first' }] }],
+    [use('p2', 'present_files', { filepaths: ['/o/a.html'] }), { type: 'tool_result', tool_use_id: 'p2', name: 'present_files', content: [{ type: 'local_resource', file_path: '/o/a.html', uuid: 'second' }] }],
+  );
+  data.chat_messages.push({ uuid: 'off', parent_message_uuid: 'h1', sender: 'assistant', content: [{ type: 'tool_result', name: 'present_files', content: [{ type: 'local_resource', file_path: '/o/b.html', uuid: 'branch' }] }] });
+  const files = plain(fn('extractPresentedFiles')(data));
+  assert.deepStrictEqual(files.map((f) => [f.path, f.uuid, f.msgIndex]), [['/o/a.html', 'second', 3]]);
+});
+
+test('extractDeliveredFiles gives each delivery its message, and an off path takes the artifact name', () => {
+  const send = (id, p, uuid) => [use(id, 'SendUserFile', { files: [p] }), { type: 'tool_result', tool_use_id: id, name: 'SendUserFile', content: [], file_deliveries: [{ file_uuid: uuid, path: p }] }];
+  const data = turns(send('s1', '/o/page.html', 'd1'), send('s2', '/o/page.html', 'd2'));
+  const plainNames = plain(fn('extractDeliveredFiles')(data, ['page.html']));
+  assert.deepStrictEqual(plainNames.map((f) => [f.filename, f.uuid, f.msgIndex]), [['page_delivered_v1.html', 'd1', 1], ['page_delivered_v2.html', 'd2', 3], ['page_delivered.html', 'd2', 3]]);
+  const off = plain(fn('extractDeliveredFiles')(data, ['page.html', 'page_v1.html'], new Map([['/o/page.html', 'page.html']])));
+  assert.deepStrictEqual(off.map((f) => [f.filename, f.uuid, !!f.replaces]), [['page_delivered.html', 'd1', false], ['page.html', 'd2', true]]);
+});
+
+test('a delivery after an opaque change replaces the artifact and its last version; without one it stays _delivered', async () => {
+  const send = (id, p, uuid) => [use(id, 'SendUserFile', { files: [p] }), { type: 'tool_result', tool_use_id: id, name: 'SendUserFile', content: [], file_deliveries: [{ file_uuid: uuid, path: p }] }];
+  const make = (opaque) => Object.assign(turns(
+    [use('w', 'Write', { file_path: '/o/page.html', content: 'one' })],
+    [use('e', 'Edit', { file_path: '/o/page.html', old_string: 'one', new_string: 'two' })],
+    [use('b', 'bash_tool', { command: opaque ? 'python3 /o/fix.py /o/page.html && cp /tmp/x /o/page.html' : 'ls /o' })],
+    send('s', '/o/page.html', 'deliv'),
+  ), { uuid: 'c-deliv', name: 'n' });
+  const strip = (v) => String(v && v.content !== undefined ? v.content : v).replace(/^﻿/, '');
+  const off = await runFolder(exportPopup({ texts: { deliv: textBlob('DELIVERED') } }), make(true));
+  assert.strictEqual(strip(off.written['artefacts/page.html']), 'DELIVERED');
+  assert.strictEqual(strip(off.written['artefacts/page_v2.html']), 'DELIVERED');
+  assert.strictEqual(strip(off.written['artefacts/page_v1.html']), 'one');
+  assert.ok(!Object.keys(off.written).some((n) => n.includes('_delivered')), Object.keys(off.written).join(','));
+  assert.strictEqual(Array.from(off.output.errorCollector.warnings).filter((w) => w.type === 'artifact_opaque_mutation').length, 0);
+  const on = await runFolder(exportPopup({ texts: { deliv: textBlob('DELIVERED') } }), make(false));
+  assert.strictEqual(strip(on.written['artefacts/page.html']), 'two');
+  assert.strictEqual(strip(on.written['artefacts/page_delivered.html']), 'DELIVERED');
+});
+
+test('a delivery before the last opaque change keeps _delivered and the warning stays', async () => {
+  const send = (id, p, uuid) => [use(id, 'SendUserFile', { files: [p] }), { type: 'tool_result', tool_use_id: id, name: 'SendUserFile', content: [], file_deliveries: [{ file_uuid: uuid, path: p }] }];
+  const data = Object.assign(turns(
+    [use('w', 'Write', { file_path: '/o/page.html', content: 'one' })],
+    send('s', '/o/page.html', 'deliv'),
+    [use('b', 'bash_tool', { command: 'cp /tmp/x /o/page.html' })],
+  ), { uuid: 'c-deliv2', name: 'n' });
+  const { written, output } = await runFolder(exportPopup({ texts: { deliv: textBlob('DELIVERED') } }), data);
+  assert.ok(written['artefacts/page_delivered.html']);
+  assert.strictEqual(Array.from(output.errorCollector.warnings).filter((w) => w.type === 'artifact_opaque_mutation').length, 1);
+});
+
+test('a file presented twice is downloaded from its second presentation', async () => {
+  const asked = [];
+  const popup = exportPopup({ routes: [[/\/files\/([^/]+)\/contents?$/, (url) => { asked.push(url); return { ok: true, status: 200, blob: async () => textBlob('x') }; }]] });
+  const shown = (id, uuid) => [use(id, 'present_files', { filepaths: ['/mnt/user-data/outputs/r.pdf'] }), { type: 'tool_result', tool_use_id: id, name: 'present_files', content: [{ type: 'local_resource', file_path: '/mnt/user-data/outputs/r.pdf', uuid }] }];
+  await runFolder(popup, Object.assign(turns(shown('p1', 'pres-one'), shown('p2', 'pres-two')), { uuid: 'c-pres', name: 'n' }));
+  assert.ok(asked.some((u) => u.includes('pres-two')), asked.join(' '));
+  assert.ok(!asked.some((u) => u.includes('pres-one')), asked.join(' '));
+});
+
+test('populateConversationFolder: a draft whose folder was delivered afterwards gets a note, not a warning', async () => {
+  const send = (id, p, uuid) => [use(id, 'SendUserFile', { files: [p] }), { type: 'tool_result', tool_use_id: id, name: 'SendUserFile', content: [], file_deliveries: [{ file_uuid: uuid, path: p }] }];
+  const data = Object.assign(turns(
+    [use('w', 'Write', { file_path: '/h/c/de-luce/draft.html', content: 'one' }), use('k', 'Write', { file_path: '/h/t/tool.py', content: 'x' })],
+    [use('b', 'bash_tool', { command: 'cp /tmp/x /h/c/de-luce/draft.html && cp /tmp/y /h/t/tool.py' })],
+    send('s', '/h/c/de-luce/Final.html', 'fin'),
+  ), { uuid: 'c-draft', name: 'n' });
+  const { output } = await runFolder(exportPopup(), data);
+  const c = output.errorCollector;
+  assert.deepStrictEqual(Array.from(c.warnings).filter((w) => w.type === 'artifact_opaque_mutation').map((w) => w.filename), []);
+  assert.deepStrictEqual(Array.from(c.notes).map((n) => `${n.type}:${n.filename}`).sort(), ['draft_superseded:draft.html', 'helper_script:tool.py']);
 });

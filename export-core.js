@@ -1738,7 +1738,9 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
     return { ok: true };
   }
 
-  for (const msg of messages) {
+  const skipped = Object.create(null);  // state key -> chain indexes of replay-shaped edits not applied
+  for (let mi = 0; mi < messages.length; mi++) {
+    const msg = messages[mi];
     for (const block of (msg.content || [])) {
       if (block.type !== 'tool_use') continue;
       // A failed bash command can still have written its heredoc, so only file
@@ -1880,7 +1882,8 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
         // have stopped before or after its edit, so it isn't.
         const cwd = cwds.has(block.id) ? cwds.get(block.id) : null;
         const failed = failedIds.has(block.id) || bashFailed(resultsById.get(block.id));
-        const swap = creates.length || failed ? null : literalSwapCommand(command, cwd, pathKeys());
+        const shape = creates.length ? null : literalSwapCommand(command, cwd, pathKeys());
+        const swap = failed ? null : shape;
         const keys = swap ? swap.edits.map((e) => knownKey(e.path)) : [];
         if (swap && keys.every(Boolean)) {
           swap.edits.forEach((edit, i) => {
@@ -1901,6 +1904,16 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
             if (replayed) replayed.add(block.id + '|' + keys[i]);
           });
         } else {
+          // A replay-shaped edit left out (the command failed, or its file was already opaque) is recorded,
+          // so the export can say its file changed even when the detector names no command for it.
+          if (shape) {
+            for (const edit of shape.edits) {
+              const key = state[edit.path] ? edit.path : Object.keys(state).find((k) => k.startsWith('/') && normalizeSandboxPath(k) === edit.path);
+              if (!key) continue;
+              const list = skipped[key] || (skipped[key] = []);
+              if (!list.includes(mi)) list.push(mi);
+            }
+          }
           for (const key of commandTouches(command, cwd, pathKeys())) opaque.add(key);
         }
       }
@@ -1967,7 +1980,7 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
       const names = s.versions.length <= 1
         ? [`${outBase}${ext}`]
         : s.versions.map((_, i) => `${outBase}_v${i + 1}${ext}`);
-      index[key] = { path: key, filename: `${outBase}${ext}`, versions: names, messages: s.versionMsgs.slice() };
+      index[key] = { path: key, filename: `${outBase}${ext}`, versions: names, messages: s.versionMsgs.slice(), skipped: (skipped[key] || []).slice() };
     }
 
     // defineProperty, so a file named __proto__ is a file, not the object's prototype.
@@ -2103,30 +2116,29 @@ function extractUploadedFiles(data, organizationId = null) {
   return files;
 }
 
-// Extract presented files from present_files tool results
-// These are files created by Claude (via bash/Python) and presented to the user
+// Extract presented files from present_files tool results on the current branch.
+// These are files created by Claude (via bash/Python) and presented to the user.
+// One entry per path, in the order first presented, from its latest presentation:
+// msgIndex is that presentation's index in getMessageChain(data).
 function extractPresentedFiles(data) {
-  const files = [];
-  const seen = new Set();  // Deduplicate by path
-  const messages = data.chat_messages || [];
+  const byPath = new Map();
+  const messages = getMessageChain(data);
 
-  for (const msg of messages) {
-    for (const item of (msg.content || [])) {
+  for (let mi = 0; mi < messages.length; mi++) {
+    for (const item of (messages[mi].content || [])) {
       // Look for tool_result from present_files
       if (item.type === 'tool_result' && item.name === 'present_files') {
         for (const content of (item.content || [])) {
           if (content.type === 'local_resource' && content.file_path) {
             const path = content.file_path;
-            if (seen.has(path)) continue;
-            seen.add(path);
-
             const filename = zipSafeName(path.split('/').pop());
-            files.push({
+            byPath.set(path, {
               filename: filename,
               path: path,
               uuid: content.uuid || '',
               mimeType: content.mime_type || '',
-              name: content.name || ''
+              name: content.name || '',
+              msgIndex: mi
             });
           }
         }
@@ -2134,50 +2146,64 @@ function extractPresentedFiles(data) {
     }
   }
 
-  return files;
+  return Array.from(byPath.values());
 }
 
 // Extract files Claude sent to the user with SendUserFile. Each delivery has its
 // own file UUID, so a path delivered more than once keeps every copy, as
 // <base>_v1<ext> ... <base>_vN<ext> plus the latest under <base><ext>.
-// takenNames holds filenames already used in artefacts/. Returns
-// [{ filename, uuid, path }].
-function extractDeliveredFiles(data, takenNames = []) {
+// takenNames holds filenames already used in artefacts/. offPaths: sandbox paths
+// (a Set, or a Map to the artifact's name in artefacts/) whose replayed artifact is
+// off and whose latest delivery is its final state: that delivery takes the
+// artifact's name (replaces: true), earlier ones are kept as <base>_delivered...
+// Returns [{ filename, uuid, path, msgIndex, replaces? }], msgIndex the delivery's
+// index in getMessageChain(data).
+function extractDeliveredFiles(data, takenNames = [], offPaths = new Set()) {
   const byPath = new Map();
-  for (const msg of getMessageChain(data)) {
-    for (const item of (msg.content || [])) {
+  const messages = getMessageChain(data);
+  for (let mi = 0; mi < messages.length; mi++) {
+    for (const item of (messages[mi].content || [])) {
       for (const delivery of (item.file_deliveries || [])) {
         if (!delivery.file_uuid || !delivery.path) continue;
         if (!byPath.has(delivery.path)) byPath.set(delivery.path, []);
-        byPath.get(delivery.path).push(delivery.file_uuid);
+        byPath.get(delivery.path).push({ uuid: delivery.file_uuid, msgIndex: mi });
       }
     }
   }
 
   const taken = new Set(takenNames);
   const files = [];
-  for (const [path, uuids] of byPath) {
+  for (const [path, all] of byPath) {
     const name = zipSafeName(path.split('/').pop()).normalize('NFC');
     const dot = name.lastIndexOf('.');
     const base = dot > 0 ? name.substring(0, dot) : name;
     const ext = dot > 0 ? name.substring(dot) : '';
+    const offName = offPaths && offPaths.has(path) ? ((typeof offPaths.get === 'function' && offPaths.get(path)) || name) : null;
+    const deliveries = offName ? all.slice(0, -1) : all;
 
-    // Keep the delivered copy apart from an artifact replayed under this name.
-    let outBase = base;
-    let attempt = 1;
-    while (taken.has(outBase + ext)) {
-      outBase = attempt === 1 ? `${base}_delivered` : `${base}_delivered_${attempt}`;
-      attempt++;
-    }
-    taken.add(outBase + ext);
+    if (deliveries.length) {
+      // Keep the delivered copy apart from an artifact replayed under this name.
+      let outBase = base;
+      let attempt = 1;
+      while (taken.has(outBase + ext)) {
+        outBase = attempt === 1 ? `${base}_delivered` : `${base}_delivered_${attempt}`;
+        attempt++;
+      }
+      taken.add(outBase + ext);
 
-    if (uuids.length > 1) {
-      uuids.forEach((uuid, i) => {
-        files.push({ filename: `${outBase}_v${i + 1}${ext}`, uuid, path });
-        taken.add(`${outBase}_v${i + 1}${ext}`);
-      });
+      if (deliveries.length > 1) {
+        deliveries.forEach((d, i) => {
+          files.push({ filename: `${outBase}_v${i + 1}${ext}`, uuid: d.uuid, path, msgIndex: d.msgIndex });
+          taken.add(`${outBase}_v${i + 1}${ext}`);
+        });
+      }
+      const last = deliveries[deliveries.length - 1];
+      files.push({ filename: outBase + ext, uuid: last.uuid, path, msgIndex: last.msgIndex });
     }
-    files.push({ filename: outBase + ext, uuid: uuids[uuids.length - 1], path });
+    if (offName) {
+      const last = all[all.length - 1];
+      files.push({ filename: offName, uuid: last.uuid, path, msgIndex: last.msgIndex, replaces: true });
+    }
   }
   return files;
 }

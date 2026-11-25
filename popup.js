@@ -624,8 +624,9 @@ function getCodeFence(content) {
 // Detect bash_tool commands that mutate a tracked artifact in a way the
 // declarative replay (create_file / str_replace / rewrite / heredoc, and a
 // literal sed -i or cat >> passed in as options.replayed) can't reconstruct.
-// Emits one `artifact_opaque_mutation` warning per changed file (all its
-// commands merged), pointing the user at `replay_bash.py`.
+// Returns one entry per changed file (all its commands merged); sortOpaque
+// later turns each into nothing, a note or an `artifact_opaque_mutation`
+// warning pointing the user at `replay_bash.py`.
 //
 // We deliberately do NOT try to replay bash scripts here. The companion CLI
 // `replay_bash.py` runs the actual scripts in an isolated tmpdir with full
@@ -860,20 +861,62 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
     entry.resolved = entry.resolved && om.resolved;
   }
 
-  // One `artifact_opaque_mutation` warning per file. The recovery hint points
-  // users at the companion `replay_bash.py` CLI.
-  if (errorCollector) {
-    for (const entry of byFile.values()) {
-      errorCollector.addWarning(
-        'artifact_opaque_mutation',
-        entry.filename,
-        `Changed by ${entry.count} command${entry.count === 1 ? '' : 's'} the export can't replay.`,
-        { path: entry.path, msgIndexes: entry.msgIndexes, note: 'Run: python3 replay_bash.py <this-export-folder>' }
-      );
-    }
-  }
-
   return { opaqueMutations, byFile };
+}
+
+// The file tools whose edits the replay follows, by name.
+const FILE_EDIT_TOOLS = ['create_file', 'str_replace', 'rewrite', 'create_or_overwrite', 'Write', 'Edit'];
+
+// Code files, which rule c of sortOpaque treats as helper scripts.
+const HELPER_SCRIPT_EXTENSIONS = ['.py', '.sh', '.bash', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl', '.r', '.sql', '.awk', '.sed'];
+
+// Sorts each file's unreplayable changes (detectOpaqueMutations' byFile) into nothing, a note or a
+// warning (spec section 2, rules a-d; the first that matches wins). saved: [{ path, filename, msgIndex }],
+// the presentations and deliveries that downloaded. shownPaths: every path presented or delivered,
+// downloaded or not (defaults to saved's). Message numbers in the texts count from 1 along the branch.
+function sortOpaque(byFile, saved, errorCollector, shownPaths = null) {
+  const norm = (p) => normalizeSandboxPath(String(p || ''));
+  const shown = new Set((shownPaths ? Array.from(shownPaths) : saved.map((s) => s.path)).map(norm));
+  for (const entry of byFile.values()) {
+    const path = norm(entry.path);
+    const indexes = (entry.msgIndexes || []).slice().sort((a, b) => a - b).map((i) => i + 1);
+    const commands = `${entry.count} command${entry.count === 1 ? '' : 's'}`;
+    const where = indexes.length ? `message${indexes.length === 1 ? '' : 's'} ${indexes.join(', ')}` : '';
+    const counted = where ? `${commands}; ${where}` : commands;
+    const later = saved.filter((s) => s.msgIndex >= entry.lastMsgIndex);
+    const name = entry.filename;
+    const details = { path: entry.path };
+    if (entry.resolved) {
+      // a: the file itself was saved at its last change or later, so the export has its final state. A
+      // download saved under the file's own name in artefacts/ (a copy presented from outputs/) replaced it, so it counts.
+      if (later.some((s) => norm(s.path) === path || s.filename === name)) continue;
+      // b: files saved afterwards from its folder or below: this one is likely their draft.
+      const folder = path.slice(0, path.lastIndexOf('/')) || '/';
+      const names = [];
+      for (const s of later) if (isUnderFolder(s.path, folder) && !names.includes(s.filename)) names.push(s.filename);
+      if (names.length) {
+        const more = names.length - 3;
+        const list = more > 0 ? `${names.slice(0, 3).join(', ')} and ${more} more` : names.join(', ');
+        errorCollector.addNote('draft_superseded', name,
+          `Draft changed by a command the export can't follow (${counted}). The files Claude delivered from this folder afterwards are in the export: ${list}. This draft is likely an earlier state of one of them.`,
+          details);
+        continue;
+      }
+      // c: code never presented or delivered is a script Claude ran.
+      const dot = path.lastIndexOf('.');
+      const ext = dot > path.lastIndexOf('/') ? path.slice(dot).toLowerCase() : '';
+      if (HELPER_SCRIPT_EXTENSIONS.includes(ext) && !shown.has(path)) {
+        errorCollector.addNote('helper_script', name,
+          `Helper script Claude ran; changed by a command the export can't follow (${counted}), so this copy may be older than the one Claude ran. Scripts are not what Claude delivered.`,
+          details);
+        continue;
+      }
+    }
+    // d: a warning, pointing at the companion replay_bash.py CLI.
+    errorCollector.addWarning('artifact_opaque_mutation', name,
+      `Changed by ${commands} the export can't replay${where ? ` (${where})` : ''}.`,
+      { ...details, note: 'Run: python3 replay_bash.py <this-export-folder>' });
+  }
 }
 
 // Extract text attachments from messages (pasted files with extracted_content)
@@ -2434,13 +2477,30 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     addFileWithBOM(folder, `artefacts/${filename}`, content);
   }
 
-  // Flag any bash_tool command that mutates a tracked artifact in a way the
-  // declarative replay can't reconstruct. Emits `artifact_opaque_mutation`
-  // warnings in errors.txt pointing the user at the companion replay_bash.py
-  // CLI for recovery. See docs/WASM_REPLAY_APPROACH.md for
-  // why we don't try to interpret bash scripts in the extension. It runs before
-  // the presented files, which use its warnings.
-  detectOpaqueMutations(data, errorCollector, { index: artifactIndex, replayed: replayedEdits });
+  // Find each file a bash command changed in a way the declarative replay can't
+  // reconstruct (see docs/WASM_REPLAY_APPROACH.md for why we don't interpret bash
+  // scripts in the extension), merged with the replay-shaped edits extractArtifacts
+  // left out. Once the presented and delivered files are in, sortOpaque turns each
+  // into nothing, a note or an `artifact_opaque_mutation` warning.
+  const { byFile: opaqueFiles } = detectOpaqueMutations(data, errorCollector, { index: artifactIndex, replayed: replayedEdits });
+  for (const [key, entry] of Object.entries(artifactIndex)) {
+    if (!entry || !Array.isArray(entry.skipped) || !entry.skipped.length) continue;
+    let merged = opaqueFiles.get(key);
+    if (!merged) {
+      merged = { path: key, filename: entry.filename, msgIndexes: [], lastMsgIndex: -1, count: 0, resolved: true };
+      opaqueFiles.set(key, merged);
+    }
+    // The detector usually counted these commands already; one per message is added only when it didn't.
+    for (const mi of entry.skipped) {
+      if (merged.msgIndexes.includes(mi)) continue;
+      merged.msgIndexes.push(mi);
+      merged.count++;
+      merged.lastMsgIndex = Math.max(merged.lastMsgIndex, mi);
+    }
+  }
+  // Presentations and deliveries that downloaded, for sortOpaque; and every path shown.
+  const savedFiles = [];
+  const shownPaths = new Set(presentedFiles.map((f) => f.path));
 
   // Download presented files (files Claude showed the user). One the replay
   // already rebuilt is skipped, unless the replay is known to be off for it (an
@@ -2448,8 +2508,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // presented copy is the real final state, and it replaces the replayed file
   // and its last version. Two presented files with one name from different
   // folders are kept apart as <base>_2<ext>.
-  const replayIsOff = (name) => errorCollector.warnings.some((w) =>
-    (w.type === 'str_replace_failed' || w.type === 'artifact_opaque_mutation') && w.filename === name);
+  const offNames = new Set(Array.from(opaqueFiles.values(), (e) => e.filename));
+  const replayIsOff = (name) => offNames.has(name)
+    || errorCollector.warnings.some((w) => w.type === 'str_replace_failed' && w.filename === name);
   const docHtmlNames = new Set();  // lowercase names of the Claude Docs .html pages written
   const docHtmlFiles = [];  // their names, for README.md
   const presentedNames = {};  // presented path -> its name in artefacts/
@@ -2485,8 +2546,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       if (replayed) {
         const entry = own || Object.values(artifactIndex).find((e) => e.filename === name);
         if (entry && entry.versions.length > 1) await addArtefactBlob(folder, artifacts, entry.versions[entry.versions.length - 1], blob);
-        errorCollector.clearWarnings('artifact_opaque_mutation', name);
       }
+      savedFiles.push({ path: file.path, filename: name, msgIndex: file.msgIndex });
       // The download is the file's final state, so edits that couldn't be
       // replayed against it aren't missing.
       errorCollector.clearWarnings('str_replace_failed', name);
@@ -2503,7 +2564,25 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   // Download files Claude sent with SendUserFile. Their bytes exist only on the
   // server, so these are fetched by UUID.
-  const deliveredFiles = extractDeliveredFiles(data, Object.keys(artifacts));
+  // A delivery of an artifact's own path at or after its last change, when the replay
+  // is off, is its final state: it takes the artifact's name and replaces the last version too.
+  const lastTouch = {};  // sandbox path -> chain index of the last file tool on it
+  messages.forEach((msg, mi) => {
+    for (const block of (msg.content || [])) {
+      const input = block && block.type === 'tool_use' && FILE_EDIT_TOOLS.includes(block.name) && block.input;
+      const p = input && (input.path || input.file_path);
+      if (typeof p === 'string') lastTouch[p] = mi;
+    }
+  });
+  const offPaths = new Map();
+  for (const file of extractDeliveredFiles(data, Object.keys(artifacts))) {
+    const own = Object.prototype.hasOwnProperty.call(artifactIndex, file.path) ? artifactIndex[file.path] : null;
+    if (!own || !replayIsOff(own.filename)) continue;
+    const opaque = opaqueFiles.get(file.path);
+    const last = Math.max(opaque ? opaque.lastMsgIndex : -1, lastTouch[file.path] !== undefined ? lastTouch[file.path] : -1);
+    if (file.msgIndex >= last) offPaths.set(file.path, own.filename);
+  }
+  const deliveredFiles = extractDeliveredFiles(data, Object.keys(artifacts), offPaths);
   // Saved files only, for the viewer's deliveries map (see buildViewerDeliveries).
   const savedDeliveries = [];
   for (let i = 0; i < deliveredFiles.length; i++) {
@@ -2513,9 +2592,16 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
 
     try {
+      shownPaths.add(file.path);
       const blob = await fetchUploadedFile(null, file.uuid, organizationId, data.uuid, null);
       await addArtefactBlob(folder, artifacts, file.filename, blob);
+      if (file.replaces) {
+        const entry = artifactIndex[file.path];
+        if (entry && entry.versions.length > 1) await addArtefactBlob(folder, artifacts, entry.versions[entry.versions.length - 1], blob);
+        errorCollector.clearWarnings('str_replace_failed', file.filename);
+      }
       savedDeliveries.push(file);
+      savedFiles.push({ path: file.path, filename: file.filename, msgIndex: file.msgIndex });
     } catch (err) {
       console.error(`Failed to download delivered file ${file.filename}:`, err);
       errorCollector.addError('delivered_file', file.filename, err.message, {
@@ -2526,6 +2612,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       });
     }
   }
+
+  sortOpaque(opaqueFiles, savedFiles, errorCollector, shownPaths);
 
   // Claude Docs diagrams show by caption, as only claude.ai's page draws them. A self-contained HTML copy
   // Claude made in the chat (docCompanions) is linked under the document's title; without one, the note
