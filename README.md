@@ -408,6 +408,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 - **SVG files show as pictures** - An SVG file in the viewer is now a picture that zooms, in the chat viewer and on the Artifacts screen. An SVG with a script, or one the browser cannot read as a picture, stays in the sandboxed frame as before.
 - **Zoom bar for pages** - A generated HTML page in the viewer has a zoom bar under it (25% to 200%), with **Fit width** for a page wider than the frame. This works on the Artifacts screen and for Design boards opened alone too.
 - **Zoom and drag on the Design canvas** - The canvas zooms from Fit to 200% with the bar, a pinch or Ctrl or Cmd with the wheel, and you drag its background to move around. Back from a board keeps your zoom.
+
 ### v1.22.2
 
 - **A notebook edit no longer hides a later change** - When Claude edited a file with `NotebookEdit` and then changed it with a `sed` command, the export replayed the `sed` onto the text from before the notebook edit, and gave no warning. That file now gets a warning pointing at `replay_bash.py`, as other edits the export can't follow do.

@@ -342,6 +342,28 @@ const pageChat = {
   await loaded();
   const src = await pimg.getAttribute('src', { timeout: 3000 }).catch(() => '');
   check('panel svg: shown as <img>', /^data:image\/svg\+xml/.test(src || '') && await page.locator('#panel-body iframe').count() === 0, `${src && src.slice(0, 40)} frames ${await page.locator('#panel-body iframe').count()}`);
+  await page.emulateMedia({ colorScheme: 'dark' });
+  const svgBg = await pimg.evaluate(i => getComputedStyle(i).backgroundColor).catch(() => '');
+  await page.emulateMedia({ colorScheme: 'light' });
+  check('panel svg: white backing in dark theme', svgBg === 'rgb(255, 255, 255)', svgBg);
+  const failedBar = await page.evaluate(() => new Promise(done => {
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:0;top:0;width:300px;height:200px;display:flex;flex-direction:column';
+    const b = document.createElement('div');
+    b.style.cssText = 'flex:1;min-height:0';
+    host.append(b);
+    document.body.append(host);
+    const i = document.createElement('img');
+    i.src = 'missing-file-' + Date.now() + '.png';
+    let c, thrown = null;
+    try { c = pictureZoom(b, i, { onError: () => {} }); } catch (e) { thrown = e.message; }
+    setTimeout(() => {
+      const bar = host.querySelector('.zoom-bar');
+      done({ thrown, failed: !!(c && c.failed), hidden: !bar || bar.hidden });
+      host.remove();
+    }, 300);
+  }));
+  check('failed image: bar hidden, onError safe', !failedBar.thrown && failedBar.failed && failedBar.hidden, JSON.stringify(failedBar));
   await pbox.focus().catch(() => {});
   await page.keyboard.press('1');
   await page.keyboard.press('+');

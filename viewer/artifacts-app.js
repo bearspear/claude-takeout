@@ -690,8 +690,8 @@
 
     // ---- Zoom (v1.23) ----
     // The picture or page on show and its zoom controller. Its zoom is kept per file, the artifact (or In chats file)
-    // and the file's path, so another version of the same file starts where the reader was; another file, or the same
-    // one opened again, starts at Fit (a picture) or 100% (a page). A state restores only into the same kind of
+    // and the file's path, so another version of the same file starts where the reader was; another file starts at
+    // Fit (a picture) or 100% (a page). The same file opened again (a board after Back) keeps its earlier zoom. A state restores only into the same kind of
     // controller ('picture' or 'page'): their states differ.
     let shownZoom = null; // { key, kind, controller }
     let keptZoom = null; // { key, kind, state }

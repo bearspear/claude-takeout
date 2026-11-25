@@ -759,7 +759,7 @@ function openLink(href) {
 // A picture in a .file-paper that zooms and pans in place (a plain wheel scrolls). Returns the frame to show
 // and its controller. opts: pictureZoom's.
 function zoomPaper(src, alt, opts = {}) {
-  const img = el('img', 'file-image');
+  const img = el('img', opts.svg ? 'file-image svg-picture' : 'file-image');
   img.setAttribute('alt', alt);
   img.setAttribute('src', src);
   const paper = el('div', 'file-paper');
@@ -1662,7 +1662,7 @@ function previewNodes(chat, file, version) {
       zoom.destroy();
       if (shown && shown.parentNode) shown.replaceWith(...pageNodes(chat, file, version));
     };
-    const { frame, zoom } = panelPictureZoom(() => zoomPaper(svgDataUrl(version.text), file.name || '', { natural: svgNaturalSize(version.text), onError: fallback }));
+    const { frame, zoom } = panelPictureZoom(() => zoomPaper(svgDataUrl(version.text), file.name || '', { svg: true, natural: svgNaturalSize(version.text), onError: fallback }));
     if (zoom.failed) return pageNodes(chat, file, version);
     shown = frame;
     return [frame];

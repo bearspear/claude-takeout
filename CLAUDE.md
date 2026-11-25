@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Kept current; last checked at v1.22.1.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Kept current; last checked at v1.23.0.
 
 ---
 
@@ -57,7 +57,7 @@ For deeper dives, two companion docs live alongside this one:
 | `tests/e2e/artifacts-viewer.e2e.js` | Browser test of the Export Artifacts viewer: grid, tabs, routing, sandboxed previews and their files, shims, hostile pages, no-network checks. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/artifacts.e2e.js` | Browser test of an Export Artifacts `index.html` over `file://`: rows sorted, title link opens the artifact, Docs row note and no local link, shared label, no network or page errors. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/download.e2e.js` | Browser test of Download: popups and the panel (names, bytes, a part-backed upload once loaded), the Artifacts screen's start file, image and list rows, Download ZIP; nothing navigates or loads the file. | Optional; needs `playwright-core` and Chromium. |
-| `tests/e2e/design.e2e.js` | Browser test of the Design canvas, standalone and hosted: boards in place and titled, sandboxed (guard frame hosted), made near the view, notes as text, badges, Open alone and back, a hostile board, the poster without `canvas.json`. | Optional; needs `playwright-core` and Chromium started with `--disable-features=IsolateSandboxedIframes`. |
+| `tests/e2e/design.e2e.js` | Browser test of the Design canvas, standalone and hosted: zoom and drag, boards in place and titled, sandboxed (guard frame hosted), made near the view, notes as text, badges, Open alone and back, a hostile board, the poster without `canvas.json`. | Optional; needs `playwright-core` and Chromium started with `--disable-features=IsolateSandboxedIframes`. |
 | `tests/e2e/combined.e2e.js` | Browser test of an Export All with artifacts: the Artifacts screen and its tabs including In chats, links both ways, the guard frame's refusals, no network. | Optional; needs `playwright-core` and Chromium started with `--disable-features=IsolateSandboxedIframes`. |
 | `tests/e2e/viewer.e2e.js` | Browser test of the chat viewer over `file://`, built from the synthetic fixture; the only coverage of `sanitizeHtml`. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/export.e2e.js` | The real extension in Chromium against a mock claude.ai: binary bytes through real ZIP exports. | Optional; needs `playwright-core` and Chromium. |
@@ -424,7 +424,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built (last checked at v1.22.1). It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built (last checked at v1.23.0). It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 

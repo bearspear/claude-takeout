@@ -1718,7 +1718,9 @@ function pictureZoom(box, img, opts = {}) {
   function fail() {
     if (controller.failed) return;
     controller.failed = true;
-    if (typeof opts.onError === 'function') opts.onError(controller);
+    bar.hidden = true;
+    // Later, so the callback never runs before the controller is complete (destroy is assigned last).
+    if (typeof opts.onError === 'function') queueMicrotask(() => opts.onError(controller));
   }
   // An <img> with no src is complete too; only one with a src that has no width has failed.
   const failedAlready = () => img.complete && !!img.getAttribute('src') && !img.naturalWidth;
