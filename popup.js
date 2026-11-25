@@ -864,6 +864,9 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
   return { opaqueMutations, byFile };
 }
 
+// The file tools that change a file at its path (input.path or input.file_path), by name.
+const FILE_EDIT_TOOLS = ['create_file', 'str_replace', 'rewrite', 'create_or_overwrite', 'Write', 'Edit'];
+
 // Code files, which rule c of sortOpaque treats as helper scripts.
 const HELPER_SCRIPT_EXTENSIONS = ['.py', '.sh', '.bash', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl', '.r', '.sql', '.awk', '.sed'];
 
@@ -2498,12 +2501,25 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       merged.lastMsgIndex = Math.max(merged.lastMsgIndex, mi);
     }
   }
-  // Each file's last change of any kind: the last version the replay made, or a change it couldn't follow.
+  // Each file's last change of any kind: the last version the replay made, a change it couldn't follow
+  // (opaque or skipped), or a file tool that succeeded in the chat, even one the replay could not apply
+  // (an Edit whose old text a script had changed makes no version).
   const chainIndex = new Map(messages.map((m, i) => [m.uuid, i]));
+  const failedTools = failedToolUseIds(messages);
+  const lastFileTool = {};  // sandbox path -> chain index of the last file tool on it that did not fail
+  messages.forEach((msg, mi) => {
+    for (const block of (msg.content || [])) {
+      if (!block || block.type !== 'tool_use' || !FILE_EDIT_TOOLS.includes(block.name) || failedTools.has(block.id)) continue;
+      const input = block.input || {};
+      const p = input.path || input.file_path;
+      if (typeof p === 'string') lastFileTool[p] = mi;
+    }
+  });
   const lastChangeOf = (key) => {
     const entry = Object.prototype.hasOwnProperty.call(artifactIndex, key) ? artifactIndex[key] : null;
     const opaque = opaqueFiles.get(key);
     let last = opaque ? opaque.lastMsgIndex : -1;
+    if (Object.prototype.hasOwnProperty.call(lastFileTool, key)) last = Math.max(last, lastFileTool[key]);
     for (const uuid of (entry && entry.messages) || []) if (chainIndex.has(uuid)) last = Math.max(last, chainIndex.get(uuid));
     return last;
   };

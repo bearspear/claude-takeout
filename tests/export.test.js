@@ -5965,3 +5965,22 @@ test('sortOpaque: a same-path save kept apart from the file, or before its last 
   const early = sortOne(opaqueEntry('/o/page.html', 3, { lastChange: 7 }), [{ path: '/o/page.html', filename: 'page.html', msgIndex: 5 }]);
   assert.strictEqual(early.warnings.length, 1);
 });
+
+test('an Edit that succeeded in the chat but not in the replay, after a delivery or presentation, is a later change', async () => {
+  const send = (id, p, uuid) => [use(id, 'SendUserFile', { files: [p] }), { type: 'tool_result', tool_use_id: id, name: 'SendUserFile', content: [], file_deliveries: [{ file_uuid: uuid, path: p }] }];
+  const show = (id, p, uuid) => [use(id, 'present_files', { filepaths: [p] }), { type: 'tool_result', tool_use_id: id, name: 'present_files', content: [{ type: 'local_resource', file_path: p, uuid }] }];
+  const strip = (v) => String(v && v.content !== undefined ? v.content : v).replace(/^﻿/, '');
+  for (const [label, saving] of [['delivery', send], ['presentation', show]]) {
+    const data = Object.assign(turns(
+      [use('w', 'Write', { file_path: '/o/page.html', content: 'one' })],
+      [use('b', 'bash_tool', { command: 'cp /tmp/x /o/page.html' })],
+      saving('s', '/o/page.html', 'got'),
+      [use('e', 'Edit', { file_path: '/o/page.html', old_string: 'X', new_string: 'Y' })],
+    ), { uuid: 'c-failed-edit', name: 'n' });
+    const { written, output } = await runFolder(exportPopup({ texts: { got: textBlob('SAVED') } }), data);
+    assert.strictEqual(strip(written['artefacts/page.html']), 'one', label + ': the download does not replace the file');
+    const types = Array.from(output.errorCollector.warnings).map((w) => w.type);
+    assert.ok(types.includes('artifact_opaque_mutation'), label + ' ' + types);
+    assert.ok(types.includes('str_replace_failed'), label + ' ' + types);
+  }
+});
