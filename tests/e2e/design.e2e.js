@@ -253,6 +253,68 @@ async function writeOut(zip) {
     await press('zoom-fit');
     check(`${label}: canvas: resize at Fit refits; after zooming, resize keeps the zoom`, parseFloat(fitLevel) < parseFloat(startLevel) && chosen === '125%' && kept === chosen && (await level()) === startLevel, JSON.stringify([fitLevel, chosen, kept, await level()]));
 
+    // Move and Interact (v1.23.1). The canvas opens in Move: boards ignore the mouse, a plain wheel zooms, a drag
+    // anywhere pans.
+    const mode = () => page.locator('.canvas-modes[role="group"] .canvas-mode[aria-pressed="true"]').allTextContents().catch(() => []);
+    const framePE = () => page.locator('.design-board', { hasText: 'Home A' }).locator('iframe').evaluate(f => getComputedStyle(f).pointerEvents, null, { timeout: 1000 }).catch(() => null);
+    const modeGroup = await page.locator('.canvas-zoom .canvas-modes').evaluate(g => ({ label: g.getAttribute('aria-label'), first: g === g.parentNode.firstElementChild,
+      buttons: [...g.querySelectorAll('button.canvas-mode')].map(b => `${b.textContent}:${b.getAttribute('aria-pressed')}`) }), null, { timeout: 1000 }).catch(() => null);
+    check(`${label}: canvas: opens in Move, Move | Interact first in the bar`, !!modeGroup && modeGroup.label === 'Canvas mode' && modeGroup.first && modeGroup.buttons.join() === 'Move:true,Interact:false', JSON.stringify(modeGroup));
+    check(`${label}: canvas: in Move a board's frame ignores the mouse`, (await framePE()) === 'none', String(await framePE()));
+    // From 125%, where the canvas is wider than the view: narrower, it stays centred, so no zoom can hold a point.
+    await press('zoom-fit');
+    await upTo('125%');
+    await scrollTo(0, 0);
+    const m0 = await boxOf('Home A');
+    const mp = { x: m0.x + m0.width * 0.6, y: m0.y + m0.height * 0.6 };
+    const mfrac = { x: (mp.x - m0.x) / m0.width, y: (mp.y - m0.y) / m0.height };
+    const fitNow = await level();
+    await page.mouse.move(mp.x, mp.y);
+    await page.mouse.wheel(0, -40);
+    await page.waitForTimeout(200);
+    const m1 = await boxOf('Home A');
+    const mmoved = [m1.x + mfrac.x * m1.width - mp.x, m1.y + mfrac.y * m1.height - mp.y];
+    check(`${label}: canvas: Move: a plain wheel over a board zooms about the pointer`, parseFloat(await level()) > parseFloat(fitNow) && Math.abs(mmoved[0]) < 3 && Math.abs(mmoved[1]) < 3, JSON.stringify([fitNow, await level(), mmoved]));
+    await upTo('125%');
+    await scrollTo(0, 0);
+    const beforeShift = await level();
+    await page.mouse.move(mp.x, mp.y);
+    await page.keyboard.down('Shift');
+    await page.mouse.wheel(0, 100);
+    await page.keyboard.up('Shift');
+    await page.waitForTimeout(200);
+    const shifted = await scrollOf();
+    check(`${label}: canvas: Move: Shift+wheel scrolls sideways, no zoom`, shifted[0] > 0 && shifted[1] === 0 && (await level()) === beforeShift, JSON.stringify([shifted, beforeShift, await level()]));
+    await scrollTo(0, 0);
+    const mb = await boxOf('Home A');
+    const mstart = { x: mb.x + mb.width / 2, y: mb.y + mb.height / 2 };
+    await page.mouse.move(mstart.x, mstart.y);
+    await page.mouse.down();
+    for (let i = 1; i <= 5; i++) await page.mouse.move(mstart.x - 20 * i, mstart.y - 16 * i);
+    await page.mouse.up();
+    const mdrag = await scrollOf();
+    check(`${label}: canvas: Move: a drag starting over a board pans`, mdrag[0] >= 90 && mdrag[1] >= 70, JSON.stringify(mdrag));
+    await scrollTo(0, 0);
+    // In Move too: a drag ending on Open alone opens nothing; a click opens it, and Back keeps Move.
+    const mopen = page.locator('.design-board', { hasText: 'Templated' }).locator('button.board-open');
+    const mob = await mopen.boundingBox();
+    const moc = { x: mob.x + mob.width / 2, y: mob.y + mob.height / 2 };
+    await page.mouse.move(moc.x, moc.y);
+    await page.mouse.down();
+    await page.mouse.move(moc.x + 12, moc.y + 12);
+    await page.mouse.move(moc.x + 24, moc.y + 24);
+    await page.mouse.move(moc.x, moc.y);
+    await page.mouse.up();
+    await page.waitForTimeout(200);
+    const mAfterDrag = await page.locator('button.canvas-back').count();
+    if (mAfterDrag) { await page.locator('button.canvas-back').click(); await canvas.waitFor({ timeout: 3000 }).catch(() => {}); }
+    await page.locator('.design-board', { hasText: 'Templated' }).locator('button.board-open').click({ timeout: 1000 }).catch(() => {});
+    await page.locator('button.canvas-back').waitFor({ timeout: 3000 }).catch(() => {});
+    const mOpened = await page.locator('button.canvas-back').count();
+    check(`${label}: canvas: Move: a drag ending on Open alone doesn't open it; a click does`, mAfterDrag === 0 && mOpened === 1, JSON.stringify([mAfterDrag, mOpened]));
+    await page.locator('button.canvas-back').click({ timeout: 1000 }).catch(() => {});
+    await canvas.waitFor({ timeout: 3000 }).catch(() => {});
+
     // Ctrl+wheel over the background, between Home A and Templated: the point under the pointer stays.
     await press('zoom-fit');
     await scrollTo(0, 0);
@@ -280,6 +342,17 @@ async function writeOut(zip) {
     await page.mouse.up();
     const dragged = await scrollOf();
     check(`${label}: canvas: drag on the background scrolls #page-body`, dragged[0] >= 90 && dragged[1] >= 70, JSON.stringify(dragged));
+    // Interact: v1.23.0's canvas. Boards take the mouse, a plain wheel doesn't zoom.
+    await page.locator('.canvas-zoom button.canvas-mode', { hasText: 'Interact' }).click({ timeout: 1000 }).catch(() => {});
+    const pressed = await page.locator('.canvas-zoom button.canvas-mode').evaluateAll(bs => bs.map(b => `${b.textContent}:${b.getAttribute('aria-pressed')}`)).catch(() => []);
+    check(`${label}: canvas: Interact is pressed, boards take the mouse again`, pressed.join() === 'Move:false,Interact:true' && (await framePE()) === 'auto', JSON.stringify([pressed, await framePE()]));
+    await scrollTo(0, 0);
+    const beforePlain = await level();
+    const gap = await boxOf('Templated');
+    await page.mouse.move(gap.x - 40, gap.y + 100);
+    await page.mouse.wheel(0, -40);
+    await page.waitForTimeout(200);
+    check(`${label}: canvas: Interact: a plain wheel doesn't zoom`, (await level()) === beforePlain, JSON.stringify([beforePlain, await level()]));
     await scrollTo(0, 0);
     const h0 = await boxOf('Home A');
     const inFrame = { x: h0.x + h0.width / 2, y: h0.y + h0.height / 2 };
@@ -288,6 +361,22 @@ async function writeOut(zip) {
     for (let i = 1; i <= 5; i++) await page.mouse.move(inFrame.x - 20 * i, inFrame.y - 16 * i);
     await page.mouse.up();
     check(`${label}: canvas: drag on a board frame doesn't`, JSON.stringify(await scrollOf()) === '[0,0]', JSON.stringify(await scrollOf()));
+    // Space held in Interact: Move until it is let go. Focus off the Interact button first (Space presses a button).
+    await page.mouse.click(gap.x - 40, gap.y + 100);
+    await scrollTo(0, 0);
+    await page.keyboard.down('Space');
+    const spacePE = await framePE();
+    const s0 = await boxOf('Home A');
+    const sAt = { x: s0.x + s0.width / 2, y: s0.y + s0.height / 2 };
+    await page.mouse.move(sAt.x, sAt.y);
+    await page.mouse.down();
+    for (let i = 1; i <= 5; i++) await page.mouse.move(sAt.x - 20 * i, sAt.y - 16 * i);
+    await page.mouse.up();
+    const sDrag = await scrollOf();
+    await page.keyboard.up('Space');
+    check(`${label}: canvas: Space held in Interact: boards ignore the mouse and a drag over one pans`, spacePE === 'none' && sDrag[0] >= 90 && sDrag[1] >= 70, JSON.stringify([spacePE, sDrag]));
+    check(`${label}: canvas: Space let go: back to Interact`, (await framePE()) === 'auto' && (await mode()).join() === 'Interact', JSON.stringify([await framePE(), await mode()]));
+    await scrollTo(0, 0);
 
     // A press on Open alone that moves away and back is a drag: no board. A plain click opens it.
     const open = page.locator('.design-board', { hasText: 'Templated' }).locator('button.board-open');
@@ -315,6 +404,7 @@ async function writeOut(zip) {
     const homeAfter = await boxOf('Home A');
     check(`${label}: canvas: Back from Open alone restores the zoom`, zoomBefore === '150%' && (await level()) === zoomBefore && Math.abs(homeAfter.x - homeBefore.x) < 3 && Math.abs(homeAfter.y - homeBefore.y) < 3,
       JSON.stringify([zoomBefore, await level(), homeBefore, homeAfter]));
+    check(`${label}: canvas: the mode survives Open alone and Back`, (await mode()).join() === 'Interact' && (await framePE()) === 'auto', JSON.stringify([await mode(), await framePE()]));
 
     // Zoomed in, a far board's frame still comes when scrolled to.
     await press('zoom-in', 5);
@@ -336,6 +426,7 @@ async function writeOut(zip) {
     await page.locator('#page-from select').selectOption('current', { timeout: 3000 }).catch(() => {});
     await canvas.waitFor({ timeout: 4000 }).catch(() => {});
     check(`${label}: and back to the current one`, await page.locator('.design-board', { hasText: 'Home A' }).count() === 1);
+    check(`${label}: canvas: the mode survives a version switch`, (await mode()).join() === 'Interact', JSON.stringify(await mode()));
 
     // A Design artifact with no canvas.json keeps the poster page.
     await page.evaluate(id => { location.hash = `#a=${id}`; }, uuidToBase58(U(2)));

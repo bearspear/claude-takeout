@@ -402,6 +402,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.23.1
+
+- **Move and Interact on the Design canvas** - The canvas's zoom bar starts with two buttons, **Move** and **Interact**. A canvas opens in Move: the mouse wheel zooms about the pointer, Shift with the wheel scrolls sideways, and you drag anywhere, boards included, to move around. The boards' pages keep running, they just don't take the mouse. **Interact** is the canvas as before, where you can click and scroll inside the boards; hold Space there to move for a moment. The viewer keeps your choice while it is open, including after Open alone and Back.
+
 ### v1.23.0
 
 - **Zoom and drag in the viewer** - Pictures zoom from Fit up to 800%, in the gallery, the side panel and the upload pop-ups: pinch on a trackpad, Ctrl or Cmd with the mouse wheel, the buttons of the zoom bar, double-click, or the keys `+`, `-`, `0` and `1`. Drag a zoomed picture to move it. In the gallery the plain mouse wheel zooms too. Diagrams open in the gallery, so they zoom as well.
