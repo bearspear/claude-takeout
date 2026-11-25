@@ -100,11 +100,18 @@ function isTextFile(filename) {
 // edit couldn't be rebuilt). The first warning for a file wins.
 const FLAG_FOR_WARNING = { artifact_opaque_mutation: 'script', str_replace_failed: 'edit', claude_doc_unreplayed: 'doc' };
 
-function viewerFlags(warnings) {
+// Notes give the softer flags 'draft' and 'helper'; a warning's flag wins over a note's.
+const FLAG_FOR_NOTE = { draft_superseded: 'draft', helper_script: 'helper' };
+
+function viewerFlags(warnings, notes = []) {
   const flags = {};
   for (const w of warnings || []) {
     const flag = w && Object.prototype.hasOwnProperty.call(FLAG_FOR_WARNING, w.type) ? FLAG_FOR_WARNING[w.type] : null;
     if (flag && w.filename && !Object.prototype.hasOwnProperty.call(flags, w.filename)) flags[w.filename] = flag;
+  }
+  for (const n of notes || []) {
+    const flag = n && Object.prototype.hasOwnProperty.call(FLAG_FOR_NOTE, n.type) ? FLAG_FOR_NOTE[n.type] : null;
+    if (flag && n.filename && !Object.prototype.hasOwnProperty.call(flags, n.filename)) flags[n.filename] = flag;
   }
   return flags;
 }

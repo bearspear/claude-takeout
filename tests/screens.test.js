@@ -1065,3 +1065,45 @@ test('a cancelled picker keeps the handoff note', async () => {
   assert.ok(doc.body.classList.contains('handoff'), 'still there after a cancelled picker');
   assert.strictEqual(doc.getElementById('handoffNote').hidden, false);
 });
+
+// Notes are shown on the Done screen, never counted (quiet warnings, Task 2).
+test('doneNotesLine and doneHeadline: notes are not warnings', () => {
+  const { fn } = loadPopup();
+  assert.strictEqual(fn('doneNotesLine')({ fileNotes: 0 }), '');
+  assert.strictEqual(fn('doneNotesLine')({}), '');
+  assert.strictEqual(fn('doneNotesLine')({ fileNotes: 1 }), "1 note about drafts and renamed files is in each chat's README.");
+  assert.strictEqual(fn('doneNotesLine')({ fileNotes: 13 }), "13 notes about drafts and renamed files are in each chat's README.");
+  const j = (o) => JSON.parse(JSON.stringify(o));
+  assert.deepStrictEqual(j(fn('doneHeadline')({ outcome: 'done', warnings: 0, fileNotes: 13 })), j(fn('doneHeadline')({ outcome: 'done', warnings: 0 })));
+  assert.strictEqual(fn('runResult')({ fileNotes: 4 }).fileNotes, 4);
+  assert.strictEqual(fn('runResult')({}).fileNotes, 0);
+});
+
+test('bulkExportZip counts a chat\'s notes in fileNotes, not warnings or errorFiles', async () => {
+  const fx = Object.assign(loadFixture(), { uuid: 'c-fx' });
+  const list = [{ uuid: 'c-fx', name: fx.name, updated_at: '2026-01-02T00:00:00Z' }];
+  const noted = (extra) => (sb) => vm.runInContext(`{ const orig = populateConversationFolder; populateConversationFolder = async (...a) => { const r = await orig(...a); r.errorCollector.warnings.length = 0; r.errorCollector.errors.length = 0; ${extra} return r; }; }`, sb);
+  const base = await bulkRun({ list, chats: { 'c-fx': fx }, setup: noted('') });
+  const { result, store } = await bulkRun({ list, chats: { 'c-fx': fx }, setup: noted("r.errorCollector.addNote('draft_superseded', 'a.html', 'm'); r.errorCollector.addNote('helper_script', 'b.py', 'm');") });
+  assert.strictEqual(result.fileNotes, 2);
+  assert.strictEqual(base.result.fileNotes, 0);
+  assert.strictEqual(result.warnings, base.result.warnings);
+  assert.deepStrictEqual(result.errorFiles, base.result.errorFiles);
+  assert.ok(!result.errorFiles.includes('errors.txt'), result.errorFiles.join());
+  assert.strictEqual(store.exportRecord['org-1'].warnings, base.result.warnings);
+});
+
+test('a single-chat ZIP with notes only reports no errors.txt to point at', async () => {
+  const sb = exportPopup().sandbox;
+  sb.JSZip = require('../jszip.min.js');
+  sb.Uint8Array = Uint8Array;
+  sb.URL = { createObjectURL: () => 'blob:x', revokeObjectURL: () => {} };
+  const mk = sb.document.createElement;
+  sb.document.createElement = (t) => (t === 'a' ? { click() {} } : mk.call(sb.document, t));
+  sb.__data = loadFixture();
+  const run = (extra) => vm.runInContext(`(async () => { const orig = populateConversationFolder; populateConversationFolder = async (...a) => { const r = await orig(...a); r.errorCollector.warnings.length = 0; r.errorCollector.errors.length = 0; r.errorCollector.addNote('helper_script', 'b.py', 'm'); ${extra} return r; }; try { return await createZipExport(__data); } finally { populateConversationFolder = orig; } })()`, sb);
+  const notesOnly = await run('');
+  assert.strictEqual(notesOnly.hasErrors, false);
+  const withWarning = await run("r.errorCollector.addWarning('upload', 'x', 'm');");
+  assert.strictEqual(withWarning.hasErrors, true);
+});

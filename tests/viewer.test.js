@@ -2289,3 +2289,15 @@ test('versionCopyTexts: a same version\'s files from the chat versions it was sa
   assert.deepStrictEqual(versionCopyTexts(chat, { same: false, files: e.files }), [], 'only a version the same as the chat\'s files');
   assert.deepStrictEqual(versionCopyTexts(null, e), []);
 });
+
+test('viewerFlags: notes give draft and helper flags, a warning flag wins, name_changed gives none', () => {
+  const { viewerFlags } = require('../export-core.js');
+  assert.deepStrictEqual(viewerFlags([], [{ type: 'draft_superseded', filename: 'a.html' }, { type: 'helper_script', filename: 'b.py' }, { type: 'name_changed', filename: 'c_2.html' }]), { 'a.html': 'draft', 'b.py': 'helper' });
+  assert.deepStrictEqual(viewerFlags([{ type: 'artifact_opaque_mutation', filename: 'a.html' }], [{ type: 'draft_superseded', filename: 'a.html' }]), { 'a.html': 'script' });
+  assert.deepStrictEqual(viewerFlags([{ type: 'artifact_opaque_mutation', filename: 'a.html' }]), { 'a.html': 'script' });
+});
+
+test('FLAG_NOTES has text for draft and helper', () => {
+  const { FLAG_NOTES } = require('../viewer/viewer-logic.js');
+  assert.ok(FLAG_NOTES.draft && FLAG_NOTES.helper);
+});

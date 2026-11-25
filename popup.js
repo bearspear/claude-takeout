@@ -2987,7 +2987,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       widgetFile,
       widgetKey,
       published,
-      flags: viewerFlags(errorCollector.warnings),
+      flags: viewerFlags(errorCollector.warnings, errorCollector.notes),
       project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions, CTViewer.TEXT_EMBED_LIMIT)
     });
   } catch (err) {
@@ -3053,7 +3053,7 @@ async function createZipExport(data, onProgress = null, fetchPublished = null) {
     artifactCount: Object.keys(result.artifacts).length,
     errorCount: result.errorCollector?.errors?.length || 0,
     warningCount: result.errorCollector?.warnings?.length || 0,
-    hasErrors: result.errorCollector?.hasAny() || false,
+    hasErrors: !!(result.errorCollector && (result.errorCollector.hasErrors() || result.errorCollector.hasWarnings())),
     healthIssues: result.healthIssues || 0,
     viewerBuilt,
     size: zipBlob.size
@@ -4794,7 +4794,7 @@ function collectorRunWarnings(collector, chat = '') {
 }
 
 // notes: plain sentences beyond the counts ("Nothing changed since …"), shown on the Done screen.
-function runResult({ outcome = 'done', reason = '', target = null, saved = null, warningList = [], errorFiles = [], notes = [], startedAt = null } = {}) {
+function runResult({ outcome = 'done', reason = '', target = null, saved = null, warningList = [], errorFiles = [], notes = [], fileNotes = 0, startedAt = null } = {}) {
   const list = Array.isArray(warningList) ? warningList : [];
   return {
     outcome,
@@ -4805,6 +4805,7 @@ function runResult({ outcome = 'done', reason = '', target = null, saved = null,
     warningList: list,
     errorFiles: [...new Set(errorFiles)],
     notes: (Array.isArray(notes) ? notes : []).map(String),
+    fileNotes: Number(fileNotes) || 0,
     startedAt: startedAt || new Date().toISOString(),
     endedAt: new Date().toISOString(),
   };
@@ -4960,7 +4961,8 @@ async function bulkExportZip(options = {}) {
   const warningList = [];
   const errorFiles = [];
   const notes = [];  // sentences the Done screen adds to its counts (runResult)
-  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, notes, startedAt: runStartedAt });
+  let fileNotes = 0;  // the chats' README notes (draft and helper files), shown but never counted as warnings
+  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, notes, fileNotes, startedAt: runStartedAt });
   // The Exporting screen's events (exportProgress) and its Stop button (options.signal.stopped).
   const signal = options && options.signal && typeof options.signal === 'object' ? options.signal : null;
   const stopRequested = () => !!(signal && signal.stopped);
@@ -5137,6 +5139,7 @@ async function bulkExportZip(options = {}) {
         if (folderResult.errorCollector) {
           totalFileErrors += folderResult.errorCollector.errors?.length || 0;
           totalFileWarnings += folderResult.errorCollector.warnings?.length || 0;
+          fileNotes += folderResult.errorCollector.notes?.length || 0;
           const chatWarnings = collectorRunWarnings(folderResult.errorCollector, data.name || conv.name || 'Untitled');
           warningList.push(...chatWarnings);
           if (chatWarnings.length) errorFiles.push('errors.txt');
@@ -5319,7 +5322,7 @@ async function bulkExportZip(options = {}) {
     if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
     if (step) {
       warningList.push(...collectorRunWarnings(step.collector));
-      if (step.collector.hasAny()) errorFiles.push('artifacts/errors.txt');
+      if (step.collector.hasErrors() || step.collector.hasWarnings()) errorFiles.push('artifacts/errors.txt');
     }
     if (!viewerBuilt) warningList.push({ type: 'viewer', text: 'viewer.html could not be built.' });
     pendingWarnings = () => 0;
@@ -6204,7 +6207,7 @@ async function exportArtifacts(options = {}) {
     if (signal && signal.stopped) {
       warningList.push(...collectorRunWarnings(collector));
       if (run) {
-        if (collector.hasAny()) {
+        if (collector.hasErrors() || collector.hasWarnings()) {
           root.file('errors.txt', collector.generateErrorReport());
           errorFiles.push('errors.txt');
         }
@@ -6247,7 +6250,7 @@ async function exportArtifacts(options = {}) {
     saved.artifacts = views.filter((v) => !v.notExported).length;
     saved.versions = Number(versionCount) || 0;
     warningList.push(...collectorRunWarnings(collector));
-    if (collector.hasAny()) errorFiles.push('errors.txt');
+    if (collector.hasErrors() || collector.hasWarnings()) errorFiles.push('errors.txt');
     if (!viewerBuilt) warningList.push({ type: 'viewer', text: 'viewer.html could not be built.' });
     collector = null;  // its warnings are in warningList now
     emit('viewer', 1, 1, 'Viewer and index');
@@ -6373,6 +6376,12 @@ function warningGroups(list, max = 5) {
 function doneHeadline(result) {
   const n = result.warnings || 0;
   return n ? { tone: 'warn', text: `Done, with ${n} warning${n === 1 ? '' : 's'}` } : { tone: 'ok', text: 'Done' };
+}
+
+// The quiet line under the warnings: notes about drafts and renamed files are in each chat's README.
+function doneNotesLine(result) {
+  const n = (result && result.fileNotes) || 0;
+  return n ? `${n} note${n === 1 ? '' : 's'} about drafts and renamed files ${n === 1 ? 'is' : 'are'} in each chat's README.` : '';
 }
 
 function doneTargetText(result) {
@@ -6903,6 +6912,7 @@ function showDone(result, plan) {
   const groups = warningGroups(result.warningList);
   fillList($('doneWarnings'), [...groups.lines, ...(groups.more ? [`and ${groups.more} more`] : [])]);
   $('doneNotes').textContent = (result.notes || []).join(' ');
+  $('doneFileNotes').textContent = doneNotesLine(result);
   const files = (result.errorFiles || []).filter((f) => f === 'errors.txt' || f === 'artifacts/errors.txt');
   // Export All writes a chat's errors.txt in that chat's folder; Export Artifacts writes one at the root.
   const where = plan.run === 'bulk' ? files.map((f) => (f === 'errors.txt' ? "errors.txt in each affected chat's folder" : f)) : files;
