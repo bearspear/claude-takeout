@@ -273,11 +273,18 @@ const CWD_HEREDOC_RE = /<<-?\s*(['"]?)(\w+)\1([^\n]*)\n(?:[\s\S]*?\n)??[ \t]*\2[
 // with its directory quoted or bare; no directory, or ~ or -, is a cd the export can't follow.
 const CD_RE = /(^|[;&|\n])[ \t]*cd(?:[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|()]+)))?[ \t]*(?=$|[;&|\n)])/g;
 
-// Each bash tool_use's working directory, by its id: its own leading cd (followed by && or ;), else
+// Every cd, wherever it is (a subshell included); pushd and popd; a chdir() call in a script.
+const ANY_CD_RE = /(?:^|[;&|\n(`])[ \t]*cd(?=[ \t;&|\n)]|$)/g;
+const PUSHD_RE = /(?:^|[;&|\n(`])[ \t]*(?:pushd|popd)(?=[ \t;&|\n)]|$)/;
+const CHDIR_RE = /\bchdir\s*\(/;
+
+// Each bash tool_use's working directory, by its id: its own leading cd (followed by && or ;) when it
+// is the command's only change of directory, else null when it changes directory any other way, else
 // the directory the last cd of an earlier bash command in the chain left (the sandbox shell keeps it
 // between calls), else null. A relative cd resolves against the directory before it; a cd that can't
-// be followed (none, ~, -, or relative to an unknown one) leaves it unknown (null). cd inside a
-// heredoc body or a subshell ( ... ) is ignored.
+// be followed (none, ~, -, or relative to an unknown one) leaves it unknown (null). A cd in a
+// heredoc body is text; one in a subshell ( ... ) makes the command's own directory unknown but
+// doesn't carry. pushd, popd or chdir() leave it unknown for later commands too.
 function commandCwds(messages) {
   const cwds = new Map();
   let carried = null;
@@ -290,12 +297,20 @@ function commandCwds(messages) {
   for (const msg of messages || []) {
     for (const block of (msg && msg.content) || []) {
       if (!block || block.type !== 'tool_use' || !isBashTool(block.name)) continue;
-      const command = String((block.input && block.input.command) || '').replace(CWD_HEREDOC_RE, '$3');
-      let own = carried;
+      const raw = String((block.input && block.input.command) || '');
+      const command = raw.replace(CWD_HEREDOC_RE, '$3');
+      // Any other change of directory (a second cd, cd ||, a cd in a subshell, pushd/popd, or a
+      // chdir() in any script, heredoc bodies included) leaves this command's directory unknown,
+      // and the one after it too.
+      const cds = (command.match(ANY_CD_RE) || []).length;
       const lead = /^\s*cd[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|()]+))[ \t]*(?:&&|;|\n)/.exec(command);
-      if (lead) own = target([null, null, lead[1], lead[2], lead[3]], carried);
+      const other = CHDIR_RE.test(raw) || PUSHD_RE.test(command);
+      let own = carried;
+      if (other || cds > 1 || (cds === 1 && !lead)) own = null;
+      else if (lead) own = target([null, null, lead[1], lead[2], lead[3]], carried);
       cwds.set(block.id, own);
-      for (const m of command.matchAll(CD_RE)) carried = target(m, carried);
+      if (other) carried = null;
+      else for (const m of command.matchAll(CD_RE)) carried = target(m, carried);
     }
   }
   return cwds;

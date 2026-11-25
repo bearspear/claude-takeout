@@ -1364,6 +1364,37 @@ test('commandCwds: own cd wins, earlier cd carries, none is null', () => {
   assert.strictEqual(cwds.get('i'), null, 'a cd the export cannot follow leaves the directory unknown');
 });
 
+test('commandCwds: a command that changes directory any other way than one leading cd has no known directory', () => {
+  const cwdOf = (...commands) => {
+    const data = turns(commands.map((command, i) => use('c' + i, 'bash_tool', { command })));
+    return fn('commandCwds')(fn('getMessageChain')(data)).get('c' + (commands.length - 1));
+  };
+  assert.strictEqual(cwdOf("cd /a && ls; cd /b && sed -i 's/a/b/' page.html"), null, 'a second cd');
+  assert.strictEqual(cwdOf('cd /b', "cd /a || exit 1\nsed -i 's/a/b/' page.html"), null, 'cd with ||');
+  assert.strictEqual(cwdOf('cd /a', "python3 -c \"import os;os.chdir('/b');open('page.html','w').write('x')\""), null, 'os.chdir');
+  assert.strictEqual(cwdOf('cd /a', "python3 - <<'PY'\nimport os\nos.chdir('/b')\nPY"), null, 'os.chdir in a heredoc');
+  assert.strictEqual(cwdOf('cd /a', "pushd /b && sed -i 's/a/b/' page.html"), null, 'pushd');
+  assert.strictEqual(cwdOf('cd /a', "(cd /b && sed -i 's/a/b/' page.html)"), null, 'cd in a subshell');
+  assert.strictEqual(cwdOf('cd /a', "python3 -c \"import os;os.chdir('/b')\"", 'ls'), null, 'unknown afterwards too');
+  assert.strictEqual(cwdOf('cd /a', 'pushd /b', 'ls'), null, 'unknown after pushd');
+  assert.strictEqual(cwdOf('cd /a && ls; cd /b && ls', 'ls'), '/b', 'the last plain cd carries');
+  assert.strictEqual(cwdOf('cd /a; ls', "cd /b && sed -i 's/a/b/' x"), '/b', 'one leading cd still wins');
+});
+
+test('detectOpaqueMutations: an edit after a second cd, a cd ||, or os.chdir is unresolved between same-named files', () => {
+  const files = [use('1', 'Write', { file_path: '/a/page.html', content: 'a' }), use('2', 'Write', { file_path: '/b/page.html', content: 'a' })];
+  for (const commands of [
+    ["cd /a && ls; cd /b && sed -i 's/a/b/' page.html"],
+    ['cd /b', "cd /a || exit 1\nsed -i 's/a/b/' page.html"],
+    ['cd /a', "python3 -c \"import os;os.chdir('/b');open('page.html','w').write('x')\""],
+  ]) {
+    const data = turns(files, ...commands.map((command, i) => [use('c' + i, 'bash_tool', { command })]));
+    const out = fn('detectOpaqueMutations')(data, collector());
+    assert.deepStrictEqual([...out.byFile.keys()].sort(), ['/a/page.html', '/b/page.html'], commands.join(' / '));
+    assert.ok([...out.byFile.values()].every((e) => e.resolved === false), commands.join(' / '));
+  }
+});
+
 test('resolveSandboxPath: relative under cwd, unique basename without cwd, ambiguous gives candidates', () => {
   const resolve = (word, cwd, known) => plain(fn('resolveSandboxPath')(word, cwd, known));
   const known = ['/home/claude/verb/body.html', '/home/claude/verb/lorber/body.html', '/home/claude/notes.md'];
