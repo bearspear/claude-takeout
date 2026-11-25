@@ -22,6 +22,7 @@ class ExportErrorCollector {
     this.label = label;
     this.errors = [];
     this.warnings = [];
+    this.notes = [];
   }
 
   addError(type, filename, error, details = {}) {
@@ -56,6 +57,35 @@ class ExportErrorCollector {
       },
       recovery: this._getRecoveryHint(type, details)
     });
+  }
+
+  // A note says something about the export that is not missing content: the report lists it apart from warnings.
+  addNote(type, filename, message, details = {}) {
+    this.notes.push({
+      type,
+      severity: 'note',
+      filename,
+      error: message,
+      details: {
+        uuid: details.uuid || null,
+        path: details.path || null,
+        note: details.note || null
+      },
+      recovery: this._getNoteHint(type)
+    });
+  }
+
+  _getNoteHint(type) {
+    switch (type) {
+      case 'draft_superseded':
+        return 'The finished files from this folder are in the export; this draft is kept for reference. replay_bash.py can try to rebuild it.';
+      case 'helper_script':
+        return "Claude's helper script, not a delivered file.";
+      case 'name_changed':
+        return 'Both files are kept; only the name changed.';
+      default:
+        return 'No action needed.';
+    }
   }
 
   _getRecoveryHint(type, details) {
@@ -138,8 +168,12 @@ class ExportErrorCollector {
     return this.warnings.length > 0;
   }
 
+  hasNotes() {
+    return this.notes.length > 0;
+  }
+
   hasAny() {
-    return this.hasErrors() || this.hasWarnings();
+    return this.hasErrors() || this.hasWarnings() || this.hasNotes();
   }
 
   generateErrorReport() {
@@ -179,6 +213,15 @@ class ExportErrorCollector {
       lines.push(`**Warnings:** ${this.warnings.length} total`);
       for (const [type, count] of Object.entries(warningsByType)) {
         lines.push(`- ${count} ${type.replace(/_/g, ' ')} warning${count > 1 ? 's' : ''}`);
+      }
+    }
+
+    if (this.notes.length > 0) {
+      const notesByType = {};
+      for (const note of this.notes) notesByType[note.type] = (notesByType[note.type] || 0) + 1;
+      lines.push(`**Notes:** ${this.notes.length} total`);
+      for (const [type, count] of Object.entries(notesByType)) {
+        lines.push(`- ${count} ${type.replace(/_/g, ' ')} note${count > 1 ? 's' : ''}`);
       }
     }
 
@@ -244,6 +287,29 @@ class ExportErrorCollector {
       }
     }
 
+    // Detailed notes
+    if (this.notes.length > 0) {
+      lines.push('---', '', '## Notes', '');
+
+      for (const note of this.notes) {
+        lines.push(`### ${note.filename}`);
+        lines.push('');
+        lines.push(`- **Type:** ${note.type.replace(/_/g, ' ')}`);
+        lines.push(`- **Message:** ${note.error}`);
+
+        if (note.details.path) {
+          lines.push(`- **Path:** ${note.details.path}`);
+        }
+        if (note.details.note) {
+          lines.push(`- **Note:** ${note.details.note}`);
+        }
+
+        lines.push('');
+        lines.push(`**Recovery:** ${note.recovery}`);
+        lines.push('');
+      }
+    }
+
     // Troubleshooting guide
     lines.push('---', '', '## Troubleshooting Guide', '');
     lines.push('### Common HTTP Status Codes');
@@ -281,6 +347,27 @@ class ExportErrorCollector {
 
     return lines.join('\n');
   }
+}
+
+// The chat README's "About some files" section: the notes by kind, so a reader knows why a file is there.
+const README_NOTE_KINDS = [
+  ['draft_superseded', 'Drafts'],
+  ['helper_script', 'Helper scripts'],
+  ['name_changed', 'Renamed files']
+];
+function readmeNoteLines(notes) {
+  const groups = README_NOTE_KINDS
+    .map(([type, heading]) => [heading, (notes || []).filter((n) => n.type === type)])
+    .filter(([, list]) => list.length > 0);
+  if (groups.length === 0) return [];
+  const lines = ['## About some files', ''];
+  for (const [heading, list] of groups) {
+    lines.push(`### ${heading}`, '');
+    for (const n of list) lines.push(`- \`${n.filename}\`: ${n.error}`);
+    lines.push('');
+  }
+  lines.pop();
+  return lines;
 }
 
 // ============================================================================
@@ -2758,6 +2845,11 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     '- [responses_text_only.md](responses_text_only.md) *(pure text, no thinking/tools)*',
     ''
   ];
+
+  const noteLines = readmeNoteLines(errorCollector.notes);
+  if (noteLines.length > 0) {
+    readmeLines.push('---', '', ...noteLines, '');
+  }
 
   if (codeBlocks.length > 0 || urls.length > 0 || webSources.length > 0) {
     readmeLines.push('---');

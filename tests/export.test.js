@@ -5123,3 +5123,42 @@ test('Export All finishes when the artifact step stops early', async () => {
   assert.ok(zip, 'the export was written');
   assert.strictEqual(result.outcome, 'done', JSON.stringify(result));
 });
+
+test('collector notes: counted apart, reported under ## Notes', () => {
+  const c = new (fn('ExportErrorCollector'))('n', 'u');
+  c.addWarning('str_replace_failed', 'a.html', 'm');
+  c.addNote('draft_superseded', 'body_2.html', 'Draft of a file Claude later rewrote', { path: '/home/claude/verb/lorber/body.html' });
+  assert.strictEqual(c.warnings.length, 1);
+  assert.strictEqual(c.notes.length, 1);
+  assert.ok(c.hasNotes());
+  const report = c.generateErrorReport();
+  assert.ok(report.includes('**Notes:** 1 total'));
+  const at = (s) => report.indexOf(s);
+  assert.ok(at('## Notes') > at('## Warnings') && at('### body_2.html') > at('## Notes') && at('- **Type:** draft superseded') > at('### body_2.html'));
+  assert.ok(report.includes('replay_bash.py can try to rebuild it.'));
+});
+
+test('collector: notes only still writes a report', () => {
+  const c = new (fn('ExportErrorCollector'))('n', 'u');
+  c.addNote('helper_script', 'make.py', 'm');
+  assert.ok(c.hasAny());
+  assert.ok(!c.hasWarnings());
+  const report = c.generateErrorReport();
+  assert.ok(report.includes('## Notes'));
+  assert.ok(!report.includes('## Warnings'));
+});
+
+test('readmeNoteLines groups by kind', () => {
+  const readmeNoteLines = fn('readmeNoteLines');
+  assert.deepStrictEqual(Array.from(readmeNoteLines([])), []);
+  const note = (type, filename) => ({ type, filename, error: `about ${filename}` });
+  const lines = Array.from(readmeNoteLines([note('draft_superseded', 'body_2.html'), note('draft_superseded', 'b_3.html'), note('helper_script', 'make.py')]));
+  assert.ok(lines.includes('## About some files'));
+  const i = lines.indexOf('### Drafts');
+  const j = lines.indexOf('### Helper scripts');
+  assert.ok(i > 0 && j > i);
+  assert.strictEqual(lines.slice(i, j).filter((l) => l.startsWith('- `')).length, 2);
+  assert.strictEqual(lines.slice(j).filter((l) => l.startsWith('- `')).length, 1);
+  assert.ok(lines.includes('- `body_2.html`: about body_2.html'));
+  assert.ok(!lines.includes('### Renamed files'));
+});
