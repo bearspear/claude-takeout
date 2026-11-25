@@ -602,11 +602,11 @@ def loose_commands(text: str) -> Optional[list[dict]]:
                 continue
             if nxt in (">", "|"):
                 i += 1
-            if i + 1 < n and text[i + 1] == "&":
-                i += 1
-                while i + 1 < n and re.match(r"[0-9-]", text[i + 1]):
-                    i += 1
-                i += 1
+            if i + 1 < n and text[i + 1] == "&":  # >&2 duplicates a descriptor; >& file writes the file
+                dup = re.match(r"&[0-9-]+(?=[\s;&|<>)]|\Z)", text[i + 1:])
+                i += (len(dup.group(0)) if dup else 1) + 1
+                if not dup:
+                    st["into"] = ">"
                 continue
             if i + 1 < n and text[i + 1] == "(":
                 return None
@@ -627,92 +627,23 @@ def loose_commands(text: str) -> Optional[list[dict]]:
     return commands
 
 
-PY_WRITE_RE = re.compile(r"write_text|write_bytes|\bos\.(?:open|rename|renames|replace|remove|unlink|system|popen|write|truncate|link|symlink|rmdir|removedirs|spawn\w*|exec\w*)\b|\bshutil\.|\bsubprocess\b|\bexec\s*\(|\beval\s*\(|__import__|\bimportlib\b|\.unlink\s*\(|\.rename\s*\(|\.touch\s*\(|\.truncate\s*\(|\bpty\b|\bctypes\b", re.ASCII)
-PY_WRITE_MODE_RE = re.compile(r"""(?:,\s*|\bmode\s*=\s*)['"][rbt]*[wax+][rbt+]*['"]\s*[,)]""", re.ASCII)
-PY_READ_MODE_RE = re.compile(r"""(['"])(?:r[bt]?|[bt]r)\1\Z""")
-PY_OPEN_RE = re.compile(r"(\.\s*)?\bopen\s*\(", re.ASCII)
-PY_KWARG_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*([\s\S]*)\Z")
-PY_MODULE_TAIL_RE = re.compile(r"\b(?:io|codecs|gzip|bz2|lzma)\s*\Z", re.ASCII)
-
-
-def python_call_args(text: str, start: int) -> Optional[list[str]]:
-    """pythonCallArgs: a call's top-level arguments, or None when it doesn't close."""
-    args: list[str] = []
-    depth = 0
-    quote = None
-    cur = ""
-    i = start
-    while i < len(text):
-        c = text[i]
-        if quote:
-            cur += c
-            if c == "\\" and i + 1 < len(text):
-                cur += text[i + 1]
-                i += 1
-            elif c == quote:
-                quote = None
-            i += 1
-            continue
-        if c in ("'", '"'):
-            quote = c
-            cur += c
-            i += 1
-            continue
-        if c in "([{":
-            depth += 1
-        if c in ")]}":
-            if depth == 0:
-                if c != ")":
-                    return None
-                if cur.strip() or args:
-                    args.append(cur.strip())
-                return args
-            depth -= 1
-        if c == "," and depth == 0:
-            args.append(cur.strip())
-            cur = ""
-            i += 1
-            continue
-        cur += c
-        i += 1
-    return None
-
-
-def python_may_write(source) -> bool:
-    """pythonMayWrite: whether Python source may change a file."""
-    text = str(source)
-    if PY_WRITE_RE.search(text) or PY_WRITE_MODE_RE.search(text):
-        return True
-    for m in PY_OPEN_RE.finditer(text):
-        args = python_call_args(text, m.end())
-        if args is None:
-            return True
-        method = bool(m.group(1)) and not PY_MODULE_TAIL_RE.search(text[:m.start()])
-        for i, arg in enumerate(args):
-            kw = PY_KWARG_RE.match(arg)
-            if kw:
-                if kw.group(1) == "mode" and not PY_READ_MODE_RE.match(kw.group(2)):
-                    return True
-                continue
-            if i == (0 if method else 1) and not PY_READ_MODE_RE.match(arg):
-                return True
-    return False
-
-
 WRITE_FREE_TOOLS = {"grep", "head", "tail", "wc", "cat", "ls", "echo", "printf", "test", "[", "cd", "mkdir", "diff", "file", "stat", "du", "md5sum", "sha256sum"}
 FIND_WRITES = {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fls"}
-PYTHON_RE = re.compile(r"python3?(?:\.[0-9]+)?\Z")
 
 
 def write_free_touches(command, cwd, known: list[str]) -> Optional[set[str]]:
-    """writeFreeTouches: the known files a provably write-free command writes, or None."""
-    bodies: list[str] = []
+    """writeFreeTouches: the known files a provably write-free command writes, or None.
+    Any interpreter, or a heredoc bash expands holding $ or a backtick, is never write-free."""
+    expands = [False]
 
     def mark_heredoc(m):
-        bodies.append(m.group(5) or "")
-        return f" {HEREDOC_MARK}{len(bodies) - 1}{HEREDOC_MARK} {m.group(4)}"
+        if m.group(2) == "" and re.search(r"[$`]", m.group(5) or ""):
+            expands[0] = True
+        return f" {HEREDOC_MARK}0{HEREDOC_MARK} {m.group(4)}"
 
     text = LOOSE_HEREDOC_RE.sub(mark_heredoc, str(command or ""))
+    if expands[0]:
+        return None
     commands = loose_commands(text)
     if commands is None:
         return None
@@ -746,18 +677,6 @@ def write_free_touches(command, cwd, known: list[str]) -> Optional[set[str]]:
         tool = words[0]["text"]
         args = words[1:]
         plain_args = [w for w in args if not w["text"].startswith("-")]
-        if PYTHON_RE.match(tool):
-            i = 0
-            while i < len(args) and re.match(r"-[BIuEsSqO]+\Z", args[i]["text"]):
-                i += 1
-            source = None
-            if i < len(args) and args[i]["text"] == "-c" and i + 1 < len(args) and not args[i + 1]["open"]:
-                source = args[i + 1]["text"]
-            elif i < len(args) and args[i]["text"] == "-" and len(cmd["heredocs"]) == 1:
-                source = bodies[cmd["heredocs"][0]]
-            if source is None or python_may_write(source):
-                return None
-            continue
         if cmd["heredocs"] and tool not in WRITE_FREE_TOOLS:
             return None
         if tool in WRITE_FREE_TOOLS:
@@ -792,13 +711,11 @@ def write_free_touches(command, cwd, known: list[str]) -> Optional[set[str]]:
                 return None
             continue
         if tool == "cp":
-            if any(re.match(r"-[a-zA-Z]*t", w["text"]) or w["text"].startswith("--target") for w in args):
+            if any(w["open"] or re.match(r"-[a-zA-Z]*t", w["text"]) or w["text"].startswith("--target") for w in args):
                 return None
             if len(plain_args) < 2:
                 return None
             dest = plain_args[-1]
-            if dest["open"]:
-                return None
             mark(dest)
             for src in plain_args[:-1]:
                 mark({"text": re.sub(r"/+\Z", "", dest["text"]) + "/" + src["text"].split("/")[-1], "open": False})
@@ -832,6 +749,8 @@ def command_touches(command, cwd, known: list[str]) -> set[str]:
             p, _ = resolve_sandbox_path(path, cwd, known)
             if p and p in known_set:
                 touched.add(p)
+            if re.search(r"[$`]", body or ""):  # $(...) in it runs
+                touched.update(known)
         header = whole.split("\n", 1)[0]
         tail = (re.search(r"<<-?\s*(['\"]?)[A-Za-z0-9_]+\1[ \t]*>(?!>)\s*\S+(.*)\Z", header)
                 or re.search(r"<<-?\s*(['\"]?)[A-Za-z0-9_]+\1(.*)\Z", header))
@@ -839,8 +758,13 @@ def command_touches(command, cwd, known: list[str]) -> set[str]:
     steps = literal_steps(rest, copies=True)
     if steps is None:
         # Not provably write-free: any file may have changed, named in the command or not.
+        # Also every known file it names, as before the write-free check existed.
         free = write_free_touches(rest, cwd, known)
         touched.update(known if free is None else free)
+        for k in known:
+            name = k.split("/")[-1]
+            if name and name in rest:
+                touched.add(k)
         return touched
 
     def mark(word):

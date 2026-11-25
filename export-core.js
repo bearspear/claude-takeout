@@ -547,8 +547,8 @@ function literalSwapCommand(command, cwd, known = []) {
 // The known files a bash command may have changed, when it was not replayed. Its cat > heredocs
 // were replayed as creates, except that a body bash expanded leaves that file unknown. The rest:
 // when it is only cd, read-only tools, cp, literal sed -i and cat >>, the files those write (for cp
-// into a folder, the copy's name there); when it provably writes nothing else (writeFreeTouches),
-// the known files its redirects and copies name; otherwise every known file.
+// into a folder, the copy's name there). Otherwise every known file its text names, and when it
+// can't be shown to write nothing else (writeFreeTouches) every known file.
 function commandTouches(command, cwd, known) {
   const raw = String(command || '');
   const knownSet = new Set(known);
@@ -558,6 +558,7 @@ function commandTouches(command, cwd, known) {
     if (m[2] === '' && /[$`\\]/.test(m[4] || '')) {
       const { path } = resolveSandboxPath(heredocPath(m), cwd, known);
       if (path && knownSet.has(path)) touched.add(path);
+      if (/[$`]/.test(m[4] || '')) known.forEach((k) => touched.add(k));  // $(...) in it runs
     }
     const header = m[0].split('\n')[0];
     const tail = /<<-?\s*(['"]?)\w+\1[ \t]*>(?!>)\s*\S+(.*)$/.exec(header) || /<<-?\s*(['"]?)\w+\1(.*)$/.exec(header);
@@ -567,8 +568,10 @@ function commandTouches(command, cwd, known) {
   if (!parsed) {
     // Not provably write-free (a script run, a write in Python, an unknown tool): any file may
     // have changed, named in the command or not.
+    // Also every known file it names, as before the write-free check existed.
     const free = writeFreeTouches(rest, cwd, known);
     for (const k of free || known) touched.add(k);
+    for (const k of known) { const name = k.split('/').pop(); if (name && rest.includes(name)) touched.add(k); }
     return touched;
   }
   const mark = (word) => {
@@ -662,7 +665,12 @@ function looseCommands(text) {
         continue;
       }
       if (next === '>' || next === '|') i++;
-      if (text[i + 1] === '&') { i++; while (i + 1 < text.length && /[\d-]/.test(text[i + 1])) i++; continue; }
+      if (text[i + 1] === '&') {  // >&2 duplicates a descriptor; >& file writes the file
+        const dup = /^&[\d-]+(?=[\s;&|<>)]|$)/.exec(text.slice(i + 1));
+        i += dup ? dup[0].length : 1;
+        if (!dup) into = '>';
+        continue;
+      }
       if (text[i + 1] === '(') return null;
       into = '>';
       continue;
@@ -676,63 +684,22 @@ function looseCommands(text) {
   return commands;
 }
 
-// Python source that may change a file: a write or remove call, a process, eval or exec, a string
-// that reads as a write mode passed to a call, or an open() whose mode isn't a literal read mode.
-const PY_WRITE_RE = /write_text|write_bytes|\bos\.(?:open|rename|renames|replace|remove|unlink|system|popen|write|truncate|link|symlink|rmdir|removedirs|spawn\w*|exec\w*)\b|\bshutil\.|\bsubprocess\b|\bexec\s*\(|\beval\s*\(|__import__|\bimportlib\b|\.unlink\s*\(|\.rename\s*\(|\.touch\s*\(|\.truncate\s*\(|\bpty\b|\bctypes\b/;
-const PY_WRITE_MODE_RE = /(?:,\s*|\bmode\s*=\s*)['"][rbt]*[wax+][rbt+]*['"]\s*[,)]/;
-const PY_READ_MODE_RE = /^(['"])(?:r[bt]?|[bt]r)\1$/;
-// A call's top-level arguments from just after its (, or null when it doesn't close.
-function pythonCallArgs(text, from) {
-  const args = [];
-  let depth = 0, quote = null, cur = '';
-  for (let i = from; i < text.length; i++) {
-    const c = text[i];
-    if (quote) {
-      cur += c;
-      if (c === '\\' && i + 1 < text.length) cur += text[++i];
-      else if (c === quote) quote = null;
-      continue;
-    }
-    if (c === "'" || c === '"') { quote = c; cur += c; continue; }
-    if (c === '(' || c === '[' || c === '{') depth++;
-    if (c === ')' || c === ']' || c === '}') {
-      if (depth === 0) { if (c !== ')') return null; if (cur.trim() || args.length) args.push(cur.trim()); return args; }
-      depth--;
-    }
-    if (c === ',' && depth === 0) { args.push(cur.trim()); cur = ''; continue; }
-    cur += c;
-  }
-  return null;
-}
-function pythonMayWrite(source) {
-  const text = String(source);
-  if (PY_WRITE_RE.test(text) || PY_WRITE_MODE_RE.test(text)) return true;
-  for (const m of text.matchAll(/(\.\s*)?\bopen\s*\(/g)) {
-    const args = pythonCallArgs(text, m.index + m[0].length);
-    if (!args) return true;
-    // open(file, mode) and io/codecs/gzip/bz2/lzma.open(file, mode); a path's .open(mode).
-    const method = !!m[1] && !/\b(?:io|codecs|gzip|bz2|lzma)\s*$/.test(text.slice(0, m.index));
-    for (const [i, arg] of args.entries()) {
-      const kw = /^([A-Za-z_]\w*)\s*=(?!=)\s*([\s\S]*)$/.exec(arg);
-      if (kw) { if (kw[1] === 'mode' && !PY_READ_MODE_RE.test(kw[2])) return true; continue; }
-      if (i === (method ? 0 : 1) && !PY_READ_MODE_RE.test(arg)) return true;
-    }
-  }
-  return false;
-}
-
 const WRITE_FREE_TOOLS = new Set(['grep', 'head', 'tail', 'wc', 'cat', 'ls', 'echo', 'printf', 'test', '[', 'cd', 'mkdir', 'diff', 'file', 'stat', 'du', 'md5sum', 'sha256sum']);
 const FIND_WRITES = new Set(['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fls']);
-const PYTHON_RE = /^python3?(?:\.\d+)?$/;
 
 // The known files a command writes, when it provably writes nothing else: every simple command is a
-// read-only tool (with cp, mkdir, find without -exec/-delete/-fprint, sort without -o, uniq, diff,
-// file, stat, du and checksums), or python3 -c / python3 - << with source that writes nothing
-// (pythonMayWrite); redirects and cp and uniq outputs are /dev/null or name the files returned.
-// null when that can't be shown: then any known file may have changed.
+// read-only tool (with cp without globs, mkdir, find without -exec/-delete/-fprint, sort without -o,
+// uniq, diff, file, stat, du and checksums); redirects and cp and uniq outputs are /dev/null or name
+// the files returned. null when that can't be shown, and then any known file may have changed: any
+// interpreter (Python included, whatever its script), any other tool, or a heredoc bash expands that
+// holds $ or a backtick (it can run a command).
 function writeFreeTouches(command, cwd, known) {
-  const bodies = [];
-  const text = String(command || '').replace(LOOSE_HEREDOC_RE, (...m) => { bodies.push(m[5] || ''); return ` ${HEREDOC_MARK}${bodies.length - 1}${HEREDOC_MARK} ${m[4]}`; });
+  let expands = false;
+  const text = String(command || '').replace(LOOSE_HEREDOC_RE, (...m) => {
+    if (m[2] === '' && /[$`]/.test(m[5] || '')) expands = true;
+    return ` ${HEREDOC_MARK}0${HEREDOC_MARK} ${m[4]}`;
+  });
+  if (expands) return null;
   const commands = looseCommands(text);
   if (!commands) return null;
   const knownSet = new Set(known);
@@ -753,15 +720,6 @@ function writeFreeTouches(command, cwd, known) {
     const tool = words[0].text;
     const args = words.slice(1);
     const plainArgs = args.filter((w) => !w.text.startsWith('-'));
-    if (PYTHON_RE.test(tool)) {
-      let i = 0;
-      while (i < args.length && /^-[BIuEsSqO]+$/.test(args[i].text)) i++;
-      let source = null;
-      if (args[i] && args[i].text === '-c' && args[i + 1] && !args[i + 1].open) source = args[i + 1].text;
-      else if (args[i] && args[i].text === '-' && cmd.heredocs.length === 1) source = bodies[cmd.heredocs[0]];
-      if (source === null || pythonMayWrite(source)) return null;
-      continue;
-    }
     if (cmd.heredocs.length && !WRITE_FREE_TOOLS.has(tool)) return null;
     if (WRITE_FREE_TOOLS.has(tool)) continue;
     if (tool === 'sed') {
@@ -786,10 +744,9 @@ function writeFreeTouches(command, cwd, known) {
       continue;
     }
     if (tool === 'cp') {
-      if (args.some((w) => /^-[a-zA-Z]*t/.test(w.text) || w.text.startsWith('--target'))) return null;
+      if (args.some((w) => w.open || /^-[a-zA-Z]*t/.test(w.text) || w.text.startsWith('--target'))) return null;
       if (plainArgs.length < 2) return null;
       const dest = plainArgs[plainArgs.length - 1];
-      if (dest.open) return null;
       mark(dest);
       for (const src of plainArgs.slice(0, -1)) mark({ text: dest.text.replace(/\/+$/, '') + '/' + src.text.split('/').pop(), open: false });
       if (args.some((w) => /^-[a-zA-Z]*[rRa]/.test(w.text) || w.text === '--recursive' || w.text === '--archive')) {
@@ -2521,7 +2478,7 @@ if (typeof module !== 'undefined' && module.exports) {
     escapeHtmlText, formatTimestamp, mdLinkText, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
     sortArtifactRows, artifactRowNotes, artifactSource, artifactUrl, artifactLocal, artifactVersionLinks, ARTIFACT_THUMB_PERMISSION_STATUS, artifactsChangedLine,
     artifactThumbsLine, ARTIFACTS_UNLISTED_HEADING, ARTIFACTS_NO_LIST, splitListedRows, artifactsIndexMd, artifactsIndexHtml,
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, literalSwapCommand, commandTouches, looseCommands, pythonMayWrite, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
     publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact, artifactForeign,

@@ -5468,23 +5468,26 @@ test('replay helpers: commandCwds, literalSwapCommand and commandTouches agree i
   assert.deepStrictEqual(js[19].swap, { edits: [] });
   assert.deepStrictEqual(js[21].touches, ['/out/p.html', '/out/q2.md']);
   assert.deepStrictEqual(js[22].touches, [...known].sort(), 'a Python write: every file');
-  assert.deepStrictEqual(js[23].touches, ['/h/p.html']);
+  assert.deepStrictEqual(js[23].touches, [...known].sort(), 'a heredoc bash expands, with $, can run anything');
   assert.ok(js[24].swap && js[24].swap.edits.length === 1);
   assert.strictEqual(js[25].swap, null);
   assert.strictEqual(js[26].swap, null);
-  const at = (c) => js[commands.indexOf(c)];
+  const at = (c) => js[commands.lastIndexOf(c)];
   assert.strictEqual(at('ls').cwd, null, 'a cd after && may not have run');
   assert.deepStrictEqual(at('python3 /h/fix.py').touches, [...known].sort());
   assert.deepStrictEqual(at('make').touches, [...known].sort());
-  assert.deepStrictEqual(at('grep -n a /h/p.html | head -5 2>/dev/null').touches, []);
-  assert.deepStrictEqual(at("python3 -c \"print(open('/h/p.html').read())\"").touches, []);
+  const named = ['/h/p.html', '/out/p.html', 'p.html'];
+  assert.deepStrictEqual(at('grep -n a /h/p.html | head -5 2>/dev/null').touches, named, 'write-free, but the files it names are marked as before');
+  assert.deepStrictEqual(at("python3 -c \"print(open('/h/p.html').read())\"").touches, [...known].sort(), 'Python is never write-free');
   assert.deepStrictEqual(at("python3 -c \"open('/h/x','w')\"").touches, [...known].sort());
   assert.deepStrictEqual(at("find /h -name '*.html' | sort").touches, []);
   assert.deepStrictEqual(at('find /h -delete').touches, [...known].sort());
-  assert.deepStrictEqual(at('grep a /h/p.html > /h/q.md').touches, ['/h/q.md']);
+  assert.deepStrictEqual(at('grep a /h/p.html > /h/q.md').touches, [...named, '/h/q.md'].sort());
   assert.deepStrictEqual(at('cp -r /h /out').touches, ['/out/p.html', '/out/q2.md']);
-  assert.deepStrictEqual(at('uniq /h/p.html /h/q.md').touches, ['/h/q.md']);
-  assert.deepStrictEqual(at("sed 's/a/b/' /h/p.html > /tmp/x").touches, []);
+  assert.deepStrictEqual(at('uniq /h/p.html /h/q.md').touches, [...named, '/h/q.md'].sort());
+  assert.deepStrictEqual(at('cat /h/p.html >> /out/q2.md 2>&1').touches, [...named, '/out/q2.md'].sort());
+  assert.deepStrictEqual(at("sed 's/a/b/' /h/p.html > /tmp/x").touches, named);
+  assert.deepStrictEqual(at("find /h -name '*.html' | sort").touches, []);
   assert.strictEqual(at("sed -i 's/a/b/' /h/p.html && cp /h/q.md /mnt/user-data/outputs/").swap.edits.length, 1);
   assert.strictEqual(at("sed -i 's/a/b/' /h/p.html && cp /h/p.html /out/").swap, null, 'a copy onto a known file');
   assert.deepStrictEqual(at('echo $(rm /h/p.html)').touches, [...known].sort());
@@ -5508,8 +5511,8 @@ test('replay: a script that may write a file without naming it stops replay of e
 });
 
 test('replay: write-free commands between seds keep replay going; a redirect into a known file stops only that file', () => {
-  const between = ["grep -n a /h/p.html | head -5 2>/dev/null", "python3 -c \"print(open('/h/p.html').read().count('a'))\"", "find /h -name '*.html' | sort > /tmp/list.txt",
-    'mkdir -p /out && cp /h/p.html /out/', "python3 - << 'PY'\nimport json\nprint(len(open('/h/p.html', encoding='utf-8').read()))\nPY"];
+  const between = ["grep -n a /h/*.md | head -5 2>/dev/null", "find /h -name '*.html' | sort > /tmp/list.txt",
+    'mkdir -p /out && ls /out', 'cp /h/p.html /out/', 'ls /h >&2', "cat << 'EOF'\n$(not run)\nEOF"];
   for (const command of between) {
     const data = turns(
       [use('w', 'Write', { file_path: '/h/p.html', content: 'a c\n' })],
@@ -5520,11 +5523,39 @@ test('replay: write-free commands between seds keep replay going; a redirect int
   }
   const data = turns(
     [use('w', 'Write', { file_path: '/h/p.html', content: 'a\n' }), use('w2', 'Write', { file_path: '/h/q.html', content: 'a\n' })],
-    [use('x', 'bash_tool', { command: 'grep a /h/p.html > /h/q.html' })],
+    [use('x', 'bash_tool', { command: 'grep a /tmp/src > /h/q.html' })],
     [use('s', 'bash_tool', { command: "sed -i 's/a/b/' /h/q.html" }), use('t', 'bash_tool', { command: "sed -i 's/a/c/' /h/p.html" })],
   );
   bothReplay(data, 'p.html', 'c\n');
   bothReplay(data, 'q.html', 'a\n');
+});
+
+test('replay: reviewer probes end opaque, unreplayed, with one warning', () => {
+  const probes = [
+    "python3 -c \"import fileinput\nfor l in fileinput.input('/h/p.html', inplace=True): print(l.replace('c', 'd'), end='')\"",
+    "python3 -c \"import os as o; o.remove('/h/p.html')\"",
+    "python3 - << 'PY'\nimport pandas as pd\ndf = pd.DataFrame()\ndf.to_csv('/h/p.html')\nPY",
+    "python3 -c \"from shutil import copyfile; copyfile('/tmp/x','/h/p.html')\"",
+    "python3 -c \"print(open('/h/x').read())\"",
+    'cp /tmp/build/* /h/',
+    "python3 - << EOF\nprint(\"$(sed -i 's/a/q/' /h/p.html)\")\nEOF",
+    "cat << EOF\n$(sed -i 's/a/q/' /h/x.html)\nEOF",
+    "cat > /h/notes.txt << EOF\n$(sed -i 's/a/q/' /h/x.html)\nEOF",
+    'echo zz >& /h/p.html',
+    'echo zz >| /h/p.html',
+    'echo zz &> /h/p.html',
+  ];
+  for (const command of probes) {
+    const data = turns(
+      [use('w', 'Write', { file_path: '/h/p.html', content: 'a c\n' })],
+      [use('x', 'bash_tool', { command })],
+      [use('s', 'bash_tool', { command: "sed -i 's/a/b/' /h/p.html" })],
+    );
+    bothReplay(data, 'p.html', 'a c\n');
+    const { warnings, replayed } = opaqueAfterReplay(data);
+    assert.strictEqual(replayed.size, 0, command);
+    assert.strictEqual(warnings.filter((w) => w.filename === 'p.html').length, 1, command);
+  }
 });
 
 test('replay: sed then cp to outputs replays; cp onto a known file does not', () => {
