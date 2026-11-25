@@ -1730,7 +1730,7 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
             elif name not in READ_FILE_TOOLS and inp.get("command") != "view":
                 # A tool the replay doesn't model that names a known file may have changed it: the
                 # file is opaque from here on.
-                for fld in ("path", "file_path", "filepath"):
+                for fld in ("path", "file_path", "filepath", "notebook_path"):
                     value = inp.get(fld)
                     if not isinstance(value, str) or not value:
                         continue
