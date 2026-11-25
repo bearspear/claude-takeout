@@ -299,8 +299,8 @@ Each entry includes:
 
 | Type | Means | What to do |
 |---|---|---|
-| `draft_superseded` | A command the export can't follow changed this file, and afterwards Claude delivered or presented files from the same folder (or below). Those are in the export; this file is likely an earlier draft of one of them, kept for reference. "Likely" is a judgment, not proof. | Nothing, usually: use the delivered file. If you want this draft's last state, `replay_bash.py` can try to rebuild it. |
-| `helper_script` | A script Claude ran (`.py`, `.sh`, `.js` and the like) and never delivered, changed by a command the export can't follow. This copy may be older than the one Claude ran. | Nothing, unless you want the script itself: `replay_bash.py` can rebuild it. |
+| `draft_superseded` | A command the export can't follow changed this file, and afterwards Claude delivered or presented files from the same folder (or below), or, for a draft in `/home/claude`, from claude.ai's outputs folder when the name matches or a later command copied or built from the draft into it. Those are in the export; this file is likely an earlier draft of one of them, kept for reference. "Likely" is a judgment, not proof. | Nothing, usually: use the delivered file. If you want this draft's last state, `replay_bash.py` can try to rebuild it. |
+| `helper_script` | A script Claude ran (`.py`, `.sh`, `.bash`, `.pl` or `.rb`) and never delivered, changed by a command the export can't follow. This copy may be older than the one Claude ran. | Nothing, unless you want the script itself: `replay_bash.py` can rebuild it. |
 | `name_changed` | Two different files had the same name. Both are kept; this one got a new name. The note gives both original paths. | Nothing. |
 
 A file Claude presented or delivered under its own name after its last change needs no entry at all: that download is its final state, and it replaces the rebuilt file and its last `_vN`.
