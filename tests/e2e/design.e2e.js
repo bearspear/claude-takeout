@@ -120,6 +120,8 @@ async function writeOut(zip) {
     context.on('page', () => { seen.popups++; });
     await context.route('**/*', r => { const u = r.request().url(); if (u.startsWith('file:')) return r.continue(); seen.requests.push(u); return r.abort(); });
     const waitLog = async (text, ms = 3000) => { const end = Date.now() + ms; while (Date.now() < end) { if (seen.logs.some(l => l.includes(text))) return true; await page.waitForTimeout(25); } return false; };
+    // A board into (v1.23.2) the middle of the window: focus on its Open alone (keyboard focus brings it into view).
+    const bring = async name => { await page.locator('.design-board', { hasText: name }).locator('button.board-open').focus({ timeout: 1000 }).catch(() => {}); await page.waitForTimeout(50); };
     await page.goto('file://' + path.join(dir, 'viewer.html') + `#a=${uuidToBase58(U(1))}`);
     const canvas = page.locator('.design-canvas');
     await canvas.waitFor({ timeout: 4000 }).catch(() => {});
@@ -151,8 +153,12 @@ async function writeOut(zip) {
     const mainBox = await page.locator('.design-board', { hasText: 'Home A' }).boundingBox();
     check(`${label}: a board's body starts at its place`, Math.abs(mainBody.y - mainBox.y) < 1, JSON.stringify([mainBody.y, mainBox.y]));
 
+    const deepActive = () => page.evaluate(() => { let a = document.activeElement; while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; return a ? (a.id || a.getAttribute('aria-label') || a.className) : null; });
+    // Opened by its address (the chat viewer routes it): focus is on the page title, not left on a hidden column.
+    check(`${label}: focus on the page title when opened by its address`, (await deepActive()) === 'page-title', String(await deepActive()));
+
     // The hostile board.
-    await page.locator('.design-board', { hasText: 'Hostile board' }).scrollIntoViewIfNeeded();
+    await bring('Hostile board');
     check(`${label}: the hostile board ran to the end`, await waitLog('ATTACK finished yes'));
     for (const [name, end] of Object.entries(attackEnds)) {
       const said = seen.logs.filter(l => l.startsWith(`ATTACK ${name} `)).map(l => l.slice(`ATTACK ${name} `.length));
@@ -160,11 +166,8 @@ async function writeOut(zip) {
     }
     check(`${label}: nothing ran in the viewer`, !(await page.evaluate(() => !!window.__hit)));
 
-    const deepActive = () => page.evaluate(() => { let a = document.activeElement; while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement; return a ? (a.id || a.getAttribute('aria-label') || a.className) : null; });
-    // Opened by its address (the chat viewer routes it): focus is on the page title, not left on a hidden column.
-    check(`${label}: focus on the page title when opened by its address`, (await deepActive()) === 'page-title', String(await deepActive()));
-
     // Open alone, and back.
+    await bring('Home A');
     await page.locator('.design-board', { hasText: 'Home A' }).locator('button.board-open').click();
     await page.locator('button.canvas-back').waitFor({ timeout: 3000 }).catch(() => {});
     check(`${label}: Open alone shows the board by itself`, await page.locator('.design-canvas').count() === 0 && await page.locator('#page-body .preview iframe').count() === 1);
@@ -184,6 +187,20 @@ async function writeOut(zip) {
     await page.locator('button.canvas-back').click();
     await canvas.waitFor({ timeout: 3000 }).catch(() => {});
     check(`${label}: Back from a board not drawn lands on its row`, (await deepActive()) === 'Open Off canvas alone', String(await deepActive()));
+    // Afresh (moving the canvas to a board ends the opening view): the opening view follows the window's size.
+    await page.reload();
+    await canvas.waitFor({ timeout: 4000 }).catch(() => {});
+    await page.waitForTimeout(300);
+    // A click on Open alone of a board running off the window opens it (a mouse focus doesn't move the canvas).
+    const hostileBody = await page.locator('.design-board', { hasText: 'Hostile board' }).locator('.board-body').boundingBox();
+    const viewBox = await page.locator('.design-view').boundingBox();
+    const panBefore = await canvas.evaluate(c => c.style.transform);
+    await page.locator('.design-board', { hasText: 'Hostile board' }).locator('button.board-open').click({ timeout: 2000 }).catch(() => {});
+    await page.locator('button.canvas-back').waitFor({ timeout: 2000 }).catch(() => {});
+    const openedPartly = await page.locator('button.canvas-back').count();
+    check(`${label}: Open alone on a board partly out of the window opens it`, openedPartly === 1, JSON.stringify([hostileBody, viewBox, openedPartly]));
+    if (openedPartly) { await page.locator('button.canvas-back').click(); await canvas.waitFor({ timeout: 3000 }).catch(() => {}); }
+    check(`${label}: and Back leaves the canvas where it was`, (await canvas.evaluate(c => c.style.transform)) === panBefore, JSON.stringify([panBefore, await canvas.evaluate(c => c.style.transform)]));
     // Narrow: each board's title row stays one line; then wide again, and the canvas follows the width.
     const wideWidth = (await canvas.boundingBox()).width;
     // Title rows: never wider than the board (a long title or badge shortens), the title never squeezed to nothing.
@@ -220,53 +237,68 @@ async function writeOut(zip) {
     const again = await page.locator('#page-badges .badge').allTextContents();
     check(`${label}: badges stay single after Back`, again.filter(b => b === 'Design canvas').length === 1 && again.filter(b => b === 'some boards need claude.ai').length === 1, again.join('|'));
 
-    // Zoom and drag (v1.23). The canvas is 1100 wide: at 1300 its Fit is 100% standalone, less hosted (the chat
-    // viewer's column takes room).
+    // The window (v1.23.2): the canvas moves and zooms inside a window as tall as #page-body, never scrolled; it opens
+    // fitted to the width (1100 wide: 100% standalone at 1300, less hosted, where the chat viewer's column takes room),
+    // Fit shows the whole design, 10% to 200%. The zoom bar sits bottom right, the mode pill bottom middle.
     const level = () => page.locator('.canvas-zoom .zoom-level').textContent({ timeout: 1000 }).catch(() => null);
     const press = async (cls, n = 1) => { for (let i = 0; i < n; i++) await page.locator(`.canvas-zoom .${cls}`).click({ timeout: 1000 }).catch(() => {}); };
     const body = page.locator('#page-body');
-    const scrollTo = (left, top) => body.evaluate((b, [l, t]) => { b.scrollLeft = l; b.scrollTop = t; }, [left, top]);
-    const scrollOf = () => body.evaluate(b => [b.scrollLeft, b.scrollTop]);
+    const view = page.locator('.design-view');
+    await body.evaluate(b => { b.scrollTop = 0; b.scrollLeft = 0; });
+    const panOf = () => canvas.evaluate(c => { const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\)/.exec(c.style.transform); return m ? [Number(m[1]), Number(m[2])] : null; });
     const boxOf = name => page.locator('.design-board', { hasText: name }).locator('.board-body').boundingBox();
+    const inView = async name => { const b = await boxOf(name), v = await view.boundingBox(); return !!b && b.x >= v.x - 0.5 && b.y >= v.y - 0.5 && b.x + b.width <= v.x + v.width + 0.5 && b.y + b.height <= v.y + v.height + 0.5; };
+    const win = await view.evaluate(v => { const b = v.closest('#page-body'); return { h: v.getBoundingClientRect().height, bodyH: b.clientHeight, overflow: getComputedStyle(v).overflow, scrolled: v.scrollLeft + v.scrollTop }; });
+    // It ends 72 px short when boards not drawn are listed below it, so the list shows.
+    check(`${label}: canvas: the window fills the page (less the list's 72 px) and never scrolls`, Math.abs(win.h - Math.max(320, win.bodyH - 72)) < 2 && win.overflow === 'hidden' && win.scrolled === 0, JSON.stringify(win));
     const startLevel = await level();
-    const upTo = async want => { for (let i = 0; i < 9 && (await level()) !== want; i++) await press('zoom-in'); };
+    const startPan = await panOf();
+    check(`${label}: canvas: opens fitted to the width, from the top`, !!startLevel && parseFloat(startLevel) <= 100 && (isHosted || startLevel === '100%') && !!startPan && startPan[1] === 40, JSON.stringify([startLevel, startPan]));
+    const bars = await page.evaluate(() => null).then(() => Promise.all([view.boundingBox(), page.locator('.design-view > .canvas-modes').boundingBox(), page.locator('.design-view > .canvas-zoom').boundingBox()]));
+    check(`${label}: canvas: the mode pill sits bottom middle, the zoom bar bottom right`, bars.every(Boolean)
+      && Math.abs(bars[1].x + bars[1].width / 2 - (bars[0].x + bars[0].width / 2)) < 2 && Math.abs(bars[0].y + bars[0].height - (bars[1].y + bars[1].height)) < 20
+      && Math.abs(bars[0].x + bars[0].width - (bars[2].x + bars[2].width)) < 20 && Math.abs(bars[0].y + bars[0].height - (bars[2].y + bars[2].height)) < 20, JSON.stringify(bars));
+    const upTo = async want => { for (let i = 0; i < 16 && (await level()) !== want; i++) await press('zoom-in'); };
     await upTo('100%');
     await press('zoom-in');
     const firstIn = await level();
     await press('zoom-in', 5);
     const top = await level();
     const topWidth = (await canvas.boundingBox() || {}).width;
-    check(`${label}: canvas: + zooms past 100% to 125%, 200% is the top`, parseFloat(startLevel) <= 100 && (isHosted || startLevel === '100%') && firstIn === '125%' && top === '200%' && Math.abs(topWidth - 2200) < 4, JSON.stringify([startLevel, firstIn, top, topWidth]));
+    check(`${label}: canvas: + zooms past 100% to 125%, 200% is the top`, firstIn === '125%' && top === '200%' && Math.abs(topWidth - 2200) < 4, JSON.stringify([firstIn, top, topWidth]));
     await press('zoom-fit');
-    // Narrower: Fit below 100%, and − never goes under it.
-    await page.setViewportSize({ width: 900, height: 900 });
-    await page.waitForTimeout(500);
     const fitLevel = await level();
-    const fitWidth = (await canvas.boundingBox()).width;
-    await press('zoom-out', 2);
-    check(`${label}: canvas: − stops at Fit`, !!fitLevel && parseFloat(fitLevel) < 100 && (await level()) === fitLevel && Math.abs((await canvas.boundingBox()).width - fitWidth) < 1, JSON.stringify([fitLevel, await level(), fitWidth]));
+    const allIn = [];
+    for (const name of ['Home A', 'Templated', 'With pictures', 'Hostile board', 'Far away', 'Not saved']) allIn.push(await inView(name));
+    check(`${label}: canvas: Fit shows the whole design`, parseFloat(fitLevel) < 20 && allIn.every(Boolean), JSON.stringify([fitLevel, allIn]));
+    await press('zoom-out', 3);
+    check(`${label}: canvas: − goes below Fit, down to 10%`, (await level()) === '10%', String(await level()));
+    // A resize at Fit fits again; zoomed, the zoom stays.
+    await press('zoom-fit');
+    await page.setViewportSize({ width: 1300, height: 1400 });
+    await page.waitForTimeout(500);
+    const tallerFit = await level();
     await upTo('125%');
     const chosen = await level();
     await page.setViewportSize({ width: 1300, height: 900 });
     await page.waitForTimeout(500);
     const kept = await level();
     await press('zoom-fit');
-    check(`${label}: canvas: resize at Fit refits; after zooming, resize keeps the zoom`, parseFloat(fitLevel) < parseFloat(startLevel) && chosen === '125%' && kept === chosen && (await level()) === startLevel, JSON.stringify([fitLevel, chosen, kept, await level()]));
+    check(`${label}: canvas: a resize at Fit fits again; after zooming, a resize keeps the zoom`, parseFloat(tallerFit) > parseFloat(fitLevel) && chosen === '125%' && kept === chosen && (await level()) === fitLevel, JSON.stringify([fitLevel, tallerFit, chosen, kept, await level()]));
 
-    // Move and Interact (v1.23.1). The canvas opens in Move: boards ignore the mouse, a plain wheel zooms, a drag
-    // anywhere pans.
-    const mode = () => page.locator('.canvas-modes[role="group"] .canvas-mode[aria-pressed="true"]').allTextContents().catch(() => []);
+    // Move and Interact (v1.23.1; the pill and V/H since v1.23.2). The canvas opens in Move: boards ignore the mouse,
+    // a plain wheel zooms, a drag anywhere moves the canvas.
+    const mode = () => page.locator('.canvas-modes[role="group"] .canvas-mode[aria-pressed="true"]').evaluateAll(bs => bs.map(b => b.dataset.mode)).catch(() => []);
+    const modeButton = m => page.locator(`.canvas-modes button.canvas-mode[data-mode="${m}"]`);
     const framePE = () => page.locator('.design-board', { hasText: 'Home A' }).locator('iframe').evaluate(f => getComputedStyle(f).pointerEvents, null, { timeout: 1000 }).catch(() => null);
-    const modeGroup = await page.locator('.canvas-zoom .canvas-modes').evaluate(g => ({ label: g.getAttribute('aria-label'), first: g === g.parentNode.firstElementChild,
-      buttons: [...g.querySelectorAll('button.canvas-mode')].map(b => `${b.textContent}:${b.getAttribute('aria-pressed')}`) }), null, { timeout: 1000 }).catch(() => null);
-    check(`${label}: canvas: opens in Move, Move | Interact first in the bar`, !!modeGroup && modeGroup.label === 'Canvas mode' && modeGroup.first && modeGroup.buttons.join() === 'Move:true,Interact:false', JSON.stringify(modeGroup));
+    const modeGroup = await page.locator('.design-view > .canvas-modes').evaluate(g => ({ label: g.getAttribute('aria-label'),
+      buttons: [...g.querySelectorAll('button.canvas-mode')].map(b => `${b.getAttribute('aria-label')}:${b.getAttribute('aria-pressed')}:${!!b.querySelector('svg')}`) }), null, { timeout: 1000 }).catch(() => null);
+    check(`${label}: canvas: opens in Move; the pill is the arrow (Interact) and the hand (Move)`, !!modeGroup && modeGroup.label === 'Canvas mode' && modeGroup.buttons.join() === 'Interact (V):false:true,Move (H):true:true', JSON.stringify(modeGroup));
     check(`${label}: canvas: in Move a board's frame ignores the mouse`, (await framePE()) === 'none', String(await framePE()));
-    // A plain wheel over a board zooms about the pointer: from Fit, where the canvas may still be narrower or shorter
-    // than the view (standalone, Fit is 100% and the canvas is narrower), and from 125%.
+    // A plain wheel over a board zooms about the pointer: from Fit and from 125%.
     const plainWheel = async (from, name) => {
       await press('zoom-fit');
-      if (from !== 'fit') await upTo(from);
-      await scrollTo(0, 0);
+      if (from !== 'fit') { await upTo(from); await bring(name); }
       const b0 = await boxOf(name);
       const p = { x: b0.x + b0.width * 0.6, y: b0.y + b0.height * 0.6 };
       const f = { x: (p.x - b0.x) / b0.width, y: (p.y - b0.y) / b0.height };
@@ -282,33 +314,40 @@ async function writeOut(zip) {
     check(`${label}: canvas: Move: a plain wheel over a board zooms about the pointer from Fit`, fromFit.ok, fromFit.said);
     const from125 = await plainWheel('125%', 'Home A');
     check(`${label}: canvas: Move: a plain wheel over a board zooms about the pointer from 125%`, from125.ok, from125.said);
-    const mp = from125.p;
+    const moved = (a, b) => [Math.round(b[0] - a[0]), Math.round(b[1] - a[1])];
+    await press('zoom-fit');
     await upTo('125%');
-    await scrollTo(0, 0);
+    await bring('Home A');
+    const mp = from125.p;
     const beforeShift = await level();
+    let p0 = await panOf();
     await page.mouse.move(mp.x, mp.y);
     await page.keyboard.down('Shift');
     await page.mouse.wheel(0, 100);
     await page.keyboard.up('Shift');
     await page.waitForTimeout(200);
-    const shifted = await scrollOf();
-    check(`${label}: canvas: Move: Shift+wheel scrolls sideways, no zoom`, shifted[0] > 0 && shifted[1] === 0 && (await level()) === beforeShift, JSON.stringify([shifted, beforeShift, await level()]));
-    await scrollTo(0, 0);
+    const shifted = moved(p0, await panOf());
+    check(`${label}: canvas: Move: Shift+wheel moves sideways, no zoom`, shifted[0] === -100 && shifted[1] === 0 && (await level()) === beforeShift, JSON.stringify([shifted, beforeShift, await level()]));
+    p0 = await panOf();
     await page.mouse.wheel(100, 0);
     await page.waitForTimeout(200);
-    const swiped = await scrollOf();
-    check(`${label}: canvas: Move: a sideways swipe scrolls sideways, no zoom`, swiped[0] > 0 && swiped[1] === 0 && (await level()) === beforeShift, JSON.stringify([swiped, beforeShift, await level()]));
-    await scrollTo(0, 0);
+    const swiped = moved(p0, await panOf());
+    check(`${label}: canvas: Move: a sideways swipe moves sideways, no zoom`, swiped[0] === -100 && swiped[1] === 0 && (await level()) === beforeShift, JSON.stringify([swiped, beforeShift, await level()]));
+    // A drag of (-100, -80).
+    const dragFrom = async at => {
+      const a = await panOf();
+      await page.mouse.move(at.x, at.y);
+      await page.mouse.down();
+      for (let i = 1; i <= 5; i++) await page.mouse.move(at.x - 20 * i, at.y - 16 * i);
+      await page.mouse.up();
+      return moved(a, await panOf());
+    };
+    await bring('Home A');
     const mb = await boxOf('Home A');
-    const mstart = { x: mb.x + mb.width / 2, y: mb.y + mb.height / 2 };
-    await page.mouse.move(mstart.x, mstart.y);
-    await page.mouse.down();
-    for (let i = 1; i <= 5; i++) await page.mouse.move(mstart.x - 20 * i, mstart.y - 16 * i);
-    await page.mouse.up();
-    const mdrag = await scrollOf();
-    check(`${label}: canvas: Move: a drag starting over a board pans`, mdrag[0] >= 90 && mdrag[1] >= 70, JSON.stringify(mdrag));
-    await scrollTo(0, 0);
+    const mdrag = await dragFrom({ x: mb.x + mb.width / 2, y: mb.y + mb.height / 2 });
+    check(`${label}: canvas: Move: a drag starting over a board moves the canvas`, mdrag.join() === '-100,-80', JSON.stringify(mdrag));
     // In Move too: a drag ending on Open alone opens nothing; a click opens it, and Back keeps Move.
+    await bring('Templated');
     const mopen = page.locator('.design-board', { hasText: 'Templated' }).locator('button.board-open');
     const mob = await mopen.boundingBox();
     const moc = { x: mob.x + mob.width / 2, y: mob.y + mob.height / 2 };
@@ -327,36 +366,54 @@ async function writeOut(zip) {
     check(`${label}: canvas: Move: a drag ending on Open alone doesn't open it; a click does`, mAfterDrag === 0 && mOpened === 1, JSON.stringify([mAfterDrag, mOpened]));
     await page.locator('button.canvas-back').click({ timeout: 1000 }).catch(() => {});
     await canvas.waitFor({ timeout: 3000 }).catch(() => {});
+    check(`${label}: canvas: Move survives Open alone and Back`, (await mode()).join() === 'move', JSON.stringify(await mode()));
+    // V and H choose the mode.
+    await page.mouse.click((await view.boundingBox()).x + 5, (await view.boundingBox()).y + 5);
+    await page.keyboard.press('v');
+    const afterV = (await mode()).join();
+    await page.keyboard.press('h');
+    const afterH = (await mode()).join();
+    check(`${label}: canvas: V is Interact, H is Move`, afterV === 'interact' && afterH === 'move', JSON.stringify([afterV, afterH]));
+    // The canvas can't be lost: a huge wheel in Interact leaves 80 px of it in the window.
+    await modeButton('interact').click({ timeout: 1000 }).catch(() => {});
+    const vb = await view.boundingBox();
+    await page.mouse.move(vb.x + 5, vb.y + vb.height / 2);
+    await page.mouse.wheel(0, 100000);
+    await page.waitForTimeout(200);
+    const lost = await canvas.boundingBox();
+    check(`${label}: canvas: moved as far as it goes, 80 px stay in the window`, Math.abs(lost.y + lost.height - vb.y - 80) < 2, JSON.stringify([lost, vb]));
+    await press('zoom-fit');
 
-    // Interact: v1.23.0's canvas. Boards take the mouse, a plain wheel doesn't zoom.
-    await page.locator('.canvas-zoom button.canvas-mode', { hasText: 'Interact' }).click({ timeout: 1000 }).catch(() => {});
-    const pressed = await page.locator('.canvas-zoom button.canvas-mode').evaluateAll(bs => bs.map(b => `${b.textContent}:${b.getAttribute('aria-pressed')}`)).catch(() => []);
-    check(`${label}: canvas: Interact is pressed, boards take the mouse again`, pressed.join() === 'Move:false,Interact:true' && (await framePE()) === 'auto', JSON.stringify([pressed, await framePE()]));
-    await scrollTo(0, 0);
+    // Interact: v1.23.0's canvas. Boards take the mouse; a plain wheel moves the canvas, no zoom.
+    const pressed = await page.locator('.canvas-modes button.canvas-mode').evaluateAll(bs => bs.map(b => `${b.dataset.mode}:${b.getAttribute('aria-pressed')}`)).catch(() => []);
+    check(`${label}: canvas: Interact is pressed, boards take the mouse again`, pressed.join() === 'interact:true,move:false' && (await framePE()) === 'auto', JSON.stringify([pressed, await framePE()]));
+    await upTo('125%');
+    await bring('Templated');
     const beforePlain = await level();
     const gap = await boxOf('Templated');
+    p0 = await panOf();
     await page.mouse.move(gap.x - 40, gap.y + 100);
     await page.mouse.wheel(0, -40);
     await page.waitForTimeout(200);
-    check(`${label}: canvas: Interact: a plain wheel doesn't zoom`, (await level()) === beforePlain, JSON.stringify([beforePlain, await level()]));
-    // In Interact, v1.23.0's checks. Ctrl+wheel over the background, between Home A and Templated: the point under the
-    // pointer stays.
-    await press('zoom-fit');
-    await scrollTo(0, 0);
+    const plainMoved = moved(p0, await panOf());
+    check(`${label}: canvas: Interact: a plain wheel moves the canvas, no zoom`, (await level()) === beforePlain && plainMoved.join() === '0,40', JSON.stringify([beforePlain, await level(), plainMoved]));
+    // Ctrl+wheel over the background, between Home A and Templated: the point under the pointer stays.
+    await bring('Templated');
     const t0 = await boxOf('Templated');
-    const pointer = { x: t0.x - 50, y: t0.y + 100 };
+    const pointer = { x: t0.x - 40, y: t0.y + 100 };
     const frac = { x: (pointer.x - t0.x) / t0.width, y: (pointer.y - t0.y) / t0.height };
+    const ctrlFrom = await level();
     await page.mouse.move(pointer.x, pointer.y);
     await page.keyboard.down('Control');
     await page.mouse.wheel(0, -40);
     await page.keyboard.up('Control');
     await page.waitForTimeout(200);
     const t1 = await boxOf('Templated');
-    const moved = [t1.x + frac.x * t1.width - pointer.x, t1.y + frac.y * t1.height - pointer.y];
-    check(`${label}: canvas: Ctrl+wheel over the background zooms about the pointer`, parseFloat(await level()) > parseFloat(startLevel) && t1.width > t0.width && Math.abs(moved[0]) < 3 && Math.abs(moved[1]) < 3, JSON.stringify([await level(), moved]));
+    const stay = [t1.x + frac.x * t1.width - pointer.x, t1.y + frac.y * t1.height - pointer.y];
+    check(`${label}: canvas: Ctrl+wheel over the background zooms about the pointer`, parseFloat(await level()) > parseFloat(ctrlFrom) && t1.width > t0.width && Math.abs(stay[0]) < 3 && Math.abs(stay[1]) < 3, JSON.stringify([ctrlFrom, await level(), stay]));
     // Over a board's frame Ctrl+wheel goes to the board's page: no canvas zoom.
     const overFrame = await level();
-    const hf = await boxOf('Home A');
+    const hf = await boxOf('Templated');
     await page.mouse.move(hf.x + hf.width / 2, hf.y + hf.height / 2);
     await page.keyboard.down('Control');
     await page.mouse.wheel(0, -40);
@@ -364,45 +421,31 @@ async function writeOut(zip) {
     await page.waitForTimeout(200);
     check(`${label}: canvas: Interact: Ctrl+wheel over a board frame doesn't zoom the canvas`, (await level()) === overFrame, JSON.stringify([overFrame, await level()]));
 
-    // Drag: on the background it scrolls the page body; on a board's frame it doesn't.
+    // Drag: on the background it moves the canvas; on a board's frame it doesn't.
     await press('zoom-fit');
     await upTo('125%');
-    await scrollTo(0, 0);
+    await bring('Templated');
     const t2 = await boxOf('Templated');
-    const at = { x: t2.x - 40, y: t2.y + 100 };
-    await page.mouse.move(at.x, at.y);
-    await page.mouse.down();
-    for (let i = 1; i <= 5; i++) await page.mouse.move(at.x - 20 * i, at.y - 16 * i);
-    await page.mouse.up();
-    const dragged = await scrollOf();
-    check(`${label}: canvas: drag on the background scrolls #page-body`, dragged[0] >= 90 && dragged[1] >= 70, JSON.stringify(dragged));
-    await scrollTo(0, 0);
+    const dragged = await dragFrom({ x: t2.x - 40, y: t2.y + 100 });
+    check(`${label}: canvas: drag on the background moves the canvas`, dragged.join() === '-100,-80', JSON.stringify(dragged));
+    await bring('Home A');
     const h0 = await boxOf('Home A');
-    const inFrame = { x: h0.x + h0.width / 2, y: h0.y + h0.height / 2 };
-    await page.mouse.move(inFrame.x, inFrame.y);
-    await page.mouse.down();
-    for (let i = 1; i <= 5; i++) await page.mouse.move(inFrame.x - 20 * i, inFrame.y - 16 * i);
-    await page.mouse.up();
-    check(`${label}: canvas: drag on a board frame doesn't`, JSON.stringify(await scrollOf()) === '[0,0]', JSON.stringify(await scrollOf()));
+    const onFrame = await dragFrom({ x: h0.x + h0.width / 2, y: h0.y + h0.height / 2 });
+    check(`${label}: canvas: drag on a board frame doesn't`, onFrame.join() === '0,0', JSON.stringify(onFrame));
     // Space held in Interact: Move until it is let go. Focus off the Interact button first (Space presses a button).
+    await bring('Templated');
     const gap2 = await boxOf('Templated');
     await page.mouse.click(gap2.x - 40, gap2.y + 100);
-    await scrollTo(0, 0);
     await page.keyboard.down('Space');
     const spacePE = await framePE();
-    const s0 = await boxOf('Home A');
-    const sAt = { x: s0.x + s0.width / 2, y: s0.y + s0.height / 2 };
-    await page.mouse.move(sAt.x, sAt.y);
-    await page.mouse.down();
-    for (let i = 1; i <= 5; i++) await page.mouse.move(sAt.x - 20 * i, sAt.y - 16 * i);
-    await page.mouse.up();
-    const sDrag = await scrollOf();
+    const s0 = await boxOf('Templated');
+    const sDrag = await dragFrom({ x: s0.x + s0.width / 2, y: s0.y + s0.height / 2 });
     await page.keyboard.up('Space');
-    check(`${label}: canvas: Space held in Interact: boards ignore the mouse and a drag over one pans`, spacePE === 'none' && sDrag[0] >= 90 && sDrag[1] >= 70, JSON.stringify([spacePE, sDrag]));
-    check(`${label}: canvas: Space let go: back to Interact`, (await framePE()) === 'auto' && (await mode()).join() === 'Interact', JSON.stringify([await framePE(), await mode()]));
-    await scrollTo(0, 0);
+    check(`${label}: canvas: Space held in Interact: boards ignore the mouse and a drag over one moves the canvas`, spacePE === 'none' && sDrag.join() === '-100,-80', JSON.stringify([spacePE, sDrag]));
+    check(`${label}: canvas: Space let go: back to Interact`, (await framePE()) === 'auto' && (await mode()).join() === 'interact', JSON.stringify([await framePE(), await mode()]));
 
     // A press on Open alone that moves away and back is a drag: no board. A plain click opens it.
+    await bring('Templated');
     const open = page.locator('.design-board', { hasText: 'Templated' }).locator('button.board-open');
     const ob = await open.boundingBox();
     const oc = { x: ob.x + ob.width / 2, y: ob.y + ob.height / 2 };
@@ -416,7 +459,7 @@ async function writeOut(zip) {
     const afterDrag = await page.locator('button.canvas-back').count();
     if (afterDrag) { await page.locator('button.canvas-back').click(); await canvas.waitFor({ timeout: 3000 }).catch(() => {}); }
     await upTo('150%');
-    await page.locator('.design-board', { hasText: 'Home A' }).locator('button.board-open').scrollIntoViewIfNeeded();
+    await bring('Home A');
     const zoomBefore = await level();
     const homeBefore = await boxOf('Home A');
     await page.locator('.design-board', { hasText: 'Home A' }).locator('button.board-open').click();
@@ -426,38 +469,38 @@ async function writeOut(zip) {
     await canvas.waitFor({ timeout: 3000 }).catch(() => {});
     await page.waitForTimeout(100);
     const homeAfter = await boxOf('Home A');
-    check(`${label}: canvas: Back from Open alone restores the zoom`, zoomBefore === '150%' && (await level()) === zoomBefore && Math.abs(homeAfter.x - homeBefore.x) < 3 && Math.abs(homeAfter.y - homeBefore.y) < 3,
+    check(`${label}: canvas: Back from Open alone restores the zoom and place`, zoomBefore === '150%' && (await level()) === zoomBefore && Math.abs(homeAfter.x - homeBefore.x) < 3 && Math.abs(homeAfter.y - homeBefore.y) < 3,
       JSON.stringify([zoomBefore, await level(), homeBefore, homeAfter]));
-    check(`${label}: canvas: the mode survives Open alone and Back`, (await mode()).join() === 'Interact' && (await framePE()) === 'auto', JSON.stringify([await mode(), await framePE()]));
+    check(`${label}: canvas: the mode survives Open alone and Back`, (await mode()).join() === 'interact' && (await framePE()) === 'auto', JSON.stringify([await mode(), await framePE()]));
 
-    // Zoomed in, a far board's frame still comes when scrolled to.
+    // Zoomed in, a far board's frame still comes when the browser scrolls to it (the window turns that into a move).
     await press('zoom-in', 5);
-    await scrollTo(0, 0);
+    await bring('Home A');
     await page.waitForTimeout(300);
     const farFrames = () => page.locator('.design-board', { hasText: 'Far away' }).locator('iframe').count();
     const farBefore = await farFrames();
     await page.locator('.design-board', { hasText: 'Far away' }).scrollIntoViewIfNeeded();
     let farAfter = 0;
     for (let i = 0; i < 40 && !farAfter; i++) { await page.waitForTimeout(50); farAfter = await farFrames(); }
-    check(`${label}: canvas: zoomed in, boards still load as they scroll into view`, (await level()) === '200%' && farBefore === 0 && farAfter === 1, JSON.stringify([await level(), farBefore, farAfter]));
+    const stillUnscrolled = await view.evaluate(v => v.scrollLeft + v.scrollTop);
+    check(`${label}: canvas: zoomed in, boards still load as they come into view`, (await level()) === '200%' && farBefore === 0 && farAfter === 1 && await inView('Far away') && stillUnscrolled === 0, JSON.stringify([await level(), farBefore, farAfter, stillUnscrolled]));
     await press('zoom-fit');
-    await scrollTo(0, 0);
 
     // An older version from the menu: its own canvas.
     await page.locator('#page-from select').selectOption({ label: 'v1' }, { timeout: 3000 }).catch(() => {});
     await page.locator('.design-board', { hasText: 'Only in the first version' }).waitFor({ timeout: 4000 }).catch(() => {});
     check(`${label}: an older version shows its own canvas`, await page.locator('.design-board', { hasText: 'Only in the first version' }).count() === 1 && await page.locator('.design-board', { hasText: 'Home A' }).count() === 0);
-    check(`${label}: canvas: the mode survives a version switch`, (await mode()).join() === 'Interact', JSON.stringify(await mode()));
-    // One small board: the canvas is narrower and shorter than the view at Fit, and a plain wheel in Move still keeps
-    // the point under the pointer.
-    await page.locator('.canvas-zoom button.canvas-mode', { hasText: 'Move' }).click({ timeout: 1000 }).catch(() => {});
+    check(`${label}: canvas: the mode survives a version switch`, (await mode()).join() === 'interact', JSON.stringify(await mode()));
+    // One small board: the canvas is smaller than the window at Fit, and a plain wheel in Move still keeps the point
+    // under the pointer.
+    await modeButton('move').click({ timeout: 1000 }).catch(() => {});
     const small = await plainWheel('fit', 'Only in the first version');
     check(`${label}: canvas: Move: a canvas smaller than the view zooms about the pointer`, small.ok, small.said);
-    await page.locator('.canvas-zoom button.canvas-mode', { hasText: 'Interact' }).click({ timeout: 1000 }).catch(() => {});
+    await modeButton('interact').click({ timeout: 1000 }).catch(() => {});
     await page.locator('#page-from select').selectOption('current', { timeout: 3000 }).catch(() => {});
     await canvas.waitFor({ timeout: 4000 }).catch(() => {});
     check(`${label}: and back to the current one`, await page.locator('.design-board', { hasText: 'Home A' }).count() === 1);
-    check(`${label}: canvas: and the mode survives the way back`, (await mode()).join() === 'Interact', JSON.stringify(await mode()));
+    check(`${label}: canvas: and the mode survives the way back`, (await mode()).join() === 'interact', JSON.stringify(await mode()));
 
     // A Design artifact with no canvas.json keeps the poster page.
     await page.evaluate(id => { location.hash = `#a=${id}`; }, uuidToBase58(U(2)));

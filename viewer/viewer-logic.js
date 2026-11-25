@@ -1439,6 +1439,32 @@ function canvasScale(width, avail) {
   if (!(Number.isFinite(width) && width > 0 && Number.isFinite(avail) && avail > 0)) return 1;
   return Math.min(1, Math.max(0.1, avail / width));
 }
+// The Design canvas's window (v1.23.2): the canvas zooms from 10% to 200% and moves freely, off the window's edges.
+const CANVAS_ZOOM_MIN = 0.1;
+const CANVAS_ZOOM_MAX = 2;
+// The zoom that shows the whole layout (w × h) in a window viewW × viewH with pad around it, never above 100%.
+function canvasFit(w, h, viewW, viewH, pad = 40) {
+  const ok = n => Number.isFinite(n) && n > 0;
+  if (![w, h, viewW, viewH].every(ok)) return 1;
+  const z = Math.min((viewW - 2 * pad) / w, (viewH - 2 * pad) / h);
+  return Math.min(1, Math.max(CANVAS_ZOOM_MIN, Math.round(z * 1e6) / 1e6));
+}
+// The canvas's top left in the window (pan), moved only as far as keeps keep px of it (or all of a smaller one) inside.
+function clampPan(pan, w, h, scale, viewW, viewH, keep = 80) {
+  const axis = (p, size, view) => {
+    const n = Number.isFinite(p) ? p : 0;
+    const s = size * scale;
+    if (!(Number.isFinite(s) && s > 0 && Number.isFinite(view) && view > 0)) return n;
+    const k = Math.min(keep, s, view);
+    return Math.min(view - k, Math.max(k - s, n));
+  };
+  return { x: axis(pan.x, w, viewW), y: axis(pan.y, h, viewH) };
+}
+// The pan that keeps the canvas point under point (in the window) in place from zoom from to zoom to.
+function panAbout(pan, point, from, to) {
+  if (from === to) return { x: pan.x, y: pan.y };
+  return { x: point.x - (point.x - pan.x) * to / from, y: point.y - (point.y - pan.y) * to / from };
+}
 const NOTE_FILLS = new Set(['teal', 'orange', 'yellow', 'green', 'blue', 'pink', 'purple', 'red']);
 const BOARD_NAME = /^[^/\\]+\.dc\.html$/;
 const designOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
@@ -1947,5 +1973,5 @@ function pageZoom(wrapper, frame, opts = {}) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
 }

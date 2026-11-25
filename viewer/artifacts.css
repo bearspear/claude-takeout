@@ -181,24 +181,30 @@ button { font: inherit; color: inherit; }
   .big-pic { height: 220px; padding: 20px 20px 0; }
 }
 .files .btn.download { font-size: 11px; padding: 1px 8px; flex: none; }
-/* A Design artifact's canvas (v1.20) */
-.design-wrap { padding: 64px 24px 24px; }
-.design-canvas { position: relative; margin: 0 auto; user-select: none; -webkit-user-select: none; }
-/* Zoom (v1.23): the stage is as wide as the canvas, so its bar (sticky, at the canvas's top edge, in the padding above
-   it) stays at the view's right edge however the canvas is scrolled. */
-.design-stage { width: max-content; min-width: 100%; }
-.canvas-zoom { position: sticky; top: 64px; right: 8px; z-index: 3; width: 0; height: 0; margin-left: auto; }
-.canvas-zoom > .zoom-bar { top: -56px; right: 0; bottom: auto; opacity: 1; width: max-content; }
-.design-stage, .design-board .board-head, .design-note { cursor: grab; }
+/* A Design artifact's canvas (v1.20); since v1.23.2 in a window it moves and zooms in, as on claude.ai: no scrollbars,
+   a dotted ground that moves with it, the zoom bar bottom right and the mode pill bottom middle. */
+.design-wrap { padding: 0; }
+.design-view { position: relative; overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; background-color: var(--bg); background-image: radial-gradient(circle, var(--line) 1.1px, transparent 1.4px); overscroll-behavior: contain; }
+.design-canvas { position: absolute; left: 0; top: 0; }
+.design-view, .design-board .board-head, .design-note { cursor: grab; }
 .design-board .board-body { cursor: default; }
-/* Move (v1.23.1): the boards' frames ignore the mouse (their pages still run), so the whole canvas pans and zooms. */
+.design-canvas.far .board-head .board-open, .design-canvas.far .board-head .board-badge { display: none; }
+.design-canvas.far .design-note { padding: 0; }
+.design-canvas.far .design-board .board-head { min-width: 0; font-size: 10px; }
+.design-canvas.far .board-body.missing > span { display: none; }
+/* Move (v1.23.1): the boards' frames ignore the mouse (their pages still run), so the whole canvas moves and zooms. */
 .design-canvas.moving .board-frame { pointer-events: none; }
-.design-canvas.moving, .design-canvas.moving .board-body { cursor: grab; }
-.design-wrap.dragging, .design-wrap.dragging * { cursor: grabbing; }
-.canvas-modes { display: flex; gap: 2px; margin-right: 2px; padding-right: 4px; border-right: 1px solid var(--line); }
-.zoom-bar button.canvas-mode[aria-pressed=true] { background: var(--pill); font-weight: 500; }
+.design-view.moving, .design-canvas.moving .board-body { cursor: grab; }
+.design-view.dragging, .design-view.dragging * { cursor: grabbing; }
+.canvas-zoom { position: absolute; right: 12px; bottom: 12px; z-index: 3; }
+.canvas-zoom > .zoom-bar { position: static; opacity: 1; width: max-content; }
+.canvas-modes { position: absolute; left: 50%; bottom: 12px; z-index: 3; transform: translateX(-50%); display: flex; gap: 2px; padding: 4px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); box-shadow: 0 2px 8px rgba(0, 0, 0, .15); cursor: default; }
+.canvas-mode { display: flex; align-items: center; justify-content: center; width: 34px; height: 30px; padding: 0; border: 0; border-radius: 8px; background: none; color: var(--soft); cursor: pointer; }
+.canvas-mode svg { width: 18px; height: 18px; }
+.canvas-mode:hover { background: var(--hover); color: var(--ink); }
+.canvas-mode[aria-pressed=true] { background: var(--design-bg); color: var(--design-ink); }
 /* The pressed button's background would hide focus: an outline for the keyboard. */
-.zoom-bar button.canvas-mode:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
+.canvas-mode:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
 /* A board sits exactly at its place; its title row goes above it, as on claude.ai, so it never pushes the board down
    onto what lies below. */
 .design-board { position: absolute; }
@@ -222,5 +228,5 @@ button { font: inherit; color: inherit; }
 .design-note[data-fill="yellow"] { background: #fdf3b9; } .design-note[data-fill="green"] { background: #d7f0d2; }
 .design-note[data-fill="blue"] { background: #d4e6fb; } .design-note[data-fill="pink"] { background: #fbd9e6; }
 .design-note[data-fill="purple"] { background: #e5dcfa; } .design-note[data-fill="red"] { background: #f9d3d0; }
-.design-skipped { margin-top: 24px; }
+.design-skipped { margin: 0; padding: 24px; }
 .canvas-bar { display: flex; align-items: center; gap: 10px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); }
