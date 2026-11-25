@@ -351,6 +351,9 @@ async function exportTo(frames, pages, thumbs) {
     art(U(62), 'Component'),
     art(U(63), 'Big picture'),
     art(U(64), 'Big shared picture', { rel: 'shared' }),
+    art(U(65), 'Scripted svg'),
+    art(U(66), 'Wide page'),
+    art(U(67), 'Large picture'),
     ...navs.map(([name], i) => art(navUuid(i), name, { rel: 'shared' })),
   ];
   const prevPages = {
@@ -372,6 +375,9 @@ async function exportTo(frames, pages, thumbs) {
     // Over the 2 MB preview cap (padding after IEND, which the browser ignores): not in the part.
     [U(63)]: live('Big picture', { 'big.png': { body: Buffer.concat([png(40, 30), Buffer.alloc(2200000)]), type: 'image/png' } }),
     [U(64)]: live('Big shared picture', { 'big.png': { body: Buffer.concat([png(40, 30), Buffer.alloc(2200000)]), type: 'image/png' } }),
+    [U(65)]: live('Scripted svg', { 's.svg': { body: '<svg xmlns="http://www.w3.org/2000/svg" width="100" height="50"><rect id="r" width="100" height="50" fill="red"/><script>document.getElementById("r").setAttribute("fill", "blue")</script></svg>', type: 'image/svg+xml' } }),
+    [U(66)]: live('Wide page', { 'index.html': '<!doctype html><html><body style="margin:0"><div style="width:1600px;height:300px;background:#69c">wide</div></body></html>' }),
+    [U(67)]: live('Large picture', { 'large.png': { body: png(2000, 1500), type: 'image/png' } }),
     [U(39)]: live('Shared board', { 'index.html': '<h1>Shared board</h1>', 'art.svg': { body: '<svg xmlns="http://www.w3.org/2000/svg"/>', type: 'image/svg+xml' }, 'notes.pdf': { body: '%PDF-1.4', type: 'application/pdf' } }),
   };
   navs.forEach(([name, attempt, head], i) => { prevPages[navUuid(i)] = live(name, { 'index.html': navArtifact(name, attempt, head).versions[0] }); });
@@ -525,8 +531,57 @@ async function exportTo(frames, pages, thumbs) {
   await md.page.waitForSelector('#page-body .details', { timeout: 3000 }).catch(() => {});
   check("shared image too large: details page", await md.page.locator('#page-body .preview').count() === 0 && /too large to show here/.test(await md.page.locator('#page-body').textContent()));
   await md.page.goto(md.url + `#a=${p(37)}`);
-  const sf = await frameOf(md);
-  check('svg: shown in the sandboxed frame', await sf.waitForSelector('#r', { timeout: 3000 }).then(() => true).catch(() => false));
+  await md.page.waitForFunction(() => { const i = document.querySelector('#page-body .preview .zoom-box img'); return i && i.complete && i.naturalWidth > 0; }, null, { timeout: 3000 }).catch(() => {});
+  const svgPic = await md.page.$eval('#page-body .preview .zoom-box img', i => ({ src: i.getAttribute('src'), w: i.naturalWidth })).catch(() => null);
+  check('svg: shown as a picture', !!svgPic && svgPic.src.startsWith('data:image/svg+xml') && svgPic.w > 0 && decodeURIComponent(svgPic.src).includes('id="r"')
+    && await md.page.locator('#page-body .preview iframe').count() === 0, JSON.stringify(svgPic && { ...svgPic, src: svgPic.src.slice(0, 40) }));
+  await md.page.goto(md.url + `#a=${p(65)}`);
+  const ssf = await frameOf(md);
+  const ssAttrs = await md.page.$eval('#page-body .preview iframe', f => ({ sandbox: f.getAttribute('sandbox'), wrapped: f.parentElement.classList.contains('page-zoom'), bar: !!f.parentElement.querySelector(':scope > .zoom-bar .zoom-fit') })).catch(() => ({}));
+  check('svg: a scripted SVG stays sandboxed', ssAttrs.sandbox === 'allow-scripts allow-forms allow-modals' && ssAttrs.wrapped && ssAttrs.bar
+    && await ssf.waitForFunction(() => document.getElementById('r') && document.getElementById('r').getAttribute('fill') === 'blue', null, { timeout: 3000 }).then(() => true).catch(() => false)
+    && await md.page.locator('#page-body .preview img').count() === 0, JSON.stringify(ssAttrs));
+
+  // Zoom: a large picture in place (a plain wheel scrolls, Ctrl+wheel zooms), and a wide page's Fit width.
+  const level = () => md.page.locator('#page-body .preview .zoom-level').first().textContent({ timeout: 3000 }).catch(() => null);
+  const settle = () => md.page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+  await md.page.goto(md.url + `#a=${p(67)}`);
+  await md.page.waitForFunction(() => { const i = document.querySelector('#page-body .preview .zoom-box img'); return i && i.complete && i.naturalWidth > 0; }, null, { timeout: 3000 }).catch(() => {});
+  await settle();
+  const zbox = md.page.locator('#page-body .preview .zoom-box');
+  await zbox.focus({ timeout: 3000 }).catch(() => {});
+  await md.page.keyboard.press('1');
+  await settle();
+  const zb = await zbox.boundingBox({ timeout: 3000 }).catch(() => null);
+  if (zb) await md.page.mouse.move(zb.x + zb.width / 2, zb.y + zb.height / 2);
+  const zTop0 = await zbox.evaluate(b => b.scrollTop, null, { timeout: 3000 }).catch(() => -1);
+  await md.page.mouse.wheel(0, 200);
+  await md.page.waitForTimeout(200);
+  const zTop1 = await zbox.evaluate(b => b.scrollTop, null, { timeout: 3000 }).catch(() => -1);
+  const zPlain = await level();
+  await md.page.keyboard.down('Control');
+  await md.page.mouse.wheel(0, -200);
+  await md.page.keyboard.up('Control');
+  await settle();
+  const zCtrl = await level();
+  check('image: Ctrl+wheel zooms, plain wheel scrolls the page', zTop0 >= 0 && zTop1 > zTop0 && zPlain === '100%' && parseFloat(zCtrl) > 100, `${zTop0} -> ${zTop1} at ${zPlain}, ctrl ${zCtrl}`);
+  const imgRule = await zbox.evaluate(b => ({ overflow: getComputedStyle(b).overflow, cls: b.className, frameFlex: getComputedStyle(b.parentElement).flexGrow }), null, { timeout: 3000 }).catch(() => ({}));
+  check('image: the picture area scrolls and fills the preview', imgRule.overflow === 'auto' && /\bimage\b/.test(imgRule.cls) && imgRule.frameFlex === '1', JSON.stringify(imgRule));
+  await md.page.goto(md.url + `#a=${p(66)}`);
+  await frameOf(md);
+  const wideFit = md.page.locator('#page-body .preview .page-zoom .zoom-fit');
+  const wideEnabled = await md.page.waitForFunction(() => { const b = document.querySelector('#page-body .preview .page-zoom .zoom-fit'); return b && !b.disabled; }, null, { timeout: 3000 }).then(() => true).catch(() => false);
+  await wideFit.click({ timeout: 3000 }).catch(() => {});
+  await settle();
+  const wideGeo = await md.page.locator('#page-body .preview .page-zoom').evaluate(w => {
+    const f = w.querySelector(':scope > iframe'), bar = w.querySelector(':scope > .zoom-bar');
+    const m = /matrix\(([^,]+),/.exec(getComputedStyle(f).transform);
+    const fr = f.getBoundingClientRect(), br = bar.getBoundingClientRect();
+    return { cw: w.clientWidth, scale: m ? Number(m[1]) : 1, frameBottom: fr.bottom, barTop: br.top };
+  }, null, { timeout: 3000 }).catch(() => ({}));
+  const wantWide = Math.min(1, Math.max(0.25, wideGeo.cw / 1600));
+  check("page: wide page's Fit width works", wideEnabled && Math.abs(wideGeo.scale - wantWide) < 1e-3 && (await level()) === `${Math.round(wantWide * 100)}%`, JSON.stringify({ wideEnabled, ...wideGeo, wantWide, level: await level() }));
+  check('page: the bar sits in its own strip below the frame', wideGeo.barTop >= wideGeo.frameBottom - 0.5, JSON.stringify(wideGeo));
   await md.page.goto(md.url + `#a=${p(38)}`);
   await frameOf(md);
   check('remote script: the note shows', await md.page.locator('#page-note').isVisible()
@@ -539,7 +594,7 @@ async function exportTo(frames, pages, thumbs) {
   await md.page.waitForSelector('#page-body .details');
   check('react start: details page at once, no part loaded', await md.page.locator('#page-body .preview').count() === 0 && await partLoads() === 0
     && /source code that needs claude\.ai to run/.test(await md.page.locator('#page-body').textContent()), await md.page.locator('#page-body').textContent());
-  check('markdown/image/svg: no requests, no errors', md.seen.requests.length === 0 && md.seen.errors.length === 0, JSON.stringify(md.seen));
+  check('markdown/image/svg/zoom: no requests, no errors', md.seen.requests.length === 0 && md.seen.errors.length === 0, JSON.stringify(md.seen));
 
   // Show saved files anyway on a Design poster.
   await md.page.goto(md.url + `#a=${p(35)}`);
@@ -588,10 +643,13 @@ async function exportTo(frames, pages, thumbs) {
   const histView = await open(histDir, 'light', `#a=${uuidToBase58(U(8))}`);
   const menu = histView.page.locator('#page-from select');
   check('history: the version menu lists every version, oldest first', JSON.stringify(await menu.locator('option').allTextContents()) === JSON.stringify(['v1', 'v2 (current)']), JSON.stringify(await menu.locator('option').allTextContents()));
+  await histView.page.locator('#page-body .preview .page-zoom .zoom-in').click({ timeout: 3000 }).catch(() => {});
   await menu.selectOption({ label: 'v1' }, { timeout: 3000 }).catch(() => {});
   await histView.page.waitForSelector('#page-body .preview iframe', { timeout: 3000 }).catch(() => {});
   const oldDoc = await histView.page.$eval('#page-body .preview iframe', f => f.getAttribute('srcdoc')).catch(() => '');
   check('history: v1 previews its own page and its own stylesheet', oldDoc.includes('<!--V1-->') && oldDoc.includes('rgb(1,2,3)'), oldDoc.slice(0, 200));
+  const keptLevel = await histView.page.locator('#page-body .preview .page-zoom .zoom-level').textContent({ timeout: 3000 }).catch(() => null);
+  check('history: another version keeps the page zoom', keptLevel === '125%', String(keptLevel));
   check('history: its Open file is in its own folder', decodeURIComponent((await histView.page.locator('#page-links a.open-file').getAttribute('href', { timeout: 3000 }).catch(() => '')) || '').endsWith('/v1/index.html'));
   check('history: no page errors, no requests', histView.errors.length === 0 && histView.requests.length === 0, JSON.stringify([histView.errors, histView.requests]));
 

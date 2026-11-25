@@ -12,8 +12,8 @@
 // The home page: a grid of cards like claude.ai/artifacts, with tabs (All / Yours / Shared with you) and a title search.
 // Hosted, a fourth tab, In chats, has a card per file Claude made in the chats (inChatsFiles), kind filters and a
 // search on file names; a card sets #ac=<chat index>.<file id>, which opens the file's page: "Made in" its chat
-// (onOpenChat), a version menu, and the file as an artifact's would show (an HTML or SVG file in the same guarded
-// sandbox, with only its own chat's scripts and stylesheets), Markdown, code, an image, or details.
+// (onOpenChat), a version menu, and the file as an artifact's would show (an HTML file or scripted SVG in the same
+// guarded sandbox, with only its own chat's scripts and stylesheets), Markdown, code, an image or SVG picture, or details.
 // Hosted, the screen also links artifacts and chats: an All card's source line (its linked chats, else Shared with you,
 // Cowork or Code) and "also in chat"; on an artifact's page a line of Made in / Published in / Edited in chats (each
 // opening that chat at its message) and a menu of every version the export saved (view.versions); a Docs
@@ -639,6 +639,11 @@
       if (Array.isArray(pairs)) for (const p of pairs) if (Array.isArray(p) && typeof p[0] === 'string' && ok(p[1])) map.set(p[0], p[1]);
       return map;
     }
+    // A payload's images: never an SVG one. An .svg file itself shows as a picture all the same, from its own text
+    // (svgDataUrl): an SVG loaded as an image is stricter than the sandbox. It runs no script, loads nothing from
+    // outside (no <image href>, <use href>, CSS @import, url() or external entities), and a <foreignObject> renders but
+    // runs nothing; the page's policy allows img-src data:. A scripted SVG stays a sandboxed page only because its
+    // script may be needed for it to look right, not for safety.
     const SAFE_IMAGE_URI = /^data:image\/(?!svg)[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]*$/i;
 
     // ---- The preview ----
@@ -683,6 +688,65 @@
       return frame;
     }
 
+    // ---- Zoom (v1.23) ----
+    // The picture or page on show and its zoom controller. Its zoom is kept per file, the artifact (or In chats file)
+    // and the file's path, so another version of the same file starts where the reader was; another file, or the same
+    // one opened again, starts at Fit (a picture) or 100% (a page). A state restores only into the same kind of
+    // controller ('picture' or 'page'): their states differ.
+    let shownZoom = null; // { key, kind, controller }
+    let keptZoom = null; // { key, kind, state }
+    // Keeps the zoom of what is on show, then lets its controller go (a page's message listener with it). Called
+    // whenever the page body changes.
+    function releaseZoom() {
+      if (!shownZoom) return;
+      const { key, kind, controller } = shownZoom;
+      shownZoom = null;
+      if (!controller.failed) keptZoom = { key, kind, state: controller.state() };
+      controller.destroy();
+    }
+    function forgetZoom() { releaseZoom(); keptZoom = null; }
+    function zoomed(key, kind, controller) {
+      shownZoom = { key, kind, controller };
+      if (keptZoom && keptZoom.key === key && keptZoom.kind === kind) controller.restore(keptZoom.state);
+      return controller;
+    }
+
+    // A sandboxed page with its zoom bar (pageZoom). Hosted, the page's size report comes from the preview inside the
+    // guard frame, which posts straight to the top window.
+    function pageFrame(v, srcdoc, key) {
+      const frame = previewFrame(v, srcdoc);
+      const wrapper = el('div', 'page-zoom');
+      zoomed(key, 'page', pageZoom(wrapper, frame, hosted ? { source: () => frame.contentWindow && frame.contentWindow.frames[0] } : {}));
+      return wrapper;
+    }
+
+    // A picture that zooms and pans in place (a plain wheel scrolls). Returns its controller; show controller.frame.
+    function pictureFrame(src, alt, key, opts = {}) {
+      const box = el('div', 'image');
+      const img = document.createElement('img');
+      img.alt = alt;
+      img.src = src;
+      box.append(img);
+      return zoomed(key, 'picture', pictureZoom(box, img, opts));
+    }
+
+    // An SVG file shows as a picture of its own text, which runs nothing; one with scripts may need them, so it stays a
+    // page. The strict XML parser can refuse what the forgiving frame shows (no xmlns, an HTML entity, a bare &): then
+    // the page, from page().
+    function svgFrame(text, alt, key, page) {
+      if (svgHasScripts(text)) return page();
+      let shown = null;
+      const fallback = zoom => {
+        if (shownZoom && shownZoom.controller === zoom) shownZoom = null;
+        zoom.destroy();
+        if (shown && shown.isConnected) shown.replaceWith(page());
+      };
+      const zoom = pictureFrame(svgDataUrl(text), alt, key, { natural: svgNaturalSize(text), onError: fallback });
+      if (zoom.failed) return page();
+      shown = zoom.frame;
+      return shown;
+    }
+
     function failedPage(v) {
       const box = sheet('details', PART_FAILED);
       box.append(actions(v), fileList(v));
@@ -693,30 +757,31 @@
       const texts = pathMap(payload && payload.texts, t => typeof t === 'string');
       const images = pathMap(payload && payload.images, u => typeof u === 'string' && SAFE_IMAGE_URI.test(u));
       const text = texts.has(v.start) ? texts.get(v.start) : null;
+      const key = `${v.id}\n${v.start}`;
       if (v.startKind === 'html' || v.startKind === 'svg') {
         if (text === null) return box.replaceChildren(failedPage(v));
-        const doc = artifactPreviewDoc(text, v.start, payload);
-        if (doc.remote) addNote(PAGE_REMOTE_NOTE);
-        return box.replaceChildren(previewFrame(v, doc.srcdoc));
+        const page = () => {
+          const doc = artifactPreviewDoc(text, v.start, payload);
+          if (doc.remote) addNote(PAGE_REMOTE_NOTE);
+          return pageFrame(v, doc.srcdoc, key);
+        };
+        return box.replaceChildren(v.startKind === 'svg' ? svgFrame(text, String(v.title || ''), key, page) : page());
       }
       if (v.startKind === 'md') return box.replaceChildren(text === null ? failedPage(v) : markdownPage(text));
       if (v.startKind === 'image') {
         // The owner's own image can also come from its saved file.
         const src = images.has(v.start) ? images.get(v.start) : ownArtifact(v) ? openHref(v, v.startSaved) : null;
         if (!src) return box.replaceChildren(failedPage(v));
-        const frame = el('div', 'image');
-        const img = document.createElement('img');
-        img.alt = String(v.title || '');
-        img.src = src;
-        frame.append(img);
-        return box.replaceChildren(frame);
+        return box.replaceChildren(pictureFrame(src, String(v.title || ''), key).frame);
       }
       box.replaceChildren(detailsPage(v));
     }
 
-    // The start file, shown in place: an HTML or SVG page in a sandboxed frame, Markdown rendered as the chat viewer
-    // does, or an image. Its texts and images come from its part, loaded now.
+    // The start file, shown in place: an HTML page (or a scripted SVG) in a sandboxed frame with its zoom bar, Markdown
+    // rendered as the chat viewer does, or an image or SVG as a picture that zooms and pans. Its texts and images come
+    // from its part, loaded now.
     function openPreview(v) {
+      releaseZoom();
       const box = el('div', 'preview');
       box.dataset.id = String(v.id);
       box.append(el('p', 'loading', 'Loading…'));
@@ -780,6 +845,7 @@
     let canvasWrap = null;
     let canvasTimer = null;
     function stopCanvas() {
+      releaseZoom();
       clearTimeout(canvasTimer);
       if (canvasResize) canvasResize.disconnect();
       if (canvasWrap && canvasWrap.stopFrames) canvasWrap.stopFrames();
@@ -976,7 +1042,7 @@
       back.type = 'button';
       back.addEventListener('click', () => openCanvas(v, b.name));
       bar.append(back, el('span', 'board-title', b.title));
-      box.append(bar, previewFrame({ title: b.title }, boardDoc(b, payload, texts)));
+      box.append(bar, pageFrame({ title: b.title }, boardDoc(b, payload, texts), `${v.id}\n${b.path}`));
       pageBody.replaceChildren(box);
       pageBody.scrollTop = 0;
       // The button that opened it is gone: focus the way back.
@@ -993,6 +1059,7 @@
 
     function showPage(v) {
       stopCanvas();
+      forgetZoom();
       const title = String(v.title || 'Untitled');
       pageTitle.textContent = title;
       pageTitle.title = title;
@@ -1151,9 +1218,11 @@
       return box;
     }
 
-    // text: the version's text, or null. A page or diagram runs in the same guarded sandbox as an artifact's, with
-    // only its own chat's scripts and stylesheets beside it; Markdown renders as the chat viewer's; an image by its link.
-    function fillFile(f, v, box, text, partFailed, own = null) {
+    // text: the version's text, or null. A page (or a scripted diagram) runs in the same guarded sandbox as an
+    // artifact's, with only its own chat's scripts and stylesheets beside it; a diagram is a picture of its own text;
+    // Markdown renders as the chat viewer's; an image by its link. Pictures and pages zoom.
+    // key: the zoom's (showVersionBody's id and the file's path).
+    function fillFile(f, v, box, text, partFailed, own = null, key = '') {
       const file = fileOf(f);
       // Download for a text this page holds, named as the version's file is (report_v2.html).
       if (text !== null) {
@@ -1161,21 +1230,17 @@
         pageLinks.prepend(downloadButton(name || file.name || 'download', text));
       }
       if ((file.kind === 'html' || file.kind === 'svg') && text !== null) {
-        const doc = own ? artifactPreviewDoc(text, own.start || file.name, { texts: own.texts })
-          : artifactPreviewDoc(text, file.name, { texts: [...chatFileTexts(chats[f.chat])] });
-        if (doc.remote) addNote(PAGE_REMOTE_NOTE);
-        return box.replaceChildren(previewFrame({ title: f.name }, doc.srcdoc));
+        const page = () => {
+          const doc = own ? artifactPreviewDoc(text, own.start || file.name, { texts: own.texts })
+            : artifactPreviewDoc(text, file.name, { texts: [...chatFileTexts(chats[f.chat])] });
+          if (doc.remote) addNote(PAGE_REMOTE_NOTE);
+          return pageFrame({ title: f.name }, doc.srcdoc, key);
+        };
+        return box.replaceChildren(file.kind === 'svg' ? svgFrame(text, f.name, key, page) : page());
       }
       if (file.kind === 'md' && text !== null) return box.replaceChildren(markdownPage(text));
       if (TEXT_KINDS.has(file.kind) && text !== null) return box.replaceChildren(el('pre', 'code-view', text));
-      if (file.kind === 'image' && fileHref(v)) {
-        const frame = el('div', 'image');
-        const img = document.createElement('img');
-        img.alt = f.name;
-        img.src = fileHref(v);
-        frame.append(img);
-        return box.replaceChildren(frame);
-      }
+      if (file.kind === 'image' && fileHref(v)) return box.replaceChildren(pictureFrame(fileHref(v), f.name, key).frame);
       box.replaceChildren(fileDetails(f, v, partFailed));
     }
 
@@ -1194,22 +1259,26 @@
     // Text moved to a part loads from it.
     // own: { texts, start } for a version shown with the files it was published with (versionCopyTexts), else null.
     function showVersionBody(f, v, id, own = null) {
+      releaseZoom();
       const box = el('div', 'preview');
       box.dataset.id = id;
       pageBody.replaceChildren(box);
       const kind = fileOf(f).kind;
-      if (typeof v.text === 'string' || !TEXT_KINDS.has(kind)) return fillFile(f, v, box, typeof v.text === 'string' ? v.text : null, false, own);
-      if (!(Number.isSafeInteger(v.part) && v.part > 0 && typeof v.key === 'string')) return fillFile(f, v, box, null, false);
+      // Kept across versions: the same artifact (or In chats file) and path.
+      const key = `${id}\n${own && own.start ? own.start : fileOf(f).name}`;
+      if (typeof v.text === 'string' || !TEXT_KINDS.has(kind)) return fillFile(f, v, box, typeof v.text === 'string' ? v.text : null, false, own, key);
+      if (!(Number.isSafeInteger(v.part) && v.part > 0 && typeof v.key === 'string')) return fillFile(f, v, box, null, false, null, key);
       box.append(el('p', 'loading', 'Loading…'));
       Promise.resolve(options.loadPart(v.part)).then(part => {
         const text = part && Object.prototype.hasOwnProperty.call(part, v.key) && typeof part[v.key] === 'string' ? part[v.key] : null;
         // Another page or version took its place meanwhile.
-        if (box.isConnected) fillFile(f, v, box, text, text === null, own);
+        if (box.isConnected) fillFile(f, v, box, text, text === null, own, key);
       });
     }
 
     function showFilePage(f, at) {
       stopCanvas();
+      forgetZoom();
       const versions = f.versions.length;
       const pick = Number.isInteger(at) && at >= 0 && at < versions ? at : versions - 1;
       pageTitle.textContent = f.name;

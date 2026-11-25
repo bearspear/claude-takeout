@@ -169,6 +169,8 @@ async function writeOut(zip) {
     await page.locator('button.canvas-back').waitFor({ timeout: 3000 }).catch(() => {});
     check(`${label}: Open alone shows the board by itself`, await page.locator('.design-canvas').count() === 0 && await page.locator('#page-body .preview iframe').count() === 1);
     check(`${label}: Open alone puts focus on Back to the canvas`, String(await deepActive()).includes('canvas-back'), String(await deepActive()));
+    const alone = await page.locator('#page-body .preview .page-zoom').evaluate(w => ({ frame: !!w.querySelector(':scope > iframe'), out: !!w.querySelector('.zoom-bar .zoom-out'), fit: !!w.querySelector('.zoom-bar .zoom-fit'), level: (w.querySelector('.zoom-level') || {}).textContent }), null, { timeout: 3000 }).catch(() => null);
+    check(`${label}: Open alone: the board has the page bar`, !!alone && alone.frame && alone.out && alone.fit && alone.level === '100%', JSON.stringify(alone));
     await page.locator('button.canvas-back').click();
     await canvas.waitFor({ timeout: 3000 }).catch(() => {});
     check(`${label}: Back to the canvas`, await page.locator('.design-canvas').count() === 1);

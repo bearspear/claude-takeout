@@ -478,6 +478,18 @@ const pageChat = {
   await page.keyboard.press('0');
   await settle();
   check('page: 0 is Fit width when enabled', (await glevel()) === `${Math.round(wfit * 100)}%`, await glevel());
+  // The bar has its own strip below the frame, also at phone width.
+  const strip = async () => page.locator('#panel-body .page-zoom').evaluate(w => {
+    const f = w.querySelector(':scope > iframe').getBoundingClientRect(), b = w.querySelector(':scope > .zoom-bar').getBoundingClientRect(), r = w.getBoundingClientRect();
+    return { below: b.top >= f.bottom - 0.5, inside: b.left >= r.left - 0.5 && b.right <= r.right + 0.5 && b.bottom <= r.bottom + 0.5, fits: b.right <= innerWidth + 0.5 };
+  }).catch(() => ({}));
+  const wideStrip = await strip();
+  await page.setViewportSize({ width: 375, height: 700 });
+  await settle();
+  const phoneStrip = await strip();
+  await page.setViewportSize({ width: 1200, height: 900 });
+  await settle();
+  check('page: the bar sits in its own strip below the frame, also at phone width', wideStrip.below && wideStrip.inside && phoneStrip.below && phoneStrip.inside && phoneStrip.fits, JSON.stringify([wideStrip, phoneStrip]));
 
   await openCard('spoof.html');
   await page.waitForFunction(() => window.__sizes.some(s => s.width === 99999), null, { timeout: 3000 }).catch(() => {});
