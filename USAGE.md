@@ -230,6 +230,13 @@ The Files button in a chat's top bar lists every file in that chat: Outputs, the
 
 Under each prompt and response is a Copy button. A prompt copies as you typed it, and a response copies the Markdown of its text, leaving out thinking, tool steps, file cards and citation markers. If the browser won't allow the copy, the button says "Copy failed". Popups and the file panel have a Copy button in their header for the whole file: it copies the file's text, and in Preview the source rather than the rendered page. Beside it, **Wrap** wraps long lines of a file's text; the viewer remembers it for all files, and **Download** saves the file under its name (a version under its own, such as `report_v2.html`). Download saves the text the viewer holds, so HTML and SVG are saved, not opened; a large upload gets the button once its text has loaded. Images, PDFs and other binary files have Open file instead. When a chat belongs to a project, the project section starts with the project's instructions, then lists its files.
 
+Zooming and dragging:
+
+- **Pictures** (the gallery, the side panel and the upload pop-ups) and **SVG files** open at Fit. Pinch on a trackpad, hold Ctrl (Cmd on a Mac) and turn the mouse wheel, use the zoom bar's **-**, **+** and **Fit** buttons, or double-click to toggle between Fit and 100% (200% when 100% is not larger than Fit). When a picture is zoomed in, drag it to move it. With the picture or its bar focused, `+` (or `=`) zooms in, `-` out, `0` goes back to Fit and `1` shows actual size. In the gallery the plain mouse wheel zooms too, and its keys always work; in the panel and the pop-ups a plain wheel scrolls as before.
+- **Generated HTML pages** have a bar under them with **-**, **+**, **Fit width** and **100%** (25% to 200%). **Fit width** works only for a page wider than the frame, and never enlarges a page. The same bar is on the Artifacts screen and on Design boards opened alone.
+- The **Design canvas** zooms from Fit to 200% with its bar, a pinch or Ctrl/Cmd and the wheel, and you drag its background to move around. Dragging a board's own page does not move the canvas. Back from a board keeps your zoom.
+- On a **touch screen**, a pinch over a page, a board or the Design canvas zooms the browser itself, so use the bar there. At Fit in the panel and the pop-ups a one-finger swipe scrolls, so a two-finger pinch may not zoom a picture. A double-tap may zoom, depending on the browser; the bar always works.
+
 What to know about previews of generated HTML:
 
 - The file's scripts run in a sandbox, cut off from the viewer, from other chats and from files on disk.

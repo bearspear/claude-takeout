@@ -12,8 +12,8 @@
 // The home page: a grid of cards like claude.ai/artifacts, with tabs (All / Yours / Shared with you) and a title search.
 // Hosted, a fourth tab, In chats, has a card per file Claude made in the chats (inChatsFiles), kind filters and a
 // search on file names; a card sets #ac=<chat index>.<file id>, which opens the file's page: "Made in" its chat
-// (onOpenChat), a version menu, and the file as an artifact's would show (an HTML or SVG file in the same guarded
-// sandbox, with only its own chat's scripts and stylesheets), Markdown, code, an image, or details.
+// (onOpenChat), a version menu, and the file as an artifact's would show (an HTML file or scripted SVG in the same
+// guarded sandbox, with only its own chat's scripts and stylesheets), Markdown, code, an image or SVG picture, or details.
 // Hosted, the screen also links artifacts and chats: an All card's source line (its linked chats, else Shared with you,
 // Cowork or Code) and "also in chat"; on an artifact's page a line of Made in / Published in / Edited in chats (each
 // opening that chat at its message) and a menu of every version the export saved (view.versions); a Docs
@@ -639,6 +639,11 @@
       if (Array.isArray(pairs)) for (const p of pairs) if (Array.isArray(p) && typeof p[0] === 'string' && ok(p[1])) map.set(p[0], p[1]);
       return map;
     }
+    // A payload's images: never an SVG one. An .svg file itself shows as a picture all the same, from its own text
+    // (svgDataUrl): an SVG loaded as an image is stricter than the sandbox. It runs no script, loads nothing from
+    // outside (no <image href>, <use href>, CSS @import, url() or external entities), and a <foreignObject> renders but
+    // runs nothing; the page's policy allows img-src data:. A scripted SVG stays a sandboxed page only because its
+    // script may be needed for it to look right, not for safety.
     const SAFE_IMAGE_URI = /^data:image\/(?!svg)[a-z0-9.+-]+;base64,[A-Za-z0-9+/=]*$/i;
 
     // ---- The preview ----
@@ -683,6 +688,67 @@
       return frame;
     }
 
+    // ---- Zoom (v1.23) ----
+    // The picture or page on show and its zoom controller. Its zoom is kept per file, the artifact (or In chats file)
+    // and the file's path, so another version of the same file starts where the reader was; another file starts at
+    // Fit (a picture) or 100% (a page). The same file opened again (a board after Back) keeps its earlier zoom. A state restores only into the same kind of
+    // controller ('picture' or 'page'): their states differ.
+    let shownZoom = null; // { key, kind, controller }
+    let keptZoom = null; // { key, kind, state }
+    // Keeps the zoom of what is on show, then lets its controller go (a page's message listener with it). Called
+    // whenever the page body changes.
+    function releaseZoom() {
+      if (!shownZoom) return;
+      const { key, kind, controller } = shownZoom;
+      shownZoom = null;
+      if (!controller.failed) keptZoom = { key, kind, state: controller.state() };
+      controller.destroy();
+    }
+    function forgetZoom() { releaseZoom(); keptZoom = null; }
+    function zoomed(key, kind, controller) {
+      shownZoom = { key, kind, controller };
+      if (keptZoom && keptZoom.key === key && keptZoom.kind === kind) controller.restore(keptZoom.state);
+      return controller;
+    }
+
+    // A sandboxed page with its zoom bar (pageZoom). Hosted, the page's size report comes from the preview inside the
+    // guard frame, which posts straight to the top window.
+    function pageFrame(v, srcdoc, key) {
+      const frame = previewFrame(v, srcdoc);
+      const wrapper = el('div', 'page-zoom');
+      // A cross-origin window throws on an index it doesn't have (the guard frame before its preview is made): ask its length first.
+      const inner = () => { const w = frame.contentWindow; try { return w && w.length > 0 ? w[0] : null; } catch (err) { return null; } };
+      zoomed(key, 'page', pageZoom(wrapper, frame, hosted ? { source: inner } : {}));
+      return wrapper;
+    }
+
+    // A picture that zooms and pans in place (a plain wheel scrolls). Returns its controller; show controller.frame.
+    function pictureFrame(src, alt, key, opts = {}) {
+      const box = el('div', 'image');
+      const img = document.createElement('img');
+      img.alt = alt;
+      img.src = src;
+      box.append(img);
+      return zoomed(key, 'picture', pictureZoom(box, img, opts));
+    }
+
+    // An SVG file shows as a picture of its own text, which runs nothing; one with scripts may need them, so it stays a
+    // page. The strict XML parser can refuse what the forgiving frame shows (no xmlns, an HTML entity, a bare &): then
+    // the page, from page().
+    function svgFrame(text, alt, key, page) {
+      if (svgHasScripts(text)) return page();
+      let shown = null;
+      const fallback = zoom => {
+        if (shownZoom && shownZoom.controller === zoom) shownZoom = null;
+        zoom.destroy();
+        if (shown && shown.isConnected) shown.replaceWith(page());
+      };
+      const zoom = pictureFrame(svgDataUrl(text), alt, key, { natural: svgNaturalSize(text), onError: fallback });
+      if (zoom.failed) return page();
+      shown = zoom.frame;
+      return shown;
+    }
+
     function failedPage(v) {
       const box = sheet('details', PART_FAILED);
       box.append(actions(v), fileList(v));
@@ -693,30 +759,31 @@
       const texts = pathMap(payload && payload.texts, t => typeof t === 'string');
       const images = pathMap(payload && payload.images, u => typeof u === 'string' && SAFE_IMAGE_URI.test(u));
       const text = texts.has(v.start) ? texts.get(v.start) : null;
+      const key = `${v.id}\n${v.start}`;
       if (v.startKind === 'html' || v.startKind === 'svg') {
         if (text === null) return box.replaceChildren(failedPage(v));
-        const doc = artifactPreviewDoc(text, v.start, payload);
-        if (doc.remote) addNote(PAGE_REMOTE_NOTE);
-        return box.replaceChildren(previewFrame(v, doc.srcdoc));
+        const page = () => {
+          const doc = artifactPreviewDoc(text, v.start, payload);
+          if (doc.remote) addNote(PAGE_REMOTE_NOTE);
+          return pageFrame(v, doc.srcdoc, key);
+        };
+        return box.replaceChildren(v.startKind === 'svg' ? svgFrame(text, String(v.title || ''), key, page) : page());
       }
       if (v.startKind === 'md') return box.replaceChildren(text === null ? failedPage(v) : markdownPage(text));
       if (v.startKind === 'image') {
         // The owner's own image can also come from its saved file.
         const src = images.has(v.start) ? images.get(v.start) : ownArtifact(v) ? openHref(v, v.startSaved) : null;
         if (!src) return box.replaceChildren(failedPage(v));
-        const frame = el('div', 'image');
-        const img = document.createElement('img');
-        img.alt = String(v.title || '');
-        img.src = src;
-        frame.append(img);
-        return box.replaceChildren(frame);
+        return box.replaceChildren(pictureFrame(src, String(v.title || ''), key).frame);
       }
       box.replaceChildren(detailsPage(v));
     }
 
-    // The start file, shown in place: an HTML or SVG page in a sandboxed frame, Markdown rendered as the chat viewer
-    // does, or an image. Its texts and images come from its part, loaded now.
+    // The start file, shown in place: an HTML page (or a scripted SVG) in a sandboxed frame with its zoom bar, Markdown
+    // rendered as the chat viewer does, or an image or SVG as a picture that zooms and pans. Its texts and images come
+    // from its part, loaded now.
     function openPreview(v) {
+      releaseZoom();
       const box = el('div', 'preview');
       box.dataset.id = String(v.id);
       box.append(el('p', 'loading', 'Loading…'));
@@ -779,7 +846,11 @@
     let canvasResize = null;
     let canvasWrap = null;
     let canvasTimer = null;
+    // A canvas's zoom and place, kept by Open alone for Back (per artifact and version; in memory only).
+    const canvasZooms = new Map();
+    const canvasKey = v => `${v.id}\n${v.part}\n${v.key}`;
     function stopCanvas() {
+      releaseZoom();
       clearTimeout(canvasTimer);
       if (canvasResize) canvasResize.disconnect();
       if (canvasWrap && canvasWrap.stopFrames) canvasWrap.stopFrames();
@@ -805,17 +876,22 @@
         canvasWrap = wrap;
         pageBody.replaceChildren(wrap);
         canvasBadges(layout, texts);
+        // Back from Open alone: the zoom and place the reader left (else the board in view, at Fit).
+        const kept = focus ? canvasZooms.get(canvasKey(v)) : null;
+        canvasZooms.delete(canvasKey(v));
+        if (kept) wrap.restoreZoom(kept);
         if (focus) {
           // A board on the canvas, or its row in the list of boards not drawn.
           const at = pageBody.querySelector(`.design-board[data-name="${CSS.escape(focus)}"], .design-skipped li[data-name="${CSS.escape(focus)}"]`);
           if (at) {
-            at.scrollIntoView({ block: 'center' });
+            if (!kept) at.scrollIntoView({ block: 'center' });
             // Keyboard focus back where it was: the board's Open alone.
             const open = at.querySelector('button.board-open');
             if (open) open.focus({ preventScroll: true });
           }
         }
-        // The scale follows the page's width, in place (frames, focus and their scripts stay), keeping the place in it.
+        // The scale follows the page's width, in place (frames, focus and their scripts stay), keeping the middle of the
+        // view (wrap.rescale).
         if (typeof ResizeObserver === 'function') {
           // The width it was last fitted to: a change under 20 px (a scrollbar, a rounding) is let be.
           let fitted = pageBody.clientWidth;
@@ -826,10 +902,7 @@
               if (canvasWrap !== wrap || !wrap.isConnected) return;
               if (Math.abs(pageBody.clientWidth - fitted) < 20) return;
               fitted = pageBody.clientWidth;
-              const at = [pageBody.scrollTop / Math.max(1, pageBody.scrollHeight), pageBody.scrollLeft / Math.max(1, pageBody.scrollWidth)];
               wrap.rescale(pageBody.clientWidth);
-              pageBody.scrollTop = at[0] * pageBody.scrollHeight;
-              pageBody.scrollLeft = at[1] * pageBody.scrollWidth;
             }, 150);
           });
           canvasResize.observe(pageBody);
@@ -854,7 +927,10 @@
       return artifactPreviewDoc(texts.get(b.path), b.path, payload).srcdoc;
     }
 
-    // canvasPage's wrap: rescale(avail) fits it to a new width in place, so frames, focus and scripts stay.
+    // canvasPage's wrap: rescale(avail) fits it to a new width in place (at Fit; a chosen zoom stays), so frames, focus
+    // and scripts stay; zoomState() and restoreZoom(s) keep the zoom across Open alone; stopFrames() ends its observer
+    // and listeners. The bar (div.canvas-zoom) zooms from Fit to 200%; Ctrl/⌘+wheel or a pinch zooms about the
+    // pointer and a drag pans, from the background, a board's head or a note.
     function canvasPage(v, layout, payload, texts) {
       const wrap = el('div', 'design-wrap');
       const canvas = el('div', 'design-canvas');
@@ -929,16 +1005,143 @@
           }
         }
       };
-      const fit = avail => canvasScale(layout.width, Math.max(320, (avail || 1000) - 48));
-      let scale = fit(pageBody.clientWidth);
+      // The zoom (v1.23): from Fit (canvasScale, never below it, so no more boards come into view than at Fit) to 200%.
+      const MAX = 2;
+      const fitOf = avail => canvasScale(layout.width, Math.max(320, (avail || 1000) - 48));
+      let fit = fitOf(pageBody.clientWidth);
+      let scale = fit;
+      let atFit = true;
       apply(scale);
-      wrap.rescale = avail => {
-        const next = fit(avail);
-        if (next === scale) return;
-        scale = next;
-        apply(scale);
+      // The bar sits at the canvas's top edge and stays in view (sticky in #page-body); the stage is as wide as the
+      // canvas, so the bar can follow a sideways scroll too.
+      const stage = el('div', 'design-stage');
+      const holder = el('div', 'canvas-zoom');
+      const bar = el('div', 'zoom-bar');
+      const button = (cls, text, label) => { const b = el('button', cls, text); b.type = 'button'; b.setAttribute('aria-label', label); return b; };
+      const levelOut = el('output', 'zoom-level');
+      levelOut.setAttribute('aria-live', 'polite');
+      const zoomOut = button('zoom-out', '−', 'Zoom out'), zoomIn = button('zoom-in', '+', 'Zoom in'), zoomFit = button('zoom-fit', 'Fit', 'Fit');
+      bar.append(zoomOut, levelOut, zoomIn, zoomFit);
+      holder.append(bar);
+      stage.append(holder, canvas);
+      const showLevel = () => { levelOut.textContent = `${Math.round(scale * 100)}%`; };
+      showLevel();
+      // The canvas's top left in #page-body's scroll content (it is centred, so it moves as it grows), and a viewport
+      // point in #page-body's client area.
+      const origin = () => {
+        const r = canvas.getBoundingClientRect(), b = pageBody.getBoundingClientRect();
+        return { x: r.left - b.left - pageBody.clientLeft + pageBody.scrollLeft, y: r.top - b.top - pageBody.clientTop + pageBody.scrollTop };
       };
-      wrap.append(canvas);
+      const pointIn = (x, y) => { const b = pageBody.getBoundingClientRect(); return { x: x - b.left - pageBody.clientLeft, y: y - b.top - pageBody.clientTop }; };
+      const middle = () => ({ x: pageBody.clientWidth / 2, y: pageBody.clientHeight / 2 });
+      // The canvas point (in canvas units) at the middle of the view, and putting one there.
+      const centre = () => { const o = origin(), m = middle(); return { cx: (pageBody.scrollLeft + m.x - o.x) / scale, cy: (pageBody.scrollTop + m.y - o.y) / scale }; };
+      const centreOn = (cx, cy) => {
+        const o = origin(), m = middle();
+        pageBody.scrollLeft = Math.max(0, o.x + cx * scale - m.x);
+        pageBody.scrollTop = Math.max(0, o.y + cy * scale - m.y);
+      };
+      // To zoom z (clamped), keeping the canvas point under point (default: the middle of the view) in place.
+      const zoomTo = (z, point, toFit = false) => {
+        const to = toFit ? fit : clampZoom(z, fit, MAX);
+        atFit = toFit || to <= fit + 1e-6;
+        if (to !== scale) {
+          const from = scale;
+          const before = origin();
+          const scroll = { left: pageBody.scrollLeft, top: pageBody.scrollTop };
+          scale = to;
+          apply(scale);
+          const next = zoomAbout({ from, to, point: point || middle(), scroll, offsetFrom: before, offsetTo: origin() });
+          pageBody.scrollLeft = next.left;
+          pageBody.scrollTop = next.top;
+        }
+        showLevel();
+      };
+      const step = dir => zoomTo(stepZoom(scale, dir, fit, MAX));
+      const off = new AbortController();
+      const on = (target, type, fn, o = {}) => target.addEventListener(type, fn, { ...o, signal: off.signal });
+      on(zoomOut, 'click', () => step(-1));
+      on(zoomIn, 'click', () => step(1));
+      on(zoomFit, 'click', () => zoomTo(0, null, true));
+      on(bar, 'keydown', e => {
+        if (e.ctrlKey || e.metaKey || e.altKey) return;
+        if (e.key === '+' || e.key === '=') step(1);
+        else if (e.key === '-') step(-1);
+        else if (e.key === '0') zoomTo(0, null, true);
+        else if (e.key === '1') zoomTo(1);
+        else return;
+        e.preventDefault();
+        e.stopPropagation();
+      });
+
+      // Wheel zoom and drag only from the canvas's background, a board's head or a note: never from a board's frame
+      // (a sandboxed frame's own events don't reach here anyway), the bar or the list of boards not drawn.
+      const ours = e => {
+        for (const n of e.composedPath()) {
+          if (n === wrap) return true;
+          if (n.classList && (n.classList.contains('board-frame') || n.classList.contains('canvas-zoom') || n.classList.contains('design-skipped'))) return false;
+        }
+        return false;
+      };
+      on(wrap, 'wheel', e => {
+        if (!(e.ctrlKey || e.metaKey) || !ours(e)) return;
+        e.preventDefault();
+        zoomTo(scale * wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey), pointIn(e.clientX, e.clientY));
+      }, { passive: false });
+      // A mouse or pen press that moves more than 4 px pans (by scrolling #page-body) and is no click; touch pans natively.
+      let drag = null;
+      let dragged = false;
+      const endDrag = () => { drag = null; wrap.classList.remove('dragging'); };
+      on(wrap, 'pointerdown', e => {
+        dragged = false;
+        if (e.pointerType === 'touch' || e.button !== 0 || !ours(e)) return;
+        drag = { id: e.pointerId, x: e.clientX, y: e.clientY, left: pageBody.scrollLeft, top: pageBody.scrollTop, moving: false };
+      });
+      on(wrap, 'pointermove', e => {
+        if (!drag || drag.id !== e.pointerId) return;
+        const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+        if (!drag.moving) {
+          if (Math.hypot(dx, dy) <= 4) return;
+          drag.moving = true;
+          dragged = true;
+          // Captured, so the drag goes on over a board's frame.
+          try { wrap.setPointerCapture(e.pointerId); } catch (err) { /* a pointer the browser doesn't know */ }
+          wrap.classList.add('dragging');
+        }
+        pageBody.scrollLeft = drag.left - dx;
+        pageBody.scrollTop = drag.top - dy;
+      });
+      const lift = e => { if (drag && drag.id === e.pointerId) endDrag(); };
+      on(wrap, 'pointerup', lift);
+      on(wrap, 'pointercancel', lift);
+      on(wrap, 'lostpointercapture', lift);
+      // The click after a drag (on Open alone, say) is not a click.
+      on(wrap, 'click', e => {
+        if (!dragged) return;
+        dragged = false;
+        e.preventDefault();
+        e.stopPropagation();
+      }, { capture: true });
+
+      // A new width: at Fit, fit it again; zoomed, keep the zoom (never below the new Fit). The middle of the view stays.
+      wrap.rescale = avail => {
+        const c = centre();
+        fit = fitOf(avail);
+        const next = atFit ? fit : clampZoom(scale, fit, MAX);
+        if (next <= fit + 1e-6) atFit = true;
+        if (next !== scale) { scale = next; apply(scale); }
+        showLevel();
+        centreOn(c.cx, c.cy);
+      };
+      // What Back from Open alone restores: the zoom ('fit' or a number) and the canvas point at the middle of the view.
+      wrap.zoomState = () => ({ zoom: atFit ? 'fit' : scale, ...centre() });
+      wrap.restoreZoom = s => {
+        if (!s) return;
+        if (s.zoom === 'fit') zoomTo(0, null, true);
+        else if (Number.isFinite(Number(s.zoom))) zoomTo(Number(s.zoom));
+        if (Number.isFinite(s.cx) && Number.isFinite(s.cy)) centreOn(s.cx, s.cy);
+      };
+      wrap.append(stage);
       if (layout.skipped.length) {
         const more = el('div', 'design-skipped');
         more.append(el('p', 'files-head', 'Not drawn on the canvas'));
@@ -962,12 +1165,13 @@
       }
       if (observer) queueMicrotask(() => { for (const item of frameOf.keys()) observer.observe(item); });
       else for (const [item, b] of frameOf) item.querySelector('.board-frame').append(previewFrame({ title: b.title }, boardDoc(b, payload, texts)));
-      wrap.stopFrames = () => { if (observer) observer.disconnect(); };
+      wrap.stopFrames = () => { if (observer) observer.disconnect(); off.abort(); endDrag(); };
       return wrap;
     }
 
     // One board alone, at its own size, with the way back to the canvas (no new hash: Back here, not in history).
     function openBoard(v, b, payload, texts) {
+      if (canvasWrap && canvasWrap.zoomState && canvasWrap.isConnected) canvasZooms.set(canvasKey(v), canvasWrap.zoomState());
       stopCanvas();
       const box = el('div', 'preview');
       box.dataset.id = String(v.id);
@@ -976,7 +1180,7 @@
       back.type = 'button';
       back.addEventListener('click', () => openCanvas(v, b.name));
       bar.append(back, el('span', 'board-title', b.title));
-      box.append(bar, previewFrame({ title: b.title }, boardDoc(b, payload, texts)));
+      box.append(bar, pageFrame({ title: b.title }, boardDoc(b, payload, texts), `${v.id}\n${b.path}`));
       pageBody.replaceChildren(box);
       pageBody.scrollTop = 0;
       // The button that opened it is gone: focus the way back.
@@ -993,6 +1197,7 @@
 
     function showPage(v) {
       stopCanvas();
+      forgetZoom();
       const title = String(v.title || 'Untitled');
       pageTitle.textContent = title;
       pageTitle.title = title;
@@ -1151,9 +1356,11 @@
       return box;
     }
 
-    // text: the version's text, or null. A page or diagram runs in the same guarded sandbox as an artifact's, with
-    // only its own chat's scripts and stylesheets beside it; Markdown renders as the chat viewer's; an image by its link.
-    function fillFile(f, v, box, text, partFailed, own = null) {
+    // text: the version's text, or null. A page (or a scripted diagram) runs in the same guarded sandbox as an
+    // artifact's, with only its own chat's scripts and stylesheets beside it; a diagram is a picture of its own text;
+    // Markdown renders as the chat viewer's; an image by its link. Pictures and pages zoom.
+    // key: the zoom's (showVersionBody's id and the file's path).
+    function fillFile(f, v, box, text, partFailed, own = null, key = '') {
       const file = fileOf(f);
       // Download for a text this page holds, named as the version's file is (report_v2.html).
       if (text !== null) {
@@ -1161,21 +1368,17 @@
         pageLinks.prepend(downloadButton(name || file.name || 'download', text));
       }
       if ((file.kind === 'html' || file.kind === 'svg') && text !== null) {
-        const doc = own ? artifactPreviewDoc(text, own.start || file.name, { texts: own.texts })
-          : artifactPreviewDoc(text, file.name, { texts: [...chatFileTexts(chats[f.chat])] });
-        if (doc.remote) addNote(PAGE_REMOTE_NOTE);
-        return box.replaceChildren(previewFrame({ title: f.name }, doc.srcdoc));
+        const page = () => {
+          const doc = own ? artifactPreviewDoc(text, own.start || file.name, { texts: own.texts })
+            : artifactPreviewDoc(text, file.name, { texts: [...chatFileTexts(chats[f.chat])] });
+          if (doc.remote) addNote(PAGE_REMOTE_NOTE);
+          return pageFrame({ title: f.name }, doc.srcdoc, key);
+        };
+        return box.replaceChildren(file.kind === 'svg' ? svgFrame(text, f.name, key, page) : page());
       }
       if (file.kind === 'md' && text !== null) return box.replaceChildren(markdownPage(text));
       if (TEXT_KINDS.has(file.kind) && text !== null) return box.replaceChildren(el('pre', 'code-view', text));
-      if (file.kind === 'image' && fileHref(v)) {
-        const frame = el('div', 'image');
-        const img = document.createElement('img');
-        img.alt = f.name;
-        img.src = fileHref(v);
-        frame.append(img);
-        return box.replaceChildren(frame);
-      }
+      if (file.kind === 'image' && fileHref(v)) return box.replaceChildren(pictureFrame(fileHref(v), f.name, key).frame);
       box.replaceChildren(fileDetails(f, v, partFailed));
     }
 
@@ -1194,22 +1397,26 @@
     // Text moved to a part loads from it.
     // own: { texts, start } for a version shown with the files it was published with (versionCopyTexts), else null.
     function showVersionBody(f, v, id, own = null) {
+      releaseZoom();
       const box = el('div', 'preview');
       box.dataset.id = id;
       pageBody.replaceChildren(box);
       const kind = fileOf(f).kind;
-      if (typeof v.text === 'string' || !TEXT_KINDS.has(kind)) return fillFile(f, v, box, typeof v.text === 'string' ? v.text : null, false, own);
-      if (!(Number.isSafeInteger(v.part) && v.part > 0 && typeof v.key === 'string')) return fillFile(f, v, box, null, false);
+      // Kept across versions: the same artifact (or In chats file) and path.
+      const key = `${id}\n${own && own.start ? own.start : fileOf(f).name}`;
+      if (typeof v.text === 'string' || !TEXT_KINDS.has(kind)) return fillFile(f, v, box, typeof v.text === 'string' ? v.text : null, false, own, key);
+      if (!(Number.isSafeInteger(v.part) && v.part > 0 && typeof v.key === 'string')) return fillFile(f, v, box, null, false, null, key);
       box.append(el('p', 'loading', 'Loading…'));
       Promise.resolve(options.loadPart(v.part)).then(part => {
         const text = part && Object.prototype.hasOwnProperty.call(part, v.key) && typeof part[v.key] === 'string' ? part[v.key] : null;
         // Another page or version took its place meanwhile.
-        if (box.isConnected) fillFile(f, v, box, text, text === null, own);
+        if (box.isConnected) fillFile(f, v, box, text, text === null, own, key);
       });
     }
 
     function showFilePage(f, at) {
       stopCanvas();
+      forgetZoom();
       const versions = f.versions.length;
       const pick = Number.isInteger(at) && at >= 0 && at < versions ? at : versions - 1;
       pageTitle.textContent = f.name;

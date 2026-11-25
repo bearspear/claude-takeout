@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Kept current; last checked at v1.22.1.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Kept current; last checked at v1.23.0.
 
 ---
 
@@ -53,10 +53,11 @@ For deeper dives, two companion docs live alongside this one:
 | `tests/e2e/webimages.e2e.js` | Browser test of web-search images: one mosaic per response, `+N`, unsaved cards, the gallery's keys and closing. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/parts.e2e.js` | Browser test of upload and generated-file text loaded from `viewer-files/`. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/published.e2e.js` | Browser test of published-page cards: one card per page, versions, "Same as published", "Needs claude.ai to run", the claude.ai link, Export All links. | Optional; needs `playwright-core` and Chromium. |
+| `tests/e2e/zoom.e2e.js` | Browser test of zoom and drag in the chat viewer: the gallery (wheel, drag, double-click, keys, inline diagrams), pictures in the panel and upload pop-ups, SVG files as pictures and their fallback to the frame, and the page zoom bar with Fit width. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/artifacts-viewer.e2e.js` | Browser test of the Export Artifacts viewer: grid, tabs, routing, sandboxed previews and their files, shims, hostile pages, no-network checks. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/artifacts.e2e.js` | Browser test of an Export Artifacts `index.html` over `file://`: rows sorted, title link opens the artifact, Docs row note and no local link, shared label, no network or page errors. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/download.e2e.js` | Browser test of Download: popups and the panel (names, bytes, a part-backed upload once loaded), the Artifacts screen's start file, image and list rows, Download ZIP; nothing navigates or loads the file. | Optional; needs `playwright-core` and Chromium. |
-| `tests/e2e/design.e2e.js` | Browser test of the Design canvas, standalone and hosted: boards in place and titled, sandboxed (guard frame hosted), made near the view, notes as text, badges, Open alone and back, a hostile board, the poster without `canvas.json`. | Optional; needs `playwright-core` and Chromium started with `--disable-features=IsolateSandboxedIframes`. |
+| `tests/e2e/design.e2e.js` | Browser test of the Design canvas, standalone and hosted: zoom and drag, boards in place and titled, sandboxed (guard frame hosted), made near the view, notes as text, badges, Open alone and back, a hostile board, the poster without `canvas.json`. | Optional; needs `playwright-core` and Chromium started with `--disable-features=IsolateSandboxedIframes`. |
 | `tests/e2e/combined.e2e.js` | Browser test of an Export All with artifacts: the Artifacts screen and its tabs including In chats, links both ways, the guard frame's refusals, no network. | Optional; needs `playwright-core` and Chromium started with `--disable-features=IsolateSandboxedIframes`. |
 | `tests/e2e/viewer.e2e.js` | Browser test of the chat viewer over `file://`, built from the synthetic fixture; the only coverage of `sanitizeHtml`. | Optional; needs `playwright-core` and Chromium. |
 | `tests/e2e/export.e2e.js` | The real extension in Chromium against a mock claude.ai: binary bytes through real ZIP exports. | Optional; needs `playwright-core` and Chromium. |
@@ -415,7 +416,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 - **No mass `git add .`** — stage the specific tracked files plus any new files that genuinely belong to the project. Never accidentally commit `.claude/`, transcripts, or `.DS_Store`.
 - **Tests:** run `sh tests/run.sh` before committing. See `tests/README.md`. Never put real conversations or exports in the repo, because they're private; add a synthetic case to `tests/fixtures/conversation.json` instead. Mocks have missed real claude.ai behavior here, so also export a real conversation for anything touching fetching or capture. `extract_artifacts.py` and the `validate-export` skill (bearspear/claude-skills, `plugins/archives/skills/validate-export/SKILL.md`; the `archives` plugin) must stay in sync with `export-core.js`. `tests/export.test.js` also pins every file an export writes against `tests/fixtures/export-baseline.json` (refresh steps in `tests/README.md`).
 - **No `_`-prefixed files or folders:** Chrome refuses to load an extension containing one, including `__pycache__`. Run Python with `-B`, and never import these scripts without `sys.dont_write_bytecode = True`.
-- **Viewer rendering:** the viewer renders chat text through escaped raw HTML, text-node placeholders and `sanitizeHtml`. Keep all three when changing it. `tests/e2e/viewer.e2e.js` is the only coverage for `sanitizeHtml`, so run it after viewer changes. The viewer page's CSP keeps `'unsafe-inline'` and `'unsafe-eval'` for scripts, and `'unsafe-inline'` for styles, because `srcdoc` previews inherit the page's policy and `PREVIEW_CSP` can only narrow it; removing either breaks previews (`new Function` in a generated file). Previews are sandboxed but not a security boundary for untrusted exports: a generated file's own text and that chat's `.js` and `.css` can leave, while the viewer, other chats and files on disk can't be reached (see `USAGE.md`).
+- **Viewer rendering:** the viewer renders chat text through escaped raw HTML, text-node placeholders and `sanitizeHtml`. Keep all three when changing it. `tests/e2e/viewer.e2e.js` is the only coverage for `sanitizeHtml`, so run it after viewer changes. The viewer page's CSP keeps `'unsafe-inline'` and `'unsafe-eval'` for scripts, and `'unsafe-inline'` for styles, because `srcdoc` previews inherit the page's policy and `PREVIEW_CSP` can only narrow it; removing either breaks previews (`new Function` in a generated file). Previews are sandboxed but not a security boundary for untrusted exports: a generated file's own text and that chat's `.js` and `.css` can leave, while the viewer, other chats and files on disk can't be reached (see `USAGE.md`). Every preview document ends with `SIZE_SCRIPT` (it posts the page size as `ct-size` to the viewer for the zoom bar's Fit width), and nothing else about a preview changed for zoom.
 - **Syntax colors:** highlight.js can run for minutes on some text, such as one very long word, so never call it on the page. It runs in a blob worker (`worker-src blob:`) built from the `#highlighter` script tag, one block at a time, and is stopped after `HIGHLIGHT_TIMEOUT`. Colors only appear as a block scrolls into view, and any failure leaves the block plain. Unlabeled fences are not guessed. Before first use the worker runs `tameMarkdown` (in `viewer-logic.js`, passed in as source), which stops `_` inside a word from opening italics and ends italics and bold at a blank line. `tests/e2e/colors.e2e.js` covers this.
 - **Syntax check after every edit:** `node --check popup.js`. Catches most copy/paste mistakes without launching Chrome.
 
@@ -423,7 +424,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built (last checked at v1.22.1). It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built (last checked at v1.23.0). It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 
@@ -461,4 +462,4 @@ A clean diff (or only the unversioned-final equivalent to `_vN`) means the JS ex
 
 ---
 
-*Last updated 2026-11-24. Keep this file accurate — it's the contract a future agent reads before touching anything.*
+*Last updated 2026-11-25. Keep this file accurate — it's the contract a future agent reads before touching anything.*

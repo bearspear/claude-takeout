@@ -512,7 +512,7 @@ function remoteScripts(html) {
 function previewDoc(text, lookup) {
   const rest = String(text).replace(/^﻿?\s*<!doctype[^>]*>/i, '');
   return {
-    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${inlineSiblings(rest, lookup)}`,
+    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${inlineSiblings(rest, lookup)}${SIZE_SCRIPT}`,
     remote: remoteScripts(rest),
   };
 }
@@ -627,7 +627,7 @@ const RTC_SHIM = `<script>(function(){['RTCPeerConnection','webkitRTCPeerConnect
 function artifactPreviewDoc(text, startPath, payload) {
   const rest = String(text).replace(/^﻿?\s*<!doctype[^>]*>/i, '');
   return {
-    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${STORAGE_SHIM}${RTC_SHIM}${inlineArtifact(rest, startPath, payload)}`,
+    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${STORAGE_SHIM}${RTC_SHIM}${inlineArtifact(rest, startPath, payload)}${SIZE_SCRIPT}`,
     remote: remoteScripts(rest),
   };
 }
@@ -1518,6 +1518,434 @@ function designCanvas(text, held) {
   return { width, height, title: str(json.title), boards, notes, skipped };
 }
 
+// ---- Zoom (v1.23) ----
+const ZOOM_STEPS = [0.1, 0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
+const PICTURE_MAX_SIDE = 32768;
+
+function clampZoom(z, min, max) {
+  const n = Number.isFinite(z) ? z : 1;
+  return Math.min(max, Math.max(min, n));
+}
+
+// The first step strictly beyond z in that direction, clamped; none beyond means the bound.
+function stepZoom(z, dir, min, max) {
+  const eps = 1e-6;
+  let next = dir > 0 ? max : min;
+  if (dir > 0) {
+    for (const s of ZOOM_STEPS) if (s > z + eps) { next = s; break; }
+  } else {
+    for (let i = ZOOM_STEPS.length - 1; i >= 0; i--) if (ZOOM_STEPS[i] < z - eps) { next = ZOOM_STEPS[i]; break; }
+  }
+  return clampZoom(next, min, max);
+}
+
+// deltaMode 0 pixels, 1 lines, 2 pages. A pinch arrives as a ctrl wheel and is faster.
+function wheelFactor(deltaY, deltaMode, pinch) {
+  const unit = deltaMode === 1 ? 16 : deltaMode === 2 ? 800 : 1;
+  const d = Math.max(-200, Math.min(200, (Number(deltaY) || 0) * unit));
+  return Math.exp(-d * (pinch ? 0.01 : 0.002));
+}
+
+// The scroll position that keeps the content point under `point` (viewport coordinates) in place when the zoom changes.
+function zoomAbout({ from, to, point, scroll, offsetFrom = { x: 0, y: 0 }, offsetTo = { x: 0, y: 0 } }) {
+  const cx = (scroll.left + point.x - offsetFrom.x) / from;
+  const cy = (scroll.top + point.y - offsetFrom.y) / from;
+  return {
+    left: Math.max(0, cx * to + offsetTo.x - point.x),
+    top: Math.max(0, cy * to + offsetTo.y - point.y),
+  };
+}
+
+function fitZoom(natural, box) {
+  const nums = [natural && natural.width, natural && natural.height, box && box.width, box && box.height];
+  if (nums.some(n => !Number.isFinite(n) || n <= 0)) return 1;
+  return Math.min(1, box.width / natural.width, box.height / natural.height);
+}
+
+function pictureRange(fit, natural) {
+  const min = Math.min(fit, 0.1);
+  const side = Math.max(natural.width, natural.height);
+  return { min, max: Math.max(fit, Math.min(8, PICTURE_MAX_SIDE / side)) };
+}
+
+function doubleClickZoom(z, fit) {
+  if (Math.abs(z - fit) < 1e-6) return 1 > fit + 1e-6 ? 1 : 2;
+  return fit;
+}
+
+// The root <svg> tag's width and height when both are plain numbers or px, else its viewBox size, else null.
+function svgNaturalSize(text) {
+  const tag = /<svg\b[^>]*>/i.exec(String(text));
+  if (!tag) return null;
+  const attr = name => {
+    const m = new RegExp('\\s' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\')', 'i').exec(tag[0]);
+    return m ? (m[1] !== undefined ? m[1] : m[2]) : null;
+  };
+  const px = v => {
+    const m = v === null ? null : /^\s*(\d+(?:\.\d+)?|\.\d+)\s*(?:px)?\s*$/i.exec(v);
+    return m ? Number(m[1]) : null;
+  };
+  const w = px(attr('width'));
+  const h = px(attr('height'));
+  if (w > 0 && h > 0) return { width: w, height: h };
+  const vb = attr('viewBox');
+  if (vb !== null) {
+    const n = vb.trim().split(/[\s,]+/).map(Number);
+    if (n.length === 4 && n.every(Number.isFinite) && n[2] > 0 && n[3] > 0) return { width: n[2], height: n[3] };
+  }
+  return null;
+}
+
+function svgHasScripts(text) {
+  const t = String(text);
+  return /<script\b/i.test(t) || /<[^>]*\son[a-z]+\s*=/i.test(t);
+}
+
+function svgDataUrl(text) {
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(String(text).replace(/^\uFEFF/, ''));
+}
+
+// A sandboxed preview reports its size by message; only a sane report counts.
+function pageFit(report, containerWidth) {
+  const ok = n => typeof n === 'number' && Number.isFinite(n) && n > 0;
+  if (!report || report.type !== 'ct-size' || !ok(report.width) || !ok(report.view) || !ok(containerWidth)) return null;
+  if (report.width <= report.view + 1) return { fit: 1, enabled: false };
+  return { fit: clampZoom(containerWidth / report.width, 0.25, 1), enabled: true };
+}
+
+// Appended to every preview document. Inline scripts run under PREVIEW_CSP; the opaque origin needs target '*'.
+// The load report can come before the frame's first real layout (it then reads 0 or the view's width), so a
+// ResizeObserver on the root reports again once the page has been laid out.
+const SIZE_SCRIPT = `<script>(function(){function r(){try{var d=document.documentElement;window.top.postMessage({type:'ct-size',width:d.scrollWidth,view:d.clientWidth},'*')}catch(e){}}window.addEventListener('load',r);window.addEventListener('resize',r);try{new ResizeObserver(function(){r()}).observe(document.documentElement)}catch(e){}})()</script>`;
+
+// ---- Zoom: DOM controllers ----
+// Page code only; never called at load. Works inside a shadow root: it touches only the elements it is
+// given and their own document. The box keeps its tabindex and the frame after destroy, so a box that
+// had focus keeps it.
+
+// Zoom and pan for one picture. box becomes the scroll container; a div.zoom-frame takes its place and
+// holds it and the bar (−, percentage, +, Fit), so the bar doesn't scroll. The frame and bar are reused
+// when the same box gets a new controller (the gallery's next picture), so focus in them isn't lost.
+// opts.plainWheel: a plain wheel zooms too (the gallery). opts.natural: the picture's size at 100%.
+// opts.onError: called once when the picture fails to load, or loads with no width (controller.failed is set).
+// Sizing waits until the box has a size: a detached or hidden box is fitted by the ResizeObserver once shown.
+function pictureZoom(box, img, opts = {}) {
+  const doc = box.ownerDocument;
+  const make = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
+  let frame = box.parentElement && box.parentElement.classList.contains('zoom-frame') ? box.parentElement : null;
+  if (!frame) {
+    // Each place sizes its frame in CSS (.gallery-pop > .zoom-frame, #panel-body > .zoom-frame, ...).
+    frame = make('div', 'zoom-frame');
+    if (box.parentNode) box.replaceWith(frame);
+    frame.append(box);
+  }
+  let bar = frame.querySelector(':scope > .zoom-bar');
+  if (!bar) {
+    bar = make('div', 'zoom-bar');
+    const button = (cls, text, label) => { const b = make('button', cls, text); b.type = 'button'; b.setAttribute('aria-label', label); return b; };
+    const out = make('output', 'zoom-level');
+    out.setAttribute('aria-live', 'polite');
+    bar.append(button('zoom-out', '−', 'Zoom out'), out, button('zoom-in', '+', 'Zoom in'), button('zoom-fit', 'Fit', 'Fit'));
+    frame.append(bar);
+  }
+  bar.hidden = false;
+  const levelOut = bar.querySelector('.zoom-level');
+  if (!box.hasAttribute('tabindex')) box.tabIndex = 0;
+  box.classList.add('zoom-box');
+  box.classList.toggle('zoom-all', !!opts.plainWheel);
+  img.draggable = false;
+
+  const off = new AbortController();
+  const on = (target, type, fn, o = {}) => target.addEventListener(type, fn, { ...o, signal: off.signal });
+  let natural = null; // { width, height } at 100%
+  let zoom = 1;
+  let atFit = true;
+  let pending = null; // a state to restore once the picture is ready
+  let loaded = false; // the picture has loaded, or opts.natural made waiting unnecessary
+  const controller = { frame, dragged: false, failed: false };
+
+  const avail = () => {
+    const cs = getComputedStyle(box);
+    return {
+      width: box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+      height: box.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
+    };
+  };
+  const hasSize = () => { const a = avail(); return Number.isFinite(a.width) && Number.isFinite(a.height) && a.width > 0 && a.height > 0; };
+  const fitNow = () => fitZoom(natural, avail());
+  const range = () => pictureRange(fitNow(), natural);
+  // The picture's top left in the scroll content, and a viewport point in the box's client area.
+  const offset = () => {
+    const r = box.getBoundingClientRect(), i = img.getBoundingClientRect();
+    return { x: i.left - r.left - box.clientLeft + box.scrollLeft, y: i.top - r.top - box.clientTop + box.scrollTop };
+  };
+  const pointIn = (x, y) => { const r = box.getBoundingClientRect(); return { x: x - r.left - box.clientLeft, y: y - r.top - box.clientTop }; };
+  const centre = () => ({ x: box.clientWidth / 2, y: box.clientHeight / 2 });
+  const canPan = () => box.scrollWidth > box.clientWidth + 1 || box.scrollHeight > box.clientHeight + 1;
+
+  function apply(z, point, fitting = false) {
+    if (!natural) return;
+    const { min, max } = range();
+    const to = fitting ? fitNow() : clampZoom(z, min, max);
+    const from = zoom;
+    const p = point || centre();
+    const before = offset();
+    const scroll = { left: box.scrollLeft, top: box.scrollTop };
+    zoom = to;
+    atFit = fitting;
+    img.style.width = `${natural.width * to}px`;
+    img.style.height = `${natural.height * to}px`;
+    const next = zoomAbout({ from, to, point: p, scroll, offsetFrom: before, offsetTo: offset() });
+    box.scrollLeft = next.left;
+    box.scrollTop = next.top;
+    levelOut.textContent = `${Math.round(to * 100)}%`;
+    box.classList.toggle('can-drag', canPan());
+  }
+  const setFit = () => apply(0, null, true);
+  const setZoom = (z, point) => apply(z, point);
+
+  // Natural size and Fit, once the picture is known and the box has a size; the ResizeObserver calls it again.
+  function ready() {
+    if (natural || !loaded || controller.failed || !hasSize()) return;
+    const n = opts.natural;
+    if (n && n.width > 0 && n.height > 0) natural = { width: n.width, height: n.height };
+    else if (img.naturalWidth > 0 && img.naturalHeight > 0) natural = { width: img.naturalWidth, height: img.naturalHeight };
+    else { const a = avail(); natural = { width: a.width, height: a.height }; }
+    zoom = fitNow();
+    setFit();
+    if (pending) { const s = pending; pending = null; controller.restore(s); }
+  }
+  function fail() {
+    if (controller.failed) return;
+    controller.failed = true;
+    bar.hidden = true;
+    // Later, so the callback never runs before the controller is complete (destroy is assigned last).
+    if (typeof opts.onError === 'function') queueMicrotask(() => opts.onError(controller));
+  }
+  // An <img> with no src is complete too; only one with a src that has no width has failed.
+  const failedAlready = () => img.complete && !!img.getAttribute('src') && !img.naturalWidth;
+  const onLoad = () => { if (!img.naturalWidth) { fail(); return; } loaded = true; ready(); };
+  if (img.complete && img.naturalWidth) loaded = true;
+  else if (failedAlready()) fail();
+  else {
+    if (opts.natural) loaded = true;
+    on(img, 'load', onLoad);
+    on(img, 'error', fail);
+  }
+  ready();
+
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+    if (!natural) { ready(); return; }
+    if (!hasSize()) return;
+    if (atFit) setFit();
+    else { const { min, max } = range(); if (zoom < min || zoom > max) setZoom(zoom); else box.classList.toggle('can-drag', canPan()); }
+  }) : null;
+  if (ro) ro.observe(box);
+
+  const current = () => (atFit ? fitNow() : zoom);
+  const step = dir => { const { min, max } = range(); setZoom(stepZoom(current(), dir, min, max)); };
+  controller.key = e => {
+    if (!natural || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key === '+' || e.key === '=') step(1);
+    else if (e.key === '-') step(-1);
+    else if (e.key === '0') setFit();
+    else if (e.key === '1') setZoom(1);
+    else return false;
+    e.preventDefault();
+    return true;
+  };
+  on(frame, 'keydown', e => { if (controller.key(e)) e.stopPropagation(); });
+  on(bar.querySelector('.zoom-out'), 'click', () => step(-1));
+  on(bar.querySelector('.zoom-in'), 'click', () => step(1));
+  on(bar.querySelector('.zoom-fit'), 'click', () => setFit());
+
+  on(box, 'wheel', e => {
+    if (!natural || !(e.ctrlKey || e.metaKey || opts.plainWheel)) return;
+    e.preventDefault();
+    setZoom(current() * wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey), pointIn(e.clientX, e.clientY));
+  }, { passive: false });
+  on(box, 'dblclick', e => {
+    if (!natural) return;
+    const z = doubleClickZoom(current(), fitNow());
+    if (Math.abs(z - fitNow()) < 1e-6 && !atFit) setFit();
+    else setZoom(z, pointIn(e.clientX, e.clientY));
+  });
+  on(box, 'dragstart', e => e.preventDefault());
+
+  // Pointers: one drags (past 4 px), two touch pointers pinch about their midpoint.
+  const pointers = new Map();
+  let drag = null, pinch = null;
+  const endDrag = () => { drag = null; box.classList.remove('dragging'); };
+  const spread = () => { const [a, b] = [...pointers.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; };
+  on(box, 'pointerdown', e => {
+    controller.dragged = false;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2 && e.pointerType === 'touch' && natural) {
+      endDrag();
+      const s = spread();
+      pinch = { d: s.d || 1, zoom: current() };
+      return;
+    }
+    if (pointers.size === 1) drag = { id: e.pointerId, x: e.clientX, y: e.clientY, left: box.scrollLeft, top: box.scrollTop, moving: false };
+  });
+  on(box, 'pointermove', e => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pointers.size === 2) {
+      const s = spread();
+      controller.dragged = true;
+      setZoom(pinch.zoom * (s.d / pinch.d), pointIn(s.x, s.y));
+      return;
+    }
+    if (!drag || drag.id !== e.pointerId) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moving) {
+      if (Math.hypot(dx, dy) <= 4) return;
+      drag.moving = true;
+      controller.dragged = true;
+      try { box.setPointerCapture(e.pointerId); } catch (err) { /* a pointer the browser doesn't know */ }
+      if (canPan()) box.classList.add('dragging');
+    }
+    if (box.classList.contains('dragging')) {
+      box.scrollLeft = drag.left - dx;
+      box.scrollTop = drag.top - dy;
+    }
+  });
+  const lift = e => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (drag && drag.id === e.pointerId) endDrag();
+  };
+  on(box, 'pointerup', lift);
+  on(box, 'pointercancel', lift);
+  on(box, 'lostpointercapture', lift);
+  // The click after a drag is not a click.
+  on(box, 'click', e => {
+    if (!controller.dragged) return;
+    controller.dragged = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, { capture: true });
+
+  controller.state = () => {
+    const fx = box.scrollWidth - box.clientWidth, fy = box.scrollHeight - box.clientHeight;
+    return { zoom: atFit ? 'fit' : zoom, fx: fx > 0 ? box.scrollLeft / fx : 0, fy: fy > 0 ? box.scrollTop / fy : 0 };
+  };
+  controller.restore = s => {
+    if (!s) return;
+    if (!natural) { pending = s; return; }
+    if (s.zoom === 'fit') { setFit(); return; }
+    setZoom(Number(s.zoom));
+    const frac = v => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0);
+    box.scrollLeft = frac(s.fx) * Math.max(0, box.scrollWidth - box.clientWidth);
+    box.scrollTop = frac(s.fy) * Math.max(0, box.scrollHeight - box.clientHeight);
+  };
+  controller.destroy = () => {
+    off.abort();
+    if (ro) ro.disconnect();
+    pointers.clear();
+    endDrag();
+    box.classList.remove('can-drag', 'zoom-all');
+    const focused = frame.getRootNode().activeElement;
+    bar.hidden = true;
+    if (focused && bar.contains(focused)) box.focus({ preventScroll: true });
+  };
+  return controller;
+}
+
+// The zoom of a sandboxed page, applied from outside: the frame is laid out at wrapper size ÷ zoom and scaled
+// by zoom from its top left, inside the wrapper (div.page-zoom) that clips it. A ResizeObserver on the wrapper
+// keeps Fit width right for its new width. The bar (−, percentage, +,
+// Fit width, Actual size) sits on the wrapper's edge. Fit width waits for the page's own size report
+// (SIZE_SCRIPT), taken only from opts.source() (default: the frame's window); it stays disabled for a page
+// that fits. The page's own events stay its own: no wheel, drag or keys over it.
+function pageZoom(wrapper, frame, opts = {}) {
+  const doc = wrapper.ownerDocument;
+  const win = doc.defaultView;
+  const make = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
+  const MIN = 0.25, MAX = 2;
+  wrapper.classList.add('page-zoom');
+  if (frame.parentNode !== wrapper) wrapper.append(frame);
+  let bar = wrapper.querySelector(':scope > .zoom-bar');
+  if (!bar) {
+    bar = make('div', 'zoom-bar');
+    const button = (cls, text, label) => { const b = make('button', cls, text); b.type = 'button'; b.setAttribute('aria-label', label); return b; };
+    const out = make('output', 'zoom-level');
+    out.setAttribute('aria-live', 'polite');
+    bar.append(button('zoom-out', '−', 'Zoom out'), out, button('zoom-in', '+', 'Zoom in'),
+      button('zoom-fit', 'Fit width', 'Fit width'), button('zoom-100', '100%', 'Actual size'));
+    wrapper.append(bar);
+  }
+  bar.hidden = false;
+  const levelOut = bar.querySelector('.zoom-level');
+  const fitButton = bar.querySelector('.zoom-fit');
+  const off = new AbortController();
+  const on = (target, type, fn, o = {}) => target.addEventListener(type, fn, { ...o, signal: off.signal });
+  let zoom = 1;
+  let report = null; // the last size report that said the page is wider than its frame
+  let fit = null; // { fit, enabled } from pageFit, null until a report counts
+
+  // The CSS (.page-zoom > .preview) lays the frame out at 100% ÷ zoom of the wrapper and scales it by zoom,
+  // so the frame itself gets no new attribute.
+  function apply(z) {
+    zoom = clampZoom(z, MIN, MAX);
+    wrapper.style.setProperty('--page-zoom', String(zoom));
+    levelOut.textContent = `${Math.round(zoom * 100)}%`;
+  }
+  function setFit(f) {
+    fit = f;
+    fitButton.disabled = !(f && f.enabled);
+  }
+  const fitWidth = () => { if (fit && fit.enabled) apply(fit.fit); };
+
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+    if (report) { const f = pageFit(report, wrapper.clientWidth); if (f) setFit(f); }
+  }) : null;
+  if (ro) ro.observe(wrapper);
+
+  // A report made while zoomed out was laid out wider than the wrapper, so "it fits" says nothing about the
+  // wrapper's width: the last report that counted stands (Fit width would otherwise disable itself).
+  on(win, 'message', e => {
+    if (!frame.isConnected) { off.abort(); if (ro) ro.disconnect(); return; }
+    const source = opts.source ? opts.source() : frame.contentWindow;
+    if (!source || e.source !== source) return;
+    const f = pageFit(e.data, wrapper.clientWidth);
+    if (!f) return;
+    if (f.enabled) { report = e.data; setFit(f); }
+    else if (zoom >= 1 - 1e-6) { report = null; setFit(f); }
+  });
+
+  const step = dir => apply(stepZoom(zoom, dir, MIN, MAX));
+  const controller = { frame, wrapper };
+  controller.key = e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key === '+' || e.key === '=') step(1);
+    else if (e.key === '-') step(-1);
+    else if (e.key === '0') { if (fit && fit.enabled) fitWidth(); else apply(1); }
+    else if (e.key === '1') apply(1);
+    else return false;
+    e.preventDefault();
+    return true;
+  };
+  on(bar, 'keydown', e => { if (controller.key(e)) e.stopPropagation(); });
+  on(bar.querySelector('.zoom-out'), 'click', () => step(-1));
+  on(bar.querySelector('.zoom-in'), 'click', () => step(1));
+  on(fitButton, 'click', fitWidth);
+  on(bar.querySelector('.zoom-100'), 'click', () => apply(1));
+
+  setFit(null);
+  apply(1);
+  controller.state = () => ({ zoom });
+  controller.restore = s => { if (s && Number.isFinite(Number(s.zoom))) apply(Number(s.zoom)); };
+  controller.destroy = () => {
+    off.abort();
+    if (ro) ro.disconnect();
+    bar.hidden = true;
+  };
+  return controller;
+}
+
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
 }

@@ -223,7 +223,8 @@ const navs = dir => [
     [U(2)]: live('Hostile', { 'index.html': hostileHtml(attacks) }),
     [U(3)]: live('Shared deck', { 'deck.html': '<h1>Shared page</h1>' }),
     [U(9)]: live('Guide', { 'index.html': GUIDE }),
-    [U(5)]: live('Cowork deck', { 'index.html': '<h1>Cowork</h1>' }),
+    // Laid out 1600 px wide, for Fit width through the guard frame.
+    [U(5)]: live('Cowork deck', { 'index.html': '<!doctype html><html><body style="margin:0"><div style="width:1600px;height:300px;background:#69c">Cowork</div></body></html>' }),
     [U(6)]: live('Code dash', { 'index.html': '<h1>Code</h1>' }),
     [U(8)]: live('Side page', { 'index.html': SIDE }),
   };
@@ -364,13 +365,22 @@ const navs = dir => [
 
   // A diagram in two versions: the menu lists both, the latest first shown.
   await page.locator('#artifacts-screen #grid .card', { hasText: 'chart.svg' }).click();
-  const svgGuard = await previewOf(v);
+  // An SVG file is a picture: its own text in a data URL, no frame.
+  const svgText = async () => {
+    await page.waitForFunction(() => { const s = document.getElementById('artifacts-screen').shadowRoot; const i = s && s.querySelector('#page-body .preview .zoom-box img'); return i && i.complete && i.naturalWidth > 0; }, null, { timeout: 3000 }).catch(() => {});
+    const src = await page.locator('#artifacts-screen #page-body .preview .zoom-box img').getAttribute('src', { timeout: 3000 }).catch(() => '');
+    return src && src.startsWith('data:image/svg+xml') ? decodeURIComponent(src.slice(src.indexOf(',') + 1)) : '';
+  };
   const options = page.locator('#artifacts-screen #page-from select option');
   check('the version menu lists the versions, the latest chosen', JSON.stringify(await options.allTextContents()) === JSON.stringify(['v1', 'v2 (latest)']) && await page.locator('#artifacts-screen #page-from select').inputValue() === '1', JSON.stringify(await options.allTextContents()));
-  check('the latest version shows', (await svgGuard.$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--V2-->'));
+  const svgV2 = await svgText();
+  check('hosted: chart.svg is a picture with its text', svgV2.includes('<!--V2-->') && await page.locator('#artifacts-screen #page-body .preview iframe').count() === 0, svgV2.slice(0, 120));
+  // Its zoom is kept across versions of the file.
+  await page.locator('#artifacts-screen #page-body .preview .zoom-in').click({ timeout: 3000 }).catch(() => {});
+  const svgLevel = await page.locator('#artifacts-screen #page-body .preview .zoom-level').textContent({ timeout: 3000 }).catch(() => null);
   await page.locator('#artifacts-screen #page-from select').selectOption('0');
-  const v1Guard = await previewOf(v);
-  check('choosing v1 shows v1', (await v1Guard.$eval('iframe', f => f.getAttribute('srcdoc'))).includes('<!--V1-->'));
+  check('choosing v1 shows v1', (await svgText()).includes('<!--V1-->'));
+  check('hosted: another version of the file keeps its zoom', !!svgLevel && svgLevel !== '100%' && (await page.locator('#artifacts-screen #page-body .preview .zoom-level').textContent({ timeout: 3000 }).catch(() => null)) === svgLevel, String(svgLevel));
   check('the diagram page', (await page.locator('#artifacts-screen #page-kind').textContent()) === 'Diagram');
 
   // Markdown through the sanitizer; Markdown from a part; code as code.
@@ -434,6 +444,8 @@ const navs = dir => [
   });
   check("the guard's policy is frame-src 'none', it runs nothing, and holds one frame", guardState.policy === "frame-src 'none'" && guardState.scripts === 0 && guardState.frames === 1, JSON.stringify(guardState));
   check('the preview frame: the same sandbox', guardState.sandbox === 'allow-scripts allow-forms allow-modals');
+  const guardSrc = await page.$eval('#artifacts-screen #page-body .preview iframe', f => f.getAttribute('srcdoc'));
+  check('hosted: guardDoc unchanged', guardSrc.startsWith('<!doctype html><html><head><meta http-equiv="Content-Security-Policy" content="frame-src \'none\'"><style>') && guardSrc.includes('<body><iframe sandbox="allow-scripts allow-forms allow-modals" title="Guide page" srcdoc="'), guardSrc.slice(0, 200));
   check('the open-file link points at the saved file', fs.existsSync(path.join(dir, decodeURIComponent(await page.locator('#artifacts-screen #page-links a.open-file').getAttribute('href')))));
   const groups = page.locator('#artifacts-screen #page-from .link-group');
   check('the link line: Published in, then Edited in, each chat once', JSON.stringify(await groups.allTextContents()) === JSON.stringify(['Published in Editing', 'Edited in Editing, Plain talk']), JSON.stringify(await groups.allTextContents()));
@@ -468,6 +480,18 @@ const navs = dir => [
   check('Back returns to the grid', await page.evaluate(() => location.hash) === '#artifacts' && await page.locator('#artifacts-screen #page-body iframe').count() === 0);
   await page.locator('#artifacts-screen #grid .card', { hasText: 'Shared deck' }).click();
   await page.waitForSelector('#artifacts-screen #page:not([hidden])');
+  await page.locator('#artifacts-screen #home-button').click();
+  // A page laid out wider than its frame: its size report comes from the preview inside the guard frame.
+  await page.evaluate(h => { location.hash = h; }, `#a=${p(5)}`);
+  await previewOf(v);
+  const coworkFit = await page.waitForFunction(() => { const s = document.getElementById('artifacts-screen').shadowRoot; const b = s && s.querySelector('#page-body .preview .page-zoom .zoom-fit'); return b && !b.disabled; }, null, { timeout: 3000 }).then(() => true).catch(() => false);
+  await page.locator('#artifacts-screen #page-body .preview .page-zoom .zoom-fit').click({ timeout: 3000 }).catch(() => {});
+  const coworkGeo = await page.locator('#artifacts-screen #page-body .preview .page-zoom').evaluate(w => {
+    const m = /matrix\(([^,]+),/.exec(getComputedStyle(w.querySelector(':scope > iframe')).transform);
+    return { cw: w.clientWidth, scale: m ? Number(m[1]) : 1, level: w.querySelector('.zoom-level').textContent };
+  }, null, { timeout: 3000 }).catch(() => ({}));
+  const coworkWant = Math.min(1, Math.max(0.25, coworkGeo.cw / 1600));
+  check("hosted: wide page's Fit width works through the guard frame", coworkFit && Math.abs(coworkGeo.scale - coworkWant) < 1e-3 && coworkGeo.level === `${Math.round(coworkWant * 100)}%`, JSON.stringify({ coworkFit, ...coworkGeo, coworkWant }));
   await page.locator('#artifacts-screen #home-button').click();
   check('the home button returns to the grid', await shown(page, '#artifacts-screen #home') && await page.evaluate(() => location.hash) === '#artifacts');
 
