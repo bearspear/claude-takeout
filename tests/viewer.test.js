@@ -2234,6 +2234,42 @@ test('canvasScale fits the width, never above 1 or below 0.1', () => {
   for (const bad of [0, -1, NaN, Infinity]) assert.strictEqual(canvasScale(bad, 1000), 1, String(bad));
 });
 
+const { canvasFit, clampPan, panAbout, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX } = require('../viewer/viewer-logic.js');
+test('canvasFit shows the whole layout in the window, never above 100% or below the minimum', () => {
+  assert.strictEqual(CANVAS_ZOOM_MIN, 0.1);
+  assert.strictEqual(CANVAS_ZOOM_MAX, 2);
+  assert.strictEqual(canvasFit(500, 300, 1000, 800), 1);
+  // 2000 wide in 1000 - 2 * 40: width decides; 4000 tall in 900 - 80: height decides.
+  assert.strictEqual(canvasFit(2000, 100, 1000, 800), 0.46);
+  assert.strictEqual(canvasFit(100, 4100, 1000, 900), 0.2);
+  assert.strictEqual(canvasFit(1e7, 100, 1000, 800), 0.1);
+  for (const bad of [0, -1, NaN, Infinity]) {
+    assert.strictEqual(canvasFit(bad, 100, 1000, 800), 1, `w ${bad}`);
+    assert.strictEqual(canvasFit(100, 100, bad, 800), 1, `view ${bad}`);
+  }
+});
+
+test('clampPan keeps some of the canvas in the window', () => {
+  const at = (x, y) => clampPan({ x, y }, 1000, 500, 1, 800, 600);
+  assert.deepStrictEqual(at(10, 20), { x: 10, y: 20 });
+  // Off to the left and up: 80 px of it stay.
+  assert.deepStrictEqual(at(-5000, -5000), { x: -920, y: -420 });
+  // Off to the right and down.
+  assert.deepStrictEqual(at(5000, 5000), { x: 720, y: 520 });
+  // A canvas smaller than 80 px keeps all of it in.
+  assert.deepStrictEqual(clampPan({ x: -500, y: 900 }, 100, 100, 0.5, 800, 600), { x: 0, y: 550 });
+  // Bad numbers: the pan as given, or 0.
+  assert.deepStrictEqual(clampPan({ x: NaN, y: 5 }, 1000, 500, 1, 800, 600), { x: 0, y: 5 });
+});
+
+test('panAbout keeps the canvas point under the pointer', () => {
+  const pan = { x: 100, y: 50 }, point = { x: 300, y: 250 };
+  const next = panAbout(pan, point, 1, 2);
+  // Canvas point (200, 200) at scale 1 sits under the pointer; at 2 it must still.
+  assert.deepStrictEqual(next, { x: -100, y: -150 });
+  assert.deepStrictEqual(panAbout(pan, point, 1, 1), pan);
+});
+
 test('a heading note takes its maxW, a sticky note its w', () => {
   const c = designCanvas(JSON.stringify({ boards: SAMPLE_CANVAS.boards, notes: {
     t: { kind: 'title1', text: 'Heading', x: 0, y: 0, w: 240, maxW: 2420 },
