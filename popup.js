@@ -887,25 +887,50 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
 // The file tools that change a file at its path (input.path or input.file_path), by name.
 const FILE_EDIT_TOOLS = ['create_file', 'str_replace', 'rewrite', 'create_or_overwrite', 'Write', 'Edit'];
 
-// Code files, which rule c of sortOpaque treats as helper scripts.
-const HELPER_SCRIPT_EXTENSIONS = ['.py', '.sh', '.bash', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl', '.r', '.sql', '.awk', '.sed'];
+// Run scripts, which rule c of sortOpaque treats as helper scripts. Other code (.js, .ts, .sql, ...)
+// is as often what Claude made for the user, so it stays a warning.
+const HELPER_SCRIPT_EXTENSIONS = ['.py', '.sh', '.bash', '.pl', '.rb'];
+
+// claude.ai's two sandbox folders: drafts are made in the first, deliveries come from the second.
+const SANDBOX_HOME = '/home/claude';
+const SANDBOX_OUTPUTS = '/mnt/user-data/outputs';
+const OUTPUTS_NAMED_RE = /\/mnt\/user-data\/outputs(?![^/\s'"`;&|)<>])/;
+
+// Whether position a (msgIndex, blockIndex) is at or after b. A missing block means the end of a
+// message for a (a save known only by its message) and its start for b, as before blocks were kept.
+function atOrAfter(aMsg, aBlock, bMsg, bBlock) {
+  if (aMsg !== bMsg) return aMsg > bMsg;
+  return (Number.isInteger(aBlock) ? aBlock : Infinity) >= (Number.isInteger(bBlock) ? bBlock : -1);
+}
 
 // Sorts each file's unreplayable changes (detectOpaqueMutations' byFile) into nothing, a note or a
-// warning (spec section 2, rules a-d; the first that matches wins). An entry's lastChange (default lastMsgIndex)
-// is its last change of any kind, replayed or not; rules a and b count only saves at or after it. saved: [{ path, filename, msgIndex }],
-// the presentations and deliveries that downloaded. shownPaths: every path presented or delivered,
-// downloaded or not (defaults to saved's). Message numbers in the texts count from 1 along the branch.
-function sortOpaque(byFile, saved, errorCollector, shownPaths = null) {
+// warning (spec section 2, rules a-d; the first that matches wins). An entry's last change is the later
+// of (lastMsgIndex, lastBlockIndex) and (lastChange, lastChangeBlock), its last change of any kind,
+// replayed or not; rules a and b count only saves at or after it, a save earlier in the same message
+// being before it. saved: [{ path, filename, msgIndex, blockIndex? }], the presentations and deliveries
+// that downloaded. shownPaths: every path presented or delivered, downloaded or not (defaults to
+// saved's). options.commands: the chat's bash commands [{ msgIndex, blockIndex, text, failed }], for
+// rule b's outputs/ case. Message numbers in the texts count from 1 along the branch.
+function sortOpaque(byFile, saved, errorCollector, shownPaths = null, { commands = [] } = {}) {
   const norm = (p) => normalizeSandboxPath(String(p || ''));
   const shown = new Set((shownPaths ? Array.from(shownPaths) : saved.map((s) => s.path)).map(norm));
+  const extOf = (p) => { const dot = p.lastIndexOf('.'); return dot > p.lastIndexOf('/') ? p.slice(dot).toLowerCase() : ''; };
+  const stemOf = (p) => { const name = p.split('/').pop(); const dot = name.lastIndexOf('.'); return dot > 0 ? name.slice(0, dot) : name; };
+  const isHelper = (p) => HELPER_SCRIPT_EXTENSIONS.includes(extOf(p)) && !shown.has(p);
+  const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   for (const entry of byFile.values()) {
     const path = norm(entry.path);
     const indexes = (entry.msgIndexes || []).slice().sort((a, b) => a - b).map((i) => i + 1);
-    const commands = `${entry.count} command${entry.count === 1 ? '' : 's'}`;
+    const commandsText = `${entry.count} command${entry.count === 1 ? '' : 's'}`;
     const where = indexes.length ? `message${indexes.length === 1 ? '' : 's'} ${indexes.join(', ')}` : '';
-    const counted = where ? `${commands}; ${where}` : commands;
-    const last = Math.max(entry.lastMsgIndex, Number.isInteger(entry.lastChange) ? entry.lastChange : -1);
-    const later = saved.filter((s) => s.msgIndex >= last);
+    const counted = where ? `${commandsText}; ${where}` : commandsText;
+    const block = (b) => (Number.isInteger(b) ? b : -1);
+    let lastMsg = entry.lastMsgIndex, lastBlock = block(entry.lastBlockIndex);
+    if (Number.isInteger(entry.lastChange) && (entry.lastChange > lastMsg || (entry.lastChange === lastMsg && block(entry.lastChangeBlock) > lastBlock))) {
+      lastMsg = entry.lastChange; lastBlock = block(entry.lastChangeBlock);
+    }
+    const isLater = (s) => atOrAfter(s.msgIndex, s.blockIndex, lastMsg, lastBlock);
+    const later = saved.filter(isLater);
     const name = entry.filename;
     const details = { path: entry.path };
     if (entry.resolved) {
@@ -913,10 +938,18 @@ function sortOpaque(byFile, saved, errorCollector, shownPaths = null) {
       // itself, or a copy presented from outputs/) replaced it, so the export has its final state. A copy kept
       // apart as <base>_delivered does not count.
       if (later.some((s) => s.filename === name)) continue;
-      // b: files saved afterwards from its folder or below: this one is likely their draft.
+      // b: files saved afterwards from its folder or below: this one is likely their draft. A draft in
+      // /home/claude also counts a file saved from outputs/ when its name has the draft's stem, or when a
+      // bash command that didn't fail, at or after the draft's last change, names both the draft and outputs/.
       const folder = path.slice(0, path.lastIndexOf('/')) || '/';
+      const base = path.split('/').pop();
+      const namesDraft = new RegExp(`(?:^|[^\\w.-])${escape(base)}(?![\\w.-])`);
+      const linked = isUnderFolder(path, SANDBOX_HOME) && commands.some((c) => !c.failed
+        && atOrAfter(c.msgIndex, c.blockIndex, lastMsg, lastBlock)
+        && namesDraft.test(c.text) && OUTPUTS_NAMED_RE.test(c.text));
+      const fromOutputs = (s) => isUnderFolder(path, SANDBOX_HOME) && isUnderFolder(s.path, SANDBOX_OUTPUTS) && (linked || stemOf(norm(s.path)) === stemOf(path));
       const names = [];
-      for (const s of later) if (norm(s.path) !== path && isUnderFolder(s.path, folder) && !names.includes(s.filename)) names.push(s.filename);
+      for (const s of later) if (norm(s.path) !== path && (isUnderFolder(s.path, folder) || fromOutputs(s)) && !names.includes(s.filename)) names.push(s.filename);
       if (names.length) {
         const more = names.length - 3;
         const list = more > 0 ? `${names.slice(0, 3).join(', ')} and ${more} more` : names.join(', ');
@@ -925,19 +958,19 @@ function sortOpaque(byFile, saved, errorCollector, shownPaths = null) {
           details);
         continue;
       }
-      // c: code never presented or delivered is a script Claude ran.
-      const dot = path.lastIndexOf('.');
-      const ext = dot > path.lastIndexOf('/') ? path.slice(dot).toLowerCase() : '';
-      if (HELPER_SCRIPT_EXTENSIONS.includes(ext) && !shown.has(path)) {
-        errorCollector.addNote('helper_script', name,
-          `Helper script Claude ran; changed by a command the export can't follow (${counted}), so this copy may be older than the one Claude ran. Scripts are not what Claude delivered.`,
-          details);
-        continue;
-      }
+    }
+    // c: a run script never presented or delivered is one Claude ran. An unresolved file is one when
+    // every file its command could have meant is.
+    const candidates = entry.resolved ? [path] : (entry.candidates || []).map(norm);
+    if (candidates.length && candidates.every(isHelper)) {
+      errorCollector.addNote('helper_script', name,
+        `Helper script Claude ran; changed by a command the export can't follow (${counted}), so this copy may be older than the one Claude ran. Scripts are not what Claude delivered.`,
+        details);
+      continue;
     }
     // d: a warning, pointing at the companion replay_bash.py CLI.
     errorCollector.addWarning('artifact_opaque_mutation', name,
-      `Changed by ${commands} the export can't replay${where ? ` (${where})` : ''}.`,
+      `Changed by ${commandsText} the export can't replay${where ? ` (${where})` : ''}.`,
       { ...details, note: 'Run: python3 replay_bash.py <this-export-folder>' });
   }
 }
@@ -2506,11 +2539,12 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // left out. Once the presented and delivered files are in, sortOpaque turns each
   // into nothing, a note or an `artifact_opaque_mutation` warning.
   const { byFile: opaqueFiles } = detectOpaqueMutations(data, errorCollector, { index: artifactIndex, replayed: replayedEdits });
+  const later = (a, b) => a[0] > b[0] || (a[0] === b[0] && a[1] > b[1]);  // positions [chain index, block index]
   for (const [key, entry] of Object.entries(artifactIndex)) {
     if (!entry || !Array.isArray(entry.skipped) || !entry.skipped.length) continue;
     let merged = opaqueFiles.get(key);
     if (!merged) {
-      merged = { path: key, filename: entry.filename, msgIndexes: [], lastMsgIndex: -1, count: 0, resolved: true };
+      merged = { path: key, filename: entry.filename, msgIndexes: [], lastMsgIndex: -1, lastBlockIndex: -1, count: 0, resolved: true, candidates: [] };
       opaqueFiles.set(key, merged);
     }
     // The detector usually counted these commands already; one per message is added only when it didn't.
@@ -2518,32 +2552,65 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       if (merged.msgIndexes.includes(mi)) continue;
       merged.msgIndexes.push(mi);
       merged.count++;
-      merged.lastMsgIndex = Math.max(merged.lastMsgIndex, mi);
+    }
+    for (const at of entry.skippedAt || entry.skipped.map((mi) => [mi, -1])) {
+      if (later(at, [merged.lastMsgIndex, Number.isInteger(merged.lastBlockIndex) ? merged.lastBlockIndex : -1])) [merged.lastMsgIndex, merged.lastBlockIndex] = at;
     }
   }
-  // Each file's last change of any kind: the last version the replay made, a change it couldn't follow
-  // (opaque or skipped), or a file tool that succeeded in the chat, even one the replay could not apply
-  // (an Edit whose old text a script had changed makes no version).
+  // Each file's last change of any kind, as [chain index, block index]: a file tool that succeeded in
+  // the chat (even one the replay could not apply: an Edit whose old text a script had changed makes no
+  // version), a heredoc that wrote it, a bash edit replayed on it, a change the replay couldn't follow
+  // (opaque or skipped), and the message of the last version the replay made (its end, when none of
+  // these says which block).
   const chainIndex = new Map(messages.map((m, i) => [m.uuid, i]));
   const failedTools = failedToolUseIds(messages);
-  const lastFileTool = {};  // sandbox path -> chain index of the last file tool on it that did not fail
+  const toolAt = new Map();  // tool_use id -> [chain index, block index]
+  const lastWrite = {};  // sandbox path -> position of the last file tool (not failed) or heredoc on it
+  const bashCommands = [];  // for sortOpaque's rule b: [{ msgIndex, blockIndex, text, failed }]
+  const resultsById = new Map();
+  messages.forEach((msg) => { for (const b of (msg.content || [])) if (b && b.type === 'tool_result' && b.tool_use_id) resultsById.set(b.tool_use_id, b); });
   messages.forEach((msg, mi) => {
-    for (const block of (msg.content || [])) {
-      if (!block || block.type !== 'tool_use' || !FILE_EDIT_TOOLS.includes(block.name) || failedTools.has(block.id)) continue;
+    (msg.content || []).forEach((block, bi) => {
+      if (!block || block.type !== 'tool_use') return;
+      toolAt.set(block.id, [mi, bi]);
       const input = block.input || {};
+      if (isBashTool(block.name)) {
+        const text = String(input.command || '');
+        for (const m of heredocMatches(text)) lastWrite[heredocPath(m)] = [mi, bi];
+        bashCommands.push({ msgIndex: mi, blockIndex: bi, text, failed: failedTools.has(block.id) || bashFailed(resultsById.get(block.id)) });
+        return;
+      }
+      if (!FILE_EDIT_TOOLS.includes(block.name) || failedTools.has(block.id)) return;
       const p = input.path || input.file_path;
-      if (typeof p === 'string') lastFileTool[p] = mi;
-    }
+      if (typeof p === 'string') lastWrite[p] = [mi, bi];
+    });
   });
-  const lastChangeOf = (key) => {
+  for (const id of replayedEdits) {
+    const cut = id.indexOf('|');
+    const at = toolAt.get(id.slice(0, cut));
+    const key = id.slice(cut + 1);
+    if (at && (!lastWrite[key] || later(at, lastWrite[key]))) lastWrite[key] = at;
+  }
+  const lastChangeAt = (key) => {
     const entry = Object.prototype.hasOwnProperty.call(artifactIndex, key) ? artifactIndex[key] : null;
     const opaque = opaqueFiles.get(key);
-    let last = opaque ? opaque.lastMsgIndex : -1;
-    if (Object.prototype.hasOwnProperty.call(lastFileTool, key)) last = Math.max(last, lastFileTool[key]);
-    for (const uuid of (entry && entry.messages) || []) if (chainIndex.has(uuid)) last = Math.max(last, chainIndex.get(uuid));
-    return last;
+    let last = opaque ? [opaque.lastMsgIndex, Number.isInteger(opaque.lastBlockIndex) ? opaque.lastBlockIndex : -1] : [-1, -1];
+    if (Object.prototype.hasOwnProperty.call(lastWrite, key) && later(lastWrite[key], last)) last = lastWrite[key];
+    for (const uuid of (entry && entry.messages) || []) {
+      if (chainIndex.has(uuid) && chainIndex.get(uuid) > last[0]) last = [chainIndex.get(uuid), Number.MAX_SAFE_INTEGER];
+    }
+    return { msgIndex: last[0], blockIndex: last[1] };
   };
-  for (const [key, entry] of opaqueFiles) entry.lastChange = lastChangeOf(key);
+  // Whether a presentation or delivery comes at or after the last change of key.
+  const savedAfterChange = (file, key) => {
+    const at = lastChangeAt(key);
+    return atOrAfter(file.msgIndex, file.blockIndex, at.msgIndex, at.blockIndex);
+  };
+  for (const [key, entry] of opaqueFiles) {
+    const at = lastChangeAt(key);
+    entry.lastChange = at.msgIndex;
+    entry.lastChangeBlock = at.blockIndex;
+  }
   // Presentations and deliveries that downloaded, for sortOpaque; and every path shown.
   const savedFiles = [];
   const shownPaths = new Set(presentedFiles.map((f) => f.path));
@@ -2583,7 +2650,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     // An off replay is replaced only by a presentation at or after the file's last change; an earlier
     // one is left out like a clean replay's, and sortOpaque keeps the file's entry.
     const ownEntry = replayed ? own || Object.values(artifactIndex).find((e) => e.filename === name) : null;
-    if (replayed && (!replayIsOff(name) || (ownEntry && file.msgIndex < lastChangeOf(ownEntry.path)))) continue;
+    if (replayed && (!replayIsOff(name) || (ownEntry && !savedAfterChange(file, ownEntry.path)))) continue;
 
     if (onProgress) {
       onProgress(15 + Math.floor((i / presentedFiles.length) * 5), 100, `Downloading: ${file.filename}`);
@@ -2597,7 +2664,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         const entry = ownEntry;
         if (entry && entry.versions.length > 1) await addArtefactBlob(folder, artifacts, entry.versions[entry.versions.length - 1], blob);
       }
-      savedFiles.push({ path: file.path, filename: name, msgIndex: file.msgIndex });
+      savedFiles.push({ path: file.path, filename: name, msgIndex: file.msgIndex, blockIndex: file.blockIndex });
       // The download is the file's final state, so edits that couldn't be
       // replayed against it aren't missing.
       errorCollector.clearWarnings('str_replace_failed', name);
@@ -2620,7 +2687,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   for (const file of extractDeliveredFiles(data, Object.keys(artifacts))) {
     const own = Object.prototype.hasOwnProperty.call(artifactIndex, file.path) ? artifactIndex[file.path] : null;
     if (!own || !replayIsOff(own.filename)) continue;
-    if (file.msgIndex >= lastChangeOf(file.path)) offPaths.set(file.path, own.filename);
+    if (savedAfterChange(file, file.path)) offPaths.set(file.path, own.filename);
   }
   const deliveredFiles = extractDeliveredFiles(data, Object.keys(artifacts), offPaths);
   // Saved files only, for the viewer's deliveries map (see buildViewerDeliveries).
@@ -2641,7 +2708,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         errorCollector.clearWarnings('str_replace_failed', file.filename);
       }
       savedDeliveries.push(file);
-      savedFiles.push({ path: file.path, filename: file.filename, msgIndex: file.msgIndex });
+      savedFiles.push({ path: file.path, filename: file.filename, msgIndex: file.msgIndex, blockIndex: file.blockIndex });
     } catch (err) {
       console.error(`Failed to download delivered file ${file.filename}:`, err);
       errorCollector.addError('delivered_file', file.filename, err.message, {
@@ -2653,7 +2720,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
   }
 
-  sortOpaque(opaqueFiles, savedFiles, errorCollector, shownPaths);
+  sortOpaque(opaqueFiles, savedFiles, errorCollector, shownPaths, { commands: bashCommands });
 
   // Claude Docs diagrams show by caption, as only claude.ai's page draws them. A self-contained HTML copy
   // Claude made in the chat (docCompanions) is linked under the document's title; without one, the note

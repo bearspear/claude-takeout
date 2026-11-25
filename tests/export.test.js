@@ -5965,7 +5965,7 @@ test('sortOpaque rule c: a script never delivered is a helper note', () => {
   assert.strictEqual(c.notes.length, 1);
   assert.strictEqual(c.notes[0].type, 'helper_script');
   assert.strictEqual(c.notes[0].message, "Helper script Claude ran; changed by a command the export can't follow (1 command; message 10), so this copy may be older than the one Claude ran. Scripts are not what Claude delivered.");
-  for (const ext of ['.sh', '.bash', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl', '.r', '.sql', '.awk', '.sed']) {
+  for (const ext of ['.sh', '.bash', '.rb', '.pl']) {
     assert.strictEqual(sortOne(opaqueEntry('/h/c/x' + ext, 1), []).notes[0].type, 'helper_script', ext);
   }
   // A script that was presented before its last change is not a helper.
@@ -5973,7 +5973,7 @@ test('sortOpaque rule c: a script never delivered is a helper note', () => {
   assert.strictEqual(shown.warnings.length, 1);
 });
 
-test('sortOpaque rule d: anything else is a warning, and an unresolved file always is', () => {
+test('sortOpaque rule d: anything else is a warning, and so is an unresolved file without only helper candidates', () => {
   const c = sortOne(opaqueEntry('/h/c/page.html', 7, { msgIndexes: [5, 7], count: 3 }), []);
   assert.strictEqual(c.notes.length, 0);
   assert.strictEqual(c.warnings.length, 1);
@@ -6280,4 +6280,114 @@ test('detectOpaqueMutations: an uncertain directory falls back to the name, unre
   );
   const { byFile } = fn('detectOpaqueMutations')(slashes, collector(), {});
   assert.deepStrictEqual(plain([...byFile.keys()].sort()), ['./h.txt', '/home/claude//g.txt']);
+});
+
+// ---- Final-review fixes: rule b for claude.ai's outputs folder, rule c's run scripts, same-message order ----
+
+const cmdAt = (msgIndex, text, extra = {}) => ({ msgIndex, blockIndex: 0, text, failed: false, ...extra });
+const sortWith = (entry, saved, commands) => {
+  const c = sortCollector();
+  fn('sortOpaque')(new Map([[entry.path, entry]]), saved, c, null, { commands });
+  return c;
+};
+
+test('sortOpaque rule b: a delivery from outputs/ counts for a /home/claude draft only when a command links them or the stems match', () => {
+  const draft = () => opaqueEntry('/home/claude/work/draft.html', 3);
+  const report = [{ path: '/mnt/user-data/outputs/report.html', filename: 'report.html', msgIndex: 5 }];
+  const link = 'cp /home/claude/work/draft.html /mnt/user-data/outputs/report.html';
+  const linked = sortWith(draft(), report, [cmdAt(4, link)]);
+  assert.deepStrictEqual(linked.notes.map((n) => n.type), ['draft_superseded']);
+  assert.match(linked.notes[0].message, /in the export: report\.html\./);
+  // By basename, in a cd'd command, and the command that is the last change itself.
+  assert.strictEqual(sortWith(draft(), report, [cmdAt(4, 'cd /home/claude/work && python3 make.py draft.html > /mnt/user-data/outputs/report.html')]).notes.length, 1);
+  assert.strictEqual(sortWith(draft(), report, [cmdAt(3, link)]).notes.length, 1);
+  // The same stem needs no command.
+  assert.strictEqual(sortWith(draft(), [{ path: '/mnt/user-data/outputs/draft.pdf', filename: 'draft.pdf', msgIndex: 5 }], []).notes.length, 1);
+  // Otherwise a warning: no command, a failed one, one before the last change, one not naming outputs/ or the draft.
+  for (const commands of [[], [cmdAt(4, link, { failed: true })], [cmdAt(2, link)], [cmdAt(4, 'cp /home/claude/work/draft.html /tmp/x')], [cmdAt(4, 'cp /home/claude/work/other.html /mnt/user-data/outputs/report.html')], [cmdAt(4, 'cp /home/claude/work/xdraft.html /mnt/user-data/outputs/report.html')]]) {
+    const c = sortWith(draft(), report, commands);
+    assert.deepStrictEqual([c.notes.length, c.warnings.length], [0, 1], JSON.stringify(commands));
+  }
+  // A draft outside /home/claude, or a save from outside outputs/, gets no such pass.
+  assert.strictEqual(sortWith(opaqueEntry('/tmp/work/draft.html', 3), report, [cmdAt(4, 'cp /tmp/work/draft.html /mnt/user-data/outputs/report.html')]).warnings.length, 1);
+  assert.strictEqual(sortWith(draft(), [{ path: '/mnt/other/draft.html', filename: 'draft_2.html', msgIndex: 5 }], []).warnings.length, 1);
+});
+
+test('populateConversationFolder: a draft copied into outputs/ and presented from there is a note; an unrelated delivery is not', async () => {
+  const show = (id, p, uuid) => [use(id, 'present_files', { filepaths: [p] }), { type: 'tool_result', tool_use_id: id, name: 'present_files', content: [{ type: 'local_resource', file_path: p, uuid }] }];
+  const make = (copy) => turns(
+    [use('w', 'Write', { file_path: '/home/claude/draft.html', content: 'one' })],
+    [use('b', 'bash_tool', { command: 'cp /tmp/x /home/claude/draft.html' }), bashOk('b')],
+    [use('c', 'bash_tool', { command: copy }), bashOk('c'), ...show('p', '/mnt/user-data/outputs/report.html', 'rep')],
+  );
+  const linked = await exportOpaque(make('cp /home/claude/draft.html /mnt/user-data/outputs/report.html'), { rep: textBlob('R') });
+  assert.deepStrictEqual([linked.warnings, linked.notes], [[], ['draft_superseded:draft.html']]);
+  const unrelated = await exportOpaque(make('cp /tmp/y /mnt/user-data/outputs/report.html'), { rep: textBlob('R') });
+  assert.deepStrictEqual([unrelated.warnings, unrelated.notes], [['draft.html'], []]);
+});
+
+test('sortOpaque rule c: only run scripts (.py .sh .bash .pl .rb) are helpers; an unresolved file is one only when every candidate is', () => {
+  for (const ext of ['.py', '.sh', '.bash', '.pl', '.rb']) assert.strictEqual(sortOne(opaqueEntry('/h/c/x' + ext, 1), []).notes[0].type, 'helper_script', ext);
+  for (const ext of ['.js', '.mjs', '.cjs', '.ts', '.r', '.sql', '.awk', '.sed', '.html']) {
+    const c = sortOne(opaqueEntry('/h/c/x' + ext, 1), []);
+    assert.deepStrictEqual([c.notes.length, c.warnings.length], [0, 1], ext);
+  }
+  const scripts = ['/h/a/run.py', '/h/b/run.py'];
+  const both = sortOne(opaqueEntry('/h/a/run.py', 7, { resolved: false, candidates: scripts }), []);
+  assert.deepStrictEqual(both.notes.map((n) => `${n.type}:${n.filename}`), ['helper_script:run.py']);
+  const mixed = sortOne(opaqueEntry('/h/a/run.py', 7, { resolved: false, candidates: ['/h/a/run.py', '/h/b/run.js'] }), []);
+  assert.deepStrictEqual([mixed.notes.length, mixed.warnings.length], [0, 1]);
+  const shown = fn('sortOpaque');
+  const c = sortCollector();
+  shown(new Map([['/h/a/run.py', opaqueEntry('/h/a/run.py', 7, { resolved: false, candidates: scripts })]]), [], c, ['/h/b/run.py']);
+  assert.deepStrictEqual([c.notes.length, c.warnings.length], [0, 1], 'a candidate that was presented');
+  assert.strictEqual(sortOne(opaqueEntry('/h/c/run.py', 7, { resolved: false }), []).warnings.length, 1, 'no candidates known');
+});
+
+test('sortOpaque: in one message, a save before the last change is not at or after it', () => {
+  const entry = () => opaqueEntry('/h/c/page.html', 4, { lastBlockIndex: 6 });
+  const before = sortOne(entry(), [{ path: '/h/c/page.html', filename: 'page.html', msgIndex: 4, blockIndex: 3 }]);
+  assert.strictEqual(before.warnings.length, 1);
+  const after = sortOne(entry(), [{ path: '/h/c/page.html', filename: 'page.html', msgIndex: 4, blockIndex: 8 }]);
+  assert.strictEqual(after.warnings.length, 0);
+  const draft = sortOne(entry(), [{ path: '/h/c/Final.html', filename: 'Final.html', msgIndex: 4, blockIndex: 3 }]);
+  assert.strictEqual(draft.warnings.length, 1, 'rule b too');
+  const late = sortOne(opaqueEntry('/h/c/page.html', 2, { lastChange: 4, lastChangeBlock: 6 }), [{ path: '/h/c/page.html', filename: 'page.html', msgIndex: 4, blockIndex: 3 }]);
+  assert.strictEqual(late.warnings.length, 1, 'lastChange with its block');
+});
+
+test('a presentation or delivery earlier in the message than the last change replaces nothing, and the warning stays', async () => {
+  const show = (id, p, uuid) => [use(id, 'present_files', { filepaths: [p] }), { type: 'tool_result', tool_use_id: id, name: 'present_files', content: [{ type: 'local_resource', file_path: p, uuid }] }];
+  const send = (id, p, uuid) => [use(id, 'SendUserFile', { files: [p] }), { type: 'tool_result', tool_use_id: id, name: 'SendUserFile', content: [], file_deliveries: [{ file_uuid: uuid, path: p }] }];
+  const strip = (v) => String(v && v.content !== undefined ? v.content : v).replace(/^﻿/, '');
+  for (const [label, saving] of [['presentation', show], ['delivery', send]]) {
+    const data = turns(
+      [use('w', 'create_file', { path: '/home/claude/x.html', file_text: 'v1' })],
+      [...saving('s', '/home/claude/x.html', 'got'), use('b', 'bash_tool', { command: "python3 -c \"open('/home/claude/x.html','w').write('v2')\"" }), bashOk('b')],
+    );
+    const { written, warnings } = await exportOpaque(data, { got: textBlob('PRESENTED-v1') });
+    assert.strictEqual(strip(written['artefacts/x.html']), 'v1', label);
+    assert.deepStrictEqual(warnings, ['x.html'], label);
+  }
+  // The other order, in one message, still counts.
+  const after = turns(
+    [use('w', 'create_file', { path: '/home/claude/x.html', file_text: 'v1' })],
+    [use('b', 'bash_tool', { command: "python3 -c \"open('/home/claude/x.html','w').write('v2')\"" }), bashOk('b'), ...show('s', '/home/claude/x.html', 'got')],
+  );
+  const ok = await exportOpaque(after, { got: textBlob('V2') });
+  assert.strictEqual(strip(ok.written['artefacts/x.html']), 'V2');
+  assert.deepStrictEqual(ok.warnings, []);
+});
+
+test('populateConversationFolder: a run script named only by a shared name is a helper when every candidate is', async () => {
+  const make = (other, word = 'run.py') => turns(
+    [use('w', 'Write', { file_path: '/home/claude/a/run.py', content: 'x' }), use('v', 'Write', { file_path: other, content: 'y' })],
+    [use('b', 'bash_tool', { command: `perl -i -pe 's/x/y/' ${word}` }), bashOk('b')],
+  );
+  const scripts = await exportOpaque(make('/home/claude/b/run.py'));
+  const helpers = (r) => r.notes.filter((n) => n.startsWith('helper_script:')).sort();
+  assert.deepStrictEqual([scripts.warnings, helpers(scripts)], [[], ['helper_script:run.py', 'helper_script:run_2.py']]);
+  // A glob with no directory names run.py and run.sql: not every candidate is a script.
+  const mixed = await exportOpaque(make('/home/claude/b/run.sql', 'run.*'));
+  assert.deepStrictEqual([mixed.warnings.sort(), helpers(mixed)], [['run.py', 'run.sql'], []]);
 });

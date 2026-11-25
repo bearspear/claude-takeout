@@ -2363,13 +2363,17 @@ function extractUploadedFiles(data, organizationId = null) {
 // Extract presented files from present_files tool results on the current branch.
 // These are files created by Claude (via bash/Python) and presented to the user.
 // One entry per path, in the order first presented, from its latest presentation:
-// msgIndex is that presentation's index in getMessageChain(data).
+// msgIndex is that presentation's index in getMessageChain(data), blockIndex its
+// tool_result's index in that message.
 function extractPresentedFiles(data) {
   const byPath = new Map();
   const messages = getMessageChain(data);
 
   for (let mi = 0; mi < messages.length; mi++) {
-    for (const item of (messages[mi].content || [])) {
+    const blocks = messages[mi].content || [];
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const item = blocks[bi];
+      if (!item) continue;
       // Look for tool_result from present_files
       if (item.type === 'tool_result' && item.name === 'present_files') {
         for (const content of (item.content || [])) {
@@ -2382,7 +2386,8 @@ function extractPresentedFiles(data) {
               uuid: content.uuid || '',
               mimeType: content.mime_type || '',
               name: content.name || '',
-              msgIndex: mi
+              msgIndex: mi,
+              blockIndex: bi
             });
           }
         }
@@ -2400,17 +2405,19 @@ function extractPresentedFiles(data) {
 // (a Set, or a Map to the artifact's name in artefacts/) whose replayed artifact is
 // off and whose latest delivery is its final state: that delivery takes the
 // artifact's name (replaces: true), earlier ones are kept as <base>_delivered...
-// Returns [{ filename, uuid, path, msgIndex, replaces? }], msgIndex the delivery's
-// index in getMessageChain(data).
+// Returns [{ filename, uuid, path, msgIndex, blockIndex, replaces? }], msgIndex the
+// delivery's index in getMessageChain(data), blockIndex its block's in that message.
 function extractDeliveredFiles(data, takenNames = [], offPaths = new Set()) {
   const byPath = new Map();
   const messages = getMessageChain(data);
   for (let mi = 0; mi < messages.length; mi++) {
-    for (const item of (messages[mi].content || [])) {
-      for (const delivery of (item.file_deliveries || [])) {
+    const content = messages[mi].content || [];
+    for (let bi = 0; bi < content.length; bi++) {
+      const item = content[bi];
+      for (const delivery of ((item && item.file_deliveries) || [])) {
         if (!delivery.file_uuid || !delivery.path) continue;
         if (!byPath.has(delivery.path)) byPath.set(delivery.path, []);
-        byPath.get(delivery.path).push({ uuid: delivery.file_uuid, msgIndex: mi });
+        byPath.get(delivery.path).push({ uuid: delivery.file_uuid, msgIndex: mi, blockIndex: bi });
       }
     }
   }
@@ -2437,16 +2444,16 @@ function extractDeliveredFiles(data, takenNames = [], offPaths = new Set()) {
 
       if (deliveries.length > 1) {
         deliveries.forEach((d, i) => {
-          files.push({ filename: `${outBase}_v${i + 1}${ext}`, uuid: d.uuid, path, msgIndex: d.msgIndex });
+          files.push({ filename: `${outBase}_v${i + 1}${ext}`, uuid: d.uuid, path, msgIndex: d.msgIndex, blockIndex: d.blockIndex });
           taken.add(`${outBase}_v${i + 1}${ext}`);
         });
       }
       const last = deliveries[deliveries.length - 1];
-      files.push({ filename: outBase + ext, uuid: last.uuid, path, msgIndex: last.msgIndex });
+      files.push({ filename: outBase + ext, uuid: last.uuid, path, msgIndex: last.msgIndex, blockIndex: last.blockIndex });
     }
     if (offName) {
       const last = all[all.length - 1];
-      files.push({ filename: offName, uuid: last.uuid, path, msgIndex: last.msgIndex, replaces: true });
+      files.push({ filename: offName, uuid: last.uuid, path, msgIndex: last.msgIndex, blockIndex: last.blockIndex, replaces: true });
     }
   }
   return files;
