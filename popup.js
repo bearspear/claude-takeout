@@ -707,8 +707,10 @@ const ANY_HEREDOC_RE = /<<-?\s*(['"]?)(\w+)\1([^\n]*)\n(?:[\s\S]*?\n)??[ \t]*\2[
 // options.index: extractArtifacts' index (key -> { filename, ... }), for each file's name in artefacts/.
 // options.replayed: toolUseId + '|' + path keys of commands already replayed, skipped here.
 // Returns { opaqueMutations (one per command and file), byFile (path -> { path, filename, msgIndexes,
-// lastMsgIndex, count, resolved }) }. resolved is false when a command named the file only by a name
-// several known files share, with no working directory to tell them apart (or a glob with none).
+// lastMsgIndex, lastBlockIndex, count, resolved, candidates }) }. resolved is false when a command named
+// the file only by a name several known files share, with no working directory to tell them apart (or
+// a glob with none), or by a relative name its uncertain working directory (commandCwds) doesn't join
+// to a known file (resolveTouch). candidates: for such a file, every known file those names could be.
 function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), index = {} } = {}) {
   const messages = getMessageChain(data);
   const basenameOf = (p) => (p || '').split('/').pop();
@@ -735,8 +737,10 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
       }
     }
   }
-  const known = Array.from(knownArtifactPaths);
-  const cwds = commandCwds(messages);
+  // Matched normalized (/home/claude//g.txt is /home/claude/g.txt); hits are filed under the raw keys.
+  const { list: known, raw: rawKeys } = normalizedKeys(knownArtifactPaths);
+  const uncertainCwds = new Set();
+  const cwds = commandCwds(messages, uncertainCwds);
 
   const opaqueMutations = [];
 
@@ -758,12 +762,18 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
       const rawCommand = (block.input && block.input.command) || '';
       if (!rawCommand) continue;
       const cwd = cwds.has(block.id) ? cwds.get(block.id) : null;
+      const uncertain = uncertainCwds.has(block.id);
 
-      // The files this command changes: path -> resolved.
+      // The files this command changes: raw key -> { resolved, candidates }. candidates: for an
+      // unresolved hit, every known file the word could name (raw keys).
       const hits = new Map();
-      const hit = (path, resolved) => {
-        if (!knownArtifactPaths.has(path)) return;
-        hits.set(path, (hits.has(path) ? hits.get(path) : true) && resolved);
+      const hit = (path, resolved, candidates = []) => {
+        for (const key of rawKeys.get(normalizeSandboxPath(path)) || []) {
+          const h = hits.get(key) || { resolved: true, candidates: new Set() };
+          h.resolved = h.resolved && resolved;
+          if (!resolved) for (const c of candidates) for (const k of rawKeys.get(normalizeSandboxPath(c)) || []) h.candidates.add(k);
+          hits.set(key, h);
+        }
       };
       // A word naming a file: its path, a relative name, or a glob.
       const target = (word) => {
@@ -771,18 +781,19 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
         if (/[*?]/.test(word)) {
           const full = word.startsWith('/') ? normalizeSandboxPath(word) : cwd ? normalizeSandboxPath(cwd + '/' + word) : null;
           const re = (w) => new RegExp('^' + w.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
-          if (full) {
-            const glob = re(full);
-            for (const ap of known) if (glob.test(ap)) hit(ap, true);
-          } else if (!word.includes('/')) {
-            const glob = re(word);
-            for (const ap of known) if (glob.test(basenameOf(ap))) hit(ap, false);
+          const found = full ? known.filter((ap) => re(full).test(ap)) : [];
+          if (found.length) found.forEach((ap) => hit(ap, true));
+          else if ((!full || (uncertain && !word.startsWith('/'))) && !word.includes('/')) {
+            // No directory, or one that may be wrong and names no known file: every file the glob
+            // could name, unresolved.
+            const loose = known.filter((ap) => re(word).test(basenameOf(ap)));
+            for (const ap of loose) hit(ap, false, loose);
           }
           return;
         }
-        const { path, candidates } = resolveSandboxPath(word, cwd, known);
-        if (path) hit(path, true);
-        else for (const c of candidates) hit(c, false);
+        const { path, candidates, resolved } = resolveTouch(word, cwd, known, uncertain);
+        if (path) hit(path, resolved);
+        else for (const c of candidates) hit(c, false, candidates);
       };
 
       // extractArtifacts already handled each `cat > path << DELIM` heredoc, so drop
@@ -844,9 +855,9 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
       }
 
       // Every file the command changes is recorded, not just the first.
-      for (const [path, resolved] of hits) {
+      for (const [path, h] of hits) {
         if (replayed.has(block.id + '|' + path)) continue;
-        opaqueMutations.push({ artifactPath: path, msgIndex: mi, blockIndex: bi, toolUseId: block.id, resolved, command: rawCommand });
+        opaqueMutations.push({ artifactPath: path, msgIndex: mi, blockIndex: bi, toolUseId: block.id, resolved: h.resolved, candidates: Array.from(h.candidates), command: rawCommand });
       }
     }
   }
@@ -857,13 +868,17 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
     const own = Object.prototype.hasOwnProperty.call(index, om.artifactPath) ? index[om.artifactPath] : null;
     let entry = byFile.get(om.artifactPath);
     if (!entry) {
-      entry = { path: om.artifactPath, filename: (own && own.filename) || basenameOf(om.artifactPath), msgIndexes: [], lastMsgIndex: om.msgIndex, count: 0, resolved: true };
+      entry = { path: om.artifactPath, filename: (own && own.filename) || basenameOf(om.artifactPath), msgIndexes: [], lastMsgIndex: om.msgIndex, lastBlockIndex: om.blockIndex, count: 0, resolved: true, candidates: [] };
       byFile.set(om.artifactPath, entry);
     }
     entry.count++;
     if (!entry.msgIndexes.includes(om.msgIndex)) entry.msgIndexes.push(om.msgIndex);
-    entry.lastMsgIndex = Math.max(entry.lastMsgIndex, om.msgIndex);
+    if (om.msgIndex > entry.lastMsgIndex || (om.msgIndex === entry.lastMsgIndex && om.blockIndex > entry.lastBlockIndex)) {
+      entry.lastMsgIndex = om.msgIndex;
+      entry.lastBlockIndex = om.blockIndex;
+    }
     entry.resolved = entry.resolved && om.resolved;
+    for (const c of om.candidates || []) if (!entry.candidates.includes(c)) entry.candidates.push(c);
   }
 
   return { opaqueMutations, byFile };

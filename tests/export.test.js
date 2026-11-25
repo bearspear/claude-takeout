@@ -1454,7 +1454,7 @@ test('detectOpaqueMutations: names the file under cd and merges its commands', (
   assert.strictEqual(c.warnings[0].details.path, '/home/claude/verb/lorber/body.html');
   assert.match(c.warnings[0].message, /2 commands/);
   const entry = out.byFile.get('/home/claude/verb/lorber/body.html');
-  assert.deepStrictEqual(plain({ ...entry }), { path: '/home/claude/verb/lorber/body.html', filename: 'body_2.html', msgIndexes: [3, 5], lastMsgIndex: 5, count: 2, resolved: true });
+  assert.deepStrictEqual(plain({ ...entry }), { path: '/home/claude/verb/lorber/body.html', filename: 'body_2.html', msgIndexes: [3, 5], lastMsgIndex: 5, lastBlockIndex: 0, count: 2, resolved: true, candidates: [] });
   // A replayed command is skipped.
   const skipped = collector();
   detectWarn(data, skipped, { index, replayed: new Set(['3|/home/claude/verb/lorber/body.html']) });
@@ -6133,4 +6133,151 @@ test('an Edit that succeeded in the chat but not in the replay, after a delivery
     assert.ok(types.includes('artifact_opaque_mutation'), label + ' ' + types);
     assert.ok(types.includes('str_replace_failed'), label + ' ' + types);
   }
+});
+
+// ---- Final-review fixes: carried directories, normalized keys, <<- tabs, unmodelled tools ----
+
+const bashOk = (id, rc = 0) => ({ type: 'tool_result', tool_use_id: id, name: 'bash_tool', content: [{ type: 'text', text: JSON.stringify({ returncode: rc, stdout: '', stderr: '' }) }] });
+// The opaque-mutation warnings and notes of a whole export of data, by file name.
+const exportOpaque = async (data, texts = {}) => {
+  const { written, output } = await runFolder(exportPopup({ texts }), Object.assign(data, { uuid: data.uuid || 'c-final', name: 'n' }));
+  const c = output.errorCollector;
+  return {
+    written,
+    warnings: Array.from(c.warnings).filter((w) => w.type === 'artifact_opaque_mutation').map((w) => w.filename),
+    notes: Array.from(c.notes).map((n) => `${n.type}:${n.filename}`),
+  };
+};
+
+test('commandCwds: after a failed command the directory is unknown, in JS and Python', () => {
+  const data = turns(
+    [use('a', 'bash_tool', { command: 'cd /home/claude/a && ls' }), bashOk('a')],
+    [use('b', 'bash_tool', { command: 'cd /home/claude/nope && ls' }), bashOk('b', 1)],
+    [use('c', 'bash_tool', { command: 'ls' }), bashOk('c')],
+    [use('d', 'bash_tool', { command: 'cd /home/claude/a; ls' }), bashOk('d')],
+    [use('e', 'bash_tool', { command: 'ls' }), bashOk('e')],
+    [use('f', 'bash_tool', { command: 'cd /home/claude/a && ls' }), bashOk('f')],
+  );
+  const core = require('../export-core.js');
+  const uncertain = new Set();
+  const cwds = core.commandCwds(core.getMessageChain(data), uncertain);
+  const js = { cwds: Object.fromEntries(cwds), uncertain: [...uncertain].sort() };
+  assert.strictEqual(js.cwds.b, '/home/claude/nope', 'its own directory stands');
+  assert.strictEqual(js.cwds.c, null, 'the failed cd may have left the shell anywhere');
+  // Carried, or set by a leading cd that may have failed with the command still running: uncertain.
+  assert.deepStrictEqual(js.uncertain, ['d', 'e']);
+  const script = [
+    'import json, sys', `sys.path.insert(0, ${JSON.stringify(REPO)})`, 'import extract_artifacts as ea',
+    'data = json.load(sys.stdin)', 'u = set()', 'c = ea.command_cwds(ea.get_message_chain(data), u)',
+    'print(json.dumps({"cwds": c, "uncertain": sorted(u)}))',
+  ].join('\n');
+  assert.deepStrictEqual(JSON.parse(execFileSync('python3', ['-B', '-c', script], { input: JSON.stringify(data) }).toString()), js);
+});
+
+test('a relative edit in an uncertain directory that names no known file is filed by name, never replayed', async () => {
+  const make = (...steps) => turns(
+    [use('w', 'create_file', { path: '/home/claude/a/f.html', file_text: 'foo' })],
+    ...steps,
+    [use('z', 'bash_tool', { command: "sed -i 's/foo/baz/' /home/claude/a/f.html" }), bashOk('z')],
+  );
+  for (const [label, data] of [
+    ['a failed cd before', make(
+      [use('a', 'bash_tool', { command: 'cd /home/claude/a && ls' }), bashOk('a')],
+      [use('b', 'bash_tool', { command: 'cd /home/claude/nope && ls' }), bashOk('b', 1)],
+      [use('s', 'bash_tool', { command: "sed -i 's/foo/bar/' f.html" }), bashOk('s')])],
+    ['a cd that failed silently before', make(
+      [use('a', 'bash_tool', { command: 'cd /home/claude/a && ls' }), bashOk('a')],
+      [use('b', 'bash_tool', { command: 'cd /home/claude/nope; ls' }), bashOk('b')],
+      [use('s', 'bash_tool', { command: "sed -i 's/foo/bar/' f.html" }), bashOk('s')])],
+    ['its own cd; then the edit', make(
+      [use('a', 'bash_tool', { command: 'cd /home/claude/a && ls' }), bashOk('a')],
+      [use('s', 'bash_tool', { command: "cd /home/claude/nope; sed -i 's/foo/bar/' f.html" }), bashOk('s')])],
+    ['a Python write', make(
+      [use('a', 'bash_tool', { command: 'cd /home/claude/a && ls' }), bashOk('a')],
+      [use('b', 'bash_tool', { command: 'cd /home/claude/nope; ls' }), bashOk('b')],
+      [use('s', 'bash_tool', { command: "python3 -c \"open('f.html','w').write('x')\"" }), bashOk('s')])],
+  ]) {
+    bothReplay(data, 'f.html', 'foo');
+    const { warnings } = await exportOpaque(data);
+    assert.deepStrictEqual(warnings, ['f.html'], label);
+  }
+  // A known file at the joined path is still that file.
+  const sure = turns(
+    [use('w', 'create_file', { path: '/home/claude/a/f.html', file_text: 'foo' })],
+    [use('a', 'bash_tool', { command: 'cd /home/claude/a && ls' }), bashOk('a')],
+    [use('s', 'bash_tool', { command: "sed -i 's/foo/bar/' f.html" }), bashOk('s')],
+  );
+  bothReplay(sure, 'f.html', 'bar');
+});
+
+test('a command naming a known file by an unnormalized path, or a key that is one, still marks it', async () => {
+  const data = turns(
+    [use('w', 'create_file', { path: '/home/claude//g.txt', file_text: 'foo' })],
+    [use('c', 'bash_tool', { command: 'cp /tmp/x /home/claude/g.txt' }), bashOk('c')],
+    [use('s', 'bash_tool', { command: "sed -i 's/foo/bar/' /home/claude/g.txt" }), bashOk('s')],
+  );
+  bothReplay(data, 'g.txt', 'foo');
+  assert.deepStrictEqual((await exportOpaque(data)).warnings, ['g.txt']);
+  const dotted = turns(
+    [use('w', 'create_file', { path: '/home/claude/g.txt', file_text: 'foo' })],
+    [use('c', 'bash_tool', { command: 'cp /tmp/x /home/claude/./g.txt' }), bashOk('c')],
+    [use('s', 'bash_tool', { command: "sed -i 's/foo/bar/' /home/claude/g.txt" }), bashOk('s')],
+  );
+  bothReplay(dotted, 'g.txt', 'foo');
+  assert.deepStrictEqual((await exportOpaque(dotted)).warnings, ['g.txt']);
+});
+
+test('<<- strips tabs only at the start of a line, as bash does, in JS and Python', () => {
+  const append = turns(
+    [use('w', 'create_file', { path: '/home/claude/f.txt', file_text: 'start' })],
+    [use('s', 'bash_tool', { command: "cat >> /home/claude/f.txt <<- 'EOF'\n\tx\r\tY \tZ\n\tw\nEOF" }), bashOk('s')],
+  );
+  bothReplay(append, 'f.txt', 'startx\r\tY \tZ\nw\n');
+  const create = turns([use('s', 'bash_tool', { command: "cat > /home/claude/g.txt <<- 'EOF'\n\ta \tb\n\tc\nEOF" }), bashOk('s')]);
+  bothReplay(create, 'g.txt', 'a \tb\nc');
+});
+
+test('a file tool the replay does not model makes its file opaque; a read does not', async () => {
+  const make = (tool) => turns(
+    [use('w', 'Write', { file_path: '/home/claude/f.html', content: 'foo one' })],
+    [tool],
+    [use('s', 'bash_tool', { command: "sed -i 's/foo/bar/' /home/claude/f.html" }), bashOk('s')],
+  );
+  for (const tool of [
+    use('m', 'MultiEdit', { file_path: '/home/claude/f.html', edits: [{ old_string: 'one', new_string: 'two' }] }),
+    use('m', 'str_replace_based_edit_tool', { command: 'str_replace', path: '/home/claude//f.html', old_str: 'one', new_str: 'two' }),
+    use('m', 'some_new_tool', { filepath: '/home/claude/f.html' }),
+  ]) {
+    const data = make(tool);
+    bothReplay(data, 'f.html', 'foo one');
+    assert.deepStrictEqual((await exportOpaque(data)).warnings, ['f.html'], tool.name);
+  }
+  for (const tool of [
+    use('v', 'view', { path: '/home/claude/f.html' }),
+    use('v', 'Read', { file_path: '/home/claude/f.html' }),
+    use('v', 'str_replace_based_edit_tool', { command: 'view', path: '/home/claude/f.html' }),
+  ]) {
+    const data = make(tool);
+    bothReplay(data, 'f.html', 'bar one');
+    assert.deepStrictEqual((await exportOpaque(data)).warnings, [], tool.name);
+  }
+});
+
+test('detectOpaqueMutations: an uncertain directory falls back to the name, unresolved; known paths match normalized', () => {
+  const steps = [
+    [use('w', 'create_file', { path: '/home/claude/a/f.html', file_text: 'foo' })],
+    [use('a', 'bash_tool', { command: 'cd /home/claude/a && ls' }), bashOk('a')],
+    [use('b', 'bash_tool', { command: 'cd /home/claude/nope; ls' }), bashOk('b')],
+  ];
+  for (const command of ["sed -i 's/foo/bar/' f.html", "python3 -c \"open('f.html','w').write('x')\"", 'cp /tmp/x f.html']) {
+    const data = turns(...steps, [use('s', 'bash_tool', { command }), bashOk('s')]);
+    const { byFile } = fn('detectOpaqueMutations')(data, collector(), {});
+    assert.deepStrictEqual(plain([...byFile.values()].map((e) => [e.path, e.resolved])), [['/home/claude/a/f.html', false]], command);
+  }
+  const slashes = turns(
+    [use('w', 'create_file', { path: '/home/claude//g.txt', file_text: 'foo' }), use('v', 'create_file', { path: './h.txt', file_text: 'foo' })],
+    [use('c', 'bash_tool', { command: 'cp /tmp/x /home/claude/g.txt && cp /tmp/y h.txt' }), bashOk('c')],
+  );
+  const { byFile } = fn('detectOpaqueMutations')(slashes, collector(), {});
+  assert.deepStrictEqual(plain([...byFile.keys()].sort()), ['./h.txt', '/home/claude//g.txt']);
 });

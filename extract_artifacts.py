@@ -93,7 +93,7 @@ def heredoc_files(command: str) -> list[tuple[str, str]]:
     for _, whole, path, body in sorted(found, key=lambda f: f[0]):
         body = body or ""
         if "<<-" in whole.split("\n", 1)[0]:
-            body = re.sub(r"^\t+", "", body, flags=re.M)
+            body = strip_heredoc_tabs(body)
         out.append((re.sub(r"^['\"]|['\"]$", "", path), body))
     return out
 
@@ -132,16 +132,20 @@ ANY_CD_RE = re.compile(r"(?:^|[;&|\n(`])[ \t]*cd(?=[ \t;&|\n)]|\Z)")
 PUSHD_RE = re.compile(r"(?:^|[;&|\n(`])[ \t]*(?:pushd|popd)(?=[ \t;&|\n)]|\Z)")
 CHDIR_RE = re.compile(r"\bchdir\s*\(", re.ASCII)
 COND_CD_RE = re.compile(r"(?:[{!]|\b(?:then|do|else|elif))[ \t]*cd(?=[ \t;&|\n)]|\Z)", re.ASCII)
-LEAD_CD_RE = re.compile(r"\s*cd[ \t]+(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|()]+))[ \t]*(?:&&|;|\n|\Z)")
+LEAD_CD_RE = re.compile(r"\s*cd[ \t]+(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|()]+))[ \t]*(&&|;|\n|\Z)")
 
 
 def is_bash_tool(name) -> bool:
     return name in ("bash_tool", "Bash")
 
 
-def command_cwds(messages: list[dict]) -> dict:
-    """commandCwds: each bash tool_use id's working directory, or None when unknown."""
+def command_cwds(messages: list[dict], uncertain: Optional[set] = None) -> dict:
+    """commandCwds: each bash tool_use id's working directory, or None when unknown. After a
+    failed command it is unknown. uncertain, when given, gets the ids whose directory may be wrong:
+    carried from an earlier command, or set by a leading cd not followed by &&."""
     cwds: dict = {}
+    results = {b.get("tool_use_id"): b for m in messages or [] for b in ((m or {}).get("content") or [])
+               if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id")}
     carried = None
 
     def target(dirs, base):
@@ -162,12 +166,17 @@ def command_cwds(messages: list[dict]) -> dict:
             lead = LEAD_CD_RE.match(command)
             other = bool(CHDIR_RE.search(raw) or PUSHD_RE.search(command) or COND_CD_RE.search(command))
             own = carried
+            sure = False
             if other or cds > 1 or (cds == 1 and not lead):
                 own = None
             elif lead:
-                own = target(lead.groups(), carried)
+                own = target(lead.groups()[:3], carried)
+                word = next(x for x in lead.groups()[:3] if x is not None)
+                sure = lead.group(4) == "&&" and word.startswith("/")
             cwds[block.get("id")] = own
-            carried = own
+            if uncertain is not None and own is not None and not sure:
+                uncertain.add(block.get("id"))
+            carried = None if bash_failed(results.get(block.get("id"))) else own
     return cwds
 
 
@@ -188,6 +197,21 @@ def resolve_sandbox_path(word, cwd, known_paths) -> tuple[Optional[str], list[st
         return None, []
     candidates = [p for p in known if p == rel or normalize_sandbox_path(p).endswith("/" + rel)]
     return (candidates[0], candidates) if len(candidates) == 1 else (None, candidates)
+
+
+def resolve_touch(word, cwd, known, uncertain: bool = False) -> tuple[Optional[str], list[str]]:
+    """resolveTouch: resolve_sandbox_path, but with an uncertain directory a relative word whose
+    join is no known file gives every known file it could name, and no path."""
+    text = str(word or "")
+    path, candidates = resolve_sandbox_path(text, cwd, known)
+    if uncertain and cwd and not text.startswith("/") and path not in list(known or []):
+        return None, resolve_sandbox_path(text, None, known)[1]
+    return path, candidates
+
+
+def strip_heredoc_tabs(body: str) -> str:
+    """stripHeredocTabs: <<-'s leading tabs removed from each line; lines end only at \\n."""
+    return re.sub(r"(^|\n)\t+", r"\1", body)
 
 
 # ---- Literal text swaps (literalCommands ... commandTouches in export-core.js) ----
@@ -649,7 +673,7 @@ def literal_steps(command, copies: bool = False, python: bool = False) -> Option
         if not quote and body is not None and re.search(r"[$`\\]", body):
             return None
         if dash and body is not None:
-            body = re.sub(r"^\t+", "", body, flags=re.M)
+            body = strip_heredoc_tabs(body)
         text += raw[at:start] + APPEND_MARK + str(len(appends)) + APPEND_MARK
         at = end
         words = literal_commands(word)
@@ -916,7 +940,7 @@ WRITE_FREE_TOOLS = {"grep", "head", "tail", "wc", "cat", "ls", "echo", "printf",
 FIND_WRITES = {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fls"}
 
 
-def write_free_touches(command, cwd, known: list[str]) -> Optional[set[str]]:
+def write_free_touches(command, cwd, known: list[str], uncertain: bool = False) -> Optional[set[str]]:
     """writeFreeTouches: the known files a provably write-free command writes, or None.
     Any interpreter, or a heredoc bash expands holding $ or a backtick, is never write-free."""
     expands = [False]
@@ -940,7 +964,7 @@ def write_free_touches(command, cwd, known: list[str]) -> Optional[set[str]]:
             return False
         if w["text"] == "/dev/null":
             return True
-        p, candidates = resolve_sandbox_path(w["text"], cwd, known)
+        p, candidates = resolve_touch(w["text"], cwd, known, uncertain)
         for c in ([p] if p else candidates):
             if c in known_set:
                 touched.add(c)
@@ -1023,17 +1047,29 @@ def is_under_folder(file, folder) -> bool:
     return p.startswith("/" if d == "/" else d + "/") and p != d
 
 
-def command_touches(command, cwd, known: list[str]) -> set[str]:
-    """commandTouches: the known files a bash command not replayed may have changed."""
+def command_touches(command, cwd, known_keys: list[str], uncertain: bool = False) -> set[str]:
+    """commandTouches: the known files a bash command not replayed may have changed. Paths are
+    matched normalized; the keys returned are known_keys' own."""
+    raw_keys: dict[str, list[str]] = {}
+    for k in known_keys or []:
+        raw_keys.setdefault(normalize_sandbox_path(k), []).append(k)
+    out: set[str] = set()
+    for n in command_touches_normalized(command, cwd, list(raw_keys), uncertain):
+        out.update(raw_keys.get(n, []))
+    return out
+
+
+def command_touches_normalized(command, cwd, known: list[str], uncertain: bool) -> set[str]:
     raw = str(command or "")
     known_set = set(known)
     touched: set[str] = set()
     rest = raw
     for start, whole, path, quote, body in reversed(heredoc_matches(raw)):
         if quote == "" and re.search(r"[$`\\]", body or ""):
-            p, _ = resolve_sandbox_path(path, cwd, known)
-            if p and p in known_set:
-                touched.add(p)
+            p, candidates = resolve_touch(path, cwd, known, uncertain)
+            for c in ([p] if p else candidates):
+                if c in known_set:
+                    touched.add(c)
             if re.search(r"[$`]", body or ""):  # $(...) in it runs
                 touched.update(known)
         header = whole.split("\n", 1)[0]
@@ -1044,7 +1080,7 @@ def command_touches(command, cwd, known: list[str]) -> set[str]:
     if steps is None:
         # Not provably write-free: any file may have changed, named in the command or not.
         # Also every known file it names, as before the write-free check existed.
-        free = write_free_touches(rest, cwd, known)
+        free = write_free_touches(rest, cwd, known, uncertain)
         touched.update(known if free is None else free)
         for k in known:
             name = k.split("/")[-1]
@@ -1053,7 +1089,7 @@ def command_touches(command, cwd, known: list[str]) -> set[str]:
         return touched
 
     def mark(word):
-        p, candidates = resolve_sandbox_path(word, cwd, known)
+        p, candidates = resolve_touch(word, cwd, known, uncertain)
         for c in ([p] if p else candidates):
             if c in known_set:
                 touched.add(c)
@@ -1456,6 +1492,10 @@ def widget_file(inp) -> Optional[tuple]:
     )
 
 
+# READ_FILE_TOOLS in export-core.js: tools that read a file at a path and change nothing.
+READ_FILE_TOOLS = {"view", "Read", "read_file", "Glob", "Grep", "LS", "NotebookRead", "present_files", "SendUserFile", "Artifact"}
+
+
 def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict] = None,
                       replayed: Optional[set] = None) -> dict[str, str]:
     """Return {filename: content} including all per-turn versions.
@@ -1472,7 +1512,8 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
     """
     messages = get_message_chain(data)
     failed_ids = failed_tool_use_ids(messages)
-    cwds = command_cwds(messages)
+    uncertain_cwds: set = set()
+    cwds = command_cwds(messages, uncertain_cwds)
     opaque: set[str] = set()  # state keys a bash command changed in a way not replayed
     state: dict[str, ArtifactState] = {}
     docs: dict[str, dict] = {}  # Claude Docs: 'doc:<node id>' -> document being rebuilt
@@ -1683,8 +1724,20 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
                         if replayed is not None:
                             replayed.add(f"{block.get('id')}|{key}")
                 else:
-                    for key in command_touches(command, cwd, path_keys()):
+                    for key in command_touches(command, cwd, path_keys(), block.get("id") in uncertain_cwds):
                         opaque.add(key)
+
+            elif name not in READ_FILE_TOOLS and inp.get("command") != "view":
+                # A tool the replay doesn't model that names a known file may have changed it: the
+                # file is opaque from here on.
+                for fld in ("path", "file_path", "filepath"):
+                    value = inp.get(fld)
+                    if not isinstance(value, str) or not value:
+                        continue
+                    target = normalize_sandbox_path(value)
+                    for key in path_keys():
+                        if normalize_sandbox_path(key) == target:
+                            opaque.add(key)
 
         # End-of-turn snapshot: any artifact edited during this message gets
         # a new version. Snapshot on both senders defensively.

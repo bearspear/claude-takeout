@@ -254,10 +254,16 @@ function heredocPath(match) {
   return match[1].replace(/^['"]|['"]$/g, '');
 }
 
+// <<-'s leading tabs removed from each line. Lines end only at \n, as in bash (and Python's ^ with
+// re.M); a JS m-flag ^ would also match after \r, U+2028 and U+2029.
+function stripHeredocTabs(body) {
+  return body.replace(/(^|\n)\t+/g, '$1');
+}
+
 // The text bash writes for a heredoc match: with <<-, leading tabs are removed from every line.
 function heredocBody(match) {
   const body = match[4] || '';
-  return /^[^\n]*<<-/.test(match[0]) ? body.replace(/^\t+/gm, '') : body;
+  return /^[^\n]*<<-/.test(match[0]) ? stripHeredocTabs(body) : body;
 }
 
 // The files a Bash command writes with a heredoc, for the viewer's cards.
@@ -295,9 +301,15 @@ const COND_CD_RE = /(?:[{!]|\b(?:then|do|else|elif))[ \t]*cd(?=[ \t;&|\n)]|$)/;
 // that can't be followed (none, ~, -, or relative to an unknown one) leaves it unknown (null). A cd
 // in a heredoc body is text. Any other change of directory (a second cd, cd after && or ||, in a
 // subshell, after then/do/else/elif/{/!, pushd, popd, chdir()) may or may not have run, so it leaves
-// the directory unknown for this command and the later ones.
-function commandCwds(messages) {
+// the directory unknown for this command and the later ones. A command that failed (bashFailed) may
+// have stopped anywhere, so the directory after it is unknown too.
+// uncertain, when given (a Set), gets the id of each command whose directory is known but may be
+// wrong: carried from an earlier command (whose own cd may have failed without failing it), or set
+// by a leading cd not followed by && (the rest runs even when that cd fails). resolveTouch uses it.
+function commandCwds(messages, uncertain = null) {
   const cwds = new Map();
+  const results = new Map();
+  for (const msg of messages || []) for (const b of (msg && msg.content) || []) if (b && b.type === 'tool_result' && b.tool_use_id) results.set(b.tool_use_id, b);
   let carried = null;
   const target = (m, base) => {
     const dir = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
@@ -314,13 +326,18 @@ function commandCwds(messages) {
       // chdir() in any script, heredoc bodies included) leaves this command's directory unknown,
       // and the one after it too.
       const cds = (command.match(ANY_CD_RE) || []).length;
-      const lead = /^\s*cd[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|()]+))[ \t]*(?:&&|;|\n|$)/.exec(command);
+      const lead = /^\s*cd[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|()]+))[ \t]*(&&|;|\n|$)/.exec(command);
       const other = CHDIR_RE.test(raw) || PUSHD_RE.test(command) || COND_CD_RE.test(command);
       let own = carried;
+      let sure = false;
       if (other || cds > 1 || (cds === 1 && !lead)) own = null;
-      else if (lead) own = target([null, null, lead[1], lead[2], lead[3]], carried);
+      else if (lead) {
+        own = target([null, null, lead[1], lead[2], lead[3]], carried);
+        sure = lead[4] === '&&' && (lead[1] !== undefined ? lead[1] : lead[2] !== undefined ? lead[2] : lead[3]).startsWith('/');
+      }
       cwds.set(block.id, own);
-      carried = own;
+      if (uncertain && own !== null && !sure) uncertain.add(block.id);
+      carried = bashFailed(results.get(block.id)) ? null : own;
     }
   }
   return cwds;
@@ -343,6 +360,31 @@ function resolveSandboxPath(word, cwd, knownPaths) {
   if (!rel || rel.startsWith('..')) return { path: null, candidates: [] };
   const candidates = known.filter((p) => p === rel || normalizeSandboxPath(p).endsWith('/' + rel));
   return candidates.length === 1 ? { path: candidates[0], candidates } : { path: null, candidates };
+}
+
+// resolveSandboxPath for a word naming a file a command may change. When the working directory is
+// uncertain (commandCwds) and the relative word joined to it is no known file, the directory may be
+// wrong: every known file the word could name (as with no directory) is a candidate, and none is
+// resolved, so it is never replayed and stays a warning. { path, candidates, resolved }.
+function resolveTouch(word, cwd, known, uncertain = false) {
+  const text = String(word || '');
+  const found = resolveSandboxPath(text, cwd, known);
+  if (uncertain && cwd && !text.startsWith('/') && !Array.from(known || []).includes(found.path)) {
+    return { path: null, candidates: resolveSandboxPath(text, null, known).candidates, resolved: false };
+  }
+  return { ...found, resolved: !!found.path };
+}
+
+// Known paths by their normalized form: { list: the normalized paths, raw: normalized -> [keys] }, so
+// /home/claude//g.txt and ./g.txt match the paths a command names.
+function normalizedKeys(known) {
+  const raw = new Map();
+  for (const k of known || []) {
+    const n = normalizeSandboxPath(k);
+    if (!raw.has(n)) raw.set(n, []);
+    raw.get(n).push(k);
+  }
+  return { list: Array.from(raw.keys()), raw };
 }
 
 // Whether a file lies in a folder or below it, by whole path segments: /a/de-luce/x is not under /a/de.
@@ -697,7 +739,7 @@ function literalSteps(command, { copies = false, python = false } = {}) {
     if (f.tabs && !f.dash) return null;
     let body = f.body;
     if (!f.quote && body !== undefined && /[$`\\]/.test(body)) return null;
-    if (f.dash && body !== undefined) body = body.replace(/^\t+/gm, '');
+    if (f.dash && body !== undefined) body = stripHeredocTabs(body);
     text += raw.slice(at, f.index) + APPEND_MARK + appends.length + APPEND_MARK;
     at = f.index + f.length;
     const words = literalCommands(f.word);
@@ -779,15 +821,24 @@ function literalSwapCommand(command, cwd, known = []) {
 // when it is only cd, read-only tools, cp, literal sed -i and cat >>, the files those write (for cp
 // into a folder, the copy's name there). Otherwise every known file its text names, and when it
 // can't be shown to write nothing else (writeFreeTouches) every known file.
-function commandTouches(command, cwd, known) {
+// Paths are matched normalized; the keys returned are known's own. uncertain: the working
+// directory may be wrong (resolveTouch).
+function commandTouches(command, cwd, knownKeys, uncertain = false) {
+  const keys = normalizedKeys(knownKeys);
+  const out = new Set();
+  for (const n of commandTouchesNormalized(command, cwd, keys.list, uncertain)) for (const k of keys.raw.get(n) || []) out.add(k);
+  return out;
+}
+
+function commandTouchesNormalized(command, cwd, known, uncertain) {
   const raw = String(command || '');
   const knownSet = new Set(known);
   const touched = new Set();
   let rest = raw;
   for (const m of heredocMatches(raw).reverse()) {
     if (m[2] === '' && /[$`\\]/.test(m[4] || '')) {
-      const { path } = resolveSandboxPath(heredocPath(m), cwd, known);
-      if (path && knownSet.has(path)) touched.add(path);
+      const { path, candidates } = resolveTouch(heredocPath(m), cwd, known, uncertain);
+      for (const p of path ? [path] : candidates) if (knownSet.has(p)) touched.add(p);
       if (/[$`]/.test(m[4] || '')) known.forEach((k) => touched.add(k));  // $(...) in it runs
     }
     const header = m[0].split('\n')[0];
@@ -799,13 +850,13 @@ function commandTouches(command, cwd, known) {
     // Not provably write-free (a script run, a write in Python, an unknown tool): any file may
     // have changed, named in the command or not.
     // Also every known file it names, as before the write-free check existed.
-    const free = writeFreeTouches(rest, cwd, known);
+    const free = writeFreeTouches(rest, cwd, known, uncertain);
     for (const k of free || known) touched.add(k);
     for (const k of known) { const name = k.split('/').pop(); if (name && rest.includes(name)) touched.add(k); }
     return touched;
   }
   const mark = (word) => {
-    const { path, candidates } = resolveSandboxPath(word, cwd, known);
+    const { path, candidates } = resolveTouch(word, cwd, known, uncertain);
     for (const p of path ? [path] : candidates) if (knownSet.has(p)) touched.add(p);
   };
   for (const step of parsed.steps) {
@@ -923,7 +974,7 @@ const FIND_WRITES = new Set(['-exec', '-execdir', '-delete', '-ok', '-okdir', '-
 // the files returned. null when that can't be shown, and then any known file may have changed: any
 // interpreter (Python included, whatever its script), any other tool, or a heredoc bash expands that
 // holds $ or a backtick (it can run a command).
-function writeFreeTouches(command, cwd, known) {
+function writeFreeTouches(command, cwd, known, uncertain = false) {
   let expands = false;
   const text = String(command || '').replace(LOOSE_HEREDOC_RE, (...m) => {
     if (m[2] === '' && /[$`]/.test(m[5] || '')) expands = true;
@@ -937,7 +988,7 @@ function writeFreeTouches(command, cwd, known) {
   const mark = (w) => {
     if (w.open) return false;
     if (w.text === '/dev/null') return true;
-    const { path, candidates } = resolveSandboxPath(w.text, cwd, known);
+    const { path, candidates } = resolveTouch(w.text, cwd, known, uncertain);
     for (const p of path ? [path] : candidates) if (knownSet.has(p)) touched.add(p);
     return true;
   };
@@ -1793,8 +1844,15 @@ function bashFailed(result) {
   return json.returncode !== 0;
 }
 
+// Tools that read a file at input.path or input.file_path and change nothing: an unmodelled tool
+// naming a known file makes it opaque (extractArtifacts), these don't. extract_artifacts.py's
+// READ_FILE_TOOLS matches.
+const READ_FILE_TOOLS = new Set(['view', 'Read', 'read_file', 'Glob', 'Grep', 'LS', 'NotebookRead', 'present_files', 'SendUserFile', 'Artifact']);
+
 // index, when given, is filled as index[key] = { path, filename, versions: [filename...],
-// messages: [msg uuid that made each version] } for the viewer; the return value is unchanged.
+// messages: [msg uuid that made each version], skipped: [chain index of each message with a change
+// not replayed], skippedAt: [[chain index, block index] of each such change] } for the viewer and
+// the export; the return value is unchanged.
 // replayed, when given (a Set), gets toolUseId + '|' + path for each bash edit replayed: a literal
 // sed -i, cat >> or Python text swap (literalSwapCommand) on a file whose text is known, that is, created in the chat
 // with every change since replayed. From a file's first bash command that isn't replayed
@@ -1803,7 +1861,8 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
   const artifacts = {};
   const messages = getMessageChain(data);
   const failedIds = failedToolUseIds(messages);
-  const cwds = commandCwds(messages);
+  const uncertainCwds = new Set();
+  const cwds = commandCwds(messages, uncertainCwds);
   const opaque = new Set();  // state keys a bash command changed in a way not replayed
 
   // Map content types to file extensions
@@ -1901,10 +1960,18 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
   }
 
   const skipped = Object.create(null);  // state key -> chain indexes of replay-shaped edits not applied
+  const skippedAt = Object.create(null);  // state key -> [chain index, block index] of each of them
+  const skip = (key, mi, bi) => {
+    const list = skipped[key] || (skipped[key] = []);
+    if (!list.includes(mi)) list.push(mi);
+    (skippedAt[key] || (skippedAt[key] = [])).push([mi, bi]);
+  };
   for (let mi = 0; mi < messages.length; mi++) {
     const msg = messages[mi];
-    for (const block of (msg.content || [])) {
-      if (block.type !== 'tool_use') continue;
+    const content = msg.content || [];
+    for (let bi = 0; bi < content.length; bi++) {
+      const block = content[bi];
+      if (!block || block.type !== 'tool_use') continue;
       // A failed bash command can still have written its heredoc, so only file
       // tools are skipped.
       if (failedIds.has(block.id) && !isBashTool(block.name)) continue;
@@ -2072,11 +2139,23 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
             for (const edit of shape.edits) {
               const key = state[edit.path] ? edit.path : Object.keys(state).find((k) => k.startsWith('/') && normalizeSandboxPath(k) === edit.path);
               if (!key) continue;
-              const list = skipped[key] || (skipped[key] = []);
-              if (!list.includes(mi)) list.push(mi);
+              skip(key, mi, bi);
             }
           }
-          for (const key of commandTouches(command, cwd, pathKeys())) opaque.add(key);
+          for (const key of commandTouches(command, cwd, pathKeys(), uncertainCwds.has(block.id))) opaque.add(key);
+        }
+      } else if (!READ_FILE_TOOLS.has(block.name) && !(input && input.command === 'view')) {
+        // A tool the replay doesn't model (MultiEdit, str_replace_based_edit_tool, anything new) that
+        // names a known file may have changed it: the file is opaque from here on, and the change is
+        // recorded like a skipped edit.
+        for (const field of ['path', 'file_path', 'filepath']) {
+          if (typeof input[field] !== 'string' || !input[field]) continue;
+          const target = normalizeSandboxPath(input[field]);
+          for (const key of pathKeys()) {
+            if (normalizeSandboxPath(key) !== target) continue;
+            opaque.add(key);
+            skip(key, mi, bi);
+          }
         }
       }
     }
@@ -2145,7 +2224,7 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
       const names = s.versions.length <= 1
         ? [`${outBase}${ext}`]
         : s.versions.map((_, i) => `${outBase}_v${i + 1}${ext}`);
-      index[key] = { path: key, filename: `${outBase}${ext}`, versions: names, messages: s.versionMsgs.slice(), skipped: (skipped[key] || []).slice() };
+      index[key] = { path: key, filename: `${outBase}${ext}`, versions: names, messages: s.versionMsgs.slice(), skipped: (skipped[key] || []).slice(), skippedAt: (skippedAt[key] || []).map((p) => p.slice()) };
     }
 
     // defineProperty, so a file named __proto__ is a file, not the object's prototype.
@@ -2912,7 +2991,7 @@ if (typeof module !== 'undefined' && module.exports) {
     escapeHtmlText, formatTimestamp, mdLinkText, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
     sortArtifactRows, artifactRowNotes, artifactSource, artifactUrl, artifactLocal, artifactVersionLinks, ARTIFACT_THUMB_PERMISSION_STATUS, artifactsChangedLine,
     artifactThumbsLine, ARTIFACTS_UNLISTED_HEADING, ARTIFACTS_NO_LIST, splitListedRows, artifactsIndexMd, artifactsIndexHtml,
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, bashFailed, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, pyStringLiteral, pythonSwapScript, applyPythonReplace, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote, docWidgetShots, docWidgetCode, docWidgetEmbeds, docDiagramPictures,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, bashFailed, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, resolveTouch, normalizedKeys, stripHeredocTabs, READ_FILE_TOOLS, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, pyStringLiteral, pythonSwapScript, applyPythonReplace, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote, docWidgetShots, docWidgetCode, docWidgetEmbeds, docDiagramPictures,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
     publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact, artifactForeign,
