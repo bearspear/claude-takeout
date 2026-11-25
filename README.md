@@ -77,7 +77,7 @@ Creates a comprehensive archive:
 ├── integrated_chat.txt          # Plain text version (no markdown formatting)
 ├── code_snippets.md             # All extracted code blocks
 ├── links_and_sources.md         # URLs + web search sources by domain
-├── errors.txt                   # Detailed error report with recovery hints (only if failures occurred)
+├── errors.txt                   # Warnings with recovery hints, then notes (only when there are some)
 ├── original.json                # Original JSON export
 ├── viewer.html                  # Offline viewer (unzip first, then open it)
 ├── viewer-check.gif             # 1x1 image the viewer uses to detect an unzipped folder
@@ -401,6 +401,15 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.22.1
+
+- **A warning means something is missing** - Many exports turned amber over things that lose nothing. Those are now **notes**: they are listed in the chat's `README.md` under **About some files** and in `errors.txt` under **Notes**, but not counted on the Done screen, in the footer or in `index.md`, and the status stays green. One quiet line on Done says how many there are. Warnings stay for what is really missing.
+- **Drafts and helper scripts** - When a command the export can't follow changed a file, and Claude then delivered or presented files from the same folder (or below), the changed file is noted as a draft of them. A script Claude only ran (`.py`, `.sh`, `.js` and the like, never delivered) is noted as a helper script. The viewer marks them **Draft** and **Helper script**, softer than **May not match**. A file delivered or presented under its own name at or after its last change is the final state: it replaces the rebuilt file and its last version, and nothing is listed. Anything else stays an `artifact_opaque_mutation` warning, now one per file with the number of commands, and under the file's right name: a relative path is read against the command's working directory (`cd` in the same command or an earlier one).
+- **More edits replayed** - Literal `sed -i` substitutions, `cat >> file << 'EOF'` appends and short Python scripts that only read a file, `replace` literal strings and write it back are now replayed, so those files' versions and final state are right without `replay_bash.py`. A command whose result shows it failed is not replayed. Anything else in the command, or any other script, leaves the file to `replay_bash.py` as before; `extract_artifacts.py` replays the same shapes.
+- **Renamed files** - Two different files with one name are both kept, as before; the renamed one is now a note (`name_changed`) naming both paths, not a warning.
+- **Claude Docs diagrams from Claude's screenshots** - When Claude took a screenshot of a document's diagram, the export's `.md` and `.html` show that picture where the caption stood (from `images/`), and the diagram no longer counts as missing. Each diagram's code is kept as `<document>_diagram<N>.jsx`. The viewer still shows diagrams by caption.
+- **Smaller fixes** - claude.ai's empty message right after a complete answer no longer trips the export health check. The Done list names diagram and web-image warnings in plain words, and a web image a site refused (403) or that is gone (404) no longer suggests a setting that can't help. `replay_bash.py` no longer reads `cat >> file` as a new file named `>file`.
 
 ### v1.22.0
 

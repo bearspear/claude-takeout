@@ -180,7 +180,7 @@ Unzip and you'll see something like this:
 ├── integrated_chat.txt             Plain-text version
 ├── code_snippets.md                Every ``` code block found in the chat
 ├── links_and_sources.md            URLs + web search sources grouped by domain
-├── errors.txt                      ★ Recovery instructions if anything didn't come through (only present if there are warnings)
+├── errors.txt                      ★ Recovery instructions if anything didn't come through, then notes (only present if there are warnings or notes)
 ├── original.json                   The raw API payload — the source of truth for recovery
 ├── viewer.html                     Offline viewer — see "Reading an export in the viewer" below
 ├── viewer-check.gif                1x1 image the viewer uses to tell if you unzipped
@@ -252,6 +252,8 @@ When Claude creates an artifact and then edits it multiple times (`create_file` 
 
 If an artifact was created once and never edited, only `<name><ext>` exists. No `_v1` clutter.
 
+Edits Claude made with a literal `sed -i`, a `cat >> file << 'EOF'` append or a short Python script that only swaps fixed text are replayed into these versions too. Other bash changes are not: see `artifact_opaque_mutation` below and `replay_bash.py`.
+
 This is useful when you want the conversation's "before" snapshot of a refactor, an early draft of a document, or the original of a long iterative edit.
 
 ### `original.json` is the source of truth
@@ -262,7 +264,9 @@ Everything else in the export is derived from `original.json`. If something look
 
 ## Reading `errors.txt`
 
-`errors.txt` only appears in the export when something didn't come through cleanly. It's a structured Markdown report with three sections: **Summary**, **Errors**, **Warnings**, and a **Troubleshooting Guide** at the bottom.
+`errors.txt` only appears in the export when something didn't come through cleanly, or when there are notes. It's a structured Markdown report with sections for **Summary**, **Errors**, **Warnings** and **Notes**, and a **Troubleshooting Guide** at the bottom.
+
+A **warning** means you may be missing something. A **note** (since v1.22.1) explains a file whose presence might puzzle you, with nothing missing; notes are also in the chat's `README.md` under **About some files**, and they don't count as warnings on the Done screen or turn the status amber.
 
 Each entry includes:
 - The filename or artifact affected
@@ -280,18 +284,28 @@ Each entry includes:
 | `project_doc` | A document attached to the Claude Project couldn't be fetched. | Verify project access, re-export. |
 | `project_metadata` | Project metadata fetch failed. `project.json` may be incomplete. | Re-export when the Project endpoint works. |
 | `str_replace_failed` | A `str_replace` edit couldn't be applied to an artifact during reconstruction (the `old_str` didn't appear or appeared multiple times). | Usually mirrors what happened in Claude's actual sandbox — no action needed unless `original.json` shows the tool succeeded but the warning fired anyway. |
-| `artifact_basename_collision` | Two distinct artifact paths produced files with the same basename. The second was renamed to avoid overwriting. | Inspect both source paths to confirm they were intentionally distinct files. |
+| `artifact_basename_collision` | Exports before v1.22.1: two distinct artifact paths produced files with the same basename. The second was renamed to avoid overwriting. Now the note `name_changed`. | Inspect both source paths to confirm they were intentionally distinct files. |
 | `tool_image` | A picture Claude looked at in the chat (a photo it opened, a page it rendered) could not be downloaded from claude.ai. | Export again later; the picture still shows in the chat on claude.ai. |
-| `web_image` | An image Claude found with image search was not saved: Claude Takeout may not fetch images from other sites, or the site refused it. | Turn on Settings > Save web images and artifact card pictures (Chrome asks once), then export again. The links in `full_chat.md` still point to the images. |
-| `doc_diagram` | A Claude Docs document has diagrams, which claude.ai draws only on the document's page, and the chat has no self-contained HTML copy of the document. | Ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again; the copy is saved in `artefacts/` and linked from the document. Or open the live document from the link in the note. |
+| `web_image` | An image Claude found with image search was not saved: Claude Takeout may not fetch images from other sites, or the site refused it (403) or no longer has it (404). | Without the permission: turn on Settings > Save web images and artifact card pictures (Chrome asks once), then export again. A site's refusal can't be fixed from here. The links in `full_chat.md` still point to the images. |
+| `doc_diagram` | A Claude Docs document has diagrams, which claude.ai draws only on the document's page, and for some of them the chat has neither a screenshot Claude took (shown in the exported document in place of the caption since v1.22.1) nor a self-contained HTML copy of the document. | Ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again; the copy is saved in `artefacts/` and linked from the document. Or open the live document from the link in the note. |
 | `claude_doc_unreplayed` | Claude edited a Claude Docs document in a way the export can't rebuild from the chat. | The exported `.md` and `.html` hold what could be rebuilt. Open the live document from the link in the note for the current version. |
 | `published_page` | A page Claude published on claude.ai could not be saved, or only partly: no claude.ai tab open, signed out (one warning per export), the page no longer there, a file too large (over 32 MB, or 50 MB for one version), a checksum that didn't match, or a path renamed to be safe. | Open claude.ai in a tab, sign in, and export again. The page is still on claude.ai: the entry links it. |
 | `artifact_export` | Export Artifacts could not save everything: signed out (one warning, then it stops fetching), an artifact or file gone, too large (over 32 MB a file, 50 MB an artifact), a checksum mismatch, a renamed path, or a list that could not be read in full (also a count of artifacts found only by paging). | Open claude.ai, sign in, export again. Each entry links the artifact on claude.ai. |
 | `viewer` | A chat couldn't be added to `viewer.html`. (If the whole viewer fails, only the status line says so.) | Nothing is lost: the chat data is all in the export and only the viewer is missing or incomplete. Use the Markdown files, or re-export. |
-| `artifact_opaque_mutation` | A `bash_tool` command mutated an artifact in a way the extension can't reconstruct (Python heredoc, sed, awk, multi-step pipeline, etc.). | **Run `replay_bash.py`** — see next section. |
-| `export_health` | claude.ai's data for the chat looks incomplete: no messages although the chat was used, messages with no content, no current branch, content the exporter doesn't show yet, or several uploads that all failed. Usually a sign that claude.ai's API changed. | Check the chat on claude.ai. `original.json` has everything that came back. If it repeats, report it so the exporter can be updated. |
+| `artifact_opaque_mutation` | A bash command changed a file in a way the extension can't reconstruct (a Python script beyond a plain text swap, awk, a pipeline, etc.), and Claude didn't deliver the file afterwards. One entry per file, with the number of commands. Literal `sed -i` swaps, `cat >> file << 'EOF'` appends and simple Python text swaps are replayed since v1.22.1 and don't warn. | **Run `replay_bash.py`** — see next section. |
+| `export_health` | claude.ai's data for the chat looks incomplete: no messages although the chat was used, messages with no content (not counting the empty message claude.ai adds right after a complete answer), no current branch, content the exporter doesn't show yet, or several uploads that all failed. Usually a sign that claude.ai's API changed. | Check the chat on claude.ai. `original.json` has everything that came back. If it repeats, report it so the exporter can be updated. |
 
-In `viewer.html`, a file with an `artifact_opaque_mutation`, `str_replace_failed` or `claude_doc_unreplayed` warning carries a **May not match** badge on its card and in the Files list, and the file panel explains why. Older exports get the badges when their viewer is rebuilt with `node tools/build_viewer.js <folder> --force`, which reads them from `errors.txt`.
+### Notes you might see
+
+| Type | Means | What to do |
+|---|---|---|
+| `draft_superseded` | A command the export can't follow changed this file, and afterwards Claude delivered or presented files from the same folder (or below). Those are in the export; this file is likely an earlier draft of one of them, kept for reference. "Likely" is a judgment, not proof. | Nothing, usually: use the delivered file. If you want this draft's last state, `replay_bash.py` can try to rebuild it. |
+| `helper_script` | A script Claude ran (`.py`, `.sh`, `.js` and the like) and never delivered, changed by a command the export can't follow. This copy may be older than the one Claude ran. | Nothing, unless you want the script itself: `replay_bash.py` can rebuild it. |
+| `name_changed` | Two different files had the same name. Both are kept; this one got a new name. The note gives both original paths. | Nothing. |
+
+A file Claude presented or delivered under its own name after its last change needs no entry at all: that download is its final state, and it replaces the rebuilt file and its last `_vN`.
+
+In `viewer.html`, a file with an `artifact_opaque_mutation`, `str_replace_failed` or `claude_doc_unreplayed` warning carries a **May not match** badge on its card and in the Files list, and the file panel explains why. A draft or helper-script note shows a softer **Draft** or **Helper script** badge. Older exports get the warning badges when their viewer is rebuilt with `node tools/build_viewer.js <folder> --force`, which reads them from `errors.txt`; it doesn't read notes.
 
 ### Published pages
 
@@ -344,6 +358,7 @@ The recovery tool. Replays every `bash_tool` and `Bash` command from a conversat
 
 **When to use it:**
 - `errors.txt` shows `artifact_opaque_mutation` warnings.
+- You want the last state of a file noted as a draft or helper script (`draft_superseded`, `helper_script`). The export already has the file Claude delivered; the CLI rebuilds the draft itself.
 - An exported artifact is incomplete (e.g. an HTML file is missing the base64-embedded image Claude inlined via Python).
 - The "Recovery" hint in `errors.txt` says to run it.
 
