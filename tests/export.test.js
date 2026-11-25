@@ -1804,6 +1804,100 @@ test('a document without diagrams gets no warning, and a note only when it has a
   assert.match(docText(copy.written, 'artefacts/Lorber_Notes.md'), /^# Lorber Notes\n\n> \*\*Self-contained copy:\*\* .*\[l\.html\]\(l\.html\)/m);
 });
 
+// ---- Claude Docs diagrams from Claude's screenshots ----
+// Claude can read a widget back as a screenshot (Claude_Docs__read, payload.kind 'screenshot'); claude.ai
+// keeps the picture and links it from the result like any image Claude viewed. The final document shows
+// it where the caption stood, and the widget's code is kept as a .jsx beside the document.
+const SHOT_U = '5ca1ab1e-0000-4000-8000-000000000001';
+const DOCS_READ = 'mcp__claude_ai_Claude_Docs__read';
+const shotRead = (id, node, uuid = SHOT_U) => [
+  use(id, DOCS_READ, { container: { id: 'proj', kind: 'project' }, engine: 'widget', payload: { kind: 'screenshot' }, ref: { id: node, object: 'node' } }),
+  { type: 'tool_result', tool_use_id: id, name: DOCS_READ, content: [
+    { type: 'image', file_uuid: uuid, preview_url: `/api/org/files/${uuid}/preview`, thumbnail_url: `/api/org/files/${uuid}/thumbnail` },
+    { type: 'text', text: '[Image: source: /tmp/shot.png]' },
+    { type: 'text', text: JSON.stringify({ verdict: 'allow', value: { kind: 'screenshot' } }) }] },
+];
+const widgetEdit = (id, node, payload = { kind: 'draft-edit', edits: [{ find: 'a', replace: 'b' }] }) => [
+  use(id, 'mcp__claude_ai_Claude_Docs__update', { container: { id: 'proj', kind: 'project' }, engine: 'widget', payload, ref: { id: node, object: 'node' } }),
+  { type: 'tool_result', tool_use_id: id, name: 'mcp__claude_ai_Claude_Docs__update', content: [{ type: 'text', text: '{"verdict":"allow"}' }] },
+];
+const shotChat = (...extraTurns) => {
+  const t = docTools();
+  return Object.assign(turns(
+    [t.batch, t.batchResult, t.update('u1', 'sess.10', '## Alpha\n\nalpha text'), t.result('u1', '{}')],
+    [diagramBatch('b2', 'sess.11', '## Beta\n\n<?claude block dia?>\n\nUnder the picture.', { caption: 'Fig 1' }),
+      t.result('b2', JSON.stringify({ verdict: 'allow', acks: [{ verdict: 'allow', id: 'wnode-1' }, { verdict: 'allow' }] }))],
+    shotRead('rd1', 'wnode-1'),
+    ...extraTurns,
+  ), { uuid: 'sc', name: 'sc' });
+};
+const shotPopup = (ok = true) => exportPopup({ routes: [[new RegExp(`${SHOT_U}/preview$`), () => (ok
+  ? { ok: true, status: 200, headers: { get: () => 'image/png' }, blob: async () => ({ size: 3, type: 'image/png', marker: 'png' }) }
+  : { ok: false, status: 404 })]] });
+
+test("a document's diagram shows Claude's screenshot of it, and its code is kept as a .jsx", async () => {
+  const data = shotChat();
+  const { written } = await runFolder(shotPopup(), data);
+  assert.ok(written['images/5ca1ab1e.png'], Object.keys(written).join(', '));
+  const md = docText(written, 'artefacts/Lorber_Notes.md');
+  assert.ok(md.includes('## Beta\n\n![Fig 1](../images/5ca1ab1e.png)\n\n*Fig 1*\n\nUnder the picture.'), md);
+  assert.ok(!md.includes('[embedded content'), md);
+  assert.ok(!md.includes('Diagram not included'), md);
+  assert.match(docText(written, 'artefacts/Lorber_Notes.html'), /<img src="\.\.\/images\/5ca1ab1e\.png" alt="Fig 1">/);
+  assert.match(docText(written, 'artefacts/Lorber_Notes.html'), /img-src https: data: file:/);
+  assert.ok(!String(docText(written, 'errors.txt') || '').includes('doc diagram'));
+  assert.strictEqual(docText(written, 'artefacts/Lorber_Notes_diagram1.jsx'), 'export default () => null');
+  assert.ok(docText(written, 'README.md').includes('[Lorber_Notes_diagram1.jsx](artefacts/Lorber_Notes_diagram1.jsx)'));
+  assert.ok(docText(written, 'integrated_chat.md').includes('![Fig 1](images/5ca1ab1e.png)'), 'the embedded copy links the picture from the chat folder');
+  // The versions stay as rebuilt, and the Python port still matches the rebuild before the pictures.
+  assert.ok(docText(written, 'artefacts/Lorber_Notes_v2.md').includes('[embedded content: Fig 1]'));
+  const rebuilt = plain(artifacts(data));
+  assert.ok(rebuilt['Lorber_Notes.md'].includes('[embedded content: Fig 1]'));
+  assert.deepStrictEqual(pythonArtifacts(data)['Lorber_Notes.md'], rebuilt['Lorber_Notes.md']);
+});
+
+test('a screenshot taken before a later edit of the widget says so, and the latest screenshot wins', async () => {
+  const edited = await runFolder(shotPopup(), shotChat(widgetEdit('we1', 'wnode-1')));
+  assert.ok(docText(edited.written, 'artefacts/Lorber_Notes.md').includes('![Fig 1](../images/5ca1ab1e.png)\n\n*Fig 1 (screenshot taken before a later edit)*'));
+  const core = require('../export-core.js');
+  const again = shotChat(widgetEdit('we1', 'wnode-1'), shotRead('rd2', 'wnode-1', 'beefbeef-0000-4000-8000-000000000002'));
+  const shots = core.docWidgetShots(again);
+  assert.deepStrictEqual(plain([...shots.keys()]), ['wnode-1']);
+  assert.strictEqual(shots.get('wnode-1').fileUuid, 'beefbeef-0000-4000-8000-000000000002');
+  assert.strictEqual(shots.get('wnode-1').editedAfter, false);
+  // A failed edit changed nothing.
+  const failed = shotChat([use('we2', 'mcp__claude_ai_Claude_Docs__update', { engine: 'widget', payload: { kind: 'publish' }, ref: { id: 'wnode-1', object: 'node' } }), result('we2', true)]);
+  assert.strictEqual(core.docWidgetShots(failed).get('wnode-1').editedAfter, false);
+  // The code kept is the last code sent for the widget.
+  const recoded = shotChat(widgetEdit('we3', 'wnode-1', { code: 'export default () => 2' }));
+  assert.strictEqual(core.docWidgetCode(recoded).get('wnode-1'), 'export default () => 2');
+});
+
+test('a screenshot that could not be downloaded leaves the caption and the doc_diagram warning', async () => {
+  const { written } = await runFolder(shotPopup(false), shotChat());
+  const md = docText(written, 'artefacts/Lorber_Notes.md');
+  assert.ok(md.includes('[embedded content: Fig 1]'), md);
+  assert.ok(!md.includes('![Fig 1]'));
+  const errors = docText(written, 'errors.txt');
+  assert.match(errors, /Type:\*\* tool image/);
+  assert.match(errors, /Type:\*\* doc diagram/);
+  assert.strictEqual(docText(written, 'artefacts/Lorber_Notes_diagram1.jsx'), 'export default () => null', 'the code is kept anyway');
+});
+
+test('docDiagramPictures puts each picture where its caption stood and counts the rest', () => {
+  const core = require('../export-core.js');
+  const md = '# T\n\n[embedded content: A [x]]\n\ntext\n\n[embedded content: B]\n\n[embedded content]\n';
+  const out = core.docDiagramPictures(md, [{ caption: 'A [x]', src: '../images/a (1).png', note: '' }, { caption: 'C', src: '../images/c.png', note: '' }]);
+  assert.strictEqual(out.missing, 2);
+  assert.strictEqual(out.markdown, '# T\n\n![A \\[x\\]](../images/a%20%281%29.png)\n\n*A [x]*\n\ntext\n\n[embedded content: B]\n\n[embedded content]\n');
+  // A widget created where the reply names it by lid.
+  const t = docTools();
+  const lids = turns([t.batch, t.batchResult],
+    [diagramBatch('b2', 'sess.11', 'x', { caption: 'Fig 2' }), t.result('b2', JSON.stringify({ verdict: 'allow', lids: { w: 'wnode-9' } }))]);
+  assert.deepStrictEqual(plain(core.docWidgetEmbeds(lids)), [{ doc: 'doc:node-1', node: 'wnode-9', caption: 'Fig 2' }]);
+  assert.strictEqual(core.docWidgetCode(lids).get('wnode-9'), 'export default () => null');
+});
+
 // ---- claude.ai's visualize, image_search and claude-artifacts tools ----
 const WIDGET = 'mcp__visualize__show_widget';
 const svgWidget = (title, body = '<g class="c-teal"><rect x="1" y="1" width="9" height="9"/></g>') =>

@@ -1450,6 +1450,157 @@ function docCompanionNote(markdown, names = []) {
   return { markdown: `${md.slice(0, end)}\n\n${note}${md.slice(end)}`, captions };
 }
 
+// ---- Claude Docs diagrams from Claude's screenshots ----
+// A diagram in a document is a widget node, made by a batch member { $lid, engine: 'widget', verb: 'create',
+// payload.code } and placed by an embed block whose ref is 'node/$lid:<lid>' (same batch) or 'node/<id>'.
+// Claude can read one back as a picture (Claude_Docs__read, engine 'widget', payload.kind 'screenshot',
+// ref.id the node), which claude.ai keeps and links from the result like any image Claude viewed. The
+// export shows that picture in the final document (a post-pass in popup.js, like docCompanionNote) and keeps
+// each widget's code as a .jsx. Nothing here changes extractArtifacts, so extract_artifacts.py has no twin.
+
+// Each widget-creating member of a batch call, with the node id the reply gave it: { lid, node, code }.
+// The reply names it by lid (reply.lids, or an ack carrying the lid), or, for a batch on an existing
+// document, by the ack in the member's place.
+function docBatchWidgets(input, result) {
+  const members = input && Array.isArray(input.batch) ? input.batch : [];
+  const reply = leadingJson(resultText(result)) || {};
+  const acks = Array.isArray(reply.acks) ? reply.acks : [];
+  const lids = reply.lids && typeof reply.lids === 'object' ? reply.lids : {};
+  const creates = !!(input && input.container && input.container.create);
+  const idOf = (v) => (typeof v === 'string' ? v : v && typeof v === 'object' && typeof v.id === 'string' ? v.id : '');
+  const out = [];
+  for (const [i, m] of members.entries()) {
+    if (!m || typeof m !== 'object' || m.engine !== 'widget' || (m.verb !== undefined && m.verb !== 'create') || m.ref) continue;
+    const lid = typeof m.$lid === 'string' ? m.$lid : '';
+    const named = lid ? acks.find((a) => a && typeof a === 'object' && (a.$lid === lid || a.lid === lid)) : null;
+    let node = (lid && Object.prototype.hasOwnProperty.call(lids, lid) ? idOf(lids[lid]) : '') || idOf(named);
+    if (!node && !creates && acks[i] && typeof acks[i] === 'object') node = idOf(acks[i]) || (typeof acks[i].minted === 'string' ? acks[i].minted : '');
+    const payload = docPayload(m.payload) || {};
+    out.push({ lid, node, code: typeof payload.code === 'string' ? payload.code : null });
+  }
+  return out;
+}
+
+// Each Docs call on the current branch, in order: { action, input, result, failed, msgIndex }.
+function docCalls(data) {
+  const messages = getMessageChain(data);
+  const results = new Map();
+  for (const m of messages) for (const b of (m.content || [])) if (b && b.type === 'tool_result' && b.tool_use_id) results.set(b.tool_use_id, b);
+  const out = [];
+  messages.forEach((m, msgIndex) => {
+    for (const b of (m.content || [])) {
+      const action = b && b.type === 'tool_use' ? claudeDocsAction(b.name) : null;
+      if (!action) continue;
+      const result = results.get(b.id) || null;
+      out.push({ action, input: (b.input && typeof b.input === 'object') ? b.input : {}, result, failed: !!(result && result.is_error), msgIndex });
+    }
+  });
+  return out;
+}
+
+// The latest screenshot Claude took of each widget: Map<node id, { fileUuid, msgIndex, editedAfter }>,
+// editedAfter when a later call (an update of the node, or a batch member on it) changed it.
+function docWidgetShots(data) {
+  const shots = new Map();
+  for (const call of docCalls(data)) {
+    if (call.failed) continue;
+    const { input } = call;
+    const payload = docPayload(input.payload) || {};
+    const ref = input.ref && typeof input.ref === 'object' ? input.ref : null;
+    if (call.action === 'read' && input.engine === 'widget' && payload.kind === 'screenshot' && ref && typeof ref.id === 'string') {
+      const content = call.result && Array.isArray(call.result.content) ? call.result.content : [];
+      const image = content.find((c) => c && c.type === 'image' && typeof c.file_uuid === 'string');
+      if (image) shots.set(ref.id, { fileUuid: image.file_uuid, msgIndex: call.msgIndex, editedAfter: false });
+    } else if (call.action === 'update' && ref && shots.has(ref.id)) {
+      shots.get(ref.id).editedAfter = true;
+    } else if (call.action === 'batch') {
+      for (const m of Array.isArray(input.batch) ? input.batch : []) {
+        const id = m && typeof m === 'object' && m.ref && typeof m.ref === 'object' ? m.ref.id : null;
+        if (id && shots.has(id) && m.verb !== 'read') shots.get(id).editedAfter = true;
+      }
+    }
+  }
+  return shots;
+}
+
+// The last code sent for each widget: Map<node id, code>.
+function docWidgetCode(data) {
+  const code = new Map();
+  for (const call of docCalls(data)) {
+    if (call.failed) continue;
+    const { input } = call;
+    if (call.action === 'batch') {
+      for (const w of docBatchWidgets(input, call.result)) if (w.node && w.code !== null) code.set(w.node, w.code);
+      for (const m of Array.isArray(input.batch) ? input.batch : []) {
+        const id = m && typeof m === 'object' && m.engine === 'widget' && m.ref && typeof m.ref === 'object' ? m.ref.id : null;
+        const p = id ? docPayload(m.payload) || {} : {};
+        if (id && typeof p.code === 'string') code.set(id, p.code);
+      }
+    } else if (call.action === 'update' && input.engine === 'widget' && input.ref && typeof input.ref.id === 'string') {
+      const p = docPayload(input.payload) || {};
+      if (typeof p.code === 'string') code.set(input.ref.id, p.code);
+    }
+  }
+  return code;
+}
+
+// Where each widget is embedded, in the order the calls place them: [{ doc: '<doc key>', node, caption }],
+// caption as the rebuilt document shows it.
+function docWidgetEmbeds(data) {
+  const out = [];
+  const captionOf = (b) => (typeof b.caption === 'string' ? b.caption.replace(/\s+/g, ' ').trim() : '');
+  const add = (blocks, doc, lidMap) => {
+    if (!doc || !blocks || typeof blocks !== 'object') return;
+    for (const b of Object.values(blocks)) {
+      if (!b || typeof b !== 'object' || b.type !== 'embed' || typeof b.ref !== 'string') continue;
+      const m = /^node\/(?:\$lid:(.+)|(.+))$/.exec(b.ref);
+      const node = m ? (m[1] !== undefined ? lidMap[m[1]] : m[2]) : '';
+      if (node) out.push({ doc, node, caption: captionOf(b) });
+    }
+  };
+  const opBlocks = (payload) => {
+    const ops = payload && Array.isArray(payload.ops) ? payload.ops : [];
+    return ops.map((op) => (op && op.with && typeof op.with === 'object' ? op.with.blocks : null)).filter(Boolean);
+  };
+  for (const call of docCalls(data)) {
+    if (call.failed) continue;
+    const { input } = call;
+    if (call.action === 'batch') {
+      const lidMap = {};
+      for (const w of docBatchWidgets(input, call.result)) if (w.lid && w.node) lidMap[w.lid] = w.node;
+      const made = claudeDocCreated(input, call.result, '');
+      if (made && !made.unconfirmed) add(made.blocks, made.key, lidMap);
+      for (const m of Array.isArray(input.batch) ? input.batch : []) {
+        if (!m || typeof m !== 'object' || m.engine !== 'prose' || !m.ref || typeof m.ref !== 'object' || !m.ref.id) continue;
+        for (const blocks of opBlocks(docPayload(m.payload))) add(blocks, `doc:${m.ref.id}`, lidMap);
+      }
+    } else if (call.action === 'update' && input.engine !== 'widget' && input.ref && input.ref.id) {
+      for (const blocks of opBlocks(docPayload(input.payload))) add(blocks, `doc:${input.ref.id}`, {});
+    }
+  }
+  return out;
+}
+
+// Puts each picture where its caption stood in a rebuilt document: '![<caption>](<src>)', the caption
+// below it in italics with the note in brackets. pictures: [{ caption, src, note }], each used once, by the
+// first caption line equal to it. Returns { markdown, missing }: the text, and how many diagrams still show
+// by caption.
+function docDiagramPictures(markdown, pictures = []) {
+  const left = pictures.slice();
+  let missing = 0;
+  const href = (src) => String(src).split('/').map((s) => (s === '..' ? s : encodeURIComponent(s))).join('/').replace(/\(/g, '%28').replace(/\)/g, '%29');
+  const text = String(markdown).replace(DOC_CAPTION_RE, (line) => {
+    const caption = line === '[embedded content]' ? '' : line.slice('[embedded content: '.length, -1);
+    const i = left.findIndex((p) => p && p.caption === caption && p.src);
+    if (i === -1) { missing++; return line; }
+    const pic = left.splice(i, 1)[0];
+    const alt = (caption || 'Diagram').replace(/([\\[\]])/g, '\\$1');
+    const under = [caption.replace(/([\\*_])/g, '\\$1'), pic.note ? `(${pic.note})` : ''].filter(Boolean).join(' ');
+    return `![${alt}](${href(pic.src)})${under ? `\n\n*${under}*` : ''}`;
+  });
+  return { markdown: text, missing };
+}
+
 // claude.ai's visualize tool (show_widget) draws an SVG or HTML fragment in the chat, styled by claude.ai's
 // own widget stylesheet. widgetFile makes it a file that stands alone: an SVG gets xmlns and WIDGET_CSS
 // (the classes and colors the tool's guide documents, light and dark), and HTML gets a page around it.
@@ -2760,7 +2911,7 @@ if (typeof module !== 'undefined' && module.exports) {
     escapeHtmlText, formatTimestamp, mdLinkText, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
     sortArtifactRows, artifactRowNotes, artifactSource, artifactUrl, artifactLocal, artifactVersionLinks, ARTIFACT_THUMB_PERMISSION_STATUS, artifactsChangedLine,
     artifactThumbsLine, ARTIFACTS_UNLISTED_HEADING, ARTIFACTS_NO_LIST, splitListedRows, artifactsIndexMd, artifactsIndexHtml,
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, bashFailed, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, pyStringLiteral, pythonSwapScript, applyPythonReplace, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, bashFailed, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, pyStringLiteral, pythonSwapScript, applyPythonReplace, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote, docWidgetShots, docWidgetCode, docWidgetEmbeds, docDiagramPictures,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
     publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact, artifactForeign,

@@ -416,8 +416,9 @@ async function addArtefactBlob(folder, artifacts, filename, blob) {
 // ============================================================================
 
 // A Claude Docs document as one self-contained page to read, print or share. Raw HTML in the Markdown is
-// shown as text, and only web and mail links and https images are kept; the page's CSP allows no
-// script at all, so nothing in it can run.
+// shown as text, and only web and mail links, https images and the diagram screenshots saved in the
+// chat's images/ folder (../images/<name>) are kept; the page's CSP allows no script at all, so nothing
+// in it can run.
 // marked hands some attribute values over already escaped (titles, alt text, autolinks) and others not,
 // so each is unescaped first and then escaped exactly once.
 const docAttr = (s) => escapeHtmlText(String(s).replace(/&(amp|lt|gt|quot|#39);/g, (m, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" })[e]));
@@ -442,7 +443,8 @@ function claudeDocHtml(title, markdown) {
           return `<a href="${docAttr(href)}"${linkTitle ? ` title="${docAttr(linkTitle)}"` : ''} rel="noopener noreferrer">${text}</a>`;
         },
         image(href, imageTitle, text) {
-          if (!/^https:/i.test(String(href || '').trim())) return docAttr(text || '');
+          // https, or a diagram's screenshot the export saved beside the document (docDiagramPictures).
+          if (!/^(https:|\.\.\/images\/[^/?#\\]+$)/i.test(String(href || '').trim())) return docAttr(text || '');
           return `<img src="${docAttr(href)}" alt="${docAttr(text || '')}"${imageTitle ? ` title="${docAttr(imageTitle)}"` : ''}>`;
         },
       },
@@ -454,7 +456,7 @@ function claudeDocHtml(title, markdown) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data: file:">
 <title>${escapeHtmlText(title)}</title>
 <style>
 :root { --bg: #faf9f6; --ink: #1f1e1c; --soft: #4a4844; --mute: #77736b; --line: #e3dfd6; --card: #fff; --accent: #b4552d; }
@@ -2649,11 +2651,40 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     if (entry && !key.startsWith('doc:') && !key.startsWith('artifact:') && !key.startsWith('widget:')) pathNames[key] = entry.filename;
   }
   const companions = docCompanions(data, artifacts, artifactIndex, pathNames);
+  // A diagram Claude took a screenshot of (Claude_Docs__read) shows that picture, saved by saveToolImages,
+  // where its caption stood; only diagrams still shown by caption count for the note and doc_diagram.
+  // Each widget's code is kept as <doc base>_diagram<N>.jsx, N in the document's order.
+  const widgetShots = docWidgetShots(data);
+  const widgetCode = docWidgetCode(data);
+  const widgetEmbeds = docWidgetEmbeds(data);
+  const docJsx = {};  // doc key -> [{ node, code }] in the document's order
+  const rebuiltDocs = {};  // file name -> the document as extractArtifacts rebuilt it
+  for (const [key, entry] of Object.entries(artifactIndex)) {
+    if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
+    const mine = widgetEmbeds.filter((e) => e.doc === key);
+    const unplaced = mine.slice();
+    const ordered = [];
+    for (const line of artifacts[entry.filename].match(DOC_CAPTION_RE) || []) {
+      const caption = line === '[embedded content]' ? '' : line.slice('[embedded content: '.length, -1);
+      const i = unplaced.findIndex((e) => e.caption === caption);
+      if (i !== -1) ordered.push(unplaced.splice(i, 1)[0]);
+    }
+    const pictures = ordered.map((e) => {
+      const shot = widgetShots.get(e.node);
+      const saved = shot && Object.prototype.hasOwnProperty.call(toolImages, shot.fileUuid) ? toolImages[shot.fileUuid] : null;
+      return saved ? { caption: e.caption, src: `../${saved}`, note: shot.editedAfter ? 'screenshot taken before a later edit' : '' } : null;
+    }).filter(Boolean);
+    rebuiltDocs[entry.filename] = artifacts[entry.filename];
+    artifacts[entry.filename] = docDiagramPictures(artifacts[entry.filename], pictures).markdown;
+    const nodes = [];
+    for (const e of ordered.concat(unplaced)) if (!nodes.includes(e.node) && widgetCode.has(e.node)) nodes.push(e.node);
+    docJsx[key] = nodes.map((node) => ({ node, code: widgetCode.get(node) }));
+  }
   for (const [key, entry] of Object.entries(artifactIndex)) {
     if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
     const names = companions[key] || [];
     const { markdown, captions } = docCompanionNote(artifacts[entry.filename], names);
-    if (markdown !== artifacts[entry.filename]) {
+    if (markdown !== artifacts[entry.filename] || markdown !== rebuiltDocs[entry.filename]) {
       artifacts[entry.filename] = markdown;
       addFileWithBOM(folder, `artefacts/${entry.filename}`, markdown);
     }
@@ -2682,6 +2713,14 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     } catch (err) {
       console.warn(`Could not write ${htmlName}:`, err.message);
     }
+    // Its diagrams' code, named uniquely the same way.
+    (docJsx[key] || []).forEach(({ code }, i) => {
+      let jsxName = `${base}_diagram${i + 1}.jsx`;
+      for (let n = 2; taken.has(jsxName.toLowerCase()) || docHtmlNames.has(jsxName.toLowerCase()); n++) jsxName = `${base}_diagram${i + 1}_${n}.jsx`;
+      docHtmlNames.add(jsxName.toLowerCase());
+      folder.file(`artefacts/${jsxName}`, code);
+      docHtmlFiles.push(jsxName);
+    });
   }
 
   // Add text attachments (pasted files)
@@ -4459,7 +4498,8 @@ function convertToMarkdown(data, options = {}) {
               const content = artifacts[filename];
               if (embedArtifacts && typeof content === 'string') {
                 if (seamlessMd) {
-                  lines.push('\n---\n', content, '\n---\n');
+                  // A diagram's screenshot is linked from artefacts/ (docDiagramPictures); this file is a folder up.
+                  lines.push('\n---\n', content.replace(/\]\(\.\.\/images\//g, '](images/'), '\n---\n');
                 } else {
                   const fence = getCodeFence(content);
                   lines.push(`${fence}markdown`, content, fence, '');
