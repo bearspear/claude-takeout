@@ -1427,10 +1427,11 @@ function docCompanions(data, artifacts, index, pathNames = {}) {
 
 // The note at the top of a Claude Docs document about its diagrams and its self-contained copies.
 // Returns { markdown, captions }: the text with the note under its title, and how many diagrams show by
-// caption.
-function docCompanionNote(markdown, names = []) {
+// caption. shown, when given, is that count from another copy of the text: the viewer's copy keeps every
+// caption, while the file shows the diagrams Claude took a screenshot of.
+function docCompanionNote(markdown, names = [], shown = null) {
   const md = String(markdown);
-  const captions = (md.match(DOC_CAPTION_RE) || []).length;
+  const captions = Number.isInteger(shown) ? shown : (md.match(DOC_CAPTION_RE) || []).length;
   const link = (n) => `[${n.replace(/([\\[\]])/g, '\\$1')}](${encodeURI(n).replace(/\(/g, '%28').replace(/\)/g, '%29')})`;
   const links = names.map(link).join(', ');
   const one = captions === 1;

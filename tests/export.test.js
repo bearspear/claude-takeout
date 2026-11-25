@@ -1856,6 +1856,25 @@ test("a document's diagram shows Claude's screenshot of it, and its code is kept
   assert.deepStrictEqual(pythonArtifacts(data)['Lorber_Notes.md'], rebuilt['Lorber_Notes.md']);
 });
 
+test("the viewer shows a document's diagram by caption, not by a picture link it cannot load", async () => {
+  // viewer.html sits at the export's root, and its sanitizer drops a ../images/ src: it gets the text as
+  // rebuilt, before the pictures, and no "not included" note when every diagram has a screenshot.
+  // One version only, so the viewer's card shows the final file's text.
+  const t = docTools();
+  const data = Object.assign(turns(
+    [t.batch, t.batchResult, diagramBatch('b2', 'sess.11', '## Beta\n\n<?claude block dia?>\n\nUnder the picture.', { caption: 'Fig 1' }),
+      t.result('b2', JSON.stringify({ verdict: 'allow', acks: [{ verdict: 'allow', id: 'wnode-1' }, { verdict: 'allow' }] }))],
+    shotRead('rd1', 'wnode-1'),
+  ), { uuid: 'sv', name: 'sv' });
+  const { written, chat } = await runFolder(shotPopup(), data);
+  assert.ok(docText(written, 'artefacts/Lorber_Notes.md').includes('![Fig 1](../images/5ca1ab1e.png)'), 'the file has the picture');
+  assert.ok(!written['artefacts/Lorber_Notes_v1.md'], 'one version');
+  const json = JSON.stringify(chat);
+  assert.ok(!json.includes('../images/'), 'no picture link in the viewer data');
+  assert.ok(json.includes('[embedded content: Fig 1]'), 'the caption is in the viewer data');
+  assert.ok(!json.includes('Diagram not included'), 'no false note');
+});
+
 test('a screenshot taken before a later edit of the widget says so, and the latest screenshot wins', async () => {
   const edited = await runFolder(shotPopup(), shotChat(widgetEdit('we1', 'wnode-1')));
   assert.ok(docText(edited.written, 'artefacts/Lorber_Notes.md').includes('![Fig 1](../images/5ca1ab1e.png)\n\n*Fig 1 (screenshot taken before a later edit)*'));

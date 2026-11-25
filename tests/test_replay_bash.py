@@ -127,6 +127,27 @@ class Replay(unittest.TestCase):
         d=export([],{'a.html':b'p','a_v1.html':b'o','a_v2.html':b'p'})
         (d/'original.json').write_text(json.dumps({'current_leaf_message_uuid':'a1','chat_messages':msgs}))
         run(d);self.assertEqual((d/'artefacts/a_v2.html').read_text(),'n\n');self.assertEqual((d/'artefacts/a.html').read_text(),'n\n');self.assertEqual((d/'artefacts/a_v1.html').read_text(),'o')
+    def test_append_heredoc_is_not_a_create(self):
+        # cat >> appends: the declarative state must not read it as a create of '>x', as extract_artifacts.py.
+        self.assertEqual(rb.heredoc_files("cat >> /home/claude/a.txt << 'EOF'\nx\nEOF"),[])
+        self.assertEqual(rb.heredoc_files("cat >>/home/claude/a.txt << 'EOF'\nx\nEOF"),[])
+        self.assertEqual(rb.heredoc_files("cat << 'EOF' >> /home/claude/a.txt\nx\nEOF"),[])
+        self.assertEqual(rb.heredoc_files("cat > /home/claude/a.txt << 'EOF'\nx\nEOF"),[('/home/claude/a.txt','x')])
+        d=export([cf('/home/claude/a.txt','a\n'),sh("cat >> /home/claude/a.txt << 'EOF'\nb\nEOF")],{'a.txt':b'a\nb\n'})
+        st=rb.declarative_state(json.loads((d/'original.json').read_text()))
+        self.assertEqual(st.get('/home/claude/a.txt'),'a\n');self.assertNotIn('>/home/claude/a.txt',st)
+    @unittest.skipUnless(HAS_SANDBOX, 'needs sandbox-exec')
+    def test_replayed_sed_not_applied_twice(self):
+        # The export already replayed this literal sed -i (extract_artifacts.py), so a.html holds 'ba'. The CLI
+        # starts from its own state before the command (replay_steps), so it swaps once: 'ba', never 'bb'.
+        # -i.bak, because macOS sed reads a bare -i's next word as the backup suffix and would fail.
+        msgs=[{'uuid':'h0','parent_message_uuid':None,'sender':'human','content':[]},
+              {'uuid':'a0','parent_message_uuid':'h0','sender':'assistant','content':[cf(P,'aa'),sh("cd /home/claude && sed -i.bak 's/a/b/' a.html")]}]
+        data={'current_leaf_message_uuid':'a0','chat_messages':msgs}
+        d=export([],{});(d/'original.json').write_text(json.dumps(data))
+        subprocess.run([sys.executable,'-B','-I',str(Path(R).parent/'extract_artifacts.py'),str(d/'original.json'),'-o',str(d/'artefacts')],check=True,capture_output=True)
+        self.assertEqual((d/'artefacts/a.html').read_text(),'ba')
+        r=run(d);self.assertIn('Commands ran:    1',r.stdout);self.assertEqual((d/'artefacts/a.html').read_text(),'ba',r.stdout+r.stderr)
     def test_utf8_sig_json(self):
         d=export([sh('true')],{});(d/'original.json').write_bytes(b'\xef\xbb\xbf'+(d/'original.json').read_bytes())
         self.assertEqual(run(d).returncode,0)

@@ -2659,6 +2659,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   const widgetEmbeds = docWidgetEmbeds(data);
   const docJsx = {};  // doc key -> [{ node, code }] in the document's order
   const rebuiltDocs = {};  // file name -> the document as extractArtifacts rebuilt it
+  // The viewer's copy keeps the captions: viewer.html sits at the export's root and its sanitizer drops a
+  // ../images/ picture, so it shows each diagram by caption, as before v1.22.1.
+  const viewerDocs = {};  // file name -> the document for viewer.html
   for (const [key, entry] of Object.entries(artifactIndex)) {
     if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
     const mine = widgetEmbeds.filter((e) => e.doc === key);
@@ -2684,6 +2687,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
     const names = companions[key] || [];
     const { markdown, captions } = docCompanionNote(artifacts[entry.filename], names);
+    if (rebuiltDocs[entry.filename] !== undefined) viewerDocs[entry.filename] = docCompanionNote(rebuiltDocs[entry.filename], names, captions).markdown;
     if (markdown !== artifacts[entry.filename] || markdown !== rebuiltDocs[entry.filename]) {
       artifacts[entry.filename] = markdown;
       addFileWithBOM(folder, `artefacts/${entry.filename}`, markdown);
@@ -3136,7 +3140,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       folder: folderName,
       model: CTViewer.modelLabel(data.model, getModelName(data)),
       fixText: fixMojibake,
-      artifacts: { ...artifacts, ...viewerArtifacts },
+      artifacts: { ...artifacts, ...viewerArtifacts, ...viewerDocs },
       artifactIndex,
       uploads: viewerUploads,
       webImages,

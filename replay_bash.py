@@ -70,14 +70,14 @@ SANDBOX_ROOT_RE = re.compile(
     r"(?<![\w./-])(" + "|".join(re.escape(r) for r in SANDBOX_ROOTS) + r")(?![\w.-])"
 )
 # cat > path << DELIM ... DELIM or cat << DELIM > path ..., with any delimiter, quoted or
-# not. heredoc_files returns (path, body) for each, in command order, like heredocMatches
-# and heredocBody in export-core.js.
+# not; cat >> appends and is not one of them. heredoc_files returns (path, body) for each,
+# in command order, like heredocMatches and heredocBody in export-core.js.
 HEREDOC_RE = re.compile(
-    r"cat\s*>\s*(\S+?)\s*<<-?\s*(['\"]?)([A-Za-z0-9_]+)\2[^\n]*\n(?:(.*?)\n)??[ \t]*\3[ \t]*(?=\n|\Z)",
+    r"cat\s*>(?!>)\s*(\S+?)\s*<<-?\s*(['\"]?)([A-Za-z0-9_]+)\2[^\n]*\n(?:(.*?)\n)??[ \t]*\3[ \t]*(?=\n|\Z)",
     re.DOTALL,
 )
 HEREDOC_TARGET_LAST_RE = re.compile(
-    r"cat\s+<<-?\s*(['\"]?)([A-Za-z0-9_]+)\1[ \t]*>\s*(\S+)[^\n]*\n(?:(.*?)\n)??[ \t]*\2[ \t]*(?=\n|\Z)",
+    r"cat\s+<<-?\s*(['\"]?)([A-Za-z0-9_]+)\1[ \t]*>(?!>)\s*(\S+)[^\n]*\n(?:(.*?)\n)??[ \t]*\2[ \t]*(?=\n|\Z)",
     re.DOTALL,
 )
 
