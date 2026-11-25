@@ -849,6 +849,9 @@
     // A canvas's zoom and place, kept by Open alone for Back (per artifact and version; in memory only).
     const canvasZooms = new Map();
     const canvasKey = v => `${v.id}\n${v.part}\n${v.key}`;
+    // Move or Interact (v1.23.1): Move when a canvas first opens, then the reader's choice for as long as this viewer is
+    // mounted (across Open alone, Back and versions; never stored).
+    let canvasMode = 'move';
     function stopCanvas() {
       releaseZoom();
       clearTimeout(canvasTimer);
@@ -929,8 +932,10 @@
 
     // canvasPage's wrap: rescale(avail) fits it to a new width in place (at Fit; a chosen zoom stays), so frames, focus
     // and scripts stay; zoomState() and restoreZoom(s) keep the zoom across Open alone; stopFrames() ends its observer
-    // and listeners. The bar (div.canvas-zoom) zooms from Fit to 200%; Ctrl/⌘+wheel or a pinch zooms about the
-    // pointer and a drag pans, from the background, a board's head or a note.
+    // and listeners. The bar (div.canvas-zoom) zooms from Fit to 200%. In Move (v1.23.1, the default) the boards' frames
+    // ignore the mouse: a wheel zooms about the pointer, Shift+wheel scrolls sideways and a drag pans, anywhere on the
+    // canvas. In Interact (v1.23.0's canvas; Space held is Move for a while) the boards take the mouse, and Ctrl/⌘+wheel
+    // or a pinch zooms and a drag pans only from the background, a board's head or a note.
     function canvasPage(v, layout, payload, texts) {
       const wrap = el('div', 'design-wrap');
       const canvas = el('div', 'design-canvas');
@@ -1021,7 +1026,22 @@
       const levelOut = el('output', 'zoom-level');
       levelOut.setAttribute('aria-live', 'polite');
       const zoomOut = button('zoom-out', '−', 'Zoom out'), zoomIn = button('zoom-in', '+', 'Zoom in'), zoomFit = button('zoom-fit', 'Fit', 'Fit');
-      bar.append(zoomOut, levelOut, zoomIn, zoomFit);
+      // Move | Interact, first in the bar.
+      const modes = el('div', 'canvas-modes');
+      modes.setAttribute('role', 'group');
+      modes.setAttribute('aria-label', 'Canvas mode');
+      const modeButton = (m, text) => { const b = el('button', 'canvas-mode', text); b.type = 'button'; b.dataset.mode = m; modes.append(b); return b; };
+      const moveButton = modeButton('move', 'Move'), interactButton = modeButton('interact', 'Interact');
+      // Space held in Interact: Move until it is let go.
+      let spaceHeld = false;
+      const moving = () => canvasMode === 'move' || spaceHeld;
+      const showMode = () => {
+        canvas.classList.toggle('moving', moving());
+        moveButton.setAttribute('aria-pressed', String(canvasMode === 'move'));
+        interactButton.setAttribute('aria-pressed', String(canvasMode !== 'move'));
+      };
+      showMode();
+      bar.append(modes, zoomOut, levelOut, zoomIn, zoomFit);
       holder.append(bar);
       stage.append(holder, canvas);
       const showLevel = () => { levelOut.textContent = `${Math.round(scale * 100)}%`; };
@@ -1041,19 +1061,50 @@
         pageBody.scrollLeft = Math.max(0, o.x + cx * scale - m.x);
         pageBody.scrollTop = Math.max(0, o.y + cy * scale - m.y);
       };
+      // Scrolling alone can't keep a point where the canvas is narrower or shorter than the view (it is centred) or near
+      // its edges: zoomTo places the canvas with margins and gives the stage room to scroll. Fit and a new width undo it.
+      const unplace = () => { canvas.style.margin = ''; stage.style.minWidth = ''; stage.style.minHeight = ''; };
+      // Puts the canvas's top left at want (a point in #page-body's client area): a margin where it must sit further
+      // right or down than the stage starts, a scroll where it must sit further left or up.
+      const place = want => {
+        canvas.style.margin = '0';
+        const s = stage.getBoundingClientRect(), b = pageBody.getBoundingClientRect(), c = canvas.getBoundingClientRect();
+        // The stage's top left in the scroll content, and the canvas's place in it.
+        const sx = s.left - b.left - pageBody.clientLeft + pageBody.scrollLeft;
+        const sy = s.top - b.top - pageBody.clientTop + pageBody.scrollTop;
+        const top = sy + (c.top - s.top);
+        const mx = Math.max(0, want.x - sx), my = Math.max(0, want.y - top);
+        const left = Math.max(0, sx - want.x), down = Math.max(0, top - want.y);
+        canvas.style.margin = `${Math.round(my)}px 0 0 ${Math.round(mx)}px`;
+        const wide = left + pageBody.clientWidth - (pageBody.scrollWidth - stage.offsetWidth);
+        if (wide > stage.offsetWidth) stage.style.minWidth = `${Math.ceil(wide)}px`;
+        // How far the content (the wrap, below the stage) ends short of what that scroll needs.
+        const tall = down + pageBody.clientHeight - (wrap.getBoundingClientRect().bottom - b.top - pageBody.clientTop + pageBody.scrollTop);
+        if (tall > 0) stage.style.minHeight = `${Math.ceil(stage.offsetHeight + tall)}px`;
+        pageBody.scrollLeft = left;
+        pageBody.scrollTop = down;
+      };
       // To zoom z (clamped), keeping the canvas point under point (default: the middle of the view) in place.
       const zoomTo = (z, point, toFit = false) => {
         const to = toFit ? fit : clampZoom(z, fit, MAX);
         atFit = toFit || to <= fit + 1e-6;
         if (to !== scale) {
           const from = scale;
+          const at = point || middle();
           const before = origin();
           const scroll = { left: pageBody.scrollLeft, top: pageBody.scrollTop };
           scale = to;
+          unplace();
           apply(scale);
-          const next = zoomAbout({ from, to, point: point || middle(), scroll, offsetFrom: before, offsetTo: origin() });
-          pageBody.scrollLeft = next.left;
-          pageBody.scrollTop = next.top;
+          if (atFit) {
+            const next = zoomAbout({ from, to, point: at, scroll, offsetFrom: before, offsetTo: origin() });
+            pageBody.scrollLeft = next.left;
+            pageBody.scrollTop = next.top;
+          } else {
+            // The canvas point under at, kept there.
+            const cx = (scroll.left + at.x - before.x) / from, cy = (scroll.top + at.y - before.y) / from;
+            place({ x: at.x - cx * to, y: at.y - cy * to });
+          }
         }
         showLevel();
       };
@@ -1063,6 +1114,9 @@
       on(zoomOut, 'click', () => step(-1));
       on(zoomIn, 'click', () => step(1));
       on(zoomFit, 'click', () => zoomTo(0, null, true));
+      const setMode = m => { canvasMode = m; spaceHeld = false; showMode(); };
+      on(moveButton, 'click', () => setMode('move'));
+      on(interactButton, 'click', () => setMode('interact'));
       on(bar, 'keydown', e => {
         if (e.ctrlKey || e.metaKey || e.altKey) return;
         if (e.key === '+' || e.key === '=') step(1);
@@ -1074,20 +1128,45 @@
         e.stopPropagation();
       });
 
-      // Wheel zoom and drag only from the canvas's background, a board's head or a note: never from a board's frame
-      // (a sandboxed frame's own events don't reach here anyway), the bar or the list of boards not drawn.
+      // Wheel zoom and drag only from the canvas (in Interact: its background, a board's head or a note, never a board's
+      // frame, whose sandboxed page's own events don't reach here anyway), never from the bar or the list of boards not
+      // drawn.
       const ours = e => {
+        const frames = !moving();
         for (const n of e.composedPath()) {
           if (n === wrap) return true;
-          if (n.classList && (n.classList.contains('board-frame') || n.classList.contains('canvas-zoom') || n.classList.contains('design-skipped'))) return false;
+          if (n.classList && ((frames && n.classList.contains('board-frame')) || n.classList.contains('canvas-zoom') || n.classList.contains('design-skipped'))) return false;
         }
         return false;
       };
       on(wrap, 'wheel', e => {
-        if (!(e.ctrlKey || e.metaKey) || !ours(e)) return;
+        const pinch = e.ctrlKey || e.metaKey;
+        if (!(pinch || moving()) || !ours(e)) return;
         e.preventDefault();
+        if (!pinch && (e.shiftKey || Math.abs(e.deltaX) > Math.abs(e.deltaY))) {
+          // Sideways: Shift with the wheel (a mouse gives deltaY, some systems turn it into deltaX), or a sideways swipe.
+          const d = Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY;
+          pageBody.scrollLeft += d * (e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? pageBody.clientWidth : 1);
+          return;
+        }
         zoomTo(scale * wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey), pointIn(e.clientX, e.clientY));
       }, { passive: false });
+      // Space: not while typing or on a button (Space presses it), not a repeat, and only while the canvas shows.
+      const isSpace = e => e.key === ' ' || e.code === 'Space';
+      const letGo = () => { if (spaceHeld) { spaceHeld = false; showMode(); } };
+      on(document, 'keydown', e => {
+        if (!isSpace(e) || canvasMode === 'move' || e.ctrlKey || e.metaKey || e.altKey || !wrap.getClientRects().length) return;
+        const t = e.composedPath()[0];
+        if (t && t.closest && t.closest('input, textarea, select, button, [contenteditable]')) return;
+        // A repeat changes nothing; while held, no page scroll from it.
+        if (e.repeat) { if (spaceHeld) e.preventDefault(); return; }
+        e.preventDefault();
+        spaceHeld = true;
+        showMode();
+      });
+      on(document, 'keyup', e => { if (isSpace(e)) letGo(); });
+      on(window, 'blur', letGo);
+      on(wrap, 'pointerleave', () => { if (!drag) letGo(); });
       // A mouse or pen press that moves more than 4 px pans (by scrolling #page-body) and is no click; touch pans natively.
       let drag = null;
       let dragged = false;
@@ -1129,6 +1208,7 @@
         fit = fitOf(avail);
         const next = atFit ? fit : clampZoom(scale, fit, MAX);
         if (next <= fit + 1e-6) atFit = true;
+        unplace();
         if (next !== scale) { scale = next; apply(scale); }
         showLevel();
         centreOn(c.cx, c.cy);
