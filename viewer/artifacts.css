@@ -197,6 +197,8 @@ button { font: inherit; color: inherit; }
 .design-wrap.dragging, .design-wrap.dragging * { cursor: grabbing; }
 .canvas-modes { display: flex; gap: 2px; margin-right: 2px; padding-right: 4px; border-right: 1px solid var(--line); }
 .zoom-bar button.canvas-mode[aria-pressed=true] { background: var(--pill); font-weight: 500; }
+/* The pressed button's background would hide focus: an outline for the keyboard. */
+.zoom-bar button.canvas-mode:focus-visible { outline: 2px solid var(--acc); outline-offset: -2px; }
 /* A board sits exactly at its place; its title row goes above it, as on claude.ai, so it never pushes the board down
    onto what lies below. */
 .design-board { position: absolute; }

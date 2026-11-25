@@ -1061,19 +1061,50 @@
         pageBody.scrollLeft = Math.max(0, o.x + cx * scale - m.x);
         pageBody.scrollTop = Math.max(0, o.y + cy * scale - m.y);
       };
+      // Scrolling alone can't keep a point where the canvas is narrower or shorter than the view (it is centred) or near
+      // its edges: zoomTo places the canvas with margins and gives the stage room to scroll. Fit and a new width undo it.
+      const unplace = () => { canvas.style.margin = ''; stage.style.minWidth = ''; stage.style.minHeight = ''; };
+      // Puts the canvas's top left at want (a point in #page-body's client area): a margin where it must sit further
+      // right or down than the stage starts, a scroll where it must sit further left or up.
+      const place = want => {
+        canvas.style.margin = '0';
+        const s = stage.getBoundingClientRect(), b = pageBody.getBoundingClientRect(), c = canvas.getBoundingClientRect();
+        // The stage's top left in the scroll content, and the canvas's place in it.
+        const sx = s.left - b.left - pageBody.clientLeft + pageBody.scrollLeft;
+        const sy = s.top - b.top - pageBody.clientTop + pageBody.scrollTop;
+        const top = sy + (c.top - s.top);
+        const mx = Math.max(0, want.x - sx), my = Math.max(0, want.y - top);
+        const left = Math.max(0, sx - want.x), down = Math.max(0, top - want.y);
+        canvas.style.margin = `${Math.round(my)}px 0 0 ${Math.round(mx)}px`;
+        const wide = left + pageBody.clientWidth - (pageBody.scrollWidth - stage.offsetWidth);
+        if (wide > stage.offsetWidth) stage.style.minWidth = `${Math.ceil(wide)}px`;
+        // How far the content (the wrap, below the stage) ends short of what that scroll needs.
+        const tall = down + pageBody.clientHeight - (wrap.getBoundingClientRect().bottom - b.top - pageBody.clientTop + pageBody.scrollTop);
+        if (tall > 0) stage.style.minHeight = `${Math.ceil(stage.offsetHeight + tall)}px`;
+        pageBody.scrollLeft = left;
+        pageBody.scrollTop = down;
+      };
       // To zoom z (clamped), keeping the canvas point under point (default: the middle of the view) in place.
       const zoomTo = (z, point, toFit = false) => {
         const to = toFit ? fit : clampZoom(z, fit, MAX);
         atFit = toFit || to <= fit + 1e-6;
         if (to !== scale) {
           const from = scale;
+          const at = point || middle();
           const before = origin();
           const scroll = { left: pageBody.scrollLeft, top: pageBody.scrollTop };
           scale = to;
+          unplace();
           apply(scale);
-          const next = zoomAbout({ from, to, point: point || middle(), scroll, offsetFrom: before, offsetTo: origin() });
-          pageBody.scrollLeft = next.left;
-          pageBody.scrollTop = next.top;
+          if (atFit) {
+            const next = zoomAbout({ from, to, point: at, scroll, offsetFrom: before, offsetTo: origin() });
+            pageBody.scrollLeft = next.left;
+            pageBody.scrollTop = next.top;
+          } else {
+            // The canvas point under at, kept there.
+            const cx = (scroll.left + at.x - before.x) / from, cy = (scroll.top + at.y - before.y) / from;
+            place({ x: at.x - cx * to, y: at.y - cy * to });
+          }
         }
         showLevel();
       };
@@ -1177,6 +1208,7 @@
         fit = fitOf(avail);
         const next = atFit ? fit : clampZoom(scale, fit, MAX);
         if (next <= fit + 1e-6) atFit = true;
+        unplace();
         if (next !== scale) { scale = next; apply(scale); }
         showLevel();
         centreOn(c.cx, c.cy);
