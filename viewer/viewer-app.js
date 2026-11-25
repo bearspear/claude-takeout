@@ -461,7 +461,14 @@ function renderSteps(blocks, sources, first = true) {
 // export didn't save is a card with its title.
 const SAVED_WEB_IMAGE = /^(?:[A-Za-z0-9%._~-]+\/)*images\/[A-Za-z0-9%._~-]+$/;
 const MOSAIC_TILES = 4;
-const savedImage = item => toolImageOk(item.href);
+// A diagram (label 'Diagram') opens in the gallery from its SVG data URL; an image can't run its scripts.
+const DIAGRAM_URL = 'data:image/svg+xml;charset=utf-8,';
+const savedImage = item => toolImageOk(item.href) || (item.label === 'Diagram' && typeof item.href === 'string' && item.href.startsWith(DIAGRAM_URL));
+// The size at 100% of a diagram's SVG, from its data URL.
+function diagramNatural(item) {
+  if (item.label !== 'Diagram' || !String(item.href).startsWith(DIAGRAM_URL)) return null;
+  try { return svgNaturalSize(decodeURIComponent(item.href.slice(DIAGRAM_URL.length))); } catch (e) { return null; }
+}
 const httpsPage = item => (typeof item.page === 'string' && /^https:\/\//i.test(item.page) ? item.page : '');
 const siteOf = item => item.source || (httpsPage(item) ? httpsPage(item).replace(/^https:\/\/(www\.)?/i, '').split('/')[0] : '');
 
@@ -518,11 +525,12 @@ function renderWebMosaic(items) {
 function openGallery(items, start, trigger) {
   closePopup();
   let at = start;
+  let zoom = null;
   const veil = el('div', 'veil gallery');
   const pop = el('div', 'gallery-pop');
   pop.setAttribute('role', 'dialog');
   pop.setAttribute('aria-modal', 'true');
-  pop.setAttribute('aria-label', 'Image preview');
+  pop.setAttribute('aria-label', (items[start] && items[start].label) || 'Image preview');
   pop.tabIndex = -1;
   const close = el('button', 'close');
   close.type = 'button';
@@ -549,23 +557,28 @@ function openGallery(items, start, trigger) {
   function show(i) {
     at = Math.max(0, Math.min(items.length - 1, i));
     const item = items[at];
+    if (zoom) { zoom.destroy(); zoom = null; }
     if (savedImage(item)) {
       const img = el('img');
       img.src = item.href;
       img.alt = item.title || 'Image from a web search';
       stage.replaceChildren(img);
+      zoom = pictureZoom(stage, img, { plainWheel: true, natural: diagramNatural(item) });
     } else {
       stage.replaceChildren(el('div', 'file-missing', 'This image is not in this export.'));
     }
-    const site = siteOf(item);
     const parts = [];
-    if (site) parts.push(el('span', 'site', site));
-    parts.push(el('span', 'title', item.title || 'Image'));
-    const page = httpsPage(item);
-    if (page) {
-      const link = el('a', 'open', 'Open page');
-      link.href = page; link.target = '_blank'; link.rel = 'noopener noreferrer';
-      parts.push(link);
+    if (item.caption) parts.push(el('span', 'title', item.caption));
+    else {
+      const site = siteOf(item);
+      if (site) parts.push(el('span', 'site', site));
+      parts.push(el('span', 'title', item.title || 'Image'));
+      const page = httpsPage(item);
+      if (page) {
+        const link = el('a', 'open', 'Open page');
+        link.href = page; link.target = '_blank'; link.rel = 'noopener noreferrer';
+        parts.push(link);
+      }
     }
     info.replaceChildren(...parts);
     pos.textContent = `${at + 1} of ${items.length}`;
@@ -575,16 +588,20 @@ function openGallery(items, start, trigger) {
   }
   pop.append(close, stage, foot);
   veil.append(pop);
-  veil.addEventListener('click', e => { if (e.target === veil || e.target === stage) closePopup(); });
+  // A drag over the picture is not a click on the background.
+  veil.addEventListener('click', e => { if ((e.target === veil || e.target === stage) && !(zoom && zoom.dragged)) closePopup(); });
+  // Another picture starts at Fit; at either end, or with one picture, Left and Right do nothing.
+  const go = dir => { const i = Math.max(0, Math.min(items.length - 1, at + dir)); if (i !== at) show(i); };
   veil.addEventListener('keydown', e => {
-    if (e.key === 'ArrowLeft') { e.preventDefault(); show(at - 1); }
-    else if (e.key === 'ArrowRight') { e.preventDefault(); show(at + 1); }
+    if (zoom && zoom.key(e)) return;
+    if (e.key === 'ArrowLeft') { e.preventDefault(); go(-1); }
+    else if (e.key === 'ArrowRight') { e.preventDefault(); go(1); }
     else popupKeys(e);
   });
   show(start);
   document.body.append(veil);
   document.getElementById('app').inert = true;
-  popup = { veil, trigger };
+  popup = { veil, trigger, onClose: () => { if (zoom) { zoom.destroy(); zoom = null; } } };
   pop.focus({ preventScroll: true });
 }
 
@@ -776,8 +793,9 @@ function popupContent(item) {
 
 function closePopup() {
   if (!popup) return;
-  const { veil, trigger } = popup;
+  const { veil, trigger, onClose } = popup;
   popup = null;
+  if (onClose) onClose();
   veil.remove();
   document.getElementById('app').inert = false;
   if (document.contains(trigger)) trigger.focus({ preventScroll: true });
@@ -787,7 +805,7 @@ function popupKeys(e) {
   if (e.key === 'Escape') { e.preventDefault(); closePopup(); return; }
   if (e.key !== 'Tab') return;
   const pop = popup.veil.firstElementChild;
-  const stops = [...pop.querySelectorAll('a[href], button')];
+  const stops = [...pop.querySelectorAll('a[href], button, [tabindex="0"]')].filter(n => !n.closest('[hidden]'));
   const last = stops.length - 1;
   const at = stops.indexOf(document.activeElement);
   if (!stops.length) { e.preventDefault(); pop.focus(); }
@@ -1310,7 +1328,14 @@ function renderDiagram(block, chat) {
   const img = el('img');
   img.src = src;
   img.alt = file.name || 'Diagram';
-  box.append(img);
+  // The picture opens larger in a one-item gallery, where it zooms; the … menu stays outside this button.
+  const title = String(file.name || 'Diagram').replace(/\.svg$/i, '');
+  const open = el('button', 'diagram-open');
+  open.type = 'button';
+  open.setAttribute('aria-label', `Open ${title} larger`);
+  open.append(img);
+  open.addEventListener('click', () => openGallery([{ href: src, title, caption: title, label: 'Diagram' }], 0, open));
+  box.append(open);
   const base = String(file.name || 'diagram').replace(/\.svg$/i, '');
   const more = el('button', 'diagram-more');
   more.type = 'button';

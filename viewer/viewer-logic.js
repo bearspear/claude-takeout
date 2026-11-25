@@ -1616,6 +1616,225 @@ function pageFit(report, containerWidth) {
 // Appended to every preview document. Inline scripts run under PREVIEW_CSP; the opaque origin needs target '*'.
 const SIZE_SCRIPT = `<script>(function(){function r(){try{var d=document.documentElement;window.top.postMessage({type:'ct-size',width:d.scrollWidth,view:d.clientWidth},'*')}catch(e){}}window.addEventListener('load',r);window.addEventListener('resize',r)})()</script>`;
 
+// ---- Zoom: DOM controllers ----
+// Page code only; never called at load. Works inside a shadow root: it touches only the elements it is
+// given and their own document. The box keeps its tabindex and the frame after destroy, so a box that
+// had focus keeps it.
+
+// Zoom and pan for one picture. box becomes the scroll container; a div.zoom-frame takes its place and
+// holds it and the bar (−, percentage, +, Fit), so the bar doesn't scroll. The frame and bar are reused
+// when the same box gets a new controller (the gallery's next picture), so focus in them isn't lost.
+// opts.plainWheel: a plain wheel zooms too (the gallery). opts.natural: the picture's size at 100%.
+function pictureZoom(box, img, opts = {}) {
+  const doc = box.ownerDocument;
+  const make = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
+  let frame = box.parentElement && box.parentElement.classList.contains('zoom-frame') ? box.parentElement : null;
+  if (!frame) {
+    frame = make('div', 'zoom-frame');
+    if (box.isConnected) {
+      const cs = getComputedStyle(box);
+      frame.style.flex = cs.flex;
+      frame.style.minHeight = cs.minHeight;
+      frame.style.minWidth = cs.minWidth;
+    }
+    if (box.parentNode) box.replaceWith(frame);
+    frame.append(box);
+  }
+  let bar = frame.querySelector(':scope > .zoom-bar');
+  if (!bar) {
+    bar = make('div', 'zoom-bar');
+    const button = (cls, text, label) => { const b = make('button', cls, text); b.type = 'button'; b.setAttribute('aria-label', label); return b; };
+    const out = make('output', 'zoom-level');
+    out.setAttribute('aria-live', 'polite');
+    bar.append(button('zoom-out', '−', 'Zoom out'), out, button('zoom-in', '+', 'Zoom in'), button('zoom-fit', 'Fit', 'Fit'));
+    frame.append(bar);
+  }
+  bar.hidden = false;
+  const levelOut = bar.querySelector('.zoom-level');
+  if (!box.hasAttribute('tabindex')) box.tabIndex = 0;
+  box.classList.add('zoom-box');
+  box.classList.toggle('zoom-all', !!opts.plainWheel);
+  img.draggable = false;
+
+  const off = new AbortController();
+  const on = (target, type, fn, o = {}) => target.addEventListener(type, fn, { ...o, signal: off.signal });
+  let natural = null; // { width, height } at 100%
+  let zoom = 1;
+  let atFit = true;
+  let pending = null; // a state to restore once the picture is ready
+  const controller = { frame, dragged: false };
+
+  const avail = () => {
+    const cs = getComputedStyle(box);
+    return {
+      width: box.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight),
+      height: box.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
+    };
+  };
+  const fitNow = () => fitZoom(natural, avail());
+  const range = () => pictureRange(fitNow(), natural);
+  // The picture's top left in the scroll content, and a viewport point in the box's client area.
+  const offset = () => {
+    const r = box.getBoundingClientRect(), i = img.getBoundingClientRect();
+    return { x: i.left - r.left - box.clientLeft + box.scrollLeft, y: i.top - r.top - box.clientTop + box.scrollTop };
+  };
+  const pointIn = (x, y) => { const r = box.getBoundingClientRect(); return { x: x - r.left - box.clientLeft, y: y - r.top - box.clientTop }; };
+  const centre = () => ({ x: box.clientWidth / 2, y: box.clientHeight / 2 });
+  const canPan = () => box.scrollWidth > box.clientWidth + 1 || box.scrollHeight > box.clientHeight + 1;
+
+  function apply(z, point, fitting = false) {
+    if (!natural) return;
+    const { min, max } = range();
+    const to = fitting ? fitNow() : clampZoom(z, min, max);
+    const from = zoom;
+    const p = point || centre();
+    const before = offset();
+    const scroll = { left: box.scrollLeft, top: box.scrollTop };
+    zoom = to;
+    atFit = fitting;
+    img.style.width = `${natural.width * to}px`;
+    img.style.height = `${natural.height * to}px`;
+    const next = zoomAbout({ from, to, point: p, scroll, offsetFrom: before, offsetTo: offset() });
+    box.scrollLeft = next.left;
+    box.scrollTop = next.top;
+    levelOut.textContent = `${Math.round(to * 100)}%`;
+    box.classList.toggle('can-drag', canPan());
+  }
+  const setFit = () => apply(0, null, true);
+  const setZoom = (z, point) => apply(z, point);
+
+  function ready() {
+    if (natural) return;
+    const n = opts.natural;
+    if (n && n.width > 0 && n.height > 0) natural = { width: n.width, height: n.height };
+    else if (img.naturalWidth > 0 && img.naturalHeight > 0) natural = { width: img.naturalWidth, height: img.naturalHeight };
+    else { const a = avail(); natural = { width: Math.max(1, a.width), height: Math.max(1, a.height) }; }
+    zoom = fitNow();
+    setFit();
+    if (pending) { const s = pending; pending = null; controller.restore(s); }
+  }
+  if (opts.natural || (img.complete && img.naturalWidth)) ready();
+  else { on(img, 'load', ready, { once: true }); on(img, 'error', ready, { once: true }); }
+
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+    if (!natural) return;
+    if (atFit) setFit();
+    else { const { min, max } = range(); if (zoom < min || zoom > max) setZoom(zoom); else box.classList.toggle('can-drag', canPan()); }
+  }) : null;
+  if (ro) ro.observe(box);
+
+  const current = () => (atFit ? fitNow() : zoom);
+  const step = dir => { const { min, max } = range(); setZoom(stepZoom(current(), dir, min, max)); };
+  controller.key = e => {
+    if (!natural || e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key === '+' || e.key === '=') step(1);
+    else if (e.key === '-') step(-1);
+    else if (e.key === '0') setFit();
+    else if (e.key === '1') setZoom(1);
+    else return false;
+    e.preventDefault();
+    return true;
+  };
+  on(frame, 'keydown', e => { if (controller.key(e)) e.stopPropagation(); });
+  on(bar.querySelector('.zoom-out'), 'click', () => step(-1));
+  on(bar.querySelector('.zoom-in'), 'click', () => step(1));
+  on(bar.querySelector('.zoom-fit'), 'click', () => setFit());
+
+  on(box, 'wheel', e => {
+    if (!natural || !(e.ctrlKey || e.metaKey || opts.plainWheel)) return;
+    e.preventDefault();
+    setZoom(current() * wheelFactor(e.deltaY, e.deltaMode, e.ctrlKey), pointIn(e.clientX, e.clientY));
+  }, { passive: false });
+  on(box, 'dblclick', e => {
+    if (!natural) return;
+    const z = doubleClickZoom(current(), fitNow());
+    if (Math.abs(z - fitNow()) < 1e-6 && !atFit) setFit();
+    else setZoom(z, pointIn(e.clientX, e.clientY));
+  });
+  on(box, 'dragstart', e => e.preventDefault());
+
+  // Pointers: one drags (past 4 px), two touch pointers pinch about their midpoint.
+  const pointers = new Map();
+  let drag = null, pinch = null;
+  const endDrag = () => { drag = null; box.classList.remove('dragging'); };
+  const spread = () => { const [a, b] = [...pointers.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; };
+  on(box, 'pointerdown', e => {
+    controller.dragged = false;
+    if (e.pointerType === 'mouse' && e.button !== 0) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2 && e.pointerType === 'touch' && natural) {
+      endDrag();
+      const s = spread();
+      pinch = { d: s.d || 1, zoom: current() };
+      return;
+    }
+    if (pointers.size === 1) drag = { id: e.pointerId, x: e.clientX, y: e.clientY, left: box.scrollLeft, top: box.scrollTop, moving: false };
+  });
+  on(box, 'pointermove', e => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pointers.size === 2) {
+      const s = spread();
+      controller.dragged = true;
+      setZoom(pinch.zoom * (s.d / pinch.d), pointIn(s.x, s.y));
+      return;
+    }
+    if (!drag || drag.id !== e.pointerId) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (!drag.moving) {
+      if (Math.hypot(dx, dy) <= 4) return;
+      drag.moving = true;
+      controller.dragged = true;
+      try { box.setPointerCapture(e.pointerId); } catch (err) { /* a pointer the browser doesn't know */ }
+      if (canPan()) box.classList.add('dragging');
+    }
+    if (box.classList.contains('dragging')) {
+      box.scrollLeft = drag.left - dx;
+      box.scrollTop = drag.top - dy;
+    }
+  });
+  const lift = e => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) pinch = null;
+    if (drag && drag.id === e.pointerId) endDrag();
+  };
+  on(box, 'pointerup', lift);
+  on(box, 'pointercancel', lift);
+  on(box, 'lostpointercapture', lift);
+  // The click after a drag is not a click.
+  on(box, 'click', e => {
+    if (!controller.dragged) return;
+    controller.dragged = false;
+    e.preventDefault();
+    e.stopPropagation();
+  }, { capture: true });
+
+  controller.state = () => {
+    const fx = box.scrollWidth - box.clientWidth, fy = box.scrollHeight - box.clientHeight;
+    return { zoom: atFit ? 'fit' : zoom, fx: fx > 0 ? box.scrollLeft / fx : 0, fy: fy > 0 ? box.scrollTop / fy : 0 };
+  };
+  controller.restore = s => {
+    if (!s) return;
+    if (!natural) { pending = s; return; }
+    if (s.zoom === 'fit') { setFit(); return; }
+    setZoom(Number(s.zoom));
+    const frac = v => (Number.isFinite(v) ? Math.min(1, Math.max(0, v)) : 0);
+    box.scrollLeft = frac(s.fx) * Math.max(0, box.scrollWidth - box.clientWidth);
+    box.scrollTop = frac(s.fy) * Math.max(0, box.scrollHeight - box.clientHeight);
+  };
+  controller.destroy = () => {
+    off.abort();
+    if (ro) ro.disconnect();
+    pointers.clear();
+    endDrag();
+    box.classList.remove('can-drag', 'zoom-all');
+    const focused = frame.getRootNode().activeElement;
+    bar.hidden = true;
+    if (focused && bar.contains(focused)) box.focus({ preventScroll: true });
+  };
+  return controller;
+}
+
 if (typeof module === 'object' && module.exports) {
   module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT };
 }
