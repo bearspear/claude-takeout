@@ -1377,7 +1377,8 @@ test('commandCwds: a command that changes directory any other way than one leadi
   assert.strictEqual(cwdOf('cd /a', "(cd /b && sed -i 's/a/b/' page.html)"), null, 'cd in a subshell');
   assert.strictEqual(cwdOf('cd /a', "python3 -c \"import os;os.chdir('/b')\"", 'ls'), null, 'unknown afterwards too');
   assert.strictEqual(cwdOf('cd /a', 'pushd /b', 'ls'), null, 'unknown after pushd');
-  assert.strictEqual(cwdOf('cd /a && ls; cd /b && ls', 'ls'), '/b', 'the last plain cd carries');
+  assert.strictEqual(cwdOf('cd /a && ls; cd /b && ls', 'ls'), null, 'a cd that is not the leading one may not have run');
+  assert.strictEqual(cwdOf('cd /a', 'ls'), '/a', 'a lone leading cd carries');
   assert.strictEqual(cwdOf('cd /a; ls', "cd /b && sed -i 's/a/b/' x"), '/b', 'one leading cd still wins');
 });
 
@@ -5424,6 +5425,11 @@ test('replay helpers: commandCwds, literalSwapCommand and commandTouches agree i
     "cat >> /h/p.html << 'E'\nmore\n\tE\nE", "cat <<-E >> /h/p.html\n\tx\n\tE", "cat >> p.html << E\n$x\nE", "sed -n '1,5p' /h/p.html; echo hi",
     "sed -i 's/a/b/' /h/p.html | tee x", 'cp /h/p.html /out/ && cp /h/q.md /out/q2.md', "python3 - << 'PY'\nopen('p.html','w')\nPY",
     "cat > /h/p.html << E\n$HOME\nE", "[ -f /h/p.html ] && sed -i 's/a/b/' /h/p.html", "sed -i 's/a/b/' *.html", 'echo x >> /h/p.html',
+    'cd /h', 'ls && cd /y', 'ls', 'python3 /h/fix.py', 'make', "grep -n a /h/p.html | head -5 2>/dev/null", "python3 -c \"print(open('/h/p.html').read())\"",
+    "python3 -c \"open('/h/x','w')\"", "python3 - << 'PY'\nimport json\nprint(json.load(open('/h/q.md', encoding='utf-8')))\nPY", "python3 - << 'PY'\nimport shutil\nPY",
+    "find /h -name '*.html' | sort", 'find /h -delete', 'grep a /h/p.html > /h/q.md', 'cat /h/p.html >> /out/q2.md 2>&1', 'cp -r /h /out', 'uniq /h/p.html /h/q.md',
+    "sed 's/a/b/' /h/p.html > /tmp/x", "sed -i 's/a/b/' /h/p.html && cp /h/q.md /mnt/user-data/outputs/", "sed -i 's/a/b/' /h/p.html && cp /h/p.html /out/",
+    'echo $(rm /h/p.html)', 'X=1 ls $HOME', 'echo hi > $OUT',
   ];
   const known = ['/h/p.html', '/h/q.md', '/out/q2.md', '/out/p.html', 'p.html'];
   const data = turns(commands.map((command, i) => use('c' + i, 'bash_tool', { command })));
@@ -5431,7 +5437,7 @@ test('replay helpers: commandCwds, literalSwapCommand and commandTouches agree i
   const cwds = core.commandCwds(core.getMessageChain(data));
   const js = commands.map((command, i) => {
     const cwd = cwds.get('c' + i);
-    return { cwd, swap: core.literalSwapCommand(command, cwd), touches: [...core.commandTouches(command, cwd, known)].sort() };
+    return { cwd, swap: core.literalSwapCommand(command, cwd, known), touches: [...core.commandTouches(command, cwd, known)].sort() };
   });
   const script = [
     'import json, sys',
@@ -5443,7 +5449,7 @@ test('replay helpers: commandCwds, literalSwapCommand and commandTouches agree i
     'out = []',
     'for b in msgs[-1]["content"]:',
     '    cwd = cwds.get(b["id"])',
-    '    swap = ea.literal_swap_command(b["input"]["command"], cwd)',
+    '    swap = ea.literal_swap_command(b["input"]["command"], cwd, known)',
     '    if swap is not None:',
     '        swap = {"edits": [dict(e, subs=[{"from": f, "to": t, "global": g} for f, t, g in e["subs"]]) if e["kind"] == "sed" else e for e in swap]}',
     '    out.append({"cwd": cwd, "swap": swap, "touches": sorted(ea.command_touches(b["input"]["command"], cwd, known))})',
@@ -5461,9 +5467,75 @@ test('replay helpers: commandCwds, literalSwapCommand and commandTouches agree i
   assert.strictEqual(js[18].swap, null);
   assert.deepStrictEqual(js[19].swap, { edits: [] });
   assert.deepStrictEqual(js[21].touches, ['/out/p.html', '/out/q2.md']);
-  assert.deepStrictEqual(js[22].touches, ['/h/p.html', '/out/p.html', 'p.html']);
+  assert.deepStrictEqual(js[22].touches, [...known].sort(), 'a Python write: every file');
   assert.deepStrictEqual(js[23].touches, ['/h/p.html']);
   assert.ok(js[24].swap && js[24].swap.edits.length === 1);
   assert.strictEqual(js[25].swap, null);
   assert.strictEqual(js[26].swap, null);
+  const at = (c) => js[commands.indexOf(c)];
+  assert.strictEqual(at('ls').cwd, null, 'a cd after && may not have run');
+  assert.deepStrictEqual(at('python3 /h/fix.py').touches, [...known].sort());
+  assert.deepStrictEqual(at('make').touches, [...known].sort());
+  assert.deepStrictEqual(at('grep -n a /h/p.html | head -5 2>/dev/null').touches, []);
+  assert.deepStrictEqual(at("python3 -c \"print(open('/h/p.html').read())\"").touches, []);
+  assert.deepStrictEqual(at("python3 -c \"open('/h/x','w')\"").touches, [...known].sort());
+  assert.deepStrictEqual(at("find /h -name '*.html' | sort").touches, []);
+  assert.deepStrictEqual(at('find /h -delete').touches, [...known].sort());
+  assert.deepStrictEqual(at('grep a /h/p.html > /h/q.md').touches, ['/h/q.md']);
+  assert.deepStrictEqual(at('cp -r /h /out').touches, ['/out/p.html', '/out/q2.md']);
+  assert.deepStrictEqual(at('uniq /h/p.html /h/q.md').touches, ['/h/q.md']);
+  assert.deepStrictEqual(at("sed 's/a/b/' /h/p.html > /tmp/x").touches, []);
+  assert.strictEqual(at("sed -i 's/a/b/' /h/p.html && cp /h/q.md /mnt/user-data/outputs/").swap.edits.length, 1);
+  assert.strictEqual(at("sed -i 's/a/b/' /h/p.html && cp /h/p.html /out/").swap, null, 'a copy onto a known file');
+  assert.deepStrictEqual(at('echo $(rm /h/p.html)').touches, [...known].sort());
+  assert.deepStrictEqual(at('X=1 ls $HOME').touches, []);
+  assert.deepStrictEqual(at('echo hi > $OUT').touches, [...known].sort());
+});
+
+test('replay: a script that may write a file without naming it stops replay of every file', () => {
+  for (const command of ['python3 /h/fix.py', 'make', 'node build.js', "python3 -c \"import os\nfor n in os.listdir('/h'): open('/h/'+n,'w').write('x')\"", 'bash run.sh']) {
+    const data = turns(
+      [use('w', 'Write', { file_path: '/h/p.html', content: 'a c\n' })],
+      [use('s1', 'bash_tool', { command: "sed -i 's/c/e/' /h/p.html" })],
+      [use('x', 'bash_tool', { command })],
+      [use('s2', 'bash_tool', { command: "sed -i 's/a/b/' /h/p.html" })],
+    );
+    bothReplay(data, 'p.html', 'a e\n');
+    const { warnings, replayed } = opaqueAfterReplay(data);
+    assert.deepStrictEqual([...replayed], ['s1|/h/p.html'], command);
+    assert.strictEqual(warnings.length, 1, command);
+  }
+});
+
+test('replay: write-free commands between seds keep replay going; a redirect into a known file stops only that file', () => {
+  const between = ["grep -n a /h/p.html | head -5 2>/dev/null", "python3 -c \"print(open('/h/p.html').read().count('a'))\"", "find /h -name '*.html' | sort > /tmp/list.txt",
+    'mkdir -p /out && cp /h/p.html /out/', "python3 - << 'PY'\nimport json\nprint(len(open('/h/p.html', encoding='utf-8').read()))\nPY"];
+  for (const command of between) {
+    const data = turns(
+      [use('w', 'Write', { file_path: '/h/p.html', content: 'a c\n' })],
+      [use('x', 'bash_tool', { command })],
+      [use('s', 'bash_tool', { command: "sed -i 's/a/b/' /h/p.html" })],
+    );
+    bothReplay(data, 'p.html', 'b c\n');
+  }
+  const data = turns(
+    [use('w', 'Write', { file_path: '/h/p.html', content: 'a\n' }), use('w2', 'Write', { file_path: '/h/q.html', content: 'a\n' })],
+    [use('x', 'bash_tool', { command: 'grep a /h/p.html > /h/q.html' })],
+    [use('s', 'bash_tool', { command: "sed -i 's/a/b/' /h/q.html" }), use('t', 'bash_tool', { command: "sed -i 's/a/c/' /h/p.html" })],
+  );
+  bothReplay(data, 'p.html', 'c\n');
+  bothReplay(data, 'q.html', 'a\n');
+});
+
+test('replay: sed then cp to outputs replays; cp onto a known file does not', () => {
+  const run = (command) => turns(
+    [use('w', 'Write', { file_path: '/h/p.html', content: 'a\n' }), use('w2', 'Write', { file_path: '/out/p.html', content: 'z\n' })],
+    [use('s', 'bash_tool', { command })],
+  );
+  const outputs = run("cd /h && sed -i 's/a/b/' p.html && cp p.html /mnt/user-data/outputs/");
+  bothReplay(outputs, 'p.html', 'b\n');
+  assert.strictEqual(opaqueAfterReplay(outputs).warnings.length, 0);
+  const onto = run("sed -i 's/a/b/' /h/p.html && cp /h/p.html /out/");
+  bothReplay(onto, 'p.html', 'a\n');
+  assert.ok(opaqueAfterReplay(onto).warnings.length >= 1);
 });

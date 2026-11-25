@@ -128,12 +128,11 @@ def normalize_sandbox_path(p) -> str:
 
 
 CWD_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z0-9_]+)\1([^\n]*)\n(?:[\s\S]*?\n)??[ \t]*\2[ \t]*(?=\n|\Z)")
-CD_RE = re.compile(r"(^|[;&|\n])[ \t]*cd(?:[ \t]+(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|()]+)))?[ \t]*(?=\Z|[;&|\n)])")
 ANY_CD_RE = re.compile(r"(?:^|[;&|\n(`])[ \t]*cd(?=[ \t;&|\n)]|\Z)")
 PUSHD_RE = re.compile(r"(?:^|[;&|\n(`])[ \t]*(?:pushd|popd)(?=[ \t;&|\n)]|\Z)")
 CHDIR_RE = re.compile(r"\bchdir\s*\(", re.ASCII)
 COND_CD_RE = re.compile(r"(?:[{!]|\b(?:then|do|else|elif))[ \t]*cd(?=[ \t;&|\n)]|\Z)", re.ASCII)
-LEAD_CD_RE = re.compile(r"\s*cd[ \t]+(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|()]+))[ \t]*(?:&&|;|\n)")
+LEAD_CD_RE = re.compile(r"\s*cd[ \t]+(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|()]+))[ \t]*(?:&&|;|\n|\Z)")
 
 
 def is_bash_tool(name) -> bool:
@@ -168,11 +167,7 @@ def command_cwds(messages: list[dict]) -> dict:
             elif lead:
                 own = target(lead.groups(), carried)
             cwds[block.get("id")] = own
-            if other:
-                carried = None
-            else:
-                for m in CD_RE.finditer(command):
-                    carried = target(m.groups()[1:], carried)
+            carried = own
     return cwds
 
 
@@ -440,9 +435,10 @@ def literal_steps(command, copies: bool = False) -> Optional[list[dict]]:
     return steps
 
 
-def literal_swap_command(command, cwd) -> Optional[list[dict]]:
-    """literalSwapCommand: the command's edits ({path, kind, subs|text}) in order, else None."""
-    steps = literal_steps(command)
+def literal_swap_command(command, cwd, known=()) -> Optional[list[dict]]:
+    """literalSwapCommand: the command's edits ({path, kind, subs|text}) in order, else None.
+    A cp is allowed onto a file that isn't one of known."""
+    steps = literal_steps(command, copies=True)
     if steps is None:
         return None
 
@@ -451,8 +447,19 @@ def literal_swap_command(command, cwd) -> Optional[list[dict]]:
             return normalize_sandbox_path(word)
         return normalize_sandbox_path(cwd + "/" + word) if cwd else None
 
+    def is_known(p):
+        return any(normalize_sandbox_path(k) == p or (not k.startswith("/") and p.endswith("/" + normalize_sandbox_path(k)))
+                   for k in known)
+
     edits = []
     for step in steps:
+        if step["kind"] == "copy":
+            dest = resolve(step["dest"])
+            if not dest or is_known(dest):
+                return None
+            if any(is_known(normalize_sandbox_path(dest + "/" + src.split("/")[-1])) for src in step["sources"]):
+                return None
+            continue
         for file in (step["files"] if step["kind"] == "sed" else [step["file"]]):
             path = resolve(file)
             if not path:
@@ -460,6 +467,358 @@ def literal_swap_command(command, cwd) -> Optional[list[dict]]:
             edits.append({"path": path, "kind": "sed", "subs": step["subs"]} if step["kind"] == "sed"
                          else {"path": path, "kind": "append", "text": step["text"]})
     return edits
+
+
+# ---- Commands that provably write no file the chat made (looseCommands ... writeFreeTouches) ----
+
+LOOSE_HEREDOC_RE = re.compile(r"""(?<!<)<<(-?)[ \t]*(['"]?)([A-Za-z0-9_]+)\2([^\n]*)\n(?:([\s\S]*?)\n)??[ \t]*\3[ \t]*(?=\n|\Z)""")
+HEREDOC_MARK = "\x02"
+HEREDOC_MARK_RE = re.compile("\x02([0-9]+)\x02\\Z")
+
+
+def loose_commands(text: str) -> Optional[list[dict]]:
+    """looseCommands: simple commands as {words, redirects, heredocs}, or None."""
+    commands: list[dict] = []
+    st = {"cur": {"words": [], "redirects": [], "heredocs": []}, "word": "", "started": False, "open": False, "into": None}
+
+    def end_word():
+        if st["started"]:
+            word = st["word"]
+            marked = HEREDOC_MARK_RE.match(word)
+            if st["into"]:
+                st["cur"]["redirects"].append({"op": st["into"], "target": {"text": word, "open": st["open"]}})
+                st["into"] = None
+            elif marked and not st["open"]:
+                st["cur"]["heredocs"].append(int(marked.group(1)))
+            else:
+                st["cur"]["words"].append({"text": word, "open": st["open"]})
+        st["word"] = ""
+        st["started"] = False
+        st["open"] = False
+
+    def end_command() -> bool:
+        end_word()
+        if st["into"]:
+            return False
+        cur = st["cur"]
+        if cur["words"] or cur["redirects"] or cur["heredocs"]:
+            commands.append(cur)
+        st["cur"] = {"words": [], "redirects": [], "heredocs": []}
+        return True
+
+    quote = None
+    n = len(text)
+    i = 0
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else None
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                st["word"] += ch
+            i += 1
+            continue
+        if ch == "`":
+            return None
+        if ch == "$":
+            if nxt == "(":
+                return None
+            st["open"] = True
+            st["started"] = True
+            st["word"] += ch
+            if nxt == "{":
+                close = text.find("}", i)
+                if close == -1:
+                    return None
+                st["word"] += text[i + 1:close + 1]
+                i = close
+            i += 1
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch == "\\" and nxt is not None:
+                st["word"] += nxt
+                i += 1
+            else:
+                st["word"] += ch
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            st["started"] = True
+            i += 1
+            continue
+        if ch == "\\":
+            if nxt is None:
+                return None
+            if nxt != "\n":
+                st["word"] += nxt
+                st["started"] = True
+            i += 2
+            continue
+        if ch == "#" and not st["started"]:
+            while i + 1 < n and text[i + 1] != "\n":
+                i += 1
+            i += 1
+            continue
+        if ch in (" ", "\t"):
+            end_word()
+            i += 1
+            continue
+        if ch in ("\n", ";", "|", "&"):
+            if ch == "&" and nxt == ">":
+                end_word()
+                i += 1
+                if i + 1 < n and text[i + 1] == ">":
+                    i += 1
+                st["into"] = ">"
+                i += 1
+                continue
+            if not end_command():
+                return None
+            if ch in ("|", "&") and nxt == ch:
+                i += 1
+            i += 1
+            continue
+        if ch in (">", "<"):
+            if st["started"] and re.match(r"[0-9]+\Z", st["word"]) and not st["open"]:
+                st["word"] = ""
+                st["started"] = False
+            else:
+                end_word()
+            if st["into"]:
+                return None
+            if ch == "<":
+                if nxt == "<" and i + 2 < n and text[i + 2] == "<":
+                    i += 3
+                    st["into"] = "<"
+                    continue
+                if nxt in ("<", ">", "("):
+                    return None
+                st["into"] = "<"
+                i += 1
+                continue
+            if nxt in (">", "|"):
+                i += 1
+            if i + 1 < n and text[i + 1] == "&":
+                i += 1
+                while i + 1 < n and re.match(r"[0-9-]", text[i + 1]):
+                    i += 1
+                i += 1
+                continue
+            if i + 1 < n and text[i + 1] == "(":
+                return None
+            st["into"] = ">"
+            i += 1
+            continue
+        if ch in "(){}":
+            return None
+        if ch in "*?[":
+            st["open"] = True
+        st["word"] += ch
+        st["started"] = True
+        i += 1
+    if quote:
+        return None
+    if not end_command():
+        return None
+    return commands
+
+
+PY_WRITE_RE = re.compile(r"write_text|write_bytes|\bos\.(?:open|rename|renames|replace|remove|unlink|system|popen|write|truncate|link|symlink|rmdir|removedirs|spawn\w*|exec\w*)\b|\bshutil\.|\bsubprocess\b|\bexec\s*\(|\beval\s*\(|__import__|\bimportlib\b|\.unlink\s*\(|\.rename\s*\(|\.touch\s*\(|\.truncate\s*\(|\bpty\b|\bctypes\b", re.ASCII)
+PY_WRITE_MODE_RE = re.compile(r"""(?:,\s*|\bmode\s*=\s*)['"][rbt]*[wax+][rbt+]*['"]\s*[,)]""", re.ASCII)
+PY_READ_MODE_RE = re.compile(r"""(['"])(?:r[bt]?|[bt]r)\1\Z""")
+PY_OPEN_RE = re.compile(r"(\.\s*)?\bopen\s*\(", re.ASCII)
+PY_KWARG_RE = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*=(?!=)\s*([\s\S]*)\Z")
+PY_MODULE_TAIL_RE = re.compile(r"\b(?:io|codecs|gzip|bz2|lzma)\s*\Z", re.ASCII)
+
+
+def python_call_args(text: str, start: int) -> Optional[list[str]]:
+    """pythonCallArgs: a call's top-level arguments, or None when it doesn't close."""
+    args: list[str] = []
+    depth = 0
+    quote = None
+    cur = ""
+    i = start
+    while i < len(text):
+        c = text[i]
+        if quote:
+            cur += c
+            if c == "\\" and i + 1 < len(text):
+                cur += text[i + 1]
+                i += 1
+            elif c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ("'", '"'):
+            quote = c
+            cur += c
+            i += 1
+            continue
+        if c in "([{":
+            depth += 1
+        if c in ")]}":
+            if depth == 0:
+                if c != ")":
+                    return None
+                if cur.strip() or args:
+                    args.append(cur.strip())
+                return args
+            depth -= 1
+        if c == "," and depth == 0:
+            args.append(cur.strip())
+            cur = ""
+            i += 1
+            continue
+        cur += c
+        i += 1
+    return None
+
+
+def python_may_write(source) -> bool:
+    """pythonMayWrite: whether Python source may change a file."""
+    text = str(source)
+    if PY_WRITE_RE.search(text) or PY_WRITE_MODE_RE.search(text):
+        return True
+    for m in PY_OPEN_RE.finditer(text):
+        args = python_call_args(text, m.end())
+        if args is None:
+            return True
+        method = bool(m.group(1)) and not PY_MODULE_TAIL_RE.search(text[:m.start()])
+        for i, arg in enumerate(args):
+            kw = PY_KWARG_RE.match(arg)
+            if kw:
+                if kw.group(1) == "mode" and not PY_READ_MODE_RE.match(kw.group(2)):
+                    return True
+                continue
+            if i == (0 if method else 1) and not PY_READ_MODE_RE.match(arg):
+                return True
+    return False
+
+
+WRITE_FREE_TOOLS = {"grep", "head", "tail", "wc", "cat", "ls", "echo", "printf", "test", "[", "cd", "mkdir", "diff", "file", "stat", "du", "md5sum", "sha256sum"}
+FIND_WRITES = {"-exec", "-execdir", "-delete", "-ok", "-okdir", "-fls"}
+PYTHON_RE = re.compile(r"python3?(?:\.[0-9]+)?\Z")
+
+
+def write_free_touches(command, cwd, known: list[str]) -> Optional[set[str]]:
+    """writeFreeTouches: the known files a provably write-free command writes, or None."""
+    bodies: list[str] = []
+
+    def mark_heredoc(m):
+        bodies.append(m.group(5) or "")
+        return f" {HEREDOC_MARK}{len(bodies) - 1}{HEREDOC_MARK} {m.group(4)}"
+
+    text = LOOSE_HEREDOC_RE.sub(mark_heredoc, str(command or ""))
+    commands = loose_commands(text)
+    if commands is None:
+        return None
+    known_set = set(known)
+    touched: set[str] = set()
+
+    def mark(w) -> bool:
+        if w["open"]:
+            return False
+        if w["text"] == "/dev/null":
+            return True
+        p, candidates = resolve_sandbox_path(w["text"], cwd, known)
+        for c in ([p] if p else candidates):
+            if c in known_set:
+                touched.add(c)
+        return True
+
+    for cmd in commands:
+        for r in cmd["redirects"]:
+            if r["op"] == ">" and not mark(r["target"]):
+                return None
+        words = list(cmd["words"])
+        while words and not words[0]["open"] and re.match(r"[A-Za-z_][A-Za-z0-9_]*=", words[0]["text"]):
+            words.pop(0)
+        if not words:
+            if cmd["heredocs"]:
+                return None
+            continue
+        if words[0]["open"]:
+            return None
+        tool = words[0]["text"]
+        args = words[1:]
+        plain_args = [w for w in args if not w["text"].startswith("-")]
+        if PYTHON_RE.match(tool):
+            i = 0
+            while i < len(args) and re.match(r"-[BIuEsSqO]+\Z", args[i]["text"]):
+                i += 1
+            source = None
+            if i < len(args) and args[i]["text"] == "-c" and i + 1 < len(args) and not args[i + 1]["open"]:
+                source = args[i + 1]["text"]
+            elif i < len(args) and args[i]["text"] == "-" and len(cmd["heredocs"]) == 1:
+                source = bodies[cmd["heredocs"][0]]
+            if source is None or python_may_write(source):
+                return None
+            continue
+        if cmd["heredocs"] and tool not in WRITE_FREE_TOOLS:
+            return None
+        if tool in WRITE_FREE_TOOLS:
+            continue
+        if tool == "sed":
+            if any(re.match(r"-[a-zA-Z]*i", w["text"]) or w["text"].startswith("--in-place") for w in args):
+                return None
+            scripts = []
+            i = 0
+            while i < len(args):
+                if args[i]["text"] == "-e":
+                    i += 1
+                    scripts.append(args[i] if i < len(args) else None)
+                i += 1
+            if not scripts:
+                scripts.append(plain_args[0] if plain_args else None)
+            if any(w is None or w["open"] or not (SED_PRINT_RE.match(w["text"]) or sed_substitution(w["text"])) for w in scripts):
+                return None
+            if any(w["text"].startswith("-") and w["text"] not in ("-n", "-e", "-E", "-r") for w in args):
+                return None
+            continue
+        if tool == "find":
+            if any(w["text"] in FIND_WRITES or w["text"].startswith("-fprint") for w in args):
+                return None
+            continue
+        if tool == "sort":
+            if any(re.match(r"-[a-zA-Z]*o", w["text"]) or w["text"].startswith("--output") for w in args):
+                return None
+            continue
+        if tool == "uniq":
+            if len(plain_args) > 1 and not mark(plain_args[1]):
+                return None
+            continue
+        if tool == "cp":
+            if any(re.match(r"-[a-zA-Z]*t", w["text"]) or w["text"].startswith("--target") for w in args):
+                return None
+            if len(plain_args) < 2:
+                return None
+            dest = plain_args[-1]
+            if dest["open"]:
+                return None
+            mark(dest)
+            for src in plain_args[:-1]:
+                mark({"text": re.sub(r"/+\Z", "", dest["text"]) + "/" + src["text"].split("/")[-1], "open": False})
+            if any(re.match(r"-[a-zA-Z]*[rRa]", w["text"]) or w["text"] in ("--recursive", "--archive") for w in args):
+                p, _ = resolve_sandbox_path(dest["text"], cwd, known)
+                if not p:
+                    return None
+                for k in known:
+                    if is_under_folder(k, p):
+                        touched.add(k)
+            continue
+        return None
+    return touched
+
+
+def is_under_folder(file, folder) -> bool:
+    """isUnderFolder: whether a file lies in a folder or below it, by whole segments."""
+    d = normalize_sandbox_path(folder)
+    p = normalize_sandbox_path(file)
+    return p.startswith("/" if d == "/" else d + "/") and p != d
 
 
 def command_touches(command, cwd, known: list[str]) -> set[str]:
@@ -479,10 +838,9 @@ def command_touches(command, cwd, known: list[str]) -> set[str]:
         rest = rest[:start] + (tail.group(2) if tail else "") + rest[start + len(whole):]
     steps = literal_steps(rest, copies=True)
     if steps is None:
-        for k in known:
-            name = k.split("/")[-1]
-            if name and name in rest:
-                touched.add(k)
+        # Not provably write-free: any file may have changed, named in the command or not.
+        free = write_free_touches(rest, cwd, known)
+        touched.update(known if free is None else free)
         return touched
 
     def mark(word):
@@ -1063,7 +1421,7 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
                 # A literal sed -i or cat >> on known files is replayed in place; a failed
                 # command may have stopped before or after its edit, so it isn't.
                 cwd = cwds.get(block.get("id"))
-                swap = None if creates or block.get("id") in failed_ids else literal_swap_command(command, cwd)
+                swap = None if creates or block.get("id") in failed_ids else literal_swap_command(command, cwd, path_keys())
                 keys = [known_key(e["path"]) for e in swap] if swap is not None else []
                 if swap is not None and all(keys):
                     for edit, key in zip(swap, keys):
