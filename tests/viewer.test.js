@@ -2,6 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, artifactTabs, relativeTime, parseArtifactHash } = require('../viewer/viewer-logic.js');
+const { ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -760,11 +761,11 @@ test('previewDoc leads with the policy', () => {
   // The policy leads the document, so a comment holding "<head>" can't push it out of force
   const d = previewDoc('<!doctype html><!-- <head> --><html><head></head>x', () => null);
   assert.ok(d.srcdoc.startsWith(head));
-  assert.strictEqual(d.srcdoc, `${head}<!-- <head> --><html><head></head>x`);
+  assert.strictEqual(d.srcdoc, `${head}<!-- <head> --><html><head></head>x${SIZE_SCRIPT}`);
   assert.strictEqual(d.remote, 0);
-  assert.strictEqual(previewDoc('﻿\n <!DOCTYPE HTML PUBLIC "x">a', () => null).srcdoc, `${head}a`);
-  assert.strictEqual(previewDoc('<svg></svg>', () => null).srcdoc, `${head}<svg></svg>`);
-  assert.strictEqual(previewDoc('<!doctype html><!doctype html>a', () => null).srcdoc, `${head}<!doctype html>a`);
+  assert.strictEqual(previewDoc('﻿\n <!DOCTYPE HTML PUBLIC "x">a', () => null).srcdoc, `${head}a${SIZE_SCRIPT}`);
+  assert.strictEqual(previewDoc('<svg></svg>', () => null).srcdoc, `${head}<svg></svg>${SIZE_SCRIPT}`);
+  assert.strictEqual(previewDoc('<!doctype html><!doctype html>a', () => null).srcdoc, `${head}<!doctype html>a${SIZE_SCRIPT}`);
   const r = previewDoc('<script src="https://x.test/a.js"></script><script src="app.js"></script>', look);
   assert.strictEqual(r.remote, 1);
   assert.ok(r.srcdoc.includes('run("<\\/script>")'));
@@ -2300,4 +2301,63 @@ test('viewerFlags: notes give draft and helper flags, a warning flag wins, name_
 test('FLAG_NOTES has text for draft and helper', () => {
   const { FLAG_NOTES } = require('../viewer/viewer-logic.js');
   assert.ok(FLAG_NOTES.draft && FLAG_NOTES.helper);
+});
+
+test('zoom steps and clamping', () => {
+  assert.strictEqual(stepZoom(1, 1, 0.1, 8), 1.25);
+  assert.strictEqual(stepZoom(0.42, 1, 0.1, 8), 0.5);
+  assert.strictEqual(stepZoom(0.42, -1, 0.1, 8), 0.33);
+  assert.strictEqual(stepZoom(8, 1, 0.1, 8), 8);
+  assert.strictEqual(stepZoom(0.25, -1, 0.25, 2), 0.25);
+  assert.strictEqual(clampZoom(NaN, 0.25, 2), 1);
+  assert.strictEqual(clampZoom(9, 0.25, 2), 2);
+});
+test('wheelFactor: pinch is faster than a wheel, lines and pages are scaled, huge deltas are capped', () => {
+  assert.ok(wheelFactor(-10, 0, true) > 1 && wheelFactor(10, 0, true) < 1);
+  assert.ok(Math.abs(Math.log(wheelFactor(10, 0, true))) > Math.abs(Math.log(wheelFactor(10, 0, false))));
+  assert.strictEqual(wheelFactor(3, 1, false), wheelFactor(48, 0, false));
+  assert.strictEqual(wheelFactor(1e9, 0, false), wheelFactor(200, 0, false));
+});
+test('zoomAbout keeps the point under the pointer', () => {
+  assert.deepStrictEqual(zoomAbout({ from: 1, to: 2, point: { x: 100, y: 50 }, scroll: { left: 0, top: 0 } }), { left: 100, top: 50 });
+  assert.deepStrictEqual(zoomAbout({ from: 2, to: 1, point: { x: 100, y: 50 }, scroll: { left: 100, top: 50 } }), { left: 0, top: 0 });
+  assert.deepStrictEqual(zoomAbout({ from: 1, to: 2, point: { x: 10, y: 10 }, scroll: { left: 0, top: 0 }, offsetFrom: { x: 50, y: 0 }, offsetTo: { x: 0, y: 0 } }), { left: 0, top: 10 });
+});
+test('fitZoom, pictureRange and doubleClickZoom', () => {
+  assert.strictEqual(fitZoom({ width: 2000, height: 1000 }, { width: 1000, height: 1000 }), 0.5);
+  assert.strictEqual(fitZoom({ width: 100, height: 100 }, { width: 1000, height: 1000 }), 1);
+  assert.strictEqual(fitZoom({ width: 0, height: 100 }, { width: 1000, height: 1000 }), 1);
+  assert.strictEqual(fitZoom({ width: 100, height: 100 }, { width: 0, height: 0 }), 1);
+  assert.deepStrictEqual(pictureRange(0.05, { width: 4000, height: 100 }), { min: 0.05, max: 8 });
+  assert.deepStrictEqual(pictureRange(0.5, { width: 100000, height: 10 }), { min: 0.1, max: 0.5 });
+  assert.strictEqual(pictureRange(0.01, { width: 100000, height: 10 }).max, 0.32768);
+  assert.strictEqual(doubleClickZoom(0.4, 0.4), 1);
+  assert.strictEqual(doubleClickZoom(1, 1), 2);
+  assert.strictEqual(doubleClickZoom(3, 0.4), 0.4);
+});
+test('svgNaturalSize, svgHasScripts and svgDataUrl', () => {
+  assert.deepStrictEqual(svgNaturalSize('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480px">'), { width: 640, height: 480 });
+  assert.deepStrictEqual(svgNaturalSize('<svg width="100%" viewBox="0 0 1200 900">'), { width: 1200, height: 900 });
+  assert.strictEqual(svgNaturalSize('<svg width="10em">'), null);
+  assert.strictEqual(svgNaturalSize('not svg'), null);
+  assert.strictEqual(svgHasScripts('<svg xmlns="http://www.w3.org/2000/svg"><circle r="5"/></svg>'), false);
+  assert.strictEqual(svgHasScripts('<svg><SCRIPT>x()</SCRIPT></svg>'), true);
+  assert.strictEqual(svgHasScripts('<svg><rect onclick="x()"/></svg>'), true);
+  assert.strictEqual(svgHasScripts('<svg><text>one=two</text></svg>'), false);
+  assert.strictEqual(svgDataUrl('\ufeff<svg/>'), 'data:image/svg+xml;charset=utf-8,%3Csvg%2F%3E');
+});
+test('pageFit: only a sane ct-size report counts; fluid pages fit at 100%', () => {
+  assert.strictEqual(pageFit({ type: 'ct-size', width: Infinity, view: 800 }, 800), null);
+  assert.strictEqual(pageFit({ type: 'ct-size', width: '900', view: 800 }, 800), null);
+  assert.strictEqual(pageFit({ type: 'ct-size', width: -5, view: 800 }, 800), null);
+  assert.strictEqual(pageFit({ type: 'other', width: 900, view: 800 }, 800), null);
+  assert.strictEqual(pageFit(null, 800), null);
+  assert.deepStrictEqual(pageFit({ type: 'ct-size', width: 801, view: 800 }, 800), { fit: 1, enabled: false });
+  assert.deepStrictEqual(pageFit({ type: 'ct-size', width: 1600, view: 800 }, 800), { fit: 0.5, enabled: true });
+  assert.deepStrictEqual(pageFit({ type: 'ct-size', width: 10000, view: 800 }, 800), { fit: 0.25, enabled: true });
+});
+test('preview documents end with the measuring script', () => {
+  assert.ok(previewDoc('<p>x</p>', () => null).srcdoc.endsWith(SIZE_SCRIPT));
+  assert.ok(artifactPreviewDoc('<p>x</p>', 'index.html', {}).srcdoc.endsWith(SIZE_SCRIPT));
+  assert.ok(/postMessage/.test(SIZE_SCRIPT) && /ct-size/.test(SIZE_SCRIPT) && /top/.test(SIZE_SCRIPT));
 });

@@ -512,7 +512,7 @@ function remoteScripts(html) {
 function previewDoc(text, lookup) {
   const rest = String(text).replace(/^﻿?\s*<!doctype[^>]*>/i, '');
   return {
-    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${inlineSiblings(rest, lookup)}`,
+    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${inlineSiblings(rest, lookup)}${SIZE_SCRIPT}`,
     remote: remoteScripts(rest),
   };
 }
@@ -627,7 +627,7 @@ const RTC_SHIM = `<script>(function(){['RTCPeerConnection','webkitRTCPeerConnect
 function artifactPreviewDoc(text, startPath, payload) {
   const rest = String(text).replace(/^﻿?\s*<!doctype[^>]*>/i, '');
   return {
-    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${STORAGE_SHIM}${RTC_SHIM}${inlineArtifact(rest, startPath, payload)}`,
+    srcdoc: `<!doctype html><meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${STORAGE_SHIM}${RTC_SHIM}${inlineArtifact(rest, startPath, payload)}${SIZE_SCRIPT}`,
     remote: remoteScripts(rest),
   };
 }
@@ -1518,6 +1518,104 @@ function designCanvas(text, held) {
   return { width, height, title: str(json.title), boards, notes, skipped };
 }
 
+// ---- Zoom (v1.23) ----
+const ZOOM_STEPS = [0.1, 0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.25, 1.5, 2, 3, 4, 6, 8];
+const PICTURE_MAX_SIDE = 32768;
+
+function clampZoom(z, min, max) {
+  const n = Number.isFinite(z) ? z : 1;
+  return Math.min(max, Math.max(min, n));
+}
+
+// The first step strictly beyond z in that direction, clamped; none beyond means the bound.
+function stepZoom(z, dir, min, max) {
+  const eps = 1e-6;
+  let next = dir > 0 ? max : min;
+  if (dir > 0) {
+    for (const s of ZOOM_STEPS) if (s > z + eps) { next = s; break; }
+  } else {
+    for (let i = ZOOM_STEPS.length - 1; i >= 0; i--) if (ZOOM_STEPS[i] < z - eps) { next = ZOOM_STEPS[i]; break; }
+  }
+  return clampZoom(next, min, max);
+}
+
+// deltaMode 0 pixels, 1 lines, 2 pages. A pinch arrives as a ctrl wheel and is faster.
+function wheelFactor(deltaY, deltaMode, pinch) {
+  const unit = deltaMode === 1 ? 16 : deltaMode === 2 ? 800 : 1;
+  const d = Math.max(-200, Math.min(200, (Number(deltaY) || 0) * unit));
+  return Math.exp(-d * (pinch ? 0.01 : 0.002));
+}
+
+// The scroll position that keeps the content point under `point` (viewport coordinates) in place when the zoom changes.
+function zoomAbout({ from, to, point, scroll, offsetFrom = { x: 0, y: 0 }, offsetTo = { x: 0, y: 0 } }) {
+  const cx = (scroll.left + point.x - offsetFrom.x) / from;
+  const cy = (scroll.top + point.y - offsetFrom.y) / from;
+  return {
+    left: Math.max(0, cx * to + offsetTo.x - point.x),
+    top: Math.max(0, cy * to + offsetTo.y - point.y),
+  };
+}
+
+function fitZoom(natural, box) {
+  const nums = [natural && natural.width, natural && natural.height, box && box.width, box && box.height];
+  if (nums.some(n => !Number.isFinite(n) || n <= 0)) return 1;
+  return Math.min(1, box.width / natural.width, box.height / natural.height);
+}
+
+function pictureRange(fit, natural) {
+  const min = Math.min(fit, 0.1);
+  const side = Math.max(natural.width, natural.height);
+  return { min, max: Math.max(fit, Math.min(8, PICTURE_MAX_SIDE / side)) };
+}
+
+function doubleClickZoom(z, fit) {
+  if (Math.abs(z - fit) < 1e-6) return 1 > fit + 1e-6 ? 1 : 2;
+  return fit;
+}
+
+// The root <svg> tag's width and height when both are plain numbers or px, else its viewBox size, else null.
+function svgNaturalSize(text) {
+  const tag = /<svg\b[^>]*>/i.exec(String(text));
+  if (!tag) return null;
+  const attr = name => {
+    const m = new RegExp('\\s' + name + '\\s*=\\s*(?:"([^"]*)"|\'([^\']*)\')', 'i').exec(tag[0]);
+    return m ? (m[1] !== undefined ? m[1] : m[2]) : null;
+  };
+  const px = v => {
+    const m = v === null ? null : /^\s*(\d+(?:\.\d+)?|\.\d+)\s*(?:px)?\s*$/i.exec(v);
+    return m ? Number(m[1]) : null;
+  };
+  const w = px(attr('width'));
+  const h = px(attr('height'));
+  if (w > 0 && h > 0) return { width: w, height: h };
+  const vb = attr('viewBox');
+  if (vb !== null) {
+    const n = vb.trim().split(/[\s,]+/).map(Number);
+    if (n.length === 4 && n.every(Number.isFinite) && n[2] > 0 && n[3] > 0) return { width: n[2], height: n[3] };
+  }
+  return null;
+}
+
+function svgHasScripts(text) {
+  const t = String(text);
+  return /<script\b/i.test(t) || /<[^>]*\son[a-z]+\s*=/i.test(t);
+}
+
+function svgDataUrl(text) {
+  return 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(String(text).replace(/^\uFEFF/, ''));
+}
+
+// A sandboxed preview reports its size by message; only a sane report counts.
+function pageFit(report, containerWidth) {
+  const ok = n => typeof n === 'number' && Number.isFinite(n) && n > 0;
+  if (!report || report.type !== 'ct-size' || !ok(report.width) || !ok(report.view) || !ok(containerWidth)) return null;
+  if (report.width <= report.view + 1) return { fit: 1, enabled: false };
+  return { fit: clampZoom(containerWidth / report.width, 0.25, 1), enabled: true };
+}
+
+// Appended to every preview document. Inline scripts run under PREVIEW_CSP; the opaque origin needs target '*'.
+const SIZE_SCRIPT = `<script>(function(){function r(){try{var d=document.documentElement;window.top.postMessage({type:'ct-size',width:d.scrollWidth,view:d.clientWidth},'*')}catch(e){}}window.addEventListener('load',r);window.addEventListener('resize',r)})()</script>`;
+
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT };
 }
