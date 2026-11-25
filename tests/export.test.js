@@ -1549,6 +1549,19 @@ test('chatHealth flags what an API change would leave behind', () => {
   assert.match(u[0].message, /hologram \(2\), voice_note \(1\)/);
 });
 
+test('chatHealth: an empty assistant tail right after a complete assistant message is not hollow', () => {
+  const tail = (parent, ms, extra = {}) => {
+    const d = chatOf([parent, { sender: 'assistant', content: [], created_at: new Date(Date.parse('2026-01-01T00:00:00Z') + ms).toISOString(), ...extra }]);
+    d.chat_messages[0].created_at = '2026-01-01T00:00:00Z';
+    return d;
+  };
+  const done = { sender: 'assistant', content: [{ type: 'text', text: 'done' }] };
+  assert.deepStrictEqual(healthOf(tail(done, 60)), []);
+  assert.deepStrictEqual(healthOf(tail({ sender: 'human', content: [{ type: 'text', text: 'q' }] }, 60)), ['empty_messages']);
+  assert.deepStrictEqual(healthOf(tail(done, 6000)), ['empty_messages']);
+  assert.deepStrictEqual(healthOf(tail({ sender: 'assistant', content: [] }, 60)), ['empty_messages']);
+});
+
 test('an export records health problems in errors.txt and says so in the result', async () => {
   const data = Object.assign(chatOf([{ sender: 'human', content: [] }, { sender: 'assistant', content: [{ type: 'text', text: 'ok' }, { type: 'hologram' }] }]), { uuid: 'hc', name: 'hc' });
   const { written, output } = await runFolder(exportPopup(), data);

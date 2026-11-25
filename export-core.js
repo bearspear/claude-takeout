@@ -148,7 +148,17 @@ function chatHealth(data) {
       : 'claude.ai returned this chat without its messages.' });
     return problems;
   }
-  const hollow = messages.filter((m) => !m || !Array.isArray(m.content) || (!m.content.length && !m.text)).length;
+  const byId = new Map(messages.map((m) => [m && m.uuid, m]));
+  // An empty assistant message created within 5 s of a complete assistant parent is the tail claude.ai
+  // leaves after a finished reply, not missing content.
+  const emptyTail = (m) => {
+    if (!m || m.sender !== 'assistant') return false;
+    const p = byId.get(m.parent_message_uuid);
+    if (!p || p.sender !== 'assistant' || !Array.isArray(p.content) || !p.content.length) return false;
+    const gap = Date.parse(m.created_at) - Date.parse(p.created_at);
+    return gap >= 0 && gap <= 5000;
+  };
+  const hollow = messages.filter((m) => (!m || !Array.isArray(m.content) || (!m.content.length && !m.text)) && !emptyTail(m)).length;
   if (hollow) problems.push({ check: 'empty_messages', message: `${hollow} of ${messages.length} messages came back with no content.` });
   const ids = new Set(messages.map((m) => m && m.uuid));
   const children = new Map();
