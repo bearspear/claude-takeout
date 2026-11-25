@@ -5617,9 +5617,8 @@ test('replay: a Python read/replace/write script replays, as Python would', () =
   // The list over lines with a trailing comma, a block for, comments and blank lines.
   pyReplays(py("python3 - <<'E'", '# swap', "p = '/h/page.html'", 's = open(p).read()', '', 'r = [', "    ('a', 'c'),  # first", "    ('c', 'e'),", ']',
     'for a, b in r:', '    s = s.replace(a, b)', "open(p, 'w').write(s)", 'E'), AB, 'e b e\n');
-  // count 1, positional or keyword: the first occurrence only.
+  // count 1 (positional; the keyword needs Python 3.13): the first occurrence only.
   pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c',1)", "open(p,'w').write(s)", 'E'), AB, 'c b a\n');
-  pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','c',count=1)", "open(p,'w').write(s)", 'E'), AB, 'c b a\n');
   // with open(...) as f, inline and as a block.
   pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('b','x')", "with open(p,'w',encoding='utf-8') as f: f.write(s)", 'E'), AB, 'a x a\n');
   pyReplays(py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('b','x')", "with open(p, 'w') as f:", '    f.write(s)', 'E'), AB, 'a x a\n');
@@ -5664,6 +5663,13 @@ test('replay: Python scripts that are not exactly the shape stay opaque', () => 
     body("t=s.replace('a','c')", "open(p,'w').write(t)"),
     py("python3 - <<'E'", "p='/h/page.html'", 'text=open(p).read()', "text=text.replace('a','c')", "open(p,'w').write(text)", 'E'),
     body("s=s.replace('a','c',2)", write),
+    body("s=s.replace('a','c',count=1)", write),
+    body("r=[('a','c')]", 'for a, b in r: s=s.replace(a, b, count=1)', write),
+    py("python3 - <<'E'", 'p = S', "s=open('/h/page.html').read()", "open('/h/page.html','w').write(s)", 'E'),
+    body("s=s.replace(S,'b')", write),
+    body("s=s.replace('a',S)", write),
+    py("python3 - <<'E'", 's=open(S).read()', "open('/h/page.html','w').write(s)", 'E'),
+    body("s=s.replace('a','c')", write, 'print(S)'),
     body("s=s.replace('','c')", write),
     body("s=s.replace('a','c')", "open(p,'a').write(s)"),
     body("s=s.replace('a','c')", write, "print(s, file=open('/h/x','w'))"),
@@ -5680,6 +5686,55 @@ test('replay: Python scripts that are not exactly the shape stay opaque', () => 
     `python3 -c "p='/h/page.html'; s=open(p).read(); s=s.replace('a','$X'); open(p,'w').write(s)"`,
     `python3 -c 'p="/h/page.html";s=open(p).read();s=s.replace("a","c");open(p,"w").write(s)' > /h/log`,
   ]) pyOpaque(command);
+});
+
+test('pythonSwapScript: a bare name S is not a string literal; count only as positional 1', () => {
+  const swap = fn('pythonSwapScript');
+  const ok = "p='/h/a'\ns=open(p).read()\ns=s.replace('S','b',1)\nopen(p,'w').write(s)\nprint('S', s.count('S'))";
+  assert.deepStrictEqual(plain(swap(ok)), { path: '/h/a', pairs: [['S', 'b', 1]] });
+  for (const script of [
+    "p = S\ns = open(p).read()\nopen(p,'w').write(s)",
+    "s = open('/h/a').read()\ns = s.replace(S, 'b')\nopen('/h/a','w').write(s)",
+    "s = open(S).read()\nopen(S,'w').write(s)",
+    "s = open('/h/a').read()\nr = [(S, 'b')]\nfor a, b in r: s = s.replace(a, b)\nopen('/h/a','w').write(s)",
+    "s = open('/h/a').read()\nopen('/h/a','w').write(s)\nprint(S)",
+    "s = open('/h/a').read()\ns = s.replace('a', 'b', count=1)\nopen('/h/a','w').write(s)",
+  ]) assert.strictEqual(swap(script), null, script);
+  const py = JSON.parse(execFileSync('python3', ['-B', '-c', [
+    'import json, sys', `sys.path.insert(0, ${JSON.stringify(REPO)})`, 'import extract_artifacts as ea',
+    'print(json.dumps([ea.python_swap_script(s) for s in json.load(sys.stdin)]))'].join('\n')],
+  { input: JSON.stringify([ok, 'p = S\ns = open(p).read()\nopen(p,"w").write(s)']) }).toString());
+  assert.deepStrictEqual(py, [{ path: '/h/a', pairs: [['S', 'b', 1]] }, null]);
+});
+
+test('replay: a bash command whose result shows a failure is not replayed, in either result format', () => {
+  const text = (id, body, isError = false) => ({ type: 'tool_result', tool_use_id: id, is_error: isError, content: [{ type: 'text', text: body }] });
+  const commands = { sed: ["sed -i 's/a/b/' /h/page.html", 'b\n'], python: [py("python3 - <<'E'", "p='/h/page.html'", 's=open(p).read()', "s=s.replace('a','b')", "open(p,'w').write(s)", 'E'), 'b\n'] };
+  const cases = [
+    [null, true],
+    [text('s', '{"returncode":0,"stdout":"","stderr":""}'), true],
+    [text('s', '{"returncode":1,"stdout":"","stderr":"boom"}'), false],
+    [text('s', '{"returncode":"1","stdout":""}'), false],
+    [text('s', 'Exit code 1\nboom', true), false],
+    [text('s', 'Exit code 2\nboom'), false],
+    [text('s', 'Exit code 0'), true],
+    [text('s', 'done'), true],
+    [text('s', 'done', true), false],
+  ];
+  for (const [kind, [command, swapped]] of Object.entries(commands)) {
+    for (const [res, replays] of cases) {
+      const data = turns(
+        [use('w', 'Write', { file_path: '/h/page.html', content: 'a\n' })],
+        [use('s', 'bash_tool', { command }), ...(res ? [res] : [])],
+        [use('t', 'bash_tool', { command: "sed -i 's/b/c/' /h/page.html" })],
+      );
+      const label = kind + ' ' + JSON.stringify(res && res.content[0].text);
+      bothReplay(data, 'page.html', replays ? swapped.replace('b', 'c') : 'a\n');
+      const { warnings, replayed } = opaqueAfterReplay(data);
+      assert.strictEqual(replayed.size, replays ? 2 : 0, label);
+      assert.strictEqual(warnings.length, replays ? 0 : 1, label);
+    }
+  }
 });
 
 test('replay: a Python swap after an opaque command on the file is not replayed', () => {

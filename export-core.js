@@ -494,7 +494,8 @@ function pyStringLiteral(src, i) {
 }
 
 // A script's logical lines as token strings: names, numbers and = ( ) [ ] , . : as themselves, a
-// string literal as S (its value in strs). indent: the line starts indented; semi: a ; ended it.
+// string literal as # (its value in strs; no name or comment gives that token). indent: the line
+// starts indented; semi: a ; ended it.
 // Comments and blank lines are skipped. null for anything else (another operator, a \ continuation,
 // an f-string, a ; inside brackets).
 function pyLines(src) {
@@ -524,7 +525,7 @@ function pyLines(src) {
     if (c === "'" || c === '"' || (name && name[0].length <= 2 && (text[i + name[0].length] === "'" || text[i + name[0].length] === '"'))) {
       const lit = pyStringLiteral(text, i);
       if (!lit) return null;
-      add('S', lit.value);
+      add('#', lit.value);
       i = lit.end;
       continue;
     }
@@ -545,22 +546,22 @@ function pyLines(src) {
   return lines.map((l) => ({ indent: l.indent, semi: l.semi, text: l.tokens.join(' '), strs: l.strs }));
 }
 
-const PY_ENC = '(?: , encoding = S)?';
-const PY_COUNT = '( , 1| , count = 1)?';
-const PY_P_RE = /^p = S$/;
-const PY_READ_RE = new RegExp(`^s = open \\( (p|S)${PY_ENC} \\) \\. read \\( \\)$`);
-const PY_REPLACE_RE = new RegExp(`^s = s \\. replace \\( S , S${PY_COUNT} \\)$`);
-const PY_LIST_RE = /^r = \[(?: \( S , S \)(?: , \( S , S \))*(?: ,)?)? \]$/;
+const PY_ENC = '(?: , encoding = #)?';
+const PY_COUNT = '( , 1)?';
+const PY_P_RE = /^p = #$/;
+const PY_READ_RE = new RegExp(`^s = open \\( (p|#)${PY_ENC} \\) \\. read \\( \\)$`);
+const PY_REPLACE_RE = new RegExp(`^s = s \\. replace \\( # , #${PY_COUNT} \\)$`);
+const PY_LIST_RE = /^r = \[(?: \( # , # \)(?: , \( # , # \))*(?: ,)?)? \]$/;
 const PY_LOOP_RE = new RegExp(`^for a , b in r :( s = s \\. replace \\( a , b${PY_COUNT} \\))?$`);
 const PY_LOOP_BODY_RE = new RegExp(`^s = s \\. replace \\( a , b${PY_COUNT} \\)$`);
-const PY_WRITE_RE = new RegExp(`^open \\( (p|S) , S${PY_ENC} \\) \\. write \\( s \\)$`);
-const PY_WITH_RE = new RegExp(`^with open \\( (p|S) , S${PY_ENC} \\) as f :( f \\. write \\( s \\))?$`);
+const PY_WRITE_RE = new RegExp(`^open \\( (p|#) , #${PY_ENC} \\) \\. write \\( s \\)$`);
+const PY_WITH_RE = new RegExp(`^with open \\( (p|#) , #${PY_ENC} \\) as f :( f \\. write \\( s \\))?$`);
 const PY_WITH_BODY_RE = /^f \. write \( s \)$/;
-const PY_PRINT_ARG = '(?:S|[0-9]+|len \\( s \\)|s \\. count \\( S \\))';
+const PY_PRINT_ARG = '(?:#|[0-9]+|len \\( s \\)|s \\. count \\( # \\))';
 const PY_PRINT_RE = new RegExp(`^print \\((?: ${PY_PRINT_ARG}(?: , ${PY_PRINT_ARG})*)? \\)$`);
 
 // A script that is only, in order: p = '<path>' (optional); s = open(p or '<path>').read(); any
-// number of s = s.replace(<lit>, <lit>[, 1 | count=1]) or r = [(<lit>, <lit>), ...] then
+// number of s = s.replace(<lit>, <lit>[, 1] (count= needs Python 3.13)) or r = [(<lit>, <lit>), ...] then
 // for a, b in r: s = s.replace(a, b[, ...]); open(p, 'w').write(s) or with open(p, 'w') as f:
 // f.write(s); then print(...) of literals, len(s) and s.count(<lit>). encoding='utf-8' is allowed
 // on open. { path, pairs: [[old, new, 1 | null]] }, path as written; else null. Every path is the
@@ -1614,6 +1615,22 @@ function failedToolUseIds(messages) {
   return ids;
 }
 
+// Whether a bash tool_result shows the command failed: is_error, Claude Code's "Exit code N" with N
+// not 0, or claude.ai's JSON {"returncode": N, ...} with N not the number 0 (claude.ai leaves
+// is_error false there). No result counts as success.
+function bashFailed(result) {
+  if (!result) return false;
+  if (result.is_error) return true;
+  const text = resultText(result);
+  const exit = /^Exit code (-?[0-9]+)/.exec(text);
+  if (exit) return Number(exit[1]) !== 0;
+  if (!/^[ \t\n\r]*\{/.test(text)) return false;
+  let json;
+  try { json = JSON.parse(text); } catch (e) { return false; }
+  if (!json || typeof json !== 'object' || Array.isArray(json) || !Object.prototype.hasOwnProperty.call(json, 'returncode')) return false;
+  return json.returncode !== 0;
+}
+
 // index, when given, is filled as index[key] = { path, filename, versions: [filename...],
 // messages: [msg uuid that made each version] } for the viewer; the return value is unchanged.
 // replayed, when given (a Set), gets toolUseId + '|' + path for each bash edit replayed: a literal
@@ -1862,7 +1879,8 @@ function extractArtifacts(data, errorCollector = null, index = null, replayed = 
         // A literal sed -i, cat >> or Python text swap on known files is replayed in place; a failed command may
         // have stopped before or after its edit, so it isn't.
         const cwd = cwds.has(block.id) ? cwds.get(block.id) : null;
-        const swap = creates.length || failedIds.has(block.id) ? null : literalSwapCommand(command, cwd, pathKeys());
+        const failed = failedIds.has(block.id) || bashFailed(resultsById.get(block.id));
+        const swap = creates.length || failed ? null : literalSwapCommand(command, cwd, pathKeys());
         const keys = swap ? swap.edits.map((e) => knownKey(e.path)) : [];
         if (swap && keys.every(Boolean)) {
           swap.edits.forEach((edit, i) => {
@@ -2703,7 +2721,7 @@ if (typeof module !== 'undefined' && module.exports) {
     escapeHtmlText, formatTimestamp, mdLinkText, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
     sortArtifactRows, artifactRowNotes, artifactSource, artifactUrl, artifactLocal, artifactVersionLinks, ARTIFACT_THUMB_PERMISSION_STATUS, artifactsChangedLine,
     artifactThumbsLine, ARTIFACTS_UNLISTED_HEADING, ARTIFACTS_NO_LIST, splitListedRows, artifactsIndexMd, artifactsIndexHtml,
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, pyStringLiteral, pythonSwapScript, applyPythonReplace, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, bashFailed, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, pyStringLiteral, pythonSwapScript, applyPythonReplace, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
     publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact, artifactForeign,

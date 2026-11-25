@@ -451,7 +451,7 @@ def py_lines(src) -> Optional[list[dict]]:
             lit = py_string_literal(text, i)
             if lit is None:
                 return None
-            add("S", lit[0])
+            add("#", lit[0])
             i = lit[1]
             continue
         if name:
@@ -482,18 +482,18 @@ def py_lines(src) -> Optional[list[dict]]:
     return [{"indent": ln["indent"], "semi": ln["semi"], "text": " ".join(ln["tokens"]), "strs": ln["strs"]} for ln in lines]
 
 
-PY_ENC = "(?: , encoding = S)?"
-PY_COUNT = "( , 1| , count = 1)?"
-PY_P_RE = re.compile(r"p = S")
-PY_READ_RE = re.compile(r"s = open \( (p|S)" + PY_ENC + r" \) \. read \( \)")
-PY_REPLACE_RE = re.compile(r"s = s \. replace \( S , S" + PY_COUNT + r" \)")
-PY_LIST_RE = re.compile(r"r = \[(?: \( S , S \)(?: , \( S , S \))*(?: ,)?)? \]")
+PY_ENC = "(?: , encoding = #)?"
+PY_COUNT = "( , 1)?"
+PY_P_RE = re.compile(r"p = #")
+PY_READ_RE = re.compile(r"s = open \( (p|#)" + PY_ENC + r" \) \. read \( \)")
+PY_REPLACE_RE = re.compile(r"s = s \. replace \( # , #" + PY_COUNT + r" \)")
+PY_LIST_RE = re.compile(r"r = \[(?: \( # , # \)(?: , \( # , # \))*(?: ,)?)? \]")
 PY_LOOP_RE = re.compile(r"for a , b in r :( s = s \. replace \( a , b" + PY_COUNT + r" \))?")
 PY_LOOP_BODY_RE = re.compile(r"s = s \. replace \( a , b" + PY_COUNT + r" \)")
-PY_WRITE_RE = re.compile(r"open \( (p|S) , S" + PY_ENC + r" \) \. write \( s \)")
-PY_WITH_RE = re.compile(r"with open \( (p|S) , S" + PY_ENC + r" \) as f :( f \. write \( s \))?")
+PY_WRITE_RE = re.compile(r"open \( (p|#) , #" + PY_ENC + r" \) \. write \( s \)")
+PY_WITH_RE = re.compile(r"with open \( (p|#) , #" + PY_ENC + r" \) as f :( f \. write \( s \))?")
 PY_WITH_BODY_RE = re.compile(r"f \. write \( s \)")
-PY_PRINT_ARG = r"(?:S|[0-9]+|len \( s \)|s \. count \( S \))"
+PY_PRINT_ARG = r"(?:#|[0-9]+|len \( s \)|s \. count \( # \))"
 PY_PRINT_RE = re.compile(r"print \((?: " + PY_PRINT_ARG + r"(?: , " + PY_PRINT_ARG + r")*)? \)")
 
 
@@ -1127,6 +1127,33 @@ def failed_tool_use_ids(messages: list[dict]) -> set[str]:
     return ids
 
 
+def bash_failed(result) -> bool:
+    """bashFailed in export-core.js: is_error, "Exit code N" with N not 0, or JSON whose
+    returncode isn't the number 0. No result counts as success."""
+    if not result:
+        return False
+    if result.get("is_error"):
+        return True
+    text = result_text(result)
+    m = re.match(r"Exit code (-?[0-9]+)", text)
+    if m:
+        return int(m.group(1)) != 0
+    if not re.match(r"[ \t\n\r]*\{", text):
+        return False
+
+    def no_constant(name):
+        raise ValueError(name)
+
+    try:
+        data = json.loads(text, parse_constant=no_constant)
+    except ValueError:
+        return False
+    if not isinstance(data, dict) or "returncode" not in data:
+        return False
+    rc = data["returncode"]
+    return not (isinstance(rc, (int, float)) and not isinstance(rc, bool) and rc == 0)
+
+
 def zip_safe_name(name: str) -> str:
     """zipSafeName in export-core.js: no separators or control characters, never . or .."""
     safe = re.sub(r"[\\/\x00-\x1f\x7f]", "_", name or "")
@@ -1630,7 +1657,8 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
                 # A literal sed -i, cat >> or Python text swap on known files is replayed in place; a failed
                 # command may have stopped before or after its edit, so it isn't.
                 cwd = cwds.get(block.get("id"))
-                swap = None if creates or block.get("id") in failed_ids else literal_swap_command(command, cwd, path_keys())
+                failed = block.get("id") in failed_ids or bash_failed(results_by_id.get(block.get("id")))
+                swap = None if creates or failed else literal_swap_command(command, cwd, path_keys())
                 keys = [known_key(e["path"]) for e in swap] if swap is not None else []
                 if swap is not None and all(keys):
                     for edit, key in zip(swap, keys):
