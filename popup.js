@@ -864,14 +864,12 @@ function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), ind
   return { opaqueMutations, byFile };
 }
 
-// The file tools whose edits the replay follows, by name.
-const FILE_EDIT_TOOLS = ['create_file', 'str_replace', 'rewrite', 'create_or_overwrite', 'Write', 'Edit'];
-
 // Code files, which rule c of sortOpaque treats as helper scripts.
 const HELPER_SCRIPT_EXTENSIONS = ['.py', '.sh', '.bash', '.js', '.mjs', '.cjs', '.ts', '.rb', '.pl', '.r', '.sql', '.awk', '.sed'];
 
 // Sorts each file's unreplayable changes (detectOpaqueMutations' byFile) into nothing, a note or a
-// warning (spec section 2, rules a-d; the first that matches wins). saved: [{ path, filename, msgIndex }],
+// warning (spec section 2, rules a-d; the first that matches wins). An entry's lastChange (default lastMsgIndex)
+// is its last change of any kind, replayed or not; rules a and b count only saves at or after it. saved: [{ path, filename, msgIndex }],
 // the presentations and deliveries that downloaded. shownPaths: every path presented or delivered,
 // downloaded or not (defaults to saved's). Message numbers in the texts count from 1 along the branch.
 function sortOpaque(byFile, saved, errorCollector, shownPaths = null) {
@@ -883,17 +881,19 @@ function sortOpaque(byFile, saved, errorCollector, shownPaths = null) {
     const commands = `${entry.count} command${entry.count === 1 ? '' : 's'}`;
     const where = indexes.length ? `message${indexes.length === 1 ? '' : 's'} ${indexes.join(', ')}` : '';
     const counted = where ? `${commands}; ${where}` : commands;
-    const later = saved.filter((s) => s.msgIndex >= entry.lastMsgIndex);
+    const last = Math.max(entry.lastMsgIndex, Number.isInteger(entry.lastChange) ? entry.lastChange : -1);
+    const later = saved.filter((s) => s.msgIndex >= last);
     const name = entry.filename;
     const details = { path: entry.path };
     if (entry.resolved) {
-      // a: the file itself was saved at its last change or later, so the export has its final state. A
-      // download saved under the file's own name in artefacts/ (a copy presented from outputs/) replaced it, so it counts.
-      if (later.some((s) => norm(s.path) === path || s.filename === name)) continue;
+      // a: a download saved under the file's own name in artefacts/ at its last change or later (the file
+      // itself, or a copy presented from outputs/) replaced it, so the export has its final state. A copy kept
+      // apart as <base>_delivered does not count.
+      if (later.some((s) => s.filename === name)) continue;
       // b: files saved afterwards from its folder or below: this one is likely their draft.
       const folder = path.slice(0, path.lastIndexOf('/')) || '/';
       const names = [];
-      for (const s of later) if (isUnderFolder(s.path, folder) && !names.includes(s.filename)) names.push(s.filename);
+      for (const s of later) if (norm(s.path) !== path && isUnderFolder(s.path, folder) && !names.includes(s.filename)) names.push(s.filename);
       if (names.length) {
         const more = names.length - 3;
         const list = more > 0 ? `${names.slice(0, 3).join(', ')} and ${more} more` : names.join(', ');
@@ -2498,6 +2498,16 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       merged.lastMsgIndex = Math.max(merged.lastMsgIndex, mi);
     }
   }
+  // Each file's last change of any kind: the last version the replay made, or a change it couldn't follow.
+  const chainIndex = new Map(messages.map((m, i) => [m.uuid, i]));
+  const lastChangeOf = (key) => {
+    const entry = Object.prototype.hasOwnProperty.call(artifactIndex, key) ? artifactIndex[key] : null;
+    const opaque = opaqueFiles.get(key);
+    let last = opaque ? opaque.lastMsgIndex : -1;
+    for (const uuid of (entry && entry.messages) || []) if (chainIndex.has(uuid)) last = Math.max(last, chainIndex.get(uuid));
+    return last;
+  };
+  for (const [key, entry] of opaqueFiles) entry.lastChange = lastChangeOf(key);
   // Presentations and deliveries that downloaded, for sortOpaque; and every path shown.
   const savedFiles = [];
   const shownPaths = new Set(presentedFiles.map((f) => f.path));
@@ -2533,7 +2543,10 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     const replayed = own ? !presentedFrom[name] : Object.prototype.hasOwnProperty.call(artifacts, name) && !presentedFrom[name];
     presentedNames[file.path] = name;
     presentedFrom[name] = file.path;
-    if (replayed && !replayIsOff(name)) continue;
+    // An off replay is replaced only by a presentation at or after the file's last change; an earlier
+    // one is left out like a clean replay's, and sortOpaque keeps the file's entry.
+    const ownEntry = replayed ? own || Object.values(artifactIndex).find((e) => e.filename === name) : null;
+    if (replayed && (!replayIsOff(name) || (ownEntry && file.msgIndex < lastChangeOf(ownEntry.path)))) continue;
 
     if (onProgress) {
       onProgress(15 + Math.floor((i / presentedFiles.length) * 5), 100, `Downloading: ${file.filename}`);
@@ -2544,7 +2557,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       const blob = await fetchUploadedFile(null, file.uuid, organizationId, conversationId, file.path);
       await addArtefactBlob(folder, artifacts, name, blob);
       if (replayed) {
-        const entry = own || Object.values(artifactIndex).find((e) => e.filename === name);
+        const entry = ownEntry;
         if (entry && entry.versions.length > 1) await addArtefactBlob(folder, artifacts, entry.versions[entry.versions.length - 1], blob);
       }
       savedFiles.push({ path: file.path, filename: name, msgIndex: file.msgIndex });
@@ -2566,21 +2579,11 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // server, so these are fetched by UUID.
   // A delivery of an artifact's own path at or after its last change, when the replay
   // is off, is its final state: it takes the artifact's name and replaces the last version too.
-  const lastTouch = {};  // sandbox path -> chain index of the last file tool on it
-  messages.forEach((msg, mi) => {
-    for (const block of (msg.content || [])) {
-      const input = block && block.type === 'tool_use' && FILE_EDIT_TOOLS.includes(block.name) && block.input;
-      const p = input && (input.path || input.file_path);
-      if (typeof p === 'string') lastTouch[p] = mi;
-    }
-  });
   const offPaths = new Map();
   for (const file of extractDeliveredFiles(data, Object.keys(artifacts))) {
     const own = Object.prototype.hasOwnProperty.call(artifactIndex, file.path) ? artifactIndex[file.path] : null;
     if (!own || !replayIsOff(own.filename)) continue;
-    const opaque = opaqueFiles.get(file.path);
-    const last = Math.max(opaque ? opaque.lastMsgIndex : -1, lastTouch[file.path] !== undefined ? lastTouch[file.path] : -1);
-    if (file.msgIndex >= last) offPaths.set(file.path, own.filename);
+    if (file.msgIndex >= lastChangeOf(file.path)) offPaths.set(file.path, own.filename);
   }
   const deliveredFiles = extractDeliveredFiles(data, Object.keys(artifacts), offPaths);
   // Saved files only, for the viewer's deliveries map (see buildViewerDeliveries).

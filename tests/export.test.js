@@ -5810,7 +5810,7 @@ test('sortOpaque rule b compares whole folder names', () => {
 });
 
 test('sortOpaque rule c: a script never delivered is a helper note', () => {
-  const c = sortOne(opaqueEntry('/h/c/build3.py', 9), [{ path: '/h/c/build3.py', filename: 'build3.py', msgIndex: 4 }].slice(1));
+  const c = sortOne(opaqueEntry('/h/c/build3.py', 9), []);
   assert.strictEqual(c.warnings.length, 0);
   assert.strictEqual(c.notes.length, 1);
   assert.strictEqual(c.notes[0].type, 'helper_script');
@@ -5931,4 +5931,37 @@ test('populateConversationFolder: a draft whose folder was delivered afterwards 
   const c = output.errorCollector;
   assert.deepStrictEqual(Array.from(c.warnings).filter((w) => w.type === 'artifact_opaque_mutation').map((w) => w.filename), []);
   assert.deepStrictEqual(Array.from(c.notes).map((n) => `${n.type}:${n.filename}`).sort(), ['draft_superseded:draft.html', 'helper_script:tool.py']);
+});
+
+test('a delivery or presentation before a later change of any kind replaces nothing, and the warning stays', async () => {
+  const send = (id, p, uuid) => [use(id, 'SendUserFile', { files: [p] }), { type: 'tool_result', tool_use_id: id, name: 'SendUserFile', content: [], file_deliveries: [{ file_uuid: uuid, path: p }] }];
+  const show = (id, p, uuid) => [use(id, 'present_files', { filepaths: [p] }), { type: 'tool_result', tool_use_id: id, name: 'present_files', content: [{ type: 'local_resource', file_path: p, uuid }] }];
+  const strip = (v) => String(v && v.content !== undefined ? v.content : v).replace(/^\uFEFF/, '');
+  for (const [label, saving, last, final] of [
+    ['delivery, then Edit', send, [use('e', 'Edit', { file_path: '/o/page.html', old_string: 'one', new_string: 'two' })], 'two'],
+    ['delivery, then heredoc', send, [use('h', 'bash_tool', { command: "cat > /o/page.html << 'EOF'\nNEW\nEOF" })], 'NEW'],
+    ['presentation, then Edit', show, [use('e', 'Edit', { file_path: '/o/page.html', old_string: 'one', new_string: 'two' })], 'two'],
+  ]) {
+    const data = Object.assign(turns(
+      [use('w', 'Write', { file_path: '/o/page.html', content: 'one' })],
+      [use('b', 'bash_tool', { command: 'cp /tmp/x /o/page.html' })],
+      saving('s', '/o/page.html', 'got'),
+      last,
+    ), { uuid: 'c-late', name: 'n' });
+    const asked = [];
+    const popup = exportPopup({ routes: [[/\/files\/([^/]+)\/contents?$/, (url) => { asked.push(url); return { ok: true, status: 200, blob: async () => textBlob('SAVED') }; }]] });
+    const { written, output } = await runFolder(popup, data);
+    assert.strictEqual(strip(written['artefacts/page.html']), final, label);
+    assert.strictEqual(strip(written['artefacts/page_v2.html']), final, label);
+    if (saving === send) assert.strictEqual(strip(written['artefacts/page_delivered.html']), 'SAVED', label);
+    else assert.strictEqual(asked.length, 0, label + ': an earlier presentation of an off file is not downloaded');
+    assert.strictEqual(Array.from(output.errorCollector.warnings).filter((w) => w.type === 'artifact_opaque_mutation').length, 1, label);
+  }
+});
+
+test('sortOpaque: a same-path save kept apart from the file, or before its last change of any kind, is not rule a', () => {
+  const apart = sortOne(opaqueEntry('/o/page.html', 3), [{ path: '/o/page.html', filename: 'page_delivered.html', msgIndex: 5 }]);
+  assert.strictEqual(apart.warnings.length, 1);
+  const early = sortOne(opaqueEntry('/o/page.html', 3, { lastChange: 7 }), [{ path: '/o/page.html', filename: 'page.html', msgIndex: 5 }]);
+  assert.strictEqual(early.warnings.length, 1);
 });
