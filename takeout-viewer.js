@@ -4,7 +4,7 @@
 //                                      ctx: { folder, model, fixText, artifacts, artifactIndex, uploads,
 //                                      deliveries, heredocs, docKey, widgetFile, widgetKey, project, flags }, all optional.
 //                                      data is never mutated. widgetFile, widgetKey: export-core.js's, for show_widget cards.
-//                                      flags: file name to 'script' | 'edit' | 'doc' (viewerFlags in export-core.js);
+//                                      flags: file name to 'script' | 'edit' | 'doc' | 'draft' | 'helper' (viewerFlags in export-core.js);
 //                                      a file with that name gets flag, for the viewer's "may not match" badge.
 //                                      artifacts: filename to text ('' for binaries). artifactIndex: extractArtifacts' index
 //                                      (state key to { path, filename, versions, messages }). deliveries: file uuid to

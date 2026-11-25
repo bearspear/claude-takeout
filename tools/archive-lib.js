@@ -1104,7 +1104,17 @@ function chatFromDisk(archive, chat, store = null) {
   }
 
   // Deliveries: names are worked out around the taken ones, as the export does, then kept if on disk.
-  const delivered = safe('delivered files', [], () => core.extractDeliveredFiles(data, takenNames));
+  // A delivery that replaced its artifact (the replay was off, so the export saved it under the artifact's
+  // name) has no <base>_delivered file: when that name is absent and the artifact's is there, it is read so.
+  const plainDelivered = safe('delivered files', [], () => core.extractDeliveredFiles(data, takenNames));
+  const offPaths = new Map();
+  const lastByPath = new Map();
+  for (const file of plainDelivered) lastByPath.set(file.path, file);
+  for (const [p, file] of lastByPath) {
+    const own = Object.prototype.hasOwnProperty.call(artifactIndex, p) ? artifactIndex[p] : null;
+    if (own && typeof own.filename === 'string' && !diskByNfc.has(nfc(file.filename)) && diskByNfc.has(nfc(own.filename))) offPaths.set(p, own.filename);
+  }
+  const delivered = offPaths.size ? safe('delivered files', [], () => core.extractDeliveredFiles(data, takenNames, offPaths)) : plainDelivered;
   const savedDeliveries = [];
   for (const file of delivered) {
     if (diskByNfc.has(nfc(file.filename))) savedDeliveries.push({ ...file, filename: diskName(file.filename) });

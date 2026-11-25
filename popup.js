@@ -22,6 +22,7 @@ class ExportErrorCollector {
     this.label = label;
     this.errors = [];
     this.warnings = [];
+    this.notes = [];
   }
 
   addError(type, filename, error, details = {}) {
@@ -56,6 +57,35 @@ class ExportErrorCollector {
       },
       recovery: this._getRecoveryHint(type, details)
     });
+  }
+
+  // A note says something about the export that is not missing content: the report lists it apart from warnings.
+  addNote(type, filename, message, details = {}) {
+    this.notes.push({
+      type,
+      severity: 'note',
+      filename,
+      error: message,
+      details: {
+        uuid: details.uuid || null,
+        path: details.path || null,
+        note: details.note || null
+      },
+      recovery: this._getNoteHint(type)
+    });
+  }
+
+  _getNoteHint(type) {
+    switch (type) {
+      case 'draft_superseded':
+        return 'The finished files from this folder are in the export; this draft is kept for reference. replay_bash.py can try to rebuild it.';
+      case 'helper_script':
+        return "Claude's helper script, not a delivered file.";
+      case 'name_changed':
+        return 'Both files are kept; only the name changed.';
+      default:
+        return 'No action needed.';
+    }
   }
 
   _getRecoveryHint(type, details) {
@@ -109,7 +139,10 @@ class ExportErrorCollector {
         return 'A picture Claude looked at in the chat (a photo it opened, a page it rendered) could not be downloaded from claude.ai. Export again later; it is still shown in the chat on claude.ai.';
 
       case 'web_image':
-        return 'An image Claude found with image search could not be saved: the site refused it, it is gone, or Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to it. To save these images, turn on Settings > Save web images and artifact card pictures (Chrome asks once), then export again.';
+        if (String(details.note || '').startsWith('No permission')) {
+          return 'Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to each image. To save these images, turn on Settings > Save web images and artifact card pictures (Chrome asks once), then export again.';
+        }
+        return 'An image Claude found with image search could not be saved: the site refused it (403) or it is gone (404); nothing in Claude Takeout can fetch it. The link in full_chat.md still points to it.';
 
       case 'published_page':
         return 'A page Claude published on claude.ai (publish_files) could not be saved, or only in part, or its file names were changed to be safe on disk. The chat itself is exported. Open the page on claude.ai (link in the note) while signed in, and export again; a page that was unpublished or deleted can no longer be saved.';
@@ -138,8 +171,12 @@ class ExportErrorCollector {
     return this.warnings.length > 0;
   }
 
+  hasNotes() {
+    return this.notes.length > 0;
+  }
+
   hasAny() {
-    return this.hasErrors() || this.hasWarnings();
+    return this.hasErrors() || this.hasWarnings() || this.hasNotes();
   }
 
   generateErrorReport() {
@@ -179,6 +216,15 @@ class ExportErrorCollector {
       lines.push(`**Warnings:** ${this.warnings.length} total`);
       for (const [type, count] of Object.entries(warningsByType)) {
         lines.push(`- ${count} ${type.replace(/_/g, ' ')} warning${count > 1 ? 's' : ''}`);
+      }
+    }
+
+    if (this.notes.length > 0) {
+      const notesByType = {};
+      for (const note of this.notes) notesByType[note.type] = (notesByType[note.type] || 0) + 1;
+      lines.push(`**Notes:** ${this.notes.length} total`);
+      for (const [type, count] of Object.entries(notesByType)) {
+        lines.push(`- ${count} ${type.replace(/_/g, ' ')} note${count > 1 ? 's' : ''}`);
       }
     }
 
@@ -244,6 +290,29 @@ class ExportErrorCollector {
       }
     }
 
+    // Detailed notes
+    if (this.notes.length > 0) {
+      lines.push('---', '', '## Notes', '');
+
+      for (const note of this.notes) {
+        lines.push(`### ${note.filename}`);
+        lines.push('');
+        lines.push(`- **Type:** ${note.type.replace(/_/g, ' ')}`);
+        lines.push(`- **Message:** ${note.error}`);
+
+        if (note.details.path) {
+          lines.push(`- **Path:** ${note.details.path}`);
+        }
+        if (note.details.note) {
+          lines.push(`- **Note:** ${note.details.note}`);
+        }
+
+        lines.push('');
+        lines.push(`**Recovery:** ${note.recovery}`);
+        lines.push('');
+      }
+    }
+
     // Troubleshooting guide
     lines.push('---', '', '## Troubleshooting Guide', '');
     lines.push('### Common HTTP Status Codes');
@@ -281,6 +350,27 @@ class ExportErrorCollector {
 
     return lines.join('\n');
   }
+}
+
+// The chat README's "About some files" section: the notes by kind, so a reader knows why a file is there.
+const README_NOTE_KINDS = [
+  ['draft_superseded', 'Drafts'],
+  ['helper_script', 'Helper scripts'],
+  ['name_changed', 'Renamed files']
+];
+function readmeNoteLines(notes) {
+  const groups = README_NOTE_KINDS
+    .map(([type, heading]) => [heading, (notes || []).filter((n) => n.type === type)])
+    .filter(([, list]) => list.length > 0);
+  if (groups.length === 0) return [];
+  const lines = ['## About some files', ''];
+  for (const [heading, list] of groups) {
+    lines.push(`### ${heading}`, '');
+    for (const n of list) lines.push(`- \`${n.filename}\`: ${n.error}`);
+    lines.push('');
+  }
+  lines.pop();
+  return lines;
 }
 
 // ============================================================================
@@ -326,8 +416,9 @@ async function addArtefactBlob(folder, artifacts, filename, blob) {
 // ============================================================================
 
 // A Claude Docs document as one self-contained page to read, print or share. Raw HTML in the Markdown is
-// shown as text, and only web and mail links and https images are kept; the page's CSP allows no
-// script at all, so nothing in it can run.
+// shown as text, and only web and mail links, https images and the diagram screenshots saved in the
+// chat's images/ folder (../images/<name>) are kept; the page's CSP allows no script at all, so nothing
+// in it can run.
 // marked hands some attribute values over already escaped (titles, alt text, autolinks) and others not,
 // so each is unescaped first and then escaped exactly once.
 const docAttr = (s) => escapeHtmlText(String(s).replace(/&(amp|lt|gt|quot|#39);/g, (m, e) => ({ amp: '&', lt: '<', gt: '>', quot: '"', '#39': "'" })[e]));
@@ -352,7 +443,8 @@ function claudeDocHtml(title, markdown) {
           return `<a href="${docAttr(href)}"${linkTitle ? ` title="${docAttr(linkTitle)}"` : ''} rel="noopener noreferrer">${text}</a>`;
         },
         image(href, imageTitle, text) {
-          if (!/^https:/i.test(String(href || '').trim())) return docAttr(text || '');
+          // https, or a diagram's screenshot the export saved beside the document (docDiagramPictures).
+          if (!/^(https:|\.\.\/images\/[^/?#\\]+$)/i.test(String(href || '').trim())) return docAttr(text || '');
           return `<img src="${docAttr(href)}" alt="${docAttr(text || '')}"${imageTitle ? ` title="${docAttr(imageTitle)}"` : ''}>`;
         },
       },
@@ -364,7 +456,7 @@ function claudeDocHtml(title, markdown) {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src https: data: file:">
 <title>${escapeHtmlText(title)}</title>
 <style>
 :root { --bg: #faf9f6; --ink: #1f1e1c; --soft: #4a4844; --mute: #77736b; --line: #e3dfd6; --card: #fff; --accent: #b4552d; }
@@ -535,9 +627,11 @@ function getCodeFence(content) {
 // getMessageChain, isBashTool, the heredoc helpers and extractArtifacts are in export-core.js
 
 // Detect bash_tool commands that mutate a tracked artifact in a way the
-// declarative replay (create_file / str_replace / rewrite / heredoc) can't
-// reconstruct. Emits one `artifact_opaque_mutation` warning per distinct
-// command, pointing the user at `replay_bash.py` for recovery.
+// declarative replay (create_file / str_replace / rewrite / heredoc, and a
+// literal sed -i or cat >> passed in as options.replayed) can't reconstruct.
+// Returns one entry per changed file (all its commands merged); sortOpaque
+// later turns each into nothing, a note or an `artifact_opaque_mutation`
+// warning pointing the user at `replay_bash.py`.
 //
 // We deliberately do NOT try to replay bash scripts here. The companion CLI
 // `replay_bash.py` runs the actual scripts in an isolated tmpdir with full
@@ -610,7 +704,14 @@ function shellWords(segment) {
 // Any heredoc's body taken out, the rest of its first line kept: the body is input, not shell.
 const ANY_HEREDOC_RE = /<<-?\s*(['"]?)(\w+)\1([^\n]*)\n(?:[\s\S]*?\n)??[ \t]*\2[ \t]*(?=\n|$)/g;
 
-function detectOpaqueMutations(data, errorCollector) {
+// options.index: extractArtifacts' index (key -> { filename, ... }), for each file's name in artefacts/.
+// options.replayed: toolUseId + '|' + path keys of commands already replayed, skipped here.
+// Returns { opaqueMutations (one per command and file), byFile (path -> { path, filename, msgIndexes,
+// lastMsgIndex, lastBlockIndex, count, resolved, candidates }) }. resolved is false when a command named
+// the file only by a name several known files share, with no working directory to tell them apart (or
+// a glob with none), or by a relative name its uncertain working directory (commandCwds) doesn't join
+// to a known file (resolveTouch). candidates: for such a file, every known file those names could be.
+function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), index = {} } = {}) {
   const messages = getMessageChain(data);
   const basenameOf = (p) => (p || '').split('/').pop();
 
@@ -636,6 +737,10 @@ function detectOpaqueMutations(data, errorCollector) {
       }
     }
   }
+  // Matched normalized (/home/claude//g.txt is /home/claude/g.txt); hits are filed under the raw keys.
+  const { list: known, raw: rawKeys } = normalizedKeys(knownArtifactPaths);
+  const uncertainCwds = new Set();
+  const cwds = commandCwds(messages, uncertainCwds);
 
   const opaqueMutations = [];
 
@@ -643,14 +748,12 @@ function detectOpaqueMutations(data, errorCollector) {
   // that writes to a tracked artifact and isn't a heredoc create (those are
   // handled declaratively by extractArtifacts).
   //
-  // An artifact may be referenced several ways:
+  // An artifact may be referenced several ways, each resolved against the
+  // command's working directory (commandCwds) by resolveSandboxPath:
   //   • Full sandbox path:   open('/home/claude/booklet/foo.html','w')
-  //   • Just the basename:   `cd <dir> && open('foo.html','w')`
+  //   • A relative name:     `cd <dir> && open('foo.html','w')`
   //   • Via a variable:      f='foo.html'; open(f,'w').write(...)
-  // We pre-scan for `<var> = '<literal>'` bindings whose literal matches
-  // either a full path or the basename of a known artifact, then look for
-  // write-back patterns that reference the path, the basename, or any such
-  // aliasing variable.
+  //   • A glob:              sed -i ... *.html
   for (let mi = 0; mi < messages.length; mi++) {
     const msg = messages[mi];
     for (let bi = 0; bi < (msg.content || []).length; bi++) {
@@ -658,6 +761,40 @@ function detectOpaqueMutations(data, errorCollector) {
       if (block.type !== 'tool_use' || !isBashTool(block.name)) continue;
       const rawCommand = (block.input && block.input.command) || '';
       if (!rawCommand) continue;
+      const cwd = cwds.has(block.id) ? cwds.get(block.id) : null;
+      const uncertain = uncertainCwds.has(block.id);
+
+      // The files this command changes: raw key -> { resolved, candidates }. candidates: for an
+      // unresolved hit, every known file the word could name (raw keys).
+      const hits = new Map();
+      const hit = (path, resolved, candidates = []) => {
+        for (const key of rawKeys.get(normalizeSandboxPath(path)) || []) {
+          const h = hits.get(key) || { resolved: true, candidates: new Set() };
+          h.resolved = h.resolved && resolved;
+          if (!resolved) for (const c of candidates) for (const k of rawKeys.get(normalizeSandboxPath(c)) || []) h.candidates.add(k);
+          hits.set(key, h);
+        }
+      };
+      // A word naming a file: its path, a relative name, or a glob.
+      const target = (word) => {
+        if (!word) return;
+        if (/[*?]/.test(word)) {
+          const full = word.startsWith('/') ? normalizeSandboxPath(word) : cwd ? normalizeSandboxPath(cwd + '/' + word) : null;
+          const re = (w) => new RegExp('^' + w.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
+          const found = full ? known.filter((ap) => re(full).test(ap)) : [];
+          if (found.length) found.forEach((ap) => hit(ap, true));
+          else if ((!full || (uncertain && !word.startsWith('/'))) && !word.includes('/')) {
+            // No directory, or one that may be wrong and names no known file: every file the glob
+            // could name, unresolved.
+            const loose = known.filter((ap) => re(word).test(basenameOf(ap)));
+            for (const ap of loose) hit(ap, false, loose);
+          }
+          return;
+        }
+        const { path, candidates, resolved } = resolveTouch(word, cwd, known, uncertain);
+        if (path) hit(path, resolved);
+        else for (const c of candidates) hit(c, false, candidates);
+      };
 
       // extractArtifacts already handled each `cat > path << DELIM` heredoc, so drop
       // the whole heredoc, body included: a body is text, and `<a href>about.html`
@@ -671,113 +808,171 @@ function detectOpaqueMutations(data, errorCollector) {
       // An unquoted delimiter means bash expanded $, ` and \ in the body, so the
       // file Claude got differs from the text in the command.
       for (const match of catHeredocs) {
-        if (match[2] === '' && /[$`\\]/.test(match[4] || '')) {
-          opaqueMutations.push({ artifactPath: heredocPath(match), msgIndex: mi, blockIndex: bi, command: rawCommand });
-        }
+        if (match[2] === '' && /[$`\\]/.test(match[4] || '')) hit(heredocPath(match), true);
       }
 
-      // Map variable name -> the artifact path it aliases (path or basename), as a string
-      // (f = 'foo.html') or a Path (p = Path('/home/claude/foo.html')).
-      const varToArtifact = {};
-      const varBindingRe = /(?:^|[\s;])\s*(\w+)\s*=\s*(?:(?:pathlib\.)?Path\(\s*)?(['"])((?:\\.|(?!\2).)*)\2/g;
+      // Python: open(p, 'w' / 'a' / 'x' / 'r+' ..., encoding=...), open(file=p, mode='w'),
+      // Path(p).write_text(...) and p.write_text(...), p a literal or a variable bound to one
+      // (f = 'foo.html', or p = Path('/home/claude/foo.html'), also first in a python3 -c "..." script).
+      const bindings = {};
+      const varBindingRe = /(?:^|[\s;'"])\s*(\w+)\s*=\s*(?:(?:pathlib\.)?Path\(\s*)?(['"])((?:\\.|(?!\2).)*)\2/g;
       let vbm;
       while ((vbm = varBindingRe.exec(command)) !== null) {
-        const varName = vbm[1];
-        const value = vbm[3].replace(/^\.\//, '');
-        for (const ap of knownArtifactPaths) {
-          if (value === ap || value === basenameOf(ap)) {
-            varToArtifact[varName] = ap;
-            break;
-          }
+        (bindings[vbm[1]] = bindings[vbm[1]] || []).push(vbm[3]);
+      }
+      const operand = "(?:(['\"])((?:\\\\.|(?!\\1).)*)\\1|([A-Za-z_]\\w*))";
+      const pyWriteRes = [
+        new RegExp("open\\(\\s*(?:file\\s*=\\s*)?" + operand + "\\s*,\\s*(?:mode\\s*=\\s*)?['\"](?:[wax][bt]?\\+?|r[bt]?\\+)['\"]", 'g'),
+        new RegExp("Path\\(\\s*" + operand + "\\s*\\)\\s*\\.write_(?:text|bytes)\\s*\\(", 'g'),
+        new RegExp("(?:^|[^\\w.)\\]])()()([A-Za-z_]\\w*)\\s*\\.\\s*write_(?:text|bytes)\\s*\\(", 'g'),
+      ];
+      for (const re of pyWriteRes) {
+        for (const m of command.matchAll(re)) {
+          if (m[2] !== undefined && m[1]) target(m[2]);
+          else if (m[3]) for (const value of bindings[m[3]] || []) target(value);
         }
       }
-      const globbed = /[*?]/.test(shellCommand);
 
-      for (const ap of knownArtifactPaths) {
-        const basename = basenameOf(ap);
-        const escapedPath = ap.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const escapedBase = basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const aliasVars = Object.keys(varToArtifact).filter(v => varToArtifact[v] === ap);
-
-        const referenced =
-          command.includes(ap) ||
-          command.includes(basename) ||
-          aliasVars.length > 0 ||
-          globbed;
-        if (!referenced) continue;
-
-        // Write-back patterns, against the full path or the basename (not as part of a
-        // longer name) or an aliasing variable.
-        const lit = "['\"](?:\\./)?(?:" + escapedPath + "|" + escapedBase + ")['\"]";
-        const varAlt = aliasVars.map(v => '\\b' + v + '\\b').join('|');
-        const target = aliasVars.length > 0 ? "(?:" + lit + "|" + varAlt + ")" : lit;
-        // Python: open(p, 'w' / 'a' / 'x' / 'r+' ..., encoding=...), open(file=p, mode='w'),
-        // Path(p).write_text(...) and p.write_text(...) for a Path variable.
-        const pyWriteRe = new RegExp(
-          "open\\(\\s*(?:file\\s*=\\s*)?" + target + "\\s*,\\s*(?:mode\\s*=\\s*)?['\"](?:[wax][bt]?\\+?|r[bt]?\\+)['\"]" +
-          "|Path\\(\\s*" + target + "\\s*\\)\\s*\\.write_(?:text|bytes)\\s*\\(" +
-          (varAlt ? "|(?:" + varAlt + ")\\s*\\.\\s*write_(?:text|bytes)\\s*\\(" : '')
-        );
-        // A shell word names the file as its path, its name, ./name, or a glob matching either.
-        const names = new Set([ap, basename]);
-        const globRe = (word) => new RegExp('^' + word.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
-        const isTarget = (word) => {
-          const w = word.replace(/^\.\//, '');
-          if (names.has(w)) return true;
-          if (!/[*?]/.test(w)) return false;
-          const re = globRe(w);
-          return w.includes('/') ? re.test(ap) : re.test(basename);
-        };
-        // Shell, one simple command at a time: a redirect into the file, sed/perl/awk
-        // in place, tee, or cp/mv/install onto it.
-        const shellWrites = shellSegments(shellCommand).some((segment) => {
-          const { words, redirects } = shellWords(segment);
-          if (redirects.some(isTarget)) return true;
-          if (words[0] === 'sudo') words.shift();
-          const tool = words[0];
-          const args = words.slice(1);
-          if (tool === 'sed' || tool === 'perl') {
-            const inPlace = args.some((w) => /^-[a-zA-Z]*i/.test(w) || w.startsWith('--in-place'));
-            return inPlace && args.some(isTarget);
-          }
-          if (tool === 'awk' || tool === 'gawk') {
-            const inPlace = args.some((w, i) => (w === '-i' && args[i + 1] === 'inplace') || w === '-iinplace' || w === '--include=inplace');
-            return inPlace && args.some(isTarget);
-          }
-          if (tool === 'tee') return args.some(isTarget);
-          if (tool === 'cp' || tool === 'mv' || tool === 'install') return args.length > 1 && isTarget(args[args.length - 1]);
-          if (tool === 'dd') return args.some((w) => w.startsWith('of=') && isTarget(w.slice(3)));
-          return false;
-        });
-
-        if (pyWriteRe.test(command) || shellWrites) {
-          // Every file the command changes is recorded, not just the first.
-          opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command: rawCommand });
+      // Shell, one simple command at a time: a redirect into the file, sed/perl/awk
+      // in place, tee, cp/mv/install onto it, or dd of=.
+      for (const segment of shellSegments(shellCommand)) {
+        const { words, redirects } = shellWords(segment);
+        redirects.forEach(target);
+        if (words[0] === 'sudo') words.shift();
+        const tool = words[0];
+        const args = words.slice(1);
+        if (tool === 'sed' || tool === 'perl') {
+          if (args.some((w) => /^-[a-zA-Z]*i/.test(w) || w.startsWith('--in-place'))) args.filter((w) => !w.startsWith('-')).forEach(target);
+        } else if (tool === 'awk' || tool === 'gawk') {
+          if (args.some((w, i) => (w === '-i' && args[i + 1] === 'inplace') || w === '-iinplace' || w === '--include=inplace')) args.filter((w) => !w.startsWith('-')).forEach(target);
+        } else if (tool === 'tee') {
+          args.filter((w) => !w.startsWith('-')).forEach(target);
+        } else if (tool === 'cp' || tool === 'mv' || tool === 'install') {
+          if (args.length > 1) target(args[args.length - 1]);
+        } else if (tool === 'dd') {
+          args.filter((w) => w.startsWith('of=')).forEach((w) => target(w.slice(3)));
         }
+      }
+
+      // Every file the command changes is recorded, not just the first.
+      for (const [path, h] of hits) {
+        if (replayed.has(block.id + '|' + path)) continue;
+        opaqueMutations.push({ artifactPath: path, msgIndex: mi, blockIndex: bi, toolUseId: block.id, resolved: h.resolved, candidates: Array.from(h.candidates), command: rawCommand });
       }
     }
   }
 
-  // Surface every distinct opaque mutation as an `artifact_opaque_mutation`
-  // warning. De-dupe by (basename, command) so the same script appearing
-  // twice doesn't get listed twice. The recovery hint points users at the
-  // companion `replay_bash.py` CLI.
-  const seenCommands = new Set();
+  // One entry per file: all its commands merged and counted.
+  const byFile = new Map();
   for (const om of opaqueMutations) {
-    const key = basenameOf(om.artifactPath) + '|' + om.command;
-    if (seenCommands.has(key)) continue;
-    seenCommands.add(key);
-    if (errorCollector) {
-      errorCollector.addWarning(
-        'artifact_opaque_mutation',
-        basenameOf(om.artifactPath),
-        `A bash command modified ${basenameOf(om.artifactPath)} in a way the exporter cannot replay declaratively (it's not a create_file, str_replace, or heredoc). The exported artifact may differ from what Claude actually produced. Use replay_bash.py to reconstruct.`,
-        { path: om.artifactPath, note: 'Run: python3 replay_bash.py <this-export-folder>' }
-      );
+    const own = Object.prototype.hasOwnProperty.call(index, om.artifactPath) ? index[om.artifactPath] : null;
+    let entry = byFile.get(om.artifactPath);
+    if (!entry) {
+      entry = { path: om.artifactPath, filename: (own && own.filename) || basenameOf(om.artifactPath), msgIndexes: [], lastMsgIndex: om.msgIndex, lastBlockIndex: om.blockIndex, count: 0, resolved: true, candidates: [] };
+      byFile.set(om.artifactPath, entry);
     }
+    entry.count++;
+    if (!entry.msgIndexes.includes(om.msgIndex)) entry.msgIndexes.push(om.msgIndex);
+    if (om.msgIndex > entry.lastMsgIndex || (om.msgIndex === entry.lastMsgIndex && om.blockIndex > entry.lastBlockIndex)) {
+      entry.lastMsgIndex = om.msgIndex;
+      entry.lastBlockIndex = om.blockIndex;
+    }
+    entry.resolved = entry.resolved && om.resolved;
+    for (const c of om.candidates || []) if (!entry.candidates.includes(c)) entry.candidates.push(c);
   }
 
-  return { opaqueMutations };
+  return { opaqueMutations, byFile };
+}
+
+// The file tools that change a file at its path (input.path or input.file_path), by name.
+const FILE_EDIT_TOOLS = ['create_file', 'str_replace', 'rewrite', 'create_or_overwrite', 'Write', 'Edit'];
+
+// Run scripts, which rule c of sortOpaque treats as helper scripts. Other code (.js, .ts, .sql, ...)
+// is as often what Claude made for the user, so it stays a warning.
+const HELPER_SCRIPT_EXTENSIONS = ['.py', '.sh', '.bash', '.pl', '.rb'];
+
+// claude.ai's two sandbox folders: drafts are made in the first, deliveries come from the second.
+const SANDBOX_HOME = '/home/claude';
+const SANDBOX_OUTPUTS = '/mnt/user-data/outputs';
+const OUTPUTS_NAMED_RE = /\/mnt\/user-data\/outputs(?![^/\s'"`;&|)<>])/;
+
+// Whether position a (msgIndex, blockIndex) is at or after b. A missing block means the end of a
+// message for a (a save known only by its message) and its start for b, as before blocks were kept.
+function atOrAfter(aMsg, aBlock, bMsg, bBlock) {
+  if (aMsg !== bMsg) return aMsg > bMsg;
+  return (Number.isInteger(aBlock) ? aBlock : Infinity) >= (Number.isInteger(bBlock) ? bBlock : -1);
+}
+
+// Sorts each file's unreplayable changes (detectOpaqueMutations' byFile) into nothing, a note or a
+// warning (spec section 2, rules a-d; the first that matches wins). An entry's last change is the later
+// of (lastMsgIndex, lastBlockIndex) and (lastChange, lastChangeBlock), its last change of any kind,
+// replayed or not; rules a and b count only saves at or after it, a save earlier in the same message
+// being before it. saved: [{ path, filename, msgIndex, blockIndex? }], the presentations and deliveries
+// that downloaded. shownPaths: every path presented or delivered, downloaded or not (defaults to
+// saved's). options.commands: the chat's bash commands [{ msgIndex, blockIndex, text, failed }], for
+// rule b's outputs/ case. Message numbers in the texts count from 1 along the branch.
+function sortOpaque(byFile, saved, errorCollector, shownPaths = null, { commands = [] } = {}) {
+  const norm = (p) => normalizeSandboxPath(String(p || ''));
+  const shown = new Set((shownPaths ? Array.from(shownPaths) : saved.map((s) => s.path)).map(norm));
+  const extOf = (p) => { const dot = p.lastIndexOf('.'); return dot > p.lastIndexOf('/') ? p.slice(dot).toLowerCase() : ''; };
+  const stemOf = (p) => { const name = p.split('/').pop(); const dot = name.lastIndexOf('.'); return dot > 0 ? name.slice(0, dot) : name; };
+  const isHelper = (p) => HELPER_SCRIPT_EXTENSIONS.includes(extOf(p)) && !shown.has(p);
+  const escape = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  for (const entry of byFile.values()) {
+    const path = norm(entry.path);
+    const indexes = (entry.msgIndexes || []).slice().sort((a, b) => a - b).map((i) => i + 1);
+    const commandsText = `${entry.count} command${entry.count === 1 ? '' : 's'}`;
+    const where = indexes.length ? `message${indexes.length === 1 ? '' : 's'} ${indexes.join(', ')}` : '';
+    const counted = where ? `${commandsText}; ${where}` : commandsText;
+    const block = (b) => (Number.isInteger(b) ? b : -1);
+    let lastMsg = entry.lastMsgIndex, lastBlock = block(entry.lastBlockIndex);
+    if (Number.isInteger(entry.lastChange) && (entry.lastChange > lastMsg || (entry.lastChange === lastMsg && block(entry.lastChangeBlock) > lastBlock))) {
+      lastMsg = entry.lastChange; lastBlock = block(entry.lastChangeBlock);
+    }
+    const isLater = (s) => atOrAfter(s.msgIndex, s.blockIndex, lastMsg, lastBlock);
+    const later = saved.filter(isLater);
+    const name = entry.filename;
+    const details = { path: entry.path };
+    if (entry.resolved) {
+      // a: a download saved under the file's own name in artefacts/ at its last change or later (the file
+      // itself, or a copy presented from outputs/) replaced it, so the export has its final state. A copy kept
+      // apart as <base>_delivered does not count.
+      if (later.some((s) => s.filename === name)) continue;
+      // b: files saved afterwards from its folder or below: this one is likely their draft. A draft in
+      // /home/claude also counts a file saved from outputs/ when its name has the draft's stem, or when a
+      // bash command that didn't fail, at or after the draft's last change, names both the draft and outputs/.
+      const folder = path.slice(0, path.lastIndexOf('/')) || '/';
+      const base = path.split('/').pop();
+      const namesDraft = new RegExp(`(?:^|[^\\w.-])${escape(base)}(?![\\w.-])`);
+      const linked = isUnderFolder(path, SANDBOX_HOME) && commands.some((c) => !c.failed
+        && atOrAfter(c.msgIndex, c.blockIndex, lastMsg, lastBlock)
+        && namesDraft.test(c.text) && OUTPUTS_NAMED_RE.test(c.text));
+      const fromOutputs = (s) => isUnderFolder(path, SANDBOX_HOME) && isUnderFolder(s.path, SANDBOX_OUTPUTS) && (linked || stemOf(norm(s.path)) === stemOf(path));
+      const names = [];
+      for (const s of later) if (norm(s.path) !== path && (isUnderFolder(s.path, folder) || fromOutputs(s)) && !names.includes(s.filename)) names.push(s.filename);
+      if (names.length) {
+        const more = names.length - 3;
+        const list = more > 0 ? `${names.slice(0, 3).join(', ')} and ${more} more` : names.join(', ');
+        errorCollector.addNote('draft_superseded', name,
+          `Draft changed by a command the export can't follow (${counted}). The files Claude delivered from this folder afterwards are in the export: ${list}. This draft is likely an earlier state of one of them.`,
+          details);
+        continue;
+      }
+    }
+    // c: a run script never presented or delivered is one Claude ran. An unresolved file is one when
+    // every file its command could have meant is.
+    const candidates = entry.resolved ? [path] : (entry.candidates || []).map(norm);
+    if (candidates.length && candidates.every(isHelper)) {
+      errorCollector.addNote('helper_script', name,
+        `Helper script Claude ran; changed by a command the export can't follow (${counted}), so this copy may be older than the one Claude ran. Scripts are not what Claude delivered.`,
+        details);
+      continue;
+    }
+    // d: a warning, pointing at the companion replay_bash.py CLI.
+    errorCollector.addWarning('artifact_opaque_mutation', name,
+      `Changed by ${commandsText} the export can't replay${where ? ` (${where})` : ''}.`,
+      { ...details, note: 'Run: python3 replay_bash.py <this-export-folder>' });
+  }
 }
 
 // Extract text attachments from messages (pasted files with extracted_content)
@@ -2000,7 +2195,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   for (const problem of chatHealth(data)) addHealth(problem.message, problem.check);
 
   const artifactIndex = {};
-  const artifacts = extractArtifacts(data, errorCollector, artifactIndex);
+  const replayedEdits = new Set();  // literal sed -i / cat >> the replay applied, not opaque
+  const artifacts = extractArtifacts(data, errorCollector, artifactIndex, replayedEdits);
   const { attachments: textAttachments, idToFilename: attachmentIdMap, byMessage: attachmentFiles } = extractTextAttachments(data);
   const uploadedFiles = extractUploadedFiles(data, organizationId);
   const presentedFiles = extractPresentedFiles(data);
@@ -2337,13 +2533,87 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     addFileWithBOM(folder, `artefacts/${filename}`, content);
   }
 
-  // Flag any bash_tool command that mutates a tracked artifact in a way the
-  // declarative replay can't reconstruct. Emits `artifact_opaque_mutation`
-  // warnings in errors.txt pointing the user at the companion replay_bash.py
-  // CLI for recovery. See docs/WASM_REPLAY_APPROACH.md for
-  // why we don't try to interpret bash scripts in the extension. It runs before
-  // the presented files, which use its warnings.
-  detectOpaqueMutations(data, errorCollector);
+  // Find each file a bash command changed in a way the declarative replay can't
+  // reconstruct (see docs/WASM_REPLAY_APPROACH.md for why we don't interpret bash
+  // scripts in the extension), merged with the replay-shaped edits extractArtifacts
+  // left out. Once the presented and delivered files are in, sortOpaque turns each
+  // into nothing, a note or an `artifact_opaque_mutation` warning.
+  const { byFile: opaqueFiles } = detectOpaqueMutations(data, errorCollector, { index: artifactIndex, replayed: replayedEdits });
+  const later = (a, b) => a[0] > b[0] || (a[0] === b[0] && a[1] > b[1]);  // positions [chain index, block index]
+  for (const [key, entry] of Object.entries(artifactIndex)) {
+    if (!entry || !Array.isArray(entry.skipped) || !entry.skipped.length) continue;
+    let merged = opaqueFiles.get(key);
+    if (!merged) {
+      merged = { path: key, filename: entry.filename, msgIndexes: [], lastMsgIndex: -1, lastBlockIndex: -1, count: 0, resolved: true, candidates: [] };
+      opaqueFiles.set(key, merged);
+    }
+    // The detector usually counted these commands already; one per message is added only when it didn't.
+    for (const mi of entry.skipped) {
+      if (merged.msgIndexes.includes(mi)) continue;
+      merged.msgIndexes.push(mi);
+      merged.count++;
+    }
+    for (const at of entry.skippedAt || entry.skipped.map((mi) => [mi, -1])) {
+      if (later(at, [merged.lastMsgIndex, Number.isInteger(merged.lastBlockIndex) ? merged.lastBlockIndex : -1])) [merged.lastMsgIndex, merged.lastBlockIndex] = at;
+    }
+  }
+  // Each file's last change of any kind, as [chain index, block index]: a file tool that succeeded in
+  // the chat (even one the replay could not apply: an Edit whose old text a script had changed makes no
+  // version), a heredoc that wrote it, a bash edit replayed on it, a change the replay couldn't follow
+  // (opaque or skipped), and the message of the last version the replay made (its end, when none of
+  // these says which block).
+  const chainIndex = new Map(messages.map((m, i) => [m.uuid, i]));
+  const failedTools = failedToolUseIds(messages);
+  const toolAt = new Map();  // tool_use id -> [chain index, block index]
+  const lastWrite = {};  // sandbox path -> position of the last file tool (not failed) or heredoc on it
+  const bashCommands = [];  // for sortOpaque's rule b: [{ msgIndex, blockIndex, text, failed }]
+  const resultsById = new Map();
+  messages.forEach((msg) => { for (const b of (msg.content || [])) if (b && b.type === 'tool_result' && b.tool_use_id) resultsById.set(b.tool_use_id, b); });
+  messages.forEach((msg, mi) => {
+    (msg.content || []).forEach((block, bi) => {
+      if (!block || block.type !== 'tool_use') return;
+      toolAt.set(block.id, [mi, bi]);
+      const input = block.input || {};
+      if (isBashTool(block.name)) {
+        const text = String(input.command || '');
+        for (const m of heredocMatches(text)) lastWrite[heredocPath(m)] = [mi, bi];
+        bashCommands.push({ msgIndex: mi, blockIndex: bi, text, failed: failedTools.has(block.id) || bashFailed(resultsById.get(block.id)) });
+        return;
+      }
+      if (!FILE_EDIT_TOOLS.includes(block.name) || failedTools.has(block.id)) return;
+      const p = input.path || input.file_path;
+      if (typeof p === 'string') lastWrite[p] = [mi, bi];
+    });
+  });
+  for (const id of replayedEdits) {
+    const cut = id.indexOf('|');
+    const at = toolAt.get(id.slice(0, cut));
+    const key = id.slice(cut + 1);
+    if (at && (!lastWrite[key] || later(at, lastWrite[key]))) lastWrite[key] = at;
+  }
+  const lastChangeAt = (key) => {
+    const entry = Object.prototype.hasOwnProperty.call(artifactIndex, key) ? artifactIndex[key] : null;
+    const opaque = opaqueFiles.get(key);
+    let last = opaque ? [opaque.lastMsgIndex, Number.isInteger(opaque.lastBlockIndex) ? opaque.lastBlockIndex : -1] : [-1, -1];
+    if (Object.prototype.hasOwnProperty.call(lastWrite, key) && later(lastWrite[key], last)) last = lastWrite[key];
+    for (const uuid of (entry && entry.messages) || []) {
+      if (chainIndex.has(uuid) && chainIndex.get(uuid) > last[0]) last = [chainIndex.get(uuid), Number.MAX_SAFE_INTEGER];
+    }
+    return { msgIndex: last[0], blockIndex: last[1] };
+  };
+  // Whether a presentation or delivery comes at or after the last change of key.
+  const savedAfterChange = (file, key) => {
+    const at = lastChangeAt(key);
+    return atOrAfter(file.msgIndex, file.blockIndex, at.msgIndex, at.blockIndex);
+  };
+  for (const [key, entry] of opaqueFiles) {
+    const at = lastChangeAt(key);
+    entry.lastChange = at.msgIndex;
+    entry.lastChangeBlock = at.blockIndex;
+  }
+  // Presentations and deliveries that downloaded, for sortOpaque; and every path shown.
+  const savedFiles = [];
+  const shownPaths = new Set(presentedFiles.map((f) => f.path));
 
   // Download presented files (files Claude showed the user). One the replay
   // already rebuilt is skipped, unless the replay is known to be off for it (an
@@ -2351,8 +2621,9 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // presented copy is the real final state, and it replaces the replayed file
   // and its last version. Two presented files with one name from different
   // folders are kept apart as <base>_2<ext>.
-  const replayIsOff = (name) => errorCollector.warnings.some((w) =>
-    (w.type === 'str_replace_failed' || w.type === 'artifact_opaque_mutation') && w.filename === name);
+  const offNames = new Set(Array.from(opaqueFiles.values(), (e) => e.filename));
+  const replayIsOff = (name) => offNames.has(name)
+    || errorCollector.warnings.some((w) => w.type === 'str_replace_failed' && w.filename === name);
   const docHtmlNames = new Set();  // lowercase names of the Claude Docs .html pages written
   const docHtmlFiles = [];  // their names, for README.md
   const presentedNames = {};  // presented path -> its name in artefacts/
@@ -2368,14 +2639,18 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       const base = dot > 0 ? name.substring(0, dot) : name;
       const ext = dot > 0 ? name.substring(dot) : '';
       for (let n = 2; Object.prototype.hasOwnProperty.call(artifacts, name) || presentedFrom[name]; n++) name = `${base}_${n}${ext}`;
-      errorCollector.addWarning('artifact_basename_collision', name,
-        `Another presented file is already named "${file.filename}". This one was saved as "${name}" to avoid overwriting.`,
-        { path: file.path, note: 'Check that both files are intended.' });
+      const message = `Two different files were named ${file.filename}; this one, from ${file.path}, was saved as ${name}. The other is ${file.filename} from ${presentedFrom[file.filename]}.`;
+      const details = { path: file.path, note: `Other file: ${file.filename} from ${presentedFrom[file.filename]}` };
+      if (typeof errorCollector.addNote === 'function') errorCollector.addNote('name_changed', name, message, details);
+      else errorCollector.addWarning('artifact_basename_collision', name, message, details);
     }
     const replayed = own ? !presentedFrom[name] : Object.prototype.hasOwnProperty.call(artifacts, name) && !presentedFrom[name];
     presentedNames[file.path] = name;
     presentedFrom[name] = file.path;
-    if (replayed && !replayIsOff(name)) continue;
+    // An off replay is replaced only by a presentation at or after the file's last change; an earlier
+    // one is left out like a clean replay's, and sortOpaque keeps the file's entry.
+    const ownEntry = replayed ? own || Object.values(artifactIndex).find((e) => e.filename === name) : null;
+    if (replayed && (!replayIsOff(name) || (ownEntry && !savedAfterChange(file, ownEntry.path)))) continue;
 
     if (onProgress) {
       onProgress(15 + Math.floor((i / presentedFiles.length) * 5), 100, `Downloading: ${file.filename}`);
@@ -2386,10 +2661,10 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       const blob = await fetchUploadedFile(null, file.uuid, organizationId, conversationId, file.path);
       await addArtefactBlob(folder, artifacts, name, blob);
       if (replayed) {
-        const entry = own || Object.values(artifactIndex).find((e) => e.filename === name);
+        const entry = ownEntry;
         if (entry && entry.versions.length > 1) await addArtefactBlob(folder, artifacts, entry.versions[entry.versions.length - 1], blob);
-        errorCollector.clearWarnings('artifact_opaque_mutation', name);
       }
+      savedFiles.push({ path: file.path, filename: name, msgIndex: file.msgIndex, blockIndex: file.blockIndex });
       // The download is the file's final state, so edits that couldn't be
       // replayed against it aren't missing.
       errorCollector.clearWarnings('str_replace_failed', name);
@@ -2406,7 +2681,15 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
 
   // Download files Claude sent with SendUserFile. Their bytes exist only on the
   // server, so these are fetched by UUID.
-  const deliveredFiles = extractDeliveredFiles(data, Object.keys(artifacts));
+  // A delivery of an artifact's own path at or after its last change, when the replay
+  // is off, is its final state: it takes the artifact's name and replaces the last version too.
+  const offPaths = new Map();
+  for (const file of extractDeliveredFiles(data, Object.keys(artifacts))) {
+    const own = Object.prototype.hasOwnProperty.call(artifactIndex, file.path) ? artifactIndex[file.path] : null;
+    if (!own || !replayIsOff(own.filename)) continue;
+    if (savedAfterChange(file, file.path)) offPaths.set(file.path, own.filename);
+  }
+  const deliveredFiles = extractDeliveredFiles(data, Object.keys(artifacts), offPaths);
   // Saved files only, for the viewer's deliveries map (see buildViewerDeliveries).
   const savedDeliveries = [];
   for (let i = 0; i < deliveredFiles.length; i++) {
@@ -2416,9 +2699,16 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
 
     try {
+      shownPaths.add(file.path);
       const blob = await fetchUploadedFile(null, file.uuid, organizationId, data.uuid, null);
       await addArtefactBlob(folder, artifacts, file.filename, blob);
+      if (file.replaces) {
+        const entry = artifactIndex[file.path];
+        if (entry && entry.versions.length > 1) await addArtefactBlob(folder, artifacts, entry.versions[entry.versions.length - 1], blob);
+        errorCollector.clearWarnings('str_replace_failed', file.filename);
+      }
       savedDeliveries.push(file);
+      savedFiles.push({ path: file.path, filename: file.filename, msgIndex: file.msgIndex, blockIndex: file.blockIndex });
     } catch (err) {
       console.error(`Failed to download delivered file ${file.filename}:`, err);
       errorCollector.addError('delivered_file', file.filename, err.message, {
@@ -2429,6 +2719,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       });
     }
   }
+
+  sortOpaque(opaqueFiles, savedFiles, errorCollector, shownPaths, { commands: bashCommands });
 
   // Claude Docs diagrams show by caption, as only claude.ai's page draws them. A self-contained HTML copy
   // Claude made in the chat (docCompanions) is linked under the document's title; without one, the note
@@ -2441,11 +2733,44 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     if (entry && !key.startsWith('doc:') && !key.startsWith('artifact:') && !key.startsWith('widget:')) pathNames[key] = entry.filename;
   }
   const companions = docCompanions(data, artifacts, artifactIndex, pathNames);
+  // A diagram Claude took a screenshot of (Claude_Docs__read) shows that picture, saved by saveToolImages,
+  // where its caption stood; only diagrams still shown by caption count for the note and doc_diagram.
+  // Each widget's code is kept as <doc base>_diagram<N>.jsx, N in the document's order.
+  const widgetShots = docWidgetShots(data);
+  const widgetCode = docWidgetCode(data);
+  const widgetEmbeds = docWidgetEmbeds(data);
+  const docJsx = {};  // doc key -> [{ node, code }] in the document's order
+  const rebuiltDocs = {};  // file name -> the document as extractArtifacts rebuilt it
+  // The viewer's copy keeps the captions: viewer.html sits at the export's root and its sanitizer drops a
+  // ../images/ picture, so it shows each diagram by caption, as before v1.22.1.
+  const viewerDocs = {};  // file name -> the document for viewer.html
+  for (const [key, entry] of Object.entries(artifactIndex)) {
+    if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
+    const mine = widgetEmbeds.filter((e) => e.doc === key);
+    const unplaced = mine.slice();
+    const ordered = [];
+    for (const line of artifacts[entry.filename].match(DOC_CAPTION_RE) || []) {
+      const caption = line === '[embedded content]' ? '' : line.slice('[embedded content: '.length, -1);
+      const i = unplaced.findIndex((e) => e.caption === caption);
+      if (i !== -1) ordered.push(unplaced.splice(i, 1)[0]);
+    }
+    const pictures = ordered.map((e) => {
+      const shot = widgetShots.get(e.node);
+      const saved = shot && Object.prototype.hasOwnProperty.call(toolImages, shot.fileUuid) ? toolImages[shot.fileUuid] : null;
+      return saved ? { caption: e.caption, src: `../${saved}`, note: shot.editedAfter ? 'screenshot taken before a later edit' : '' } : null;
+    }).filter(Boolean);
+    rebuiltDocs[entry.filename] = artifacts[entry.filename];
+    artifacts[entry.filename] = docDiagramPictures(artifacts[entry.filename], pictures).markdown;
+    const nodes = [];
+    for (const e of ordered.concat(unplaced)) if (!nodes.includes(e.node) && widgetCode.has(e.node)) nodes.push(e.node);
+    docJsx[key] = nodes.map((node) => ({ node, code: widgetCode.get(node) }));
+  }
   for (const [key, entry] of Object.entries(artifactIndex)) {
     if (!key.startsWith('doc:') || !entry || typeof artifacts[entry.filename] !== 'string') continue;
     const names = companions[key] || [];
     const { markdown, captions } = docCompanionNote(artifacts[entry.filename], names);
-    if (markdown !== artifacts[entry.filename]) {
+    if (rebuiltDocs[entry.filename] !== undefined) viewerDocs[entry.filename] = docCompanionNote(rebuiltDocs[entry.filename], names, captions).markdown;
+    if (markdown !== artifacts[entry.filename] || markdown !== rebuiltDocs[entry.filename]) {
       artifacts[entry.filename] = markdown;
       addFileWithBOM(folder, `artefacts/${entry.filename}`, markdown);
     }
@@ -2474,6 +2799,14 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     } catch (err) {
       console.warn(`Could not write ${htmlName}:`, err.message);
     }
+    // Its diagrams' code, named uniquely the same way.
+    (docJsx[key] || []).forEach(({ code }, i) => {
+      let jsxName = `${base}_diagram${i + 1}.jsx`;
+      for (let n = 2; taken.has(jsxName.toLowerCase()) || docHtmlNames.has(jsxName.toLowerCase()); n++) jsxName = `${base}_diagram${i + 1}_${n}.jsx`;
+      docHtmlNames.add(jsxName.toLowerCase());
+      folder.file(`artefacts/${jsxName}`, code);
+      docHtmlFiles.push(jsxName);
+    });
   }
 
   // Add text attachments (pasted files)
@@ -2759,6 +3092,11 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     ''
   ];
 
+  const noteLines = readmeNoteLines(errorCollector.notes);
+  if (noteLines.length > 0) {
+    readmeLines.push('---', '', ...noteLines, '');
+  }
+
   if (codeBlocks.length > 0 || urls.length > 0 || webSources.length > 0) {
     readmeLines.push('---');
     readmeLines.push('');
@@ -2884,7 +3222,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       folder: folderName,
       model: CTViewer.modelLabel(data.model, getModelName(data)),
       fixText: fixMojibake,
-      artifacts: { ...artifacts, ...viewerArtifacts },
+      artifacts: { ...artifacts, ...viewerArtifacts, ...viewerDocs },
       artifactIndex,
       uploads: viewerUploads,
       webImages,
@@ -2895,7 +3233,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       widgetFile,
       widgetKey,
       published,
-      flags: viewerFlags(errorCollector.warnings),
+      flags: viewerFlags(errorCollector.warnings, errorCollector.notes),
       project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions, CTViewer.TEXT_EMBED_LIMIT)
     });
   } catch (err) {
@@ -2961,7 +3299,7 @@ async function createZipExport(data, onProgress = null, fetchPublished = null) {
     artifactCount: Object.keys(result.artifacts).length,
     errorCount: result.errorCollector?.errors?.length || 0,
     warningCount: result.errorCollector?.warnings?.length || 0,
-    hasErrors: result.errorCollector?.hasAny() || false,
+    hasErrors: !!(result.errorCollector && (result.errorCollector.hasErrors() || result.errorCollector.hasWarnings())),
     healthIssues: result.healthIssues || 0,
     viewerBuilt,
     size: zipBlob.size
@@ -3102,7 +3440,7 @@ async function saveWebImages(folder, data, errorCollector, onProgress = null) {
   if (!images.length) return saved;
   if (!(await webImagesAllowed())) {
     errorCollector.addWarning('web_image', 'images/', `${images.length} image${images.length === 1 ? '' : 's'} from web searches ${images.length === 1 ? 'was' : 'were'} not saved: Claude Takeout may not fetch images from other sites.`,
-      { note: 'Turn on Settings > Save web images and artifact card pictures, then export again. The links in full_chat.md still work.' });
+      { note: 'No permission to fetch images from other sites' });
     return saved;
   }
   const fetchImage = async (url) => {
@@ -4246,7 +4584,8 @@ function convertToMarkdown(data, options = {}) {
               const content = artifacts[filename];
               if (embedArtifacts && typeof content === 'string') {
                 if (seamlessMd) {
-                  lines.push('\n---\n', content, '\n---\n');
+                  // A diagram's screenshot is linked from artefacts/ (docDiagramPictures); this file is a folder up.
+                  lines.push('\n---\n', content.replace(/\]\(\.\.\/images\//g, '](images/'), '\n---\n');
                 } else {
                   const fence = getCodeFence(content);
                   lines.push(`${fence}markdown`, content, fence, '');
@@ -4702,7 +5041,7 @@ function collectorRunWarnings(collector, chat = '') {
 }
 
 // notes: plain sentences beyond the counts ("Nothing changed since …"), shown on the Done screen.
-function runResult({ outcome = 'done', reason = '', target = null, saved = null, warningList = [], errorFiles = [], notes = [], startedAt = null } = {}) {
+function runResult({ outcome = 'done', reason = '', target = null, saved = null, warningList = [], errorFiles = [], notes = [], fileNotes = 0, startedAt = null } = {}) {
   const list = Array.isArray(warningList) ? warningList : [];
   return {
     outcome,
@@ -4713,6 +5052,7 @@ function runResult({ outcome = 'done', reason = '', target = null, saved = null,
     warningList: list,
     errorFiles: [...new Set(errorFiles)],
     notes: (Array.isArray(notes) ? notes : []).map(String),
+    fileNotes: Number(fileNotes) || 0,
     startedAt: startedAt || new Date().toISOString(),
     endedAt: new Date().toISOString(),
   };
@@ -4868,7 +5208,8 @@ async function bulkExportZip(options = {}) {
   const warningList = [];
   const errorFiles = [];
   const notes = [];  // sentences the Done screen adds to its counts (runResult)
-  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, notes, startedAt: runStartedAt });
+  let fileNotes = 0;  // the chats' README notes (draft and helper files), shown but never counted as warnings
+  const result = (outcome, reason = '') => runResult({ outcome, reason, target, saved, warningList, errorFiles, notes, fileNotes, startedAt: runStartedAt });
   // The Exporting screen's events (exportProgress) and its Stop button (options.signal.stopped).
   const signal = options && options.signal && typeof options.signal === 'object' ? options.signal : null;
   const stopRequested = () => !!(signal && signal.stopped);
@@ -5045,6 +5386,7 @@ async function bulkExportZip(options = {}) {
         if (folderResult.errorCollector) {
           totalFileErrors += folderResult.errorCollector.errors?.length || 0;
           totalFileWarnings += folderResult.errorCollector.warnings?.length || 0;
+          fileNotes += folderResult.errorCollector.notes?.length || 0;
           const chatWarnings = collectorRunWarnings(folderResult.errorCollector, data.name || conv.name || 'Untitled');
           warningList.push(...chatWarnings);
           if (chatWarnings.length) errorFiles.push('errors.txt');
@@ -5227,7 +5569,7 @@ async function bulkExportZip(options = {}) {
     if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
     if (step) {
       warningList.push(...collectorRunWarnings(step.collector));
-      if (step.collector.hasAny()) errorFiles.push('artifacts/errors.txt');
+      if (step.collector.hasErrors() || step.collector.hasWarnings()) errorFiles.push('artifacts/errors.txt');
     }
     if (!viewerBuilt) warningList.push({ type: 'viewer', text: 'viewer.html could not be built.' });
     pendingWarnings = () => 0;
@@ -6112,7 +6454,7 @@ async function exportArtifacts(options = {}) {
     if (signal && signal.stopped) {
       warningList.push(...collectorRunWarnings(collector));
       if (run) {
-        if (collector.hasAny()) {
+        if (collector.hasErrors() || collector.hasWarnings()) {
           root.file('errors.txt', collector.generateErrorReport());
           errorFiles.push('errors.txt');
         }
@@ -6155,7 +6497,7 @@ async function exportArtifacts(options = {}) {
     saved.artifacts = views.filter((v) => !v.notExported).length;
     saved.versions = Number(versionCount) || 0;
     warningList.push(...collectorRunWarnings(collector));
-    if (collector.hasAny()) errorFiles.push('errors.txt');
+    if (collector.hasErrors() || collector.hasWarnings()) errorFiles.push('errors.txt');
     if (!viewerBuilt) warningList.push({ type: 'viewer', text: 'viewer.html could not be built.' });
     collector = null;  // its warnings are in warningList now
     emit('viewer', 1, 1, 'Viewer and index');
@@ -6260,6 +6602,9 @@ const WARNING_NOUNS = {
   presented_file: ['file Claude made could not be downloaded', 'files Claude made could not be downloaded'],
   delivered_file: ['file Claude made could not be downloaded', 'files Claude made could not be downloaded'],
   project_doc: ['project document not saved', 'project documents not saved'],
+  doc_diagram: ['diagram not included', 'diagrams not included'],
+  claude_doc_unreplayed: ['Claude Docs edit not rebuilt', 'Claude Docs edits not rebuilt'],
+  artifact_basename_collision: ['file renamed', 'files renamed'],
 };
 
 // Warnings grouped by type, one line each: "<count> <noun phrase> (<example>)".
@@ -6281,6 +6626,12 @@ function warningGroups(list, max = 5) {
 function doneHeadline(result) {
   const n = result.warnings || 0;
   return n ? { tone: 'warn', text: `Done, with ${n} warning${n === 1 ? '' : 's'}` } : { tone: 'ok', text: 'Done' };
+}
+
+// The quiet line under the warnings: notes about drafts and renamed files are in each chat's README.
+function doneNotesLine(result) {
+  const n = (result && result.fileNotes) || 0;
+  return n ? `${n} note${n === 1 ? '' : 's'} about drafts and renamed files ${n === 1 ? 'is' : 'are'} in each chat's README.` : '';
 }
 
 function doneTargetText(result) {
@@ -6811,6 +7162,7 @@ function showDone(result, plan) {
   const groups = warningGroups(result.warningList);
   fillList($('doneWarnings'), [...groups.lines, ...(groups.more ? [`and ${groups.more} more`] : [])]);
   $('doneNotes').textContent = (result.notes || []).join(' ');
+  $('doneFileNotes').textContent = doneNotesLine(result);
   const files = (result.errorFiles || []).filter((f) => f === 'errors.txt' || f === 'artifacts/errors.txt');
   // Export All writes a chat's errors.txt in that chat's folder; Export Artifacts writes one at the root.
   const where = plan.run === 'bulk' ? files.map((f) => (f === 'errors.txt' ? "errors.txt in each affected chat's folder" : f)) : files;

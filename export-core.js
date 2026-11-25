@@ -100,11 +100,18 @@ function isTextFile(filename) {
 // edit couldn't be rebuilt). The first warning for a file wins.
 const FLAG_FOR_WARNING = { artifact_opaque_mutation: 'script', str_replace_failed: 'edit', claude_doc_unreplayed: 'doc' };
 
-function viewerFlags(warnings) {
+// Notes give the softer flags 'draft' and 'helper'; a warning's flag wins over a note's.
+const FLAG_FOR_NOTE = { draft_superseded: 'draft', helper_script: 'helper' };
+
+function viewerFlags(warnings, notes = []) {
   const flags = {};
   for (const w of warnings || []) {
     const flag = w && Object.prototype.hasOwnProperty.call(FLAG_FOR_WARNING, w.type) ? FLAG_FOR_WARNING[w.type] : null;
     if (flag && w.filename && !Object.prototype.hasOwnProperty.call(flags, w.filename)) flags[w.filename] = flag;
+  }
+  for (const n of notes || []) {
+    const flag = n && Object.prototype.hasOwnProperty.call(FLAG_FOR_NOTE, n.type) ? FLAG_FOR_NOTE[n.type] : null;
+    if (flag && n.filename && !Object.prototype.hasOwnProperty.call(flags, n.filename)) flags[n.filename] = flag;
   }
   return flags;
 }
@@ -141,7 +148,17 @@ function chatHealth(data) {
       : 'claude.ai returned this chat without its messages.' });
     return problems;
   }
-  const hollow = messages.filter((m) => !m || !Array.isArray(m.content) || (!m.content.length && !m.text)).length;
+  const byId = new Map(messages.map((m) => [m && m.uuid, m]));
+  // An empty assistant message created within 5 s of a complete assistant parent is the tail claude.ai
+  // leaves after a finished reply, not missing content.
+  const emptyTail = (m) => {
+    if (!m || m.sender !== 'assistant') return false;
+    const p = byId.get(m.parent_message_uuid);
+    if (!p || p.sender !== 'assistant' || !Array.isArray(p.content) || !p.content.length) return false;
+    const gap = Date.parse(m.created_at) - Date.parse(p.created_at);
+    return gap >= 0 && gap <= 5000;
+  };
+  const hollow = messages.filter((m) => (!m || !Array.isArray(m.content) || (!m.content.length && !m.text)) && !emptyTail(m)).length;
   if (hollow) problems.push({ check: 'empty_messages', message: `${hollow} of ${messages.length} messages came back with no content.` });
   const ids = new Set(messages.map((m) => m && m.uuid));
   const children = new Map();
@@ -214,12 +231,13 @@ function isBashTool(name) {
   return name === 'bash_tool' || name === 'Bash';
 }
 
-// `cat > path << DELIM ... DELIM` or `cat << DELIM > path ...`, with any delimiter, quoted or not.
+// `cat > path << DELIM ... DELIM` or `cat << DELIM > path ...`, with any delimiter, quoted or not
+// (`cat >> path` appends; see literalSwapCommand).
 // heredocMatches returns them in command order, each shaped like a match of the first form:
 // [0] the whole heredoc, [1] path, [2] the quote (empty when bash expands the body), [4] body
 // (undefined when empty), and index. Use heredocPath and heredocBody on them.
-const HEREDOC_RE = /cat\s*>\s*(\S+?)\s*<<-?\s*(['"]?)(\w+)\2[^\n]*\n(?:([\s\S]*?)\n)??[ \t]*\3[ \t]*(?=\n|$)/g;
-const HEREDOC_TARGET_LAST_RE = /cat\s+<<-?\s*(['"]?)(\w+)\1[ \t]*>\s*(\S+)[^\n]*\n(?:([\s\S]*?)\n)??[ \t]*\2[ \t]*(?=\n|$)/g;
+const HEREDOC_RE = /cat\s*>(?!>)\s*(\S+?)\s*<<-?\s*(['"]?)(\w+)\2[^\n]*\n(?:([\s\S]*?)\n)??[ \t]*\3[ \t]*(?=\n|$)/g;
+const HEREDOC_TARGET_LAST_RE = /cat\s+<<-?\s*(['"]?)(\w+)\1[ \t]*>(?!>)\s*(\S+)[^\n]*\n(?:([\s\S]*?)\n)??[ \t]*\2[ \t]*(?=\n|$)/g;
 
 function heredocMatches(command) {
   const text = String(command || '');
@@ -236,15 +254,792 @@ function heredocPath(match) {
   return match[1].replace(/^['"]|['"]$/g, '');
 }
 
+// <<-'s leading tabs removed from each line. Lines end only at \n, as in bash (and Python's ^ with
+// re.M); a JS m-flag ^ would also match after \r, U+2028 and U+2029.
+function stripHeredocTabs(body) {
+  return body.replace(/(^|\n)\t+/g, '$1');
+}
+
 // The text bash writes for a heredoc match: with <<-, leading tabs are removed from every line.
 function heredocBody(match) {
   const body = match[4] || '';
-  return /^[^\n]*<<-/.test(match[0]) ? body.replace(/^\t+/gm, '') : body;
+  return /^[^\n]*<<-/.test(match[0]) ? stripHeredocTabs(body) : body;
 }
 
 // The files a Bash command writes with a heredoc, for the viewer's cards.
 function heredocFiles(command) {
   return heredocMatches(command).map((match) => ({ path: heredocPath(match), text: heredocBody(match) }));
+}
+
+// A sandbox path with . and .. segments and repeated or trailing slashes removed. '..' above the root stays at the root.
+function normalizeSandboxPath(p) {
+  const text = String(p || '');
+  const absolute = text.startsWith('/');
+  const parts = [];
+  for (const seg of text.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (parts.length && parts[parts.length - 1] !== '..') parts.pop(); else if (!absolute) parts.push(seg); continue; }
+    parts.push(seg);
+  }
+  return (absolute ? '/' : '') + parts.join('/');
+}
+
+// Any heredoc's body, with the rest of its first line kept: a body is input, not shell.
+const CWD_HEREDOC_RE = /<<-?\s*(['"]?)(\w+)\1([^\n]*)\n(?:[\s\S]*?\n)??[ \t]*\2[ \t]*(?=\n|$)/g;
+
+// Every cd, wherever it is (a subshell included); pushd and popd; a chdir() call in a script.
+const ANY_CD_RE = /(?:^|[;&|\n(`])[ \t]*cd(?=[ \t;&|\n)]|$)/g;
+const PUSHD_RE = /(?:^|[;&|\n(`])[ \t]*(?:pushd|popd)(?=[ \t;&|\n)]|$)/;
+const CHDIR_RE = /\bchdir\s*\(/;
+// A cd that may or may not run: after then, do, else, elif, { or !.
+const COND_CD_RE = /(?:[{!]|\b(?:then|do|else|elif))[ \t]*cd(?=[ \t;&|\n)]|$)/;
+
+// Each bash tool_use's working directory, by its id: its own leading cd (followed by &&, ;, a newline
+// or nothing) when it is the command's only change of directory, else null when it changes directory
+// any other way, else the directory an earlier bash command's leading cd left (the sandbox shell
+// keeps it between calls), else null. A relative cd resolves against the directory before it; a cd
+// that can't be followed (none, ~, -, or relative to an unknown one) leaves it unknown (null). A cd
+// in a heredoc body is text. Any other change of directory (a second cd, cd after && or ||, in a
+// subshell, after then/do/else/elif/{/!, pushd, popd, chdir()) may or may not have run, so it leaves
+// the directory unknown for this command and the later ones. A command that failed (bashFailed) may
+// have stopped anywhere, so the directory after it is unknown too.
+// uncertain, when given (a Set), gets the id of each command whose directory is known but may be
+// wrong: carried from an earlier command (whose own cd may have failed without failing it), or set
+// by a leading cd not followed by && (the rest runs even when that cd fails). resolveTouch uses it.
+function commandCwds(messages, uncertain = null) {
+  const cwds = new Map();
+  const results = new Map();
+  for (const msg of messages || []) for (const b of (msg && msg.content) || []) if (b && b.type === 'tool_result' && b.tool_use_id) results.set(b.tool_use_id, b);
+  let carried = null;
+  const target = (m, base) => {
+    const dir = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
+    if (dir === undefined || dir === '' || dir === '-' || dir.startsWith('~')) return null;
+    if (dir.startsWith('/')) return normalizeSandboxPath(dir);
+    return base ? normalizeSandboxPath(base + '/' + dir) : null;
+  };
+  for (const msg of messages || []) {
+    for (const block of (msg && msg.content) || []) {
+      if (!block || block.type !== 'tool_use' || !isBashTool(block.name)) continue;
+      const raw = String((block.input && block.input.command) || '');
+      const command = raw.replace(CWD_HEREDOC_RE, '$3');
+      // Any other change of directory (a second cd, cd ||, a cd in a subshell, pushd/popd, or a
+      // chdir() in any script, heredoc bodies included) leaves this command's directory unknown,
+      // and the one after it too.
+      const cds = (command.match(ANY_CD_RE) || []).length;
+      const lead = /^\s*cd[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|()]+))[ \t]*(&&|;|\n|$)/.exec(command);
+      const other = CHDIR_RE.test(raw) || PUSHD_RE.test(command) || COND_CD_RE.test(command);
+      let own = carried;
+      let sure = false;
+      if (other || cds > 1 || (cds === 1 && !lead)) own = null;
+      else if (lead) {
+        own = target([null, null, lead[1], lead[2], lead[3]], carried);
+        sure = lead[4] === '&&' && (lead[1] !== undefined ? lead[1] : lead[2] !== undefined ? lead[2] : lead[3]).startsWith('/');
+      }
+      cwds.set(block.id, own);
+      if (uncertain && own !== null && !sure) uncertain.add(block.id);
+      carried = bashFailed(results.get(block.id)) ? null : own;
+    }
+  }
+  return cwds;
+}
+
+// What file a word in a command names. Absolute: itself. Relative with a working directory: the
+// directory joined with it (or the word itself when that is a known path and the join is not, for a
+// file Claude wrote by a relative path). With no directory: the one known path ending in the word
+// (its basename, or its last segments), else path null and every such known path as candidates.
+function resolveSandboxPath(word, cwd, knownPaths) {
+  const text = String(word || '');
+  const known = Array.from(knownPaths || []);
+  if (text.startsWith('/')) { const path = normalizeSandboxPath(text); return { path, candidates: [path] }; }
+  const rel = normalizeSandboxPath(text);
+  if (cwd) {
+    let path = normalizeSandboxPath(cwd + '/' + text);
+    if (!known.includes(path) && known.includes(rel)) path = rel;
+    return { path, candidates: [path] };
+  }
+  if (!rel || rel.startsWith('..')) return { path: null, candidates: [] };
+  const candidates = known.filter((p) => p === rel || normalizeSandboxPath(p).endsWith('/' + rel));
+  return candidates.length === 1 ? { path: candidates[0], candidates } : { path: null, candidates };
+}
+
+// resolveSandboxPath for a word naming a file a command may change. When the working directory is
+// uncertain (commandCwds) and the relative word joined to it is no known file, the directory may be
+// wrong: every known file the word could name (as with no directory) is a candidate, and none is
+// resolved, so it is never replayed and stays a warning. { path, candidates, resolved }.
+function resolveTouch(word, cwd, known, uncertain = false) {
+  const text = String(word || '');
+  const found = resolveSandboxPath(text, cwd, known);
+  if (uncertain && cwd && !text.startsWith('/') && !Array.from(known || []).includes(found.path)) {
+    return { path: null, candidates: resolveSandboxPath(text, null, known).candidates, resolved: false };
+  }
+  return { ...found, resolved: !!found.path };
+}
+
+// Known paths by their normalized form: { list: the normalized paths, raw: normalized -> [keys] }, so
+// /home/claude//g.txt and ./g.txt match the paths a command names.
+function normalizedKeys(known) {
+  const raw = new Map();
+  for (const k of known || []) {
+    const n = normalizeSandboxPath(k);
+    if (!raw.has(n)) raw.set(n, []);
+    raw.get(n).push(k);
+  }
+  return { list: Array.from(raw.keys()), raw };
+}
+
+// Whether a file lies in a folder or below it, by whole path segments: /a/de-luce/x is not under /a/de.
+function isUnderFolder(file, folder) {
+  const dir = normalizeSandboxPath(folder);
+  const path = normalizeSandboxPath(file);
+  return path.startsWith(dir === '/' ? '/' : dir + '/') && path !== dir;
+}
+
+// ---- Literal text swaps a bash command makes (spec "Replay of literal text swaps") ----
+// extract_artifacts.py has a twin of each of these; keep them in step.
+
+// `cat >> path << 'D'` (or `cat << 'D' >> path`) with nothing else on its first line. Groups: the
+// path word, - (tabs stripped), the quote, the delimiter, the body (undefined when empty), and the
+// tabs before the closing delimiter.
+const APPEND_WORD = `([^\\s'"<>;&|$\`]+|'[^'\\n]*'|"[^"$\`\\\\\\n]*")`;
+const APPEND_RE = new RegExp(`cat[ \\t]*>>[ \\t]*${APPEND_WORD}[ \\t]*<<(-?)[ \\t]*(['"]?)([A-Za-z0-9_]+)\\3[ \\t]*\\n(?:([\\s\\S]*?)\\n)??(\\t*)\\4(?=\\n|$)`, 'g');
+const APPEND_TARGET_LAST_RE = new RegExp(`cat[ \\t]+<<(-?)[ \\t]*(['"]?)([A-Za-z0-9_]+)\\2[ \\t]*>>[ \\t]*${APPEND_WORD}[ \\t]*\\n(?:([\\s\\S]*?)\\n)??(\\t*)\\3(?=\\n|$)`, 'g');
+const APPEND_MARK = '\u0001';
+
+// A command's simple commands as lists of words, split at ;, && and newlines, when every word is
+// literal text. null when anything would be expanded, redirected, piped, grouped or run in the
+// background: $, a backtick, an unquoted glob, ~, #, !, (, ), {, }, <, >, | or a single &.
+// [ and ] are allowed only as whole words (test's [ ... ]).
+function literalCommands(text) {
+  const commands = [];
+  let words = [], word = '', started = false, quote = null;
+  const endWord = () => { if (started) words.push(word); word = ''; started = false; };
+  const endCommand = () => { endWord(); if (words.length) commands.push(words); words = []; };
+  const wordEnd = (c) => c === undefined || c === ' ' || c === '\t' || c === '\n' || c === ';';
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (quote === "'") { if (ch === "'") quote = null; else word += ch; continue; }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === '$' || ch === '`') return null;
+      else if (ch === '\\') {
+        const next = text[i + 1];
+        if (next === undefined || next === '\n') return null;
+        if ('"\\$`'.includes(next)) { word += next; i++; } else word += ch;
+      } else word += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; started = true; continue; }
+    if (ch === '\\') {
+      const next = text[i + 1];
+      if (next === undefined) return null;
+      i++;
+      if (next !== '\n') { word += next; started = true; }
+      continue;
+    }
+    if (ch === ' ' || ch === '\t') { endWord(); continue; }
+    if (ch === '\n' || ch === ';') { endCommand(); continue; }
+    if (ch === '&' && text[i + 1] === '&') { endCommand(); i++; continue; }
+    if ((ch === '[' || ch === ']') && !started && wordEnd(text[i + 1])) { word = ch; started = true; continue; }
+    if ('|&<>()$`*?[]{}~#!'.includes(ch)) return null;
+    word += ch; started = true;
+  }
+  if (quote) return null;
+  endCommand();
+  return commands;
+}
+
+// One sed script `s<d>A<d>B<d>` or `...g`, both sides literal: { from, to, global }, else null. A may
+// escape only the delimiter and . / * [ ] $ ^; B only the delimiter, /, \ and &. Neither side holds
+// a newline, A no other regex character, B no & (the match) and no \1.
+const SED_PATTERN_META = '.*[]^$';
+const SED_PATTERN_ESCAPES = './*[]$^';
+const SED_REPLACEMENT_ESCAPES = '/\\&';
+function sedSubstitution(script) {
+  const text = String(script);
+  if (text[0] !== 's' || text.length < 4) return null;
+  const d = text[1];
+  if (/[\sA-Za-z0-9\\]/.test(d) || SED_PATTERN_META.includes(d)) return null;
+  let i = 2;
+  const part = (pattern) => {
+    let out = '';
+    for (; i < text.length; i++) {
+      const c = text[i];
+      if (c === d) { i++; return out; }
+      if (c === '\n') return null;
+      if (c === '\\') {
+        const n = text[i + 1];
+        if (n === undefined) return null;
+        if (n !== d && !(pattern ? SED_PATTERN_ESCAPES : SED_REPLACEMENT_ESCAPES).includes(n)) return null;
+        out += n; i++;
+        continue;
+      }
+      if (pattern ? SED_PATTERN_META.includes(c) : c === '&') return null;
+      out += c;
+    }
+    return null;
+  };
+  const from = part(true);
+  if (!from) return null;
+  const to = part(false);
+  if (to === null) return null;
+  const flags = text.slice(i);
+  if (flags !== '' && flags !== 'g') return null;
+  return { from, to, global: flags === 'g' };
+}
+
+// sed's per-line replay of literal substitutions: the first match on each line, or every one with g.
+function applySedSubstitutions(text, subs) {
+  return String(text).split('\n').map((line) => {
+    for (const { from, to, global } of subs) {
+      if (global) line = line.split(from).join(to);
+      else {
+        const at = line.indexOf(from);
+        if (at !== -1) line = line.slice(0, at) + to + line.slice(at + from.length);
+      }
+    }
+    return line;
+  }).join('\n');
+}
+
+// ---- Python text swaps: python3 - <<'D' or python3 -c '<script>' (spec section 3) ----
+// A Python heredoc with a quoted delimiter (bash leaves its body alone): groups the quote, the
+// delimiter, the rest of its first line, the body (undefined when empty).
+const PY_HEREDOC_RE = /python3[ \t]+-[ \t]*<<[ \t]*(['"])([A-Za-z0-9_]+)\1([^\n]*)\n(?:([\s\S]*?)\n)??\2(?=\n|$)/g;
+// python3 -c with one quoted script: single quotes, or double quotes holding nothing bash changes.
+const PY_C_RE = /python3[ \t]+-c[ \t]+(?:'([^']*)'|"([^"$`\\]*)")/g;
+const PY_ESCAPES = { n: '\n', t: '\t', '\\': '\\', "'": "'", '"': '"' };
+
+// The Python string literal starting at i (an optional u or r prefix, then ' " ''' or """):
+// { value, end } (end just past it), else null. Escapes: \n \t \\ \' \" \xNN \uNNNN (not a
+// surrogate); any other backslash, an f or b prefix, or r with a backslash in it is null.
+function pyStringLiteral(src, i) {
+  const text = String(src);
+  const prefix = /^[A-Za-z]{0,2}/.exec(text.slice(i))[0];
+  if (!/^[uUrR]?$/.test(prefix)) return null;
+  const raw = /[rR]/.test(prefix);
+  let at = i + prefix.length;
+  const q = text[at];
+  if (q !== "'" && q !== '"') return null;
+  const triple = text.startsWith(q.repeat(3), at);
+  const close = triple ? q.repeat(3) : q;
+  at += close.length;
+  let value = '';
+  while (at < text.length) {
+    if (text.startsWith(close, at)) return { value, end: at + close.length };
+    const c = text[at];
+    if (c === '\n' && !triple) return null;
+    if (c === '\\') {
+      if (raw) return null;
+      const n = text[at + 1];
+      if (n !== undefined && Object.prototype.hasOwnProperty.call(PY_ESCAPES, n)) { value += PY_ESCAPES[n]; at += 2; continue; }
+      const hex = n === 'x' ? /^[0-9A-Fa-f]{2}/.exec(text.slice(at + 2)) : n === 'u' ? /^[0-9A-Fa-f]{4}/.exec(text.slice(at + 2)) : null;
+      if (!hex || hex[0].length !== (n === 'x' ? 2 : 4)) return null;
+      const code = parseInt(hex[0], 16);
+      if (code >= 0xd800 && code <= 0xdfff) return null;
+      value += String.fromCharCode(code);
+      at += 2 + hex[0].length;
+      continue;
+    }
+    value += c; at++;
+  }
+  return null;
+}
+
+// A script's logical lines as token strings: names, numbers and = ( ) [ ] , . : as themselves, a
+// string literal as # (its value in strs; no name or comment gives that token). indent: the line
+// starts indented; semi: a ; ended it.
+// Comments and blank lines are skipped. null for anything else (another operator, a \ continuation,
+// an f-string, a ; inside brackets).
+function pyLines(src) {
+  const text = String(src);
+  const lines = [];
+  let cur = null, depth = 0, lineIndent = false, start = true;
+  const add = (tok, str) => {
+    if (!cur) cur = { indent: lineIndent, tokens: [], strs: [], semi: false };
+    cur.tokens.push(tok);
+    if (str !== undefined) cur.strs.push(str);
+  };
+  const end = (semi) => { if (cur) { cur.semi = semi; lines.push(cur); } cur = null; };
+  for (let i = 0; i < text.length;) {
+    if (start) {
+      const ws = /^[ \t]*/.exec(text.slice(i))[0];
+      lineIndent = ws.length > 0;
+      i += ws.length;
+      start = false;
+      continue;
+    }
+    const c = text[i];
+    if (c === ' ' || c === '\t') { i++; continue; }
+    if (c === '#') { while (i < text.length && text[i] !== '\n') i++; continue; }
+    if (c === '\n') { i++; if (depth === 0) { end(false); start = true; } continue; }
+    if (c === ';') { if (depth) return null; end(true); i++; continue; }
+    const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(text.slice(i));
+    if (c === "'" || c === '"' || (name && name[0].length <= 2 && (text[i + name[0].length] === "'" || text[i + name[0].length] === '"'))) {
+      const lit = pyStringLiteral(text, i);
+      if (!lit) return null;
+      add('#', lit.value);
+      i = lit.end;
+      continue;
+    }
+    if (name) { add(name[0]); i += name[0].length; continue; }
+    const num = /^[0-9]+/.exec(text.slice(i));
+    if (num) {
+      if (!/^(?:0|[1-9][0-9]*)$/.test(num[0]) || /[A-Za-z0-9_.]/.test(text[i + num[0].length] || '')) return null;
+      add(num[0]); i += num[0].length;
+      continue;
+    }
+    if ('(['.includes(c)) depth++;
+    else if (')]'.includes(c)) { if (--depth < 0) return null; }
+    else if (!'=,.:'.includes(c)) return null;
+    add(c); i++;
+  }
+  if (depth) return null;
+  end(false);
+  return lines.map((l) => ({ indent: l.indent, semi: l.semi, text: l.tokens.join(' '), strs: l.strs }));
+}
+
+const PY_ENC = '(?: , encoding = #)?';
+const PY_COUNT = '( , 1)?';
+const PY_P_RE = /^p = #$/;
+const PY_READ_RE = new RegExp(`^s = open \\( (p|#)${PY_ENC} \\) \\. read \\( \\)$`);
+const PY_REPLACE_RE = new RegExp(`^s = s \\. replace \\( # , #${PY_COUNT} \\)$`);
+const PY_LIST_RE = /^r = \[(?: \( # , # \)(?: , \( # , # \))*(?: ,)?)? \]$/;
+const PY_LOOP_RE = new RegExp(`^for a , b in r :( s = s \\. replace \\( a , b${PY_COUNT} \\))?$`);
+const PY_LOOP_BODY_RE = new RegExp(`^s = s \\. replace \\( a , b${PY_COUNT} \\)$`);
+const PY_WRITE_RE = new RegExp(`^open \\( (p|#) , #${PY_ENC} \\) \\. write \\( s \\)$`);
+const PY_WITH_RE = new RegExp(`^with open \\( (p|#) , #${PY_ENC} \\) as f :( f \\. write \\( s \\))?$`);
+const PY_WITH_BODY_RE = /^f \. write \( s \)$/;
+const PY_PRINT_ARG = '(?:#|[0-9]+|len \\( s \\)|s \\. count \\( # \\))';
+const PY_PRINT_RE = new RegExp(`^print \\((?: ${PY_PRINT_ARG}(?: , ${PY_PRINT_ARG})*)? \\)$`);
+
+// A script that is only, in order: p = '<path>' (optional); s = open(p or '<path>').read(); any
+// number of s = s.replace(<lit>, <lit>[, 1] (count= needs Python 3.13)) or r = [(<lit>, <lit>), ...] then
+// for a, b in r: s = s.replace(a, b[, ...]); open(p, 'w').write(s) or with open(p, 'w') as f:
+// f.write(s); then print(...) of literals, len(s) and s.count(<lit>). encoding='utf-8' is allowed
+// on open. { path, pairs: [[old, new, 1 | null]] }, path as written; else null. Every path is the
+// same text; no old string is empty.
+function pythonSwapScript(src) {
+  const lines = pyLines(src);
+  if (!lines) return null;
+  let i = 0;
+  const line = () => lines[i];
+  // A line that stands alone: not indented, not ended by ;.
+  const plain = (re) => { const l = line(); return l && !l.indent && re.exec(l.text); };
+  const isUtf8 = (v) => /^[uU][tT][fF]-?8$/.test(v);
+  let path = null;
+  if (plain(PY_P_RE)) { path = line().strs[0]; i++; }
+  // The file a p-or-literal operand names, its strings after it.
+  const operand = (m, l) => {
+    const usesP = m[1] === 'p';
+    if (usesP && path === null) return null;
+    const value = usesP ? path : l.strs[0];
+    return { value, rest: usesP ? l.strs : l.strs.slice(1) };
+  };
+  let m = plain(PY_READ_RE);
+  if (!m) return null;
+  const read = operand(m, line());
+  if (!read || (read.rest.length && !isUtf8(read.rest[0]))) return null;
+  const target = read.value;
+  if (path !== null && target !== path) return null;
+  i++;
+  const pairs = [];
+  const count = (c) => (c ? 1 : null);
+  for (;;) {
+    if ((m = plain(PY_REPLACE_RE))) {
+      pairs.push([line().strs[0], line().strs[1], count(m[1])]);
+      i++;
+      continue;
+    }
+    if (plain(PY_LIST_RE)) {
+      const strs = line().strs;
+      i++;
+      m = plain(PY_LOOP_RE);
+      if (!m) return null;
+      let c = m[2];
+      if (!m[1]) {
+        if (line().semi) return null;
+        i++;
+        const body = line();
+        if (!body || !body.indent || body.semi) return null;
+        const b = PY_LOOP_BODY_RE.exec(body.text);
+        if (!b) return null;
+        c = b[1];
+      } else if (line().semi) return null;
+      for (let k = 0; k < strs.length; k += 2) pairs.push([strs[k], strs[k + 1], count(c)]);
+      i++;
+      continue;
+    }
+    break;
+  }
+  const writeOk = (mm, l) => {
+    const op = operand(mm, l);
+    return op && op.value === target && op.rest[0] === 'w' && (op.rest.length === 1 || isUtf8(op.rest[1]));
+  };
+  if ((m = plain(PY_WRITE_RE))) {
+    if (!writeOk(m, line())) return null;
+    i++;
+  } else if ((m = plain(PY_WITH_RE))) {
+    if (!writeOk(m, line()) || line().semi) return null;
+    if (!m[2]) {
+      i++;
+      const body = line();
+      if (!body || !body.indent || body.semi || !PY_WITH_BODY_RE.test(body.text)) return null;
+    }
+    i++;
+  } else return null;
+  while (plain(PY_PRINT_RE)) i++;
+  if (i !== lines.length) return null;
+  if (pairs.some((p) => p[0] === '')) return null;
+  return { path: target, pairs };
+}
+
+// Python's str.replace of each pair (every occurrence, or the first with count 1) on text read in
+// Python's text mode (\r\n and \r read as \n).
+function applyPythonReplace(text, pairs) {
+  let s = String(text).replace(/\r\n?/g, '\n');
+  for (const [from, to, count] of pairs) {
+    if (count === 1) {
+      const at = s.indexOf(from);
+      if (at !== -1) s = s.slice(0, at) + to + s.slice(at + from.length);
+    } else s = s.split(from).join(to);
+  }
+  return s;
+}
+
+const READ_ONLY_TOOLS = new Set(['grep', 'head', 'tail', 'wc', 'cat', 'ls', 'echo', 'printf', 'test', '[']);
+const SED_PRINT_RE = /^(?:\d+|\$)(?:,(?:\d+|\$))?p$/;
+
+// The steps of a command made only of cd, read-only tools, sed -i with literal substitutions,
+// cat >> appends, (copies: true) cp and (python: true) Python text swaps (pythonSwapScript):
+// { steps: [{ kind: 'sed', files, subs } | { kind: 'append', file, text } | { kind: 'copy', sources,
+// dest } | { kind: 'python', file, pairs }] }, the file words as written. null for anything else.
+function literalSteps(command, { copies = false, python = false } = {}) {
+  const raw = String(command || '');
+  if (raw.includes(APPEND_MARK)) return null;
+  const found = [];
+  for (const m of raw.matchAll(APPEND_RE)) found.push({ index: m.index, length: m[0].length, word: m[1], dash: m[2], quote: m[3], body: m[5], tabs: m[6] });
+  for (const m of raw.matchAll(APPEND_TARGET_LAST_RE)) found.push({ index: m.index, length: m[0].length, word: m[4], dash: m[1], quote: m[2], body: m[5], tabs: m[6] });
+  if (python) {
+    for (const m of raw.matchAll(PY_HEREDOC_RE)) found.push({ index: m.index, length: m[0].length, script: m[4] === undefined ? '' : m[4], rest: m[3] });
+    for (const m of raw.matchAll(PY_C_RE)) found.push({ index: m.index, length: m[0].length, script: m[1] !== undefined ? m[1] : m[2], rest: '' });
+  }
+  found.sort((a, b) => a.index - b.index);
+  const appends = [];
+  let text = '', at = 0;
+  for (const f of found) {
+    if (f.index < at) return null;
+    if (f.script !== undefined) {
+      const swap = pythonSwapScript(f.script);
+      if (!swap) return null;
+      text += raw.slice(at, f.index) + APPEND_MARK + appends.length + APPEND_MARK + f.rest;
+      at = f.index + f.length;
+      appends.push({ kind: 'python', file: swap.path, pairs: swap.pairs });
+      continue;
+    }
+    if (f.tabs && !f.dash) return null;
+    let body = f.body;
+    if (!f.quote && body !== undefined && /[$`\\]/.test(body)) return null;
+    if (f.dash && body !== undefined) body = stripHeredocTabs(body);
+    text += raw.slice(at, f.index) + APPEND_MARK + appends.length + APPEND_MARK;
+    at = f.index + f.length;
+    const words = literalCommands(f.word);
+    if (!words || words.length !== 1 || words[0].length !== 1) return null;
+    appends.push({ kind: 'append', file: words[0][0], text: body === undefined ? '' : body + '\n' });
+  }
+  text += raw.slice(at);
+  const commands = literalCommands(text);
+  if (!commands) return null;
+  const steps = [];
+  const markRe = new RegExp(`^${APPEND_MARK}(\\d+)${APPEND_MARK}$`);
+  for (const words of commands) {
+    const mark = markRe.exec(words[0]);
+    if (mark) { if (words.length !== 1) return null; steps.push(appends[Number(mark[1])]); continue; }
+    if (words.some((w) => w.includes(APPEND_MARK))) return null;
+    const [tool, ...args] = words;
+    if (tool === 'cd') { if (args.length !== 1) return null; continue; }
+    if (tool === 'sed') {
+      if (args[0] === '-n' && args.length >= 2 && SED_PRINT_RE.test(args[1]) && args.slice(2).every((w) => !w.startsWith('-'))) continue;
+      let inPlace = false;
+      const scripts = [], positional = [];
+      for (let i = 0; i < args.length; i++) {
+        const w = args[i];
+        if (/^-i/.test(w) || w === '--in-place' || w.startsWith('--in-place=')) inPlace = true;
+        else if (w === '-e') { if (i + 1 >= args.length) return null; scripts.push(args[++i]); }
+        else if (w.startsWith('-')) return null;
+        else positional.push(w);
+      }
+      if (!scripts.length && positional.length) scripts.push(positional.shift());
+      if (!inPlace || !scripts.length || !positional.length) return null;
+      const subs = scripts.map(sedSubstitution);
+      if (subs.some((s) => !s)) return null;
+      steps.push({ kind: 'sed', files: positional, subs });
+      continue;
+    }
+    if (copies && tool === 'cp') {
+      if (args.length < 2 || args.some((w) => w.startsWith('-'))) return null;
+      steps.push({ kind: 'copy', sources: args.slice(0, -1), dest: args[args.length - 1] });
+      continue;
+    }
+    if (READ_ONLY_TOOLS.has(tool)) continue;
+    return null;
+  }
+  return { steps };
+}
+
+// A bash command extractArtifacts can replay: only cd, read-only tools, sed -i with literal
+// substitutions, cat >> appends and cp onto a file that isn't one of known (the chat's files; for a
+// folder, the copy's name in it), and Python text swaps (pythonSwapScript). { edits: [{ path, kind:
+// 'sed', subs } | { path, kind: 'append', text } | { path, kind: 'pyreplace', pairs }] } in command
+// order, each path absolute (a relative name joined to cwd); null for any other command, or a
+// relative name with no known directory.
+function literalSwapCommand(command, cwd, known = []) {
+  const parsed = literalSteps(command, { copies: true, python: true });
+  if (!parsed) return null;
+  const resolve = (word) => word.startsWith('/') ? normalizeSandboxPath(word) : cwd ? normalizeSandboxPath(cwd + '/' + word) : null;
+  const isKnown = (p) => known.some((k) => normalizeSandboxPath(k) === p || (!k.startsWith('/') && p.endsWith('/' + normalizeSandboxPath(k))));
+  const edits = [];
+  for (const step of parsed.steps) {
+    if (step.kind === 'copy') {
+      const dest = resolve(step.dest);
+      if (!dest || isKnown(dest)) return null;
+      if (step.sources.some((src) => isKnown(normalizeSandboxPath(dest + '/' + src.split('/').pop())))) return null;
+      continue;
+    }
+    const files = step.kind === 'sed' ? step.files : [step.file];
+    for (const file of files) {
+      const path = resolve(file);
+      if (!path) return null;
+      edits.push(step.kind === 'sed' ? { path, kind: 'sed', subs: step.subs }
+        : step.kind === 'python' ? { path, kind: 'pyreplace', pairs: step.pairs } : { path, kind: 'append', text: step.text });
+    }
+  }
+  return { edits };
+}
+
+// The known files a bash command may have changed, when it was not replayed. Its cat > heredocs
+// were replayed as creates, except that a body bash expanded leaves that file unknown. The rest:
+// when it is only cd, read-only tools, cp, literal sed -i and cat >>, the files those write (for cp
+// into a folder, the copy's name there). Otherwise every known file its text names, and when it
+// can't be shown to write nothing else (writeFreeTouches) every known file.
+// Paths are matched normalized; the keys returned are known's own. uncertain: the working
+// directory may be wrong (resolveTouch).
+function commandTouches(command, cwd, knownKeys, uncertain = false) {
+  const keys = normalizedKeys(knownKeys);
+  const out = new Set();
+  for (const n of commandTouchesNormalized(command, cwd, keys.list, uncertain)) for (const k of keys.raw.get(n) || []) out.add(k);
+  return out;
+}
+
+function commandTouchesNormalized(command, cwd, known, uncertain) {
+  const raw = String(command || '');
+  const knownSet = new Set(known);
+  const touched = new Set();
+  let rest = raw;
+  for (const m of heredocMatches(raw).reverse()) {
+    if (m[2] === '' && /[$`\\]/.test(m[4] || '')) {
+      const { path, candidates } = resolveTouch(heredocPath(m), cwd, known, uncertain);
+      for (const p of path ? [path] : candidates) if (knownSet.has(p)) touched.add(p);
+      if (/[$`]/.test(m[4] || '')) known.forEach((k) => touched.add(k));  // $(...) in it runs
+    }
+    const header = m[0].split('\n')[0];
+    const tail = /<<-?\s*(['"]?)\w+\1[ \t]*>(?!>)\s*\S+(.*)$/.exec(header) || /<<-?\s*(['"]?)\w+\1(.*)$/.exec(header);
+    rest = rest.slice(0, m.index) + (tail ? tail[2] : '') + rest.slice(m.index + m[0].length);
+  }
+  const parsed = literalSteps(rest, { copies: true });
+  if (!parsed) {
+    // Not provably write-free (a script run, a write in Python, an unknown tool): any file may
+    // have changed, named in the command or not.
+    // Also every known file it names, as before the write-free check existed.
+    const free = writeFreeTouches(rest, cwd, known, uncertain);
+    for (const k of free || known) touched.add(k);
+    for (const k of known) { const name = k.split('/').pop(); if (name && rest.includes(name)) touched.add(k); }
+    return touched;
+  }
+  const mark = (word) => {
+    const { path, candidates } = resolveTouch(word, cwd, known, uncertain);
+    for (const p of path ? [path] : candidates) if (knownSet.has(p)) touched.add(p);
+  };
+  for (const step of parsed.steps) {
+    if (step.kind === 'sed') step.files.forEach(mark);
+    else if (step.kind === 'append') mark(step.file);
+    else {
+      mark(step.dest);
+      for (const src of step.sources) mark(step.dest.replace(/\/+$/, '') + '/' + src.split('/').pop());
+    }
+  }
+  return touched;
+}
+
+// ---- Commands that provably write no file the chat made ----
+// Any heredoc, with the rest of its first line kept. The << that isn't part of a <<< here-string.
+const LOOSE_HEREDOC_RE = /(?<!<)<<(-?)[ \t]*(['"]?)(\w+)\2([^\n]*)\n(?:([\s\S]*?)\n)??[ \t]*\3[ \t]*(?=\n|$)/g;
+const HEREDOC_MARK = '\u0002';
+
+// A command's simple commands, split at &&, ||, |, ;, & and newlines: { words, redirects, heredocs }
+// each, words as { text, open } (open: holds an unquoted or double-quoted $, or an unquoted glob),
+// redirects as { op, target } (target a word, or null for a duplicated descriptor such as 2>&1),
+// heredocs as body indexes. null for command substitution, a subshell or group, or a heredoc left
+// unparsed.
+function looseCommands(text) {
+  const commands = [];
+  let cur = { words: [], redirects: [], heredocs: [] };
+  let word = '', started = false, open = false, quote = null, into = null;
+  const endWord = () => {
+    if (started) {
+      const marked = new RegExp(`^${HEREDOC_MARK}(\\d+)${HEREDOC_MARK}$`).exec(word);
+      if (into) { cur.redirects.push({ op: into, target: { text: word, open } }); into = null; }
+      else if (marked && !open) cur.heredocs.push(Number(marked[1]));
+      else cur.words.push({ text: word, open });
+    }
+    word = ''; started = false; open = false;
+  };
+  const endCommand = () => {
+    endWord();
+    if (into) return false;
+    if (cur.words.length || cur.redirects.length || cur.heredocs.length) commands.push(cur);
+    cur = { words: [], redirects: [], heredocs: [] };
+    return true;
+  };
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (quote === "'") { if (ch === "'") quote = null; else word += ch; continue; }
+    if (ch === '`') return null;
+    if (ch === '$') {
+      if (next === '(') return null;
+      open = true; started = true; word += ch;
+      if (next === '{') {  // ${NAME}: a variable, not a group
+        const close = text.indexOf('}', i);
+        if (close === -1) return null;
+        word += text.slice(i + 1, close + 1); i = close;
+      }
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === '\\' && next !== undefined) { word += next; i++; }
+      else word += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; started = true; continue; }
+    if (ch === '\\') { if (next === undefined) return null; i++; if (next !== '\n') { word += next; started = true; } continue; }
+    if (ch === '#' && !started) { while (i + 1 < text.length && text[i + 1] !== '\n') i++; continue; }
+    if (ch === ' ' || ch === '\t') { endWord(); continue; }
+    if (ch === '\n' || ch === ';' || ch === '|' || ch === '&') {
+      if (ch === '&' && next === '>') {  // &> and &>> send both outputs to a file
+        endWord(); i++;
+        if (text[i + 1] === '>') i++;
+        into = '>';
+        continue;
+      }
+      if (!endCommand()) return null;
+      if ((ch === '|' || ch === '&') && next === ch) i++;
+      continue;
+    }
+    if (ch === '>' || ch === '<') {
+      if (started && /^\d+$/.test(word) && !open) { word = ''; started = false; } else endWord();
+      if (into) return null;
+      if (ch === '<') {
+        if (next === '<' && text[i + 2] === '<') { i += 2; into = '<'; continue; }
+        if (next === '<' || next === '>' || next === '(') return null;
+        into = '<';
+        continue;
+      }
+      if (next === '>' || next === '|') i++;
+      if (text[i + 1] === '&') {  // >&2 duplicates a descriptor; >& file writes the file
+        const dup = /^&[\d-]+(?=[\s;&|<>)]|$)/.exec(text.slice(i + 1));
+        i += dup ? dup[0].length : 1;
+        if (!dup) into = '>';
+        continue;
+      }
+      if (text[i + 1] === '(') return null;
+      into = '>';
+      continue;
+    }
+    if ('(){}'.includes(ch)) return null;
+    if ('*?['.includes(ch)) open = true;
+    word += ch; started = true;
+  }
+  if (quote) return null;
+  if (!endCommand()) return null;
+  return commands;
+}
+
+const WRITE_FREE_TOOLS = new Set(['grep', 'head', 'tail', 'wc', 'cat', 'ls', 'echo', 'printf', 'test', '[', 'cd', 'mkdir', 'diff', 'file', 'stat', 'du', 'md5sum', 'sha256sum']);
+const FIND_WRITES = new Set(['-exec', '-execdir', '-delete', '-ok', '-okdir', '-fls']);
+
+// The known files a command writes, when it provably writes nothing else: every simple command is a
+// read-only tool (with cp without globs, mkdir, find without -exec/-delete/-fprint, sort without -o,
+// uniq, diff, file, stat, du and checksums); redirects and cp and uniq outputs are /dev/null or name
+// the files returned. null when that can't be shown, and then any known file may have changed: any
+// interpreter (Python included, whatever its script), any other tool, or a heredoc bash expands that
+// holds $ or a backtick (it can run a command).
+function writeFreeTouches(command, cwd, known, uncertain = false) {
+  let expands = false;
+  const text = String(command || '').replace(LOOSE_HEREDOC_RE, (...m) => {
+    if (m[2] === '' && /[$`]/.test(m[5] || '')) expands = true;
+    return ` ${HEREDOC_MARK}0${HEREDOC_MARK} ${m[4]}`;
+  });
+  if (expands) return null;
+  const commands = looseCommands(text);
+  if (!commands) return null;
+  const knownSet = new Set(known);
+  const touched = new Set();
+  const mark = (w) => {
+    if (w.open) return false;
+    if (w.text === '/dev/null') return true;
+    const { path, candidates } = resolveTouch(w.text, cwd, known, uncertain);
+    for (const p of path ? [path] : candidates) if (knownSet.has(p)) touched.add(p);
+    return true;
+  };
+  for (const cmd of commands) {
+    for (const r of cmd.redirects) if (r.op === '>' && !mark(r.target)) return null;
+    const words = cmd.words.slice();
+    while (words.length && !words[0].open && /^[A-Za-z_]\w*=/.test(words[0].text)) words.shift();
+    if (!words.length) { if (cmd.heredocs.length) return null; continue; }
+    if (words[0].open) return null;
+    const tool = words[0].text;
+    const args = words.slice(1);
+    const plainArgs = args.filter((w) => !w.text.startsWith('-'));
+    if (cmd.heredocs.length && !WRITE_FREE_TOOLS.has(tool)) return null;
+    if (WRITE_FREE_TOOLS.has(tool)) continue;
+    if (tool === 'sed') {
+      if (args.some((w) => /^-[a-zA-Z]*i/.test(w.text) || w.text.startsWith('--in-place'))) return null;
+      const scripts = [];
+      for (let i = 0; i < args.length; i++) if (args[i].text === '-e') scripts.push(args[++i]);
+      if (!scripts.length) scripts.push(plainArgs[0]);
+      if (scripts.some((w) => !w || w.open || !(SED_PRINT_RE.test(w.text) || sedSubstitution(w.text)))) return null;
+      if (args.some((w) => w.text.startsWith('-') && !['-n', '-e', '-E', '-r'].includes(w.text))) return null;
+      continue;
+    }
+    if (tool === 'find') {
+      if (args.some((w) => FIND_WRITES.has(w.text) || w.text.startsWith('-fprint'))) return null;
+      continue;
+    }
+    if (tool === 'sort') {
+      if (args.some((w) => /^-[a-zA-Z]*o/.test(w.text) || w.text.startsWith('--output'))) return null;
+      continue;
+    }
+    if (tool === 'uniq') {
+      if (plainArgs.length > 1 && !mark(plainArgs[1])) return null;
+      continue;
+    }
+    if (tool === 'cp') {
+      if (args.some((w) => w.open || /^-[a-zA-Z]*t/.test(w.text) || w.text.startsWith('--target'))) return null;
+      if (plainArgs.length < 2) return null;
+      const dest = plainArgs[plainArgs.length - 1];
+      mark(dest);
+      for (const src of plainArgs.slice(0, -1)) mark({ text: dest.text.replace(/\/+$/, '') + '/' + src.text.split('/').pop(), open: false });
+      if (args.some((w) => /^-[a-zA-Z]*[rRa]/.test(w.text) || w.text === '--recursive' || w.text === '--archive')) {
+        const { path } = resolveSandboxPath(dest.text, cwd, known);
+        if (!path) return null;
+        for (const k of known) if (isUnderFolder(k, path)) touched.add(k);
+      }
+      continue;
+    }
+    return null;
+  }
+  return touched;
 }
 
 // A title made safe as a file name: letters, digits and marks from any script, _ and -, with spaces
@@ -683,10 +1478,11 @@ function docCompanions(data, artifacts, index, pathNames = {}) {
 
 // The note at the top of a Claude Docs document about its diagrams and its self-contained copies.
 // Returns { markdown, captions }: the text with the note under its title, and how many diagrams show by
-// caption.
-function docCompanionNote(markdown, names = []) {
+// caption. shown, when given, is that count from another copy of the text: the viewer's copy keeps every
+// caption, while the file shows the diagrams Claude took a screenshot of.
+function docCompanionNote(markdown, names = [], shown = null) {
   const md = String(markdown);
-  const captions = (md.match(DOC_CAPTION_RE) || []).length;
+  const captions = Number.isInteger(shown) ? shown : (md.match(DOC_CAPTION_RE) || []).length;
   const link = (n) => `[${n.replace(/([\\[\]])/g, '\\$1')}](${encodeURI(n).replace(/\(/g, '%28').replace(/\)/g, '%29')})`;
   const links = names.map(link).join(', ');
   const one = captions === 1;
@@ -704,6 +1500,157 @@ function docCompanionNote(markdown, names = []) {
   if (!heading || heading.index !== 0) return { markdown: `${note}\n\n${md}`, captions };
   const end = heading[0].length;
   return { markdown: `${md.slice(0, end)}\n\n${note}${md.slice(end)}`, captions };
+}
+
+// ---- Claude Docs diagrams from Claude's screenshots ----
+// A diagram in a document is a widget node, made by a batch member { $lid, engine: 'widget', verb: 'create',
+// payload.code } and placed by an embed block whose ref is 'node/$lid:<lid>' (same batch) or 'node/<id>'.
+// Claude can read one back as a picture (Claude_Docs__read, engine 'widget', payload.kind 'screenshot',
+// ref.id the node), which claude.ai keeps and links from the result like any image Claude viewed. The
+// export shows that picture in the final document (a post-pass in popup.js, like docCompanionNote) and keeps
+// each widget's code as a .jsx. Nothing here changes extractArtifacts, so extract_artifacts.py has no twin.
+
+// Each widget-creating member of a batch call, with the node id the reply gave it: { lid, node, code }.
+// The reply names it by lid (reply.lids, or an ack carrying the lid), or, for a batch on an existing
+// document, by the ack in the member's place.
+function docBatchWidgets(input, result) {
+  const members = input && Array.isArray(input.batch) ? input.batch : [];
+  const reply = leadingJson(resultText(result)) || {};
+  const acks = Array.isArray(reply.acks) ? reply.acks : [];
+  const lids = reply.lids && typeof reply.lids === 'object' ? reply.lids : {};
+  const creates = !!(input && input.container && input.container.create);
+  const idOf = (v) => (typeof v === 'string' ? v : v && typeof v === 'object' && typeof v.id === 'string' ? v.id : '');
+  const out = [];
+  for (const [i, m] of members.entries()) {
+    if (!m || typeof m !== 'object' || m.engine !== 'widget' || (m.verb !== undefined && m.verb !== 'create') || m.ref) continue;
+    const lid = typeof m.$lid === 'string' ? m.$lid : '';
+    const named = lid ? acks.find((a) => a && typeof a === 'object' && (a.$lid === lid || a.lid === lid)) : null;
+    let node = (lid && Object.prototype.hasOwnProperty.call(lids, lid) ? idOf(lids[lid]) : '') || idOf(named);
+    if (!node && !creates && acks[i] && typeof acks[i] === 'object') node = idOf(acks[i]) || (typeof acks[i].minted === 'string' ? acks[i].minted : '');
+    const payload = docPayload(m.payload) || {};
+    out.push({ lid, node, code: typeof payload.code === 'string' ? payload.code : null });
+  }
+  return out;
+}
+
+// Each Docs call on the current branch, in order: { action, input, result, failed, msgIndex }.
+function docCalls(data) {
+  const messages = getMessageChain(data);
+  const results = new Map();
+  for (const m of messages) for (const b of (m.content || [])) if (b && b.type === 'tool_result' && b.tool_use_id) results.set(b.tool_use_id, b);
+  const out = [];
+  messages.forEach((m, msgIndex) => {
+    for (const b of (m.content || [])) {
+      const action = b && b.type === 'tool_use' ? claudeDocsAction(b.name) : null;
+      if (!action) continue;
+      const result = results.get(b.id) || null;
+      out.push({ action, input: (b.input && typeof b.input === 'object') ? b.input : {}, result, failed: !!(result && result.is_error), msgIndex });
+    }
+  });
+  return out;
+}
+
+// The latest screenshot Claude took of each widget: Map<node id, { fileUuid, msgIndex, editedAfter }>,
+// editedAfter when a later call (an update of the node, or a batch member on it) changed it.
+function docWidgetShots(data) {
+  const shots = new Map();
+  for (const call of docCalls(data)) {
+    if (call.failed) continue;
+    const { input } = call;
+    const payload = docPayload(input.payload) || {};
+    const ref = input.ref && typeof input.ref === 'object' ? input.ref : null;
+    if (call.action === 'read' && input.engine === 'widget' && payload.kind === 'screenshot' && ref && typeof ref.id === 'string') {
+      const content = call.result && Array.isArray(call.result.content) ? call.result.content : [];
+      const image = content.find((c) => c && c.type === 'image' && typeof c.file_uuid === 'string');
+      if (image) shots.set(ref.id, { fileUuid: image.file_uuid, msgIndex: call.msgIndex, editedAfter: false });
+    } else if (call.action === 'update' && ref && shots.has(ref.id)) {
+      shots.get(ref.id).editedAfter = true;
+    } else if (call.action === 'batch') {
+      for (const m of Array.isArray(input.batch) ? input.batch : []) {
+        const id = m && typeof m === 'object' && m.ref && typeof m.ref === 'object' ? m.ref.id : null;
+        if (id && shots.has(id) && m.verb !== 'read') shots.get(id).editedAfter = true;
+      }
+    }
+  }
+  return shots;
+}
+
+// The last code sent for each widget: Map<node id, code>.
+function docWidgetCode(data) {
+  const code = new Map();
+  for (const call of docCalls(data)) {
+    if (call.failed) continue;
+    const { input } = call;
+    if (call.action === 'batch') {
+      for (const w of docBatchWidgets(input, call.result)) if (w.node && w.code !== null) code.set(w.node, w.code);
+      for (const m of Array.isArray(input.batch) ? input.batch : []) {
+        const id = m && typeof m === 'object' && m.engine === 'widget' && m.ref && typeof m.ref === 'object' ? m.ref.id : null;
+        const p = id ? docPayload(m.payload) || {} : {};
+        if (id && typeof p.code === 'string') code.set(id, p.code);
+      }
+    } else if (call.action === 'update' && input.engine === 'widget' && input.ref && typeof input.ref.id === 'string') {
+      const p = docPayload(input.payload) || {};
+      if (typeof p.code === 'string') code.set(input.ref.id, p.code);
+    }
+  }
+  return code;
+}
+
+// Where each widget is embedded, in the order the calls place them: [{ doc: '<doc key>', node, caption }],
+// caption as the rebuilt document shows it.
+function docWidgetEmbeds(data) {
+  const out = [];
+  const captionOf = (b) => (typeof b.caption === 'string' ? b.caption.replace(/\s+/g, ' ').trim() : '');
+  const add = (blocks, doc, lidMap) => {
+    if (!doc || !blocks || typeof blocks !== 'object') return;
+    for (const b of Object.values(blocks)) {
+      if (!b || typeof b !== 'object' || b.type !== 'embed' || typeof b.ref !== 'string') continue;
+      const m = /^node\/(?:\$lid:(.+)|(.+))$/.exec(b.ref);
+      const node = m ? (m[1] !== undefined ? lidMap[m[1]] : m[2]) : '';
+      if (node) out.push({ doc, node, caption: captionOf(b) });
+    }
+  };
+  const opBlocks = (payload) => {
+    const ops = payload && Array.isArray(payload.ops) ? payload.ops : [];
+    return ops.map((op) => (op && op.with && typeof op.with === 'object' ? op.with.blocks : null)).filter(Boolean);
+  };
+  for (const call of docCalls(data)) {
+    if (call.failed) continue;
+    const { input } = call;
+    if (call.action === 'batch') {
+      const lidMap = {};
+      for (const w of docBatchWidgets(input, call.result)) if (w.lid && w.node) lidMap[w.lid] = w.node;
+      const made = claudeDocCreated(input, call.result, '');
+      if (made && !made.unconfirmed) add(made.blocks, made.key, lidMap);
+      for (const m of Array.isArray(input.batch) ? input.batch : []) {
+        if (!m || typeof m !== 'object' || m.engine !== 'prose' || !m.ref || typeof m.ref !== 'object' || !m.ref.id) continue;
+        for (const blocks of opBlocks(docPayload(m.payload))) add(blocks, `doc:${m.ref.id}`, lidMap);
+      }
+    } else if (call.action === 'update' && input.engine !== 'widget' && input.ref && input.ref.id) {
+      for (const blocks of opBlocks(docPayload(input.payload))) add(blocks, `doc:${input.ref.id}`, {});
+    }
+  }
+  return out;
+}
+
+// Puts each picture where its caption stood in a rebuilt document: '![<caption>](<src>)', the caption
+// below it in italics with the note in brackets. pictures: [{ caption, src, note }], each used once, by the
+// first caption line equal to it. Returns { markdown, missing }: the text, and how many diagrams still show
+// by caption.
+function docDiagramPictures(markdown, pictures = []) {
+  const left = pictures.slice();
+  let missing = 0;
+  const href = (src) => String(src).split('/').map((s) => (s === '..' ? s : encodeURIComponent(s))).join('/').replace(/\(/g, '%28').replace(/\)/g, '%29');
+  const text = String(markdown).replace(DOC_CAPTION_RE, (line) => {
+    const caption = line === '[embedded content]' ? '' : line.slice('[embedded content: '.length, -1);
+    const i = left.findIndex((p) => p && p.caption === caption && p.src);
+    if (i === -1) { missing++; return line; }
+    const pic = left.splice(i, 1)[0];
+    const alt = (caption || 'Diagram').replace(/([\\[\]])/g, '\\$1');
+    const under = [caption.replace(/([\\*_])/g, '\\$1'), pic.note ? `(${pic.note})` : ''].filter(Boolean).join(' ');
+    return `![${alt}](${href(pic.src)})${under ? `\n\n*${under}*` : ''}`;
+  });
+  return { markdown: text, missing };
 }
 
 // claude.ai's visualize tool (show_widget) draws an SVG or HTML fragment in the chat, styled by claude.ai's
@@ -881,12 +1828,42 @@ function failedToolUseIds(messages) {
   return ids;
 }
 
+// Whether a bash tool_result shows the command failed: is_error, Claude Code's "Exit code N" with N
+// not 0, or claude.ai's JSON {"returncode": N, ...} with N not the number 0 (claude.ai leaves
+// is_error false there). No result counts as success.
+function bashFailed(result) {
+  if (!result) return false;
+  if (result.is_error) return true;
+  const text = resultText(result);
+  const exit = /^Exit code (-?[0-9]+)/.exec(text);
+  if (exit) return Number(exit[1]) !== 0;
+  if (!/^[ \t\n\r]*\{/.test(text)) return false;
+  let json;
+  try { json = JSON.parse(text); } catch (e) { return false; }
+  if (!json || typeof json !== 'object' || Array.isArray(json) || !Object.prototype.hasOwnProperty.call(json, 'returncode')) return false;
+  return json.returncode !== 0;
+}
+
+// Tools that read a file at input.path or input.file_path and change nothing: an unmodelled tool
+// naming a known file makes it opaque (extractArtifacts), these don't. extract_artifacts.py's
+// READ_FILE_TOOLS matches.
+const READ_FILE_TOOLS = new Set(['view', 'Read', 'read_file', 'Glob', 'Grep', 'LS', 'NotebookRead', 'present_files', 'SendUserFile', 'Artifact']);
+
 // index, when given, is filled as index[key] = { path, filename, versions: [filename...],
-// messages: [msg uuid that made each version] } for the viewer; the return value is unchanged.
-function extractArtifacts(data, errorCollector = null, index = null) {
+// messages: [msg uuid that made each version], skipped: [chain index of each message with a change
+// not replayed], skippedAt: [[chain index, block index] of each such change] } for the viewer and
+// the export; the return value is unchanged.
+// replayed, when given (a Set), gets toolUseId + '|' + path for each bash edit replayed: a literal
+// sed -i, cat >> or Python text swap (literalSwapCommand) on a file whose text is known, that is, created in the chat
+// with every change since replayed. From a file's first bash command that isn't replayed
+// (commandTouches), none is replayed for it again.
+function extractArtifacts(data, errorCollector = null, index = null, replayed = null) {
   const artifacts = {};
   const messages = getMessageChain(data);
   const failedIds = failedToolUseIds(messages);
+  const uncertainCwds = new Set();
+  const cwds = commandCwds(messages, uncertainCwds);
+  const opaque = new Set();  // state keys a bash command changed in a way not replayed
 
   // Map content types to file extensions
   const typeToExt = {
@@ -932,13 +1909,23 @@ function extractArtifacts(data, errorCollector = null, index = null) {
       : { base: name, ext: '' };
   };
 
-  function setContent(key, content, basename) {
+  // missingNewline: the text is a heredoc's body, which in the file ends with a newline the
+  // export leaves out. An append puts it back first.
+  function setContent(key, content, basename, missingNewline = false) {
     if (!state[key]) {
-      state[key] = { current: content, basename, versions: [], versionMsgs: [], editedThisTurn: true };
+      state[key] = { current: content, basename, versions: [], versionMsgs: [], editedThisTurn: true, missingNewline };
     } else {
       state[key].current = content;
       state[key].editedThisTurn = true;
+      state[key].missingNewline = missingNewline;
     }
+  }
+
+  // The state key of a sandbox path, when its file is known.
+  const pathKeys = () => Object.keys(state).filter((k) => k.startsWith('/') || !/^(artifact|doc|widget):/.test(k));
+  function knownKey(path) {
+    const key = state[path] ? path : Object.keys(state).find((k) => k.startsWith('/') && normalizeSandboxPath(k) === path);
+    return key && !opaque.has(key) ? key : null;
   }
 
   function applyStrReplace(path, oldStr, newStr, replaceAll = false) {
@@ -972,9 +1959,19 @@ function extractArtifacts(data, errorCollector = null, index = null) {
     return { ok: true };
   }
 
-  for (const msg of messages) {
-    for (const block of (msg.content || [])) {
-      if (block.type !== 'tool_use') continue;
+  const skipped = Object.create(null);  // state key -> chain indexes of replay-shaped edits not applied
+  const skippedAt = Object.create(null);  // state key -> [chain index, block index] of each of them
+  const skip = (key, mi, bi) => {
+    const list = skipped[key] || (skipped[key] = []);
+    if (!list.includes(mi)) list.push(mi);
+    (skippedAt[key] || (skippedAt[key] = [])).push([mi, bi]);
+  };
+  for (let mi = 0; mi < messages.length; mi++) {
+    const msg = messages[mi];
+    const content = msg.content || [];
+    for (let bi = 0; bi < content.length; bi++) {
+      const block = content[bi];
+      if (!block || block.type !== 'tool_use') continue;
       // A failed bash command can still have written its heredoc, so only file
       // tools are skipped.
       if (failedIds.has(block.id) && !isBashTool(block.name)) continue;
@@ -1101,12 +2098,63 @@ function extractArtifacts(data, errorCollector = null, index = null) {
         if (file) setContent(widgetKey(input, block.id), file.text, file.name);
       } else if (isBashTool(block.name)) {
         const command = input.command || '';
-        for (const match of heredocMatches(command)) {
+        const creates = heredocMatches(command);
+        for (const match of creates) {
           const filepath = heredocPath(match);
           const content = heredocBody(match);
           const filename = basenameOf(filepath);
           if (filename && content) {
-            setContent(filepath, content, filename);
+            setContent(filepath, content, filename, true);
+          }
+        }
+        // A literal sed -i, cat >> or Python text swap on known files is replayed in place; a failed command may
+        // have stopped before or after its edit, so it isn't.
+        const cwd = cwds.has(block.id) ? cwds.get(block.id) : null;
+        const failed = failedIds.has(block.id) || bashFailed(resultsById.get(block.id));
+        const shape = creates.length ? null : literalSwapCommand(command, cwd, pathKeys());
+        const swap = failed ? null : shape;
+        const keys = swap ? swap.edits.map((e) => knownKey(e.path)) : [];
+        if (swap && keys.every(Boolean)) {
+          swap.edits.forEach((edit, i) => {
+            const s = state[keys[i]];
+            const before = s.current;
+            if (edit.kind === 'sed') s.current = applySedSubstitutions(s.current, edit.subs);
+            else if (edit.kind === 'pyreplace') {
+              // Python reads the real file, whose last newline a heredoc-made state lacks; the
+              // export keeps that form when the newline is still there.
+              const text = applyPythonReplace(s.missingNewline ? s.current + '\n' : s.current, edit.pairs);
+              if (s.missingNewline && text.endsWith('\n')) s.current = text.slice(0, -1);
+              else { s.current = text; s.missingNewline = false; }
+            } else {
+              s.current = (s.missingNewline ? s.current + '\n' : s.current) + edit.text;
+              s.missingNewline = false;
+            }
+            if (s.current !== before) s.editedThisTurn = true;
+            if (replayed) replayed.add(block.id + '|' + keys[i]);
+          });
+        } else {
+          // A replay-shaped edit left out (the command failed, or its file was already opaque) is recorded,
+          // so the export can say its file changed even when the detector names no command for it.
+          if (shape) {
+            for (const edit of shape.edits) {
+              const key = state[edit.path] ? edit.path : Object.keys(state).find((k) => k.startsWith('/') && normalizeSandboxPath(k) === edit.path);
+              if (!key) continue;
+              skip(key, mi, bi);
+            }
+          }
+          for (const key of commandTouches(command, cwd, pathKeys(), uncertainCwds.has(block.id))) opaque.add(key);
+        }
+      } else if (!READ_FILE_TOOLS.has(block.name) && !(input && input.command === 'view')) {
+        // A tool the replay doesn't model (MultiEdit, str_replace_based_edit_tool, anything new) that
+        // names a known file may have changed it: the file is opaque from here on, and the change is
+        // recorded like a skipped edit.
+        for (const field of ['path', 'file_path', 'filepath']) {
+          if (typeof input[field] !== 'string' || !input[field]) continue;
+          const target = normalizeSandboxPath(input[field]);
+          for (const key of pathKeys()) {
+            if (normalizeSandboxPath(key) !== target) continue;
+            opaque.add(key);
+            skip(key, mi, bi);
           }
         }
       }
@@ -1144,7 +2192,7 @@ function extractArtifacts(data, errorCollector = null, index = null) {
   // of them (two paths with one basename, or a file Claude itself named
   // report_v1.html), this one becomes <base>_2<ext> and so on, so nothing is
   // silently overwritten.
-  const usedNames = new Set();
+  const usedNames = new Map();  // file name -> { key, filename } of the artifact that took it
 
   for (const key of Object.keys(state)) {
     const s = state[key];
@@ -1159,21 +2207,24 @@ function extractArtifacts(data, errorCollector = null, index = null) {
       collision++;
       outBase = `${base}_${collision + 1}`;
     }
-    for (const n of namesFor(outBase)) usedNames.add(n);
+    // The name that was taken (the first this artifact needs that is used) and who holds it.
+    const takenName = collision > 0 ? namesFor(base).find((n) => usedNames.has(n)) : null;
+    const other = takenName ? usedNames.get(takenName) : null;
+    for (const n of namesFor(outBase)) usedNames.set(n, { key, filename: n });
     if (collision > 0 && errorCollector) {
-      errorCollector.addWarning(
-        'artifact_basename_collision',
-        `${outBase}${ext}`,
-        `Another artifact already uses a file name that "${base}${ext}" needs. This artifact was renamed to "${outBase}${ext}" to avoid overwriting.`,
-        { path: key, note: 'Check that both artifacts are intended; the renamed copy still preserves all versions.' }
-      );
+      const otherName = other ? other.filename : '?';
+      const otherPath = other ? other.key : '?';
+      const message = `Two different files were named ${base}${ext}; this one, from ${key}, was saved as ${outBase}${ext}. The other is ${otherName} from ${otherPath}.`;
+      const details = { path: key, note: `Other file: ${otherName} from ${otherPath}` };
+      if (typeof errorCollector.addNote === 'function') errorCollector.addNote('name_changed', `${outBase}${ext}`, message, details);
+      else errorCollector.addWarning('artifact_basename_collision', `${outBase}${ext}`, message, details);
     }
 
     if (index) {
       const names = s.versions.length <= 1
         ? [`${outBase}${ext}`]
         : s.versions.map((_, i) => `${outBase}_v${i + 1}${ext}`);
-      index[key] = { path: key, filename: `${outBase}${ext}`, versions: names, messages: s.versionMsgs.slice() };
+      index[key] = { path: key, filename: `${outBase}${ext}`, versions: names, messages: s.versionMsgs.slice(), skipped: (skipped[key] || []).slice(), skippedAt: (skippedAt[key] || []).map((p) => p.slice()) };
     }
 
     // defineProperty, so a file named __proto__ is a file, not the object's prototype.
@@ -1309,30 +2360,34 @@ function extractUploadedFiles(data, organizationId = null) {
   return files;
 }
 
-// Extract presented files from present_files tool results
-// These are files created by Claude (via bash/Python) and presented to the user
+// Extract presented files from present_files tool results on the current branch.
+// These are files created by Claude (via bash/Python) and presented to the user.
+// One entry per path, in the order first presented, from its latest presentation:
+// msgIndex is that presentation's index in getMessageChain(data), blockIndex its
+// tool_result's index in that message.
 function extractPresentedFiles(data) {
-  const files = [];
-  const seen = new Set();  // Deduplicate by path
-  const messages = data.chat_messages || [];
+  const byPath = new Map();
+  const messages = getMessageChain(data);
 
-  for (const msg of messages) {
-    for (const item of (msg.content || [])) {
+  for (let mi = 0; mi < messages.length; mi++) {
+    const blocks = messages[mi].content || [];
+    for (let bi = 0; bi < blocks.length; bi++) {
+      const item = blocks[bi];
+      if (!item) continue;
       // Look for tool_result from present_files
       if (item.type === 'tool_result' && item.name === 'present_files') {
         for (const content of (item.content || [])) {
           if (content.type === 'local_resource' && content.file_path) {
             const path = content.file_path;
-            if (seen.has(path)) continue;
-            seen.add(path);
-
             const filename = zipSafeName(path.split('/').pop());
-            files.push({
+            byPath.set(path, {
               filename: filename,
               path: path,
               uuid: content.uuid || '',
               mimeType: content.mime_type || '',
-              name: content.name || ''
+              name: content.name || '',
+              msgIndex: mi,
+              blockIndex: bi
             });
           }
         }
@@ -1340,50 +2395,66 @@ function extractPresentedFiles(data) {
     }
   }
 
-  return files;
+  return Array.from(byPath.values());
 }
 
 // Extract files Claude sent to the user with SendUserFile. Each delivery has its
 // own file UUID, so a path delivered more than once keeps every copy, as
 // <base>_v1<ext> ... <base>_vN<ext> plus the latest under <base><ext>.
-// takenNames holds filenames already used in artefacts/. Returns
-// [{ filename, uuid, path }].
-function extractDeliveredFiles(data, takenNames = []) {
+// takenNames holds filenames already used in artefacts/. offPaths: sandbox paths
+// (a Set, or a Map to the artifact's name in artefacts/) whose replayed artifact is
+// off and whose latest delivery is its final state: that delivery takes the
+// artifact's name (replaces: true), earlier ones are kept as <base>_delivered...
+// Returns [{ filename, uuid, path, msgIndex, blockIndex, replaces? }], msgIndex the
+// delivery's index in getMessageChain(data), blockIndex its block's in that message.
+function extractDeliveredFiles(data, takenNames = [], offPaths = new Set()) {
   const byPath = new Map();
-  for (const msg of getMessageChain(data)) {
-    for (const item of (msg.content || [])) {
-      for (const delivery of (item.file_deliveries || [])) {
+  const messages = getMessageChain(data);
+  for (let mi = 0; mi < messages.length; mi++) {
+    const content = messages[mi].content || [];
+    for (let bi = 0; bi < content.length; bi++) {
+      const item = content[bi];
+      for (const delivery of ((item && item.file_deliveries) || [])) {
         if (!delivery.file_uuid || !delivery.path) continue;
         if (!byPath.has(delivery.path)) byPath.set(delivery.path, []);
-        byPath.get(delivery.path).push(delivery.file_uuid);
+        byPath.get(delivery.path).push({ uuid: delivery.file_uuid, msgIndex: mi, blockIndex: bi });
       }
     }
   }
 
   const taken = new Set(takenNames);
   const files = [];
-  for (const [path, uuids] of byPath) {
+  for (const [path, all] of byPath) {
     const name = zipSafeName(path.split('/').pop()).normalize('NFC');
     const dot = name.lastIndexOf('.');
     const base = dot > 0 ? name.substring(0, dot) : name;
     const ext = dot > 0 ? name.substring(dot) : '';
+    const offName = offPaths && offPaths.has(path) ? ((typeof offPaths.get === 'function' && offPaths.get(path)) || name) : null;
+    const deliveries = offName ? all.slice(0, -1) : all;
 
-    // Keep the delivered copy apart from an artifact replayed under this name.
-    let outBase = base;
-    let attempt = 1;
-    while (taken.has(outBase + ext)) {
-      outBase = attempt === 1 ? `${base}_delivered` : `${base}_delivered_${attempt}`;
-      attempt++;
-    }
-    taken.add(outBase + ext);
+    if (deliveries.length) {
+      // Keep the delivered copy apart from an artifact replayed under this name.
+      let outBase = base;
+      let attempt = 1;
+      while (taken.has(outBase + ext)) {
+        outBase = attempt === 1 ? `${base}_delivered` : `${base}_delivered_${attempt}`;
+        attempt++;
+      }
+      taken.add(outBase + ext);
 
-    if (uuids.length > 1) {
-      uuids.forEach((uuid, i) => {
-        files.push({ filename: `${outBase}_v${i + 1}${ext}`, uuid, path });
-        taken.add(`${outBase}_v${i + 1}${ext}`);
-      });
+      if (deliveries.length > 1) {
+        deliveries.forEach((d, i) => {
+          files.push({ filename: `${outBase}_v${i + 1}${ext}`, uuid: d.uuid, path, msgIndex: d.msgIndex, blockIndex: d.blockIndex });
+          taken.add(`${outBase}_v${i + 1}${ext}`);
+        });
+      }
+      const last = deliveries[deliveries.length - 1];
+      files.push({ filename: outBase + ext, uuid: last.uuid, path, msgIndex: last.msgIndex, blockIndex: last.blockIndex });
     }
-    files.push({ filename: outBase + ext, uuid: uuids[uuids.length - 1], path });
+    if (offName) {
+      const last = all[all.length - 1];
+      files.push({ filename: offName, uuid: last.uuid, path, msgIndex: last.msgIndex, blockIndex: last.blockIndex, replaces: true });
+    }
   }
   return files;
 }
@@ -1927,7 +2998,7 @@ if (typeof module !== 'undefined' && module.exports) {
     escapeHtmlText, formatTimestamp, mdLinkText, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
     sortArtifactRows, artifactRowNotes, artifactSource, artifactUrl, artifactLocal, artifactVersionLinks, ARTIFACT_THUMB_PERMISSION_STATUS, artifactsChangedLine,
     artifactThumbsLine, ARTIFACTS_UNLISTED_HEADING, ARTIFACTS_NO_LIST, splitListedRows, artifactsIndexMd, artifactsIndexHtml,
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, bashFailed, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, resolveTouch, normalizedKeys, stripHeredocTabs, READ_FILE_TOOLS, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, pyStringLiteral, pythonSwapScript, applyPythonReplace, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote, docWidgetShots, docWidgetCode, docWidgetEmbeds, docDiagramPictures,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
     publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact, artifactForeign,

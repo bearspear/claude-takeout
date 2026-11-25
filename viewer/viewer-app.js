@@ -1039,7 +1039,8 @@ function renderCard(block, chat) {
   card.append(tile, label);
   card.title = file.name || '';
   if (file.flag) {
-    card.append(el('span', 'flag', 'May not match'));
+    const soft = file.flag === 'draft' || file.flag === 'helper';
+    card.append(el('span', soft ? 'flag soft' : 'flag', file.flag === 'draft' ? 'Draft' : file.flag === 'helper' ? 'Helper script' : 'May not match'));
     card.title = `${file.name || ''}\n${flagNote(file)}`;
   }
   return card;
@@ -1079,7 +1080,7 @@ function openFilesMenu() {
   const parts = [];
   const outputRows = list => list.map(o => {
     const file = chat.files[o.id];
-    const note = [fileKindLabel(file), o.versions > 1 ? `${o.versions} versions` : '', file && file.flag ? 'may not match' : ''].filter(Boolean).join(' · ');
+    const note = [fileKindLabel(file), o.versions > 1 ? `${o.versions} versions` : '', file && file.flag ? (file.flag === 'draft' ? 'draft' : file.flag === 'helper' ? 'helper script' : 'may not match') : ''].filter(Boolean).join(' · ');
     return filesRow(o.name, note, () => {
       closeFilesMenu(false);
       panelReturn = button;
@@ -1632,7 +1633,7 @@ function panelButton(className, text, pressed, onClick) {
 function renderPanelBody(chat, file, version, shape) {
   const body = document.getElementById('panel-body');
   const flagged = () => {
-    if (file.flag) body.prepend(el('div', 'file-note flag-note', flagNote(file)));
+    if (file.flag) body.prepend(el('div', file.flag === 'draft' || file.flag === 'helper' ? 'file-note' : 'file-note flag-note', flagNote(file)));
     if (file.published && file.published.needsRuntime) body.prepend(el('div', 'file-note', 'This page uses claude.ai to run, so the preview here may not work. Open it on claude.ai.'));
     if (file.published && version.same) body.prepend(el('div', 'file-note', 'Same as published: claude.ai published this file as Claude wrote it.'));
   };

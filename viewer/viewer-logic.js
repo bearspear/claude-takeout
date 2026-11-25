@@ -830,6 +830,8 @@ function artifactsEntry(data) {
 const FLAG_NOTES = {
   script: "Claude changed this file with a command the export can't replay, so it may not match what Claude made. replay_bash.py beside the extension can rebuild it from the chat folder.",
   edit: "An edit Claude made to this file couldn't be replayed, so it may not match what Claude made.",
+  draft: "Draft: not the file Claude delivered. A command the export can't follow changed it, and the files Claude delivered afterwards are in the export.",
+  helper: "Helper script Claude ran. A command the export can't follow changed it, so this copy may be older than the one Claude ran.",
   doc: 'Some edits to this document couldn\'t be rebuilt from the chat. The live document on claude.ai is the current one.',
 };
 const flagNote = file => (file && file.flag ? FLAG_NOTES[file.flag] || FLAG_NOTES.edit : '');

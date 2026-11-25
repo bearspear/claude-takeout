@@ -520,6 +520,21 @@ test('a decomposed delivered binary on disk is found, not missing, and linked by
   assert.strictEqual(f.versions[0].href, 'artefacts/' + encodeURIComponent(NFD('Prot\u00f3.odt')));
 });
 
+test('a delivery that replaced its off artifact is found under the artifact name, not missing', () => {
+  const data = { uuid: 'u', current_leaf_message_uuid: 'b', chat_messages: [
+    { uuid: 'a', parent_message_uuid: null, sender: 'assistant', content: [
+      { type: 'tool_use', id: '1', name: 'Write', input: { file_path: '/o/page.html', content: 'one' } },
+      { type: 'tool_use', id: '2', name: 'bash_tool', input: { command: 'cp /tmp/x /o/page.html' } }] },
+    { uuid: 'b', parent_message_uuid: 'a', sender: 'assistant', content: sendFile('3', '/o/page.html', 'de1') }] };
+  const { dir, archive, chat } = chatDir(data);
+  put(dir, 'artefacts/page.html', 'DELIVERED');
+  const got = chatFromDisk(archive, chat);
+  assert.deepStrictEqual(got.missing, []);
+  // An older export kept it apart, and that is still read.
+  put(dir, 'artefacts/page_delivered.html', 'DELIVERED');
+  assert.deepStrictEqual(chatFromDisk(archive, chat).missing, []);
+});
+
 test('a decomposed presented binary is not reported missing', () => {
   const data = { uuid: 'u', current_leaf_message_uuid: 'a', chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant',
     content: [{ type: 'tool_result', name: 'present_files', content: [{ type: 'local_resource', file_path: '/o/Prot\u00f3.odt', uuid: 'p1' }] }] }] };
