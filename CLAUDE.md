@@ -4,7 +4,7 @@ A self-contained orientation document for any agent (human or LLM) picking up th
 
 For deeper dives, two companion docs live alongside this one:
 - `README.md` — user-facing feature list, install/usage instructions, changelog.
-- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Kept current; last checked at v1.20.5.
+- `TECHNICAL.md` — long-form writeup: data loading, JSON structure, message chains, artifact versioning, files, citations, the ZIP, `errors.txt`, the viewer and the old-archive tool. Kept current; last checked at v1.22.0.
 
 ---
 
@@ -27,10 +27,10 @@ For deeper dives, two companion docs live alongside this one:
 | `injected.js` | Page-context org ID fallback (runs in the page's world). | Wraps `window.fetch`, reads the org ID from request URLs, relays it via `window.postMessage`. |
 | `content.js` | Isolated-world bridge (runs at `document_start`). | Injects `injected.js`, resolves the org ID, and exposes `getOrgId` / `fetchAllConversations` / `fetchConversation` / `listArtifacts` / `artifactThumbUrl` / `publishedPageInfo` / `publishedPageFile` to the popup via `chrome.runtime.onMessage`. The two published-page actions fetch a page's details and files from claude.ai's frame host; they keep the asset token to themselves and answer only with error codes, never URLs or messages. |
 | `background.js` | MV3 service worker. | Only manages side-panel "open on action click" preference. Listens to `chrome.storage.onChanged` for `useSidePanel` to re-apply behavior. |
-| `popup.html` | Popup UI (action click). | Buttons, status pill, settings drawer. Includes `.status.ready` / `.waiting` / `.error` / `.warning` styles. |
-| `sidepanel.html` | Side Panel UI. | Same buttons/handlers as the popup, just a different host. |
+| `popup.html` | Popup UI (action click). | Five screens as `section[data-screen]`: main (This chat card and buttons; Everything on claude.ai choices and Export selected), Exporting (steps, Stop), Done, Export stopped, and Settings (its own screen, not a drawer). `IS_POPUP` puts `popup` or `sidebar` on the body. |
+| `sidepanel.html` | Side Panel UI. | A byte-for-byte copy of `popup.html`; `tests/screens.test.js` fails if they differ. Edit one, copy it over the other. |
 | `export-core.js` | Shared pure extractors. | Classic script loaded before `popup.js` (plain top-level declarations, `module.exports` under Node only). Holds `fixMojibake`, `isTextFile`, `zipSafeName` (every name from chat data that becomes a ZIP path goes through it), `getMessageChain`, `extractArtifacts`, the heredoc helpers, `extractUploadedFiles`, `extractPresentedFiles`, `extractDeliveredFiles`, `getModelName`, `buildViewerDeliveries`, `viewerProject`, `heredocFiles`, `safeFileTitle`, the diagram files (`WIDGET_CSS`, `widgetFile`, `widgetKey`), `extractAttachedFiles`, the artifact list helpers (`uuidToBase58`, `artifactsFromList`), the artifacts store's views and indexes (`artifactView`, `previewKind`, `artifactFileKind`, `storeVersionList`, `storeRecordRow`, `artifactsIndexMd`, `artifactsIndexHtml` and their helpers `formatTimestamp`, `mdLinkText`, `escapeHtmlText`, `encodePath`) and the Claude Docs rebuild (`claudeDocCreated`, `claudeDocKey`, `renderClaudeDoc`, `docCompanions`, `docCompanionNote`). Used by `popup.js` and Node tools. |
-| `popup.js` | **The brain.** About 4,100 lines. All export logic, all conversion, all UI wiring. Same script is loaded by both `popup.html` and `sidepanel.html`. | See §3 below for the internal layout. |
+| `popup.js` | **The brain.** About 7,000 lines. All export logic, all conversion, all UI wiring. Same script is loaded by both `popup.html` and `sidepanel.html`. | See §3 below for the internal layout. |
 | `jszip.min.js` | ZIP library (vendored). | Used by both single-ZIP and mega-ZIP exports. |
 | `extract_artifacts.py` | Stdlib-only Python port of `extractArtifacts`. | Reconstructs all per-turn artifact versions from `original.json` offline. Byte-identical output to the JS implementation. |
 | `replay_bash.py` | Stdlib-only Python CLI for post-export bash replay. | Reconstruction, isolated by `sandbox-exec` on macOS, of artifacts the declarative replay can't reach (anything Claude mutated via `bash_tool`). See §10 below and `docs/WASM_REPLAY_APPROACH.md`. |
@@ -38,6 +38,7 @@ For deeper dives, two companion docs live alongside this one:
 | `tools/archive-zip.js` | ZIP extraction for the old-archive tool. | Extracts into a new folder under `--out`; refuses unsafe entries and checks free space. |
 | `tools/build_viewer.js` | CLI that gives older archives a viewer. | `node tools/build_viewer.js <folder> [--out] [--force] [--dry-run] [--json]`. Writes only `viewer.html`, `viewer-check.gif`, `viewer-files/`, and temporary `.tmp-<pid>` and `.old-<pid>` names. The write-safety rules live here: `inspectRoot`, `install`, `writeNew`, `assertFree`. It creates `--out` if absent, and extracts ZIPs into new folders under it. Needs Node 20+. |
 | `tools/merge_archives.js` | CLI that combines archives into one. | `node tools/merge_archives.js <folder or ZIP>... --out <folder> [--name] [--dry-run] [--json]`. Takes each chat once, from its newest copy (`pickNewest`), copies it into a new folder under `--out` built under a temporary name, writes `index.md`, `export-manifest.json` (`kind: "merged"`) and a viewer through `writeViewer`. Merges the artifacts of every layout into one `artifacts/` store (newest source per version) and rewrites the chats' links into `published/`. Only reads its sources. |
+| `tests/screens.test.js` | Unit tests for the panel: the screens' sentences (view-model functions), the markup of both pages (identical, ids, colours), counts, folder handoff, and the screens driven against fake elements. | Run by `sh tests/run.sh`. |
 | `tests/archive.test.js` | Unit tests for the three `tools/` files. | Run by `sh tests/run.sh`. |
 | `tests/merge.test.js` | Unit tests for `tools/merge_archives.js`. | Run by `sh tests/run.sh`. |
 | `tests/e2e/archive.e2e.js` | Browser test of a built archive viewer. | Optional; needs `playwright-core` and Chromium. |
@@ -94,10 +95,11 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 | `updateUI`, `showProgress`, `hideProgress`, `requestData` | DOM glue. |
 | `exportArtifacts`, `artifactsIndexHtml`, `artifactsIndexMd`, `saveArtifact`, `fetchPublishedFiles` | Export Artifacts: lists claude.ai's artifacts (`content.js` `listArtifacts`, then `artifactsFromList` in export-core.js), fetches each one's current files through `fetchPublishedFiles` (shared with `savePublishedPages`), writes a folder per artifact (`artifact.json` format 2 and a `<ver>/` folder per version, from `artifactStore`), plus `index.html`, `index.md`, `export-manifest.json` (`kind: "artifacts"`). Folder or ZIP by `settings.megaFormat`; `folderExport` is shared with Export All. `writeArtifactsViewer` builds its `viewer.html` (see TECHNICAL.md "Artifacts viewer"). See TECHNICAL.md "Export Artifacts". |
 | `artifactStore`, `artifactJsonV2`, `runArtifactStep` | `artifactStore(root, { prefix })` is the one writer of the artifacts store (a record per uuid, `<Title>_<shortId>/<ver>/`, `artifact.json`), shared by chats' publishes (`savePublishedPages`), Export Artifacts (prefix `''`) and Export All (prefix `artifacts/`). `runArtifactStep(root, { prefix, artifacts, ... })` adds each listed artifact's current version when no whole folder for that version exists. See TECHNICAL.md "The artifacts store". |
-| `bulkExport`, `bulkExportZip` | Multi-conversation paths. `bulkExportZip({ directory })` writes into a folder instead (`createDiskFolder`, `makeRunFolder`; the default, `settings.megaFormat`). `bulkExport` downloads one file per conversation (MD/embedded/JSON). `bulkExportZip` builds a single mega-zip with `index.md` + one folder per conversation reusing `populateConversationFolder`. |
+| `bulkExportZip` | The multi-conversation path (the per-conversation Markdown/Embedded/JSON `bulkExport` was removed in v1.22: every Export All chat folder holds those). `bulkExportZip({ directory })` writes into a folder instead (`createDiskFolder`, `makeRunFolder`; the default, `settings.megaFormat`); otherwise it builds a single mega-zip with `index.md` + one folder per conversation reusing `populateConversationFolder`. Like `exportArtifacts` it never throws and returns a `runResult` (`outcome`, `reason`, `target`, `saved`, `warnings`, `warningList`, `errorFiles`, `notes`, `startedAt`, `endedAt`); `options.onProgress` (`exportProgress` events `{ phase, done, total, sub, warnings }`), `options.onTarget` and `options.signal` (`{ stopped }`) drive the Exporting screen and Stop. |
+| Panel screens (`// ==== Panel screens`, then the UI block) | Pure view-model functions for every sentence the screens show (`exportPlan`, `everythingSummary`, `runResult` text helpers, `stoppedReasonText`, ...), then `showScreen`, `renderEverything`/`loadEverything`, `countEverything`/`cachedCounts` (Count, cached 10 min in `chrome.storage.session` `takeoutCounts`), `runSelected` (starts `bulkExportZip` or `exportArtifacts` per `exportPlan`), `showDone`/`showStopped`, the Settings screen and `takeHandoff`. Keep new sentences in the pure part so `tests/screens.test.js` can pin them. |
 | Click handlers + `refresh` | Button → action mapping. Each per-conversation handler calls `ensureProjectName` before generating the filename or starting the ZIP. |
-| Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, megaZipScope, megaFormat, exportAllArtifacts, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
-| Keyboard shortcuts | `Alt+M / E / Z / J / A / R`. |
+| Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, megaZipScope, megaFormat, exportAllChats, exportAllArtifacts, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
+| Keyboard shortcuts | `Alt+Z` (Export ZIP), `Alt+M` (Markdown), `Alt+E` (Markdown + files), `Alt+J` (JSON), `Alt+A` (Export selected), `Alt+R` (Refresh); the main screen only. The buttons list is `EXPORT_BUTTONS`. |
 | `exclusiveExport`, `onExport` | One export at a time: the export buttons are disabled while one runs, and a second click or shortcut does nothing. |
 | `generateFilename` | `[<Project>-project]_` prefix + filenameStyle, with an optional suffix such as `_embedded` added after the title is cut to length. |
 | Bootstrap | `loadSettings()` then `requestData()`. |
@@ -321,16 +323,20 @@ If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a
   "exporterSettings": {
     "filenameStyle": "title" | "title_date" | "date_title",
     "includeThinking": true,
-    "megaZipScope": "all" | "changes",  // what Export All exports; "changes" relabels it Export Changes
-    "megaFormat": "folder" | "zip",     // Export All and Export Artifacts into a folder (showDirectoryPicker, createDiskFolder) or one Mega-Zip download
-    "exportAllArtifacts": true,         // Export All also saves claude.ai's artifacts into artifacts/ (box "Include artifacts in Export All")
+    "megaZipScope": "all" | "changes",  // main screen: All / Changes only
+    "megaFormat": "folder" | "zip",     // main screen: Folder (showDirectoryPicker, createDiskFolder) or ZIP
+    "exportAllChats": true,             // main screen: the Chats box of Export selected
+    "exportAllArtifacts": true,         // main screen: the Artifacts box; Chats off + Artifacts on is the old Export Artifacts
     "showShortcuts": true,
     "useSidePanel": false
   },
   "useSidePanel": false,  // mirrored at top level so background.js can read it
   "exportRecord": {       // written after each mega-ZIP; with megaZipScope "changes", the mega-ZIP takes chats whose listed updated_at differs
-    "<org id>": { "at": "ISO time of that export", "chats": { "<chat uuid>": "updated_at as the chat list gave it" }, "artifacts": { "<artifact uuid>": "its live version as listed (paged:<updatedAt> for one found only by paging); only artifacts saved whole and written" }, "artifactVersions": { "<artifact uuid>": ["version ids an Export All saved whole or found gone (v1.21); Export Changes skips them"] } }
-  }  // recordableExport leaves out chats and artifacts with a write failure, and chats whose published pages were skipped after a 401
+    "<org id>": { "at": "ISO time of that export", "warnings": 0 /* the run's warning count, for the panel footer */, "chats": { "<chat uuid>": "updated_at as the chat list gave it" }, "artifacts": { "<artifact uuid>": "its live version as listed (paged:<updatedAt> for one found only by paging); only artifacts saved whole and written" }, "artifactVersions": { "<artifact uuid>": ["version ids an Export All saved whole or found gone (v1.21); Export Changes skips them"] } }
+  },
+  // chrome.storage.session (not local): "takeoutCounts" { <org>: { chats, artifacts, changedChats, changedArtifacts, at } }, Count's cache for 10 min;
+  // "folderExportNote" { at, choices } handoff from a popup folder export to the sidebar
+  // recordableExport leaves out chats and artifacts with a write failure, and chats whose published pages were skipped after a 401
 }
 ```
 
@@ -412,7 +418,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 ## 14. Keeping TECHNICAL.md accurate
 
-`TECHNICAL.md` describes how each part of an export is built (last checked at v1.20.5). It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
+`TECHNICAL.md` describes how each part of an export is built (last checked at v1.22.0). It names functions instead of copying their code, so it doesn't go stale with every edit. When you change behavior it describes (data loading, versioning, the download order in `fetchUploadedFile`, the ZIP layout, warning types, the viewer, the old-archive tool), update its section in the same PR. This file stays the entry point.
 
 ---
 
@@ -420,7 +426,7 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 
 | You want to… | Look at |
 |---|---|
-| Add a new export format | `popup.html` (button) + `popup.js` click handlers + a new `generate<Format>` function + bulk path in `bulkExport`. |
+| Add a new export format | `popup.html` (button) + `popup.js` click handlers + a new `generate<Format>` function; the bulk path is `bulkExportZip`, which writes each chat through `populateConversationFolder`. |
 | Render a new tool call inline | `convertToMarkdown`, in the `tool_use` branch. |
 | Extract a new file type to disk | New `extract<Foo>(data)` function; call site in `populateConversationFolder`; possibly a new folder under the ZIP layout. |
 | Add a new API fetch with retry | Pattern-match `fetchUploadedFile`: primary URL, fallbacks, per-URL `urlsTried`, surface failures via `errorCollector`. |
@@ -428,8 +434,8 @@ Recognized `type` values (all map to a case in `_getRecoveryHint`):
 | Adjust the ZIP layout | `populateConversationFolder`. README's "ZIP Archive" section is the user-facing contract — update it too. |
 | Change the offline viewer | `viewer/` (page), `takeout-viewer.js` (data contract), `writeViewer` in `popup.js`. Update `tests/viewer.test.js`, run `tests/e2e/viewer.e2e.js`, and keep the `USAGE.md` preview note accurate. |
 | Change the old-archive tool | `tools/build_viewer.js`, `tools/archive-lib.js`, `tools/archive-zip.js`. Never let it write anything but `viewer.html`, `viewer-check.gif`, `viewer-files/` and new folders under `--out`. Merge changes go in `tools/merge_archives.js` (update `tests/merge.test.js`). Update `tests/archive.test.js`, run `tests/e2e/archive.e2e.js`, and keep the USAGE.md sections "Adding a viewer to older archives" and "Combining archives" accurate. The external `build-archive-viewer` skill documents the old refusal and needs the same update. |
-| Add a setting | Add to `defaultSettings`, `loadSettings`, `applySettings`, `popup.html` settings drawer markup, optional `sidepanel.html` markup, and the change handler block. |
-| Add a keyboard shortcut | The `keydown` switch and the `<span class="shortcut">` markup in the relevant button. |
+| Add a setting | Add to `defaultSettings`, `loadSettings`, `applySettings`, the Settings screen's markup in `popup.html` (then copy the file to `sidepanel.html`; the pages must stay identical), and the change handler block. A choice that belongs next to Export selected goes on the main screen instead (see `setChoice`). |
+| Add a keyboard shortcut | The `SHORTCUT_BUTTONS` map (key to button id) beside the `keydown` handler, and the `<span class="shortcut">` markup in the relevant button. |
 | Bump README's changelog | Add a `### v<next>` section at the top of the changelog, and bump `manifest.json` in the same PR. |
 
 ---
@@ -450,4 +456,4 @@ A clean diff (or only the unversioned-final equivalent to `_vN`) means the JS ex
 
 ---
 
-*Last updated 2026-11-15. Keep this file accurate — it's the contract a future agent reads before touching anything.*
+*Last updated 2026-11-24. Keep this file accurate — it's the contract a future agent reads before touching anything.*

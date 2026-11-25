@@ -51,6 +51,8 @@ const PAGE = `<!doctype html><title>mock</title><body>mock claude<script>
         if (m[1] !== ORG || !server[m[2]]) return route.fulfill({ status: 404, json: {} });
         return route.fulfill({ json: server[m[2]] });
       }
+      if (/\/organizations\/[0-9a-f-]+\/chat_conversations(\?|$)/.test(url)) return route.fulfill({ json: Object.values(server).map((c) => ({ uuid: c.uuid, name: c.name, updated_at: c.updated_at })) });
+      if (url.includes('/api/')) return route.fulfill({ status: 404, json: {} });
       if (url.includes('/claudeai-rpc/')) return route.fulfill({ contentType: 'application/connect+proto', body: 'x' });
       return route.fulfill({ contentType: 'text/html', body: PAGE });
     });
@@ -78,7 +80,7 @@ const PAGE = `<!doctype html><title>mock</title><body>mock claude<script>
 
     const read = () => panel.evaluate(() => ({
       status: document.getElementById('status').textContent,
-      info: document.getElementById('info').textContent,
+      info: document.getElementById('chatTitle').textContent,
       disabled: document.getElementById('exportJson').disabled,
       uuid: conversationData ? conversationData.uuid : null,
       msgs: conversationData ? conversationData.chat_messages.length : null,
@@ -120,7 +122,28 @@ const PAGE = `<!doctype html><title>mock</title><body>mock claude<script>
     }, fs.readFileSync(zipPath).toString('base64'));
     s = await read();
     check('ZIP export has latest messages', original === 12, String(original));
-    check('ZIP result status survives', /Exported zip/.test(s.status), JSON.stringify(s));
+    check('ZIP result status survives', /^Saved ZIP/.test(s.status), JSON.stringify(s));
+
+    // Export selected: chats only, one ZIP, then the Done screen.
+    await panel.evaluate(() => { const b = document.getElementById('pickArtifacts'); if (b.checked) b.click(); });
+    await panel.click('#formatZip');
+    [dl] = await Promise.all([panel.waitForEvent('download', { timeout: 30000 }), panel.click('#exportSelected')]);
+    await panel.waitForSelector('#doneCard', { state: 'visible', timeout: 15000 });
+    const done = (await panel.textContent('#doneCard')).trim();
+    check('Export selected ends on the Done screen', done.startsWith('Done'), done);
+    check('Done screen replaced the main screen', await panel.$eval('[data-screen="main"]', (e) => e.hidden));
+    await panel.click('#doneBack');
+    check('Back to export returns to the main screen', await panel.$eval('[data-screen="main"]', (e) => !e.hidden));
+
+    // Alt+A on the main screen in folder mode asks for the folder.
+    await panel.click('#formatFolder');
+    await panel.evaluate(() => {
+      window.__pickerCalls = 0;
+      window.showDirectoryPicker = async () => { window.__pickerCalls++; throw new DOMException('stub', 'AbortError'); };
+    });
+    await panel.keyboard.press('Alt+KeyA');
+    await panel.waitForFunction(() => window.__pickerCalls > 0, null, { timeout: 5000 }).catch(() => {});
+    check('Alt+A in folder mode requests the folder picker', (await panel.evaluate(() => window.__pickerCalls)) === 1);
 
     await claude.evaluate(() => { history.pushState({}, '', '/new'); });
     await panel.waitForTimeout(800);
