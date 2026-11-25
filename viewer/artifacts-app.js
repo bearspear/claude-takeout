@@ -963,11 +963,16 @@
       }
       // Frames come and go as boards near the view, so only about a screenful runs at once.
       const frameOf = new Map();
+      // Far out (v1.23.3) no frame runs: each board is a tile, so a Fit of many boards starts none of their pages.
+      let far = false;
+      let observing = false;
+      const showTile = (item, on) => item.querySelector('.board-body').classList.toggle('tile', on);
       const observer = typeof IntersectionObserver === 'function' ? new IntersectionObserver(entries => {
         for (const e of entries) {
           const b = frameOf.get(e.target);
           if (!b) continue;
           const holder = e.target.querySelector('.board-frame');
+          if (far) continue;
           if (e.isIntersecting && !holder.firstChild) {
             const frame = previewFrame({ title: b.title }, boardDoc(b, payload, texts));
             frame.style.width = `${b.w}px`;
@@ -1009,8 +1014,18 @@
         placed.push({ node: item, o: b, body, holder });
       }
       const apply = scale => {
-        // Far out, a board's head keeps only its title (Open alone and badges come back at 20%).
-        canvas.classList.toggle('far', scale < 0.2);
+        // Far out, a board's head keeps only its title (Open alone and badges come back at 20%) and its body is a tile.
+        const nowFar = scale < 0.2;
+        canvas.classList.toggle('far', nowFar);
+        if (nowFar !== far) {
+          far = nowFar;
+          for (const item of frameOf.keys()) {
+            if (far) item.querySelector('.board-frame').replaceChildren();
+            showTile(item, far);
+          }
+          // Back from far: observing again reports every board afresh, so those near the view get their frames.
+          if (!far && observer && observing) { observer.disconnect(); for (const item of frameOf.keys()) observer.observe(item); }
+        }
         canvas.style.width = `${Math.ceil(layout.width * scale)}px`;
         canvas.style.height = `${Math.ceil(layout.height * scale)}px`;
         const px = n => `${Math.round(n * scale)}px`;
@@ -1286,7 +1301,7 @@
         more.append(ul);
         wrap.append(more);
       }
-      if (observer) queueMicrotask(() => { for (const item of frameOf.keys()) observer.observe(item); });
+      if (observer) queueMicrotask(() => { observing = true; for (const item of frameOf.keys()) observer.observe(item); });
       else for (const [item, b] of frameOf) item.querySelector('.board-frame').append(previewFrame({ title: b.title }, boardDoc(b, payload, texts)));
       wrap.stopFrames = () => { if (observer) observer.disconnect(); off.abort(); endDrag(); };
       return wrap;

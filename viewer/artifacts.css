@@ -190,6 +190,8 @@ button { font: inherit; color: inherit; }
 .design-board .board-body { cursor: default; }
 .design-canvas.far .board-head .board-open, .design-canvas.far .board-head .board-badge { display: none; }
 .design-canvas.far .design-note { padding: 0; }
+/* Far out (v1.23.3) a board is a tile: no frame runs in it. */
+.design-board .board-body.tile { background: var(--pic); }
 .design-canvas.far .design-board .board-head { min-width: 0; font-size: 10px; }
 .design-canvas.far .board-body.missing > span { display: none; }
 /* Move (v1.23.1): the boards' frames ignore the mouse (their pages still run), so the whole canvas moves and zooms. */

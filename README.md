@@ -402,6 +402,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.23.3
+
+- **Tiles when far out on the Design canvas** - Below 20%, as at Fit for a big design, each board is a plain tile with its title and its page doesn't run, so seeing the whole of a design with many boards stays quick. Zoom in to 20% or more and the boards near the view come back to life.
+
 ### v1.23.2
 
 - **A Design canvas like claude.ai's** - The canvas sits in a window as tall as the page and moves inside it, off the edges, with no scrollbars and a dotted background that moves with it. It opens fitted to the width, from the top; **Fit** now shows the whole design, and you can zoom from 10% to 200%. Move and Interact are a pill at the bottom of the canvas, an arrow (Interact) and a hand (Move), also on the keys **V** and **H**; the zoom bar sits at the bottom right. In Interact the wheel or a two-finger swipe over the space between boards moves the canvas, and Ctrl/Cmd with the wheel or a pinch zooms. However far you move it, some of the design stays in view; Tab to a board brings it into view. Far out, boards show only their titles. A one-finger drag on a touch screen moves the canvas; a two-finger pinch there doesn't zoom it, use the buttons.
