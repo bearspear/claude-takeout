@@ -756,7 +756,19 @@ function openLink(href) {
   return link;
 }
 
-// Returns the body nodes and, for a file the header can offer, a link.
+// A picture in a .file-paper that zooms and pans in place (a plain wheel scrolls). Returns the frame to show
+// and its controller. opts: pictureZoom's.
+function zoomPaper(src, alt, opts = {}) {
+  const img = el('img', 'file-image');
+  img.setAttribute('alt', alt);
+  img.setAttribute('src', src);
+  const paper = el('div', 'file-paper');
+  paper.append(img);
+  const zoom = pictureZoom(paper, img, opts);
+  return { frame: zoom.frame, zoom };
+}
+
+// Returns the body nodes, the picture's zoom controller and, for a file the header can offer, a link.
 function popupContent(item) {
   const name = item.name || 'Untitled';
   if (item.text === null && partsListed.has(item.part)) return { nodes: [el('div', 'file-loading', 'Loading…')], part: item.part };
@@ -768,12 +780,8 @@ function popupContent(item) {
   }
   if (!item.href) return { nodes: [el('div', 'file-missing', 'This file is not in this export.')] };
   if (POPUP_IMAGE.test(name)) {
-    const img = el('img', 'file-image');
-    img.setAttribute('alt', name);
-    img.setAttribute('src', item.href);
-    const paper = el('div', 'file-paper');
-    paper.append(img);
-    return { nodes: [paper], link: openableHref(item.href) ? openLink(item.href) : null };
+    const { frame, zoom } = zoomPaper(item.href, name);
+    return { nodes: [frame], zoom, link: openableHref(item.href) ? openLink(item.href) : null };
   }
   if (POPUP_PDF.test(name)) {
     const frame = el('iframe', 'preview');
@@ -805,7 +813,7 @@ function popupKeys(e) {
   if (e.key === 'Escape') { e.preventDefault(); closePopup(); return; }
   if (e.key !== 'Tab') return;
   const pop = popup.veil.firstElementChild;
-  const stops = [...pop.querySelectorAll('a[href], button, [tabindex="0"]')].filter(n => !n.closest('[hidden]'));
+  const stops = [...pop.querySelectorAll('a[href], button, [tabindex="0"]')].filter(n => !n.disabled && !n.closest('[hidden]'));
   const last = stops.length - 1;
   const at = stops.indexOf(document.activeElement);
   if (!stops.length) { e.preventDefault(); pop.focus(); }
@@ -815,7 +823,7 @@ function popupKeys(e) {
 
 function openPopup(item, trigger) {
   closePopup();
-  const { nodes, link, part } = popupContent(item);
+  const { nodes, link, part, zoom } = popupContent(item);
   const pop = el('div', 'pop');
   pop.setAttribute('role', 'dialog');
   pop.setAttribute('aria-modal', 'true');
@@ -838,7 +846,7 @@ function openPopup(item, trigger) {
   veil.addEventListener('keydown', popupKeys);
   document.body.append(veil);
   document.getElementById('app').inert = true;
-  const mine = popup = { veil, trigger };
+  const mine = popup = { veil, trigger, onClose: () => { if (zoom) zoom.destroy(); } };
   pop.focus({ preventScroll: true });
   // Large upload text is in a part. It lands only in the popup that asked for it.
   // The text is kept even when the popup has closed, so the next open is instant.
@@ -1572,6 +1580,29 @@ function setDrawer(open) {
 let openFile = null; // { file, version } as the hash has it
 let panelFor = ''; // what the panel shows, so a hash change that leaves it alone doesn't reload a frame
 let panelView = null;
+// The picture in the panel and its zoom, kept across versions of one file. Ruling: a state restores only into the
+// same kind of controller ('picture' here; 'page' for a frame's own zoom).
+let panelFileKey = ''; // `${chat}\n${file}\n`, as showPanel builds it, without the version
+let panelPicture = null; // { fileKey, kind, controller }
+let panelZoom = null; // { fileKey, kind, state }
+
+// Keeps the zoom of the picture the panel shows, then lets it go. Called before the panel body changes.
+function releasePanelPicture() {
+  if (!panelPicture) return;
+  const { fileKey, kind, controller } = panelPicture;
+  panelPicture = null;
+  if (!controller.failed) panelZoom = { fileKey, kind, state: controller.state() };
+  controller.destroy();
+}
+
+// A zoom controller for the panel: starts where this file's last version was, else at Fit.
+function panelPictureZoom(make) {
+  const fileKey = panelFileKey;
+  const made = make();
+  panelPicture = { fileKey, kind: 'picture', controller: made.zoom };
+  if (panelZoom && panelZoom.fileKey === fileKey && panelZoom.kind === 'picture') made.zoom.restore(panelZoom.state);
+  return made;
+}
 
 // Siblings are found by name, newest text of the last file with that name.
 function siblingLookup(chat) {
@@ -1612,14 +1643,31 @@ function fileDetails(file, version) {
 
 function previewNodes(chat, file, version) {
   if (file.kind === 'md') return [renderText({ text: version.text, cites: [] }, [])];
-  if (file.kind === 'image') {
-    const img = el('img', 'file-image');
-    img.setAttribute('alt', file.name || '');
-    img.setAttribute('src', version.href);
-    const paper = el('div', 'file-paper');
-    paper.append(img);
-    return [paper];
+  if (file.kind === 'image') return [panelPictureZoom(() => zoomPaper(version.href, file.name || '')).frame];
+  // An SVG shows as a picture, which runs nothing; one with scripts may need them, so it stays a page.
+  if (file.kind === 'svg' && typeof version.text === 'string' && !svgHasScripts(version.text)) {
+    let shown = null;
+    // The strict XML parser refused it (no xmlns, an HTML entity, a bare &): the forgiving frame shows it.
+    const fallback = zoom => {
+      if (panelPicture && panelPicture.controller === zoom) panelPicture = null;
+      zoom.destroy();
+      if (shown && shown.parentNode) shown.replaceWith(...svgPageNodes(chat, file, version));
+    };
+    const { frame, zoom } = panelPictureZoom(() => zoomPaper(svgDataUrl(version.text), file.name || '', { natural: svgNaturalSize(version.text), onError: fallback }));
+    if (zoom.failed) return svgPageNodes(chat, file, version);
+    shown = frame;
+    return [frame];
   }
+  return pageNodes(chat, file, version);
+}
+
+// An SVG the picture can't show, as a page: today's sandboxed frame (the one place a page's own zoom bar goes).
+function svgPageNodes(chat, file, version) {
+  return pageNodes(chat, file, version);
+}
+
+// Today's sandboxed preview of a file's text.
+function pageNodes(chat, file, version) {
   if (file.kind === 'audio' || file.kind === 'video') {
     const media = el(file.kind, `file-${file.kind}`);
     media.controls = true;
@@ -1657,6 +1705,7 @@ function panelButton(className, text, pressed, onClick) {
 
 function renderPanelBody(chat, file, version, shape) {
   const body = document.getElementById('panel-body');
+  releasePanelPicture();
   const flagged = () => {
     if (file.flag) body.prepend(el('div', file.flag === 'draft' || file.flag === 'helper' ? 'file-note' : 'file-note flag-note', flagNote(file)));
     if (file.published && file.published.needsRuntime) body.prepend(el('div', 'file-note', 'This page uses claude.ai to run, so the preview here may not work. Open it on claude.ai.'));
@@ -1734,6 +1783,7 @@ let panelLoad = 0; // goes up with every change of the panel, so a slow part can
 function drawFromPart(chat, open, file, version) {
   const load = panelLoad;
   renderPanelHead(chat, open.file, file, open.version, { views: [] });
+  releasePanelPicture();
   document.getElementById('panel-body').replaceChildren(el('div', 'file-loading', 'Loading…'));
   loadPart(version.part).then(part => {
     if (load !== panelLoad) return;
@@ -1763,8 +1813,11 @@ function showPanel(chat, open, again = false) {
   const fileKey = open ? `${chat.id}\n${open.file}\n` : '';
   const key = open ? fileKey + open.version : '';
   if (key === panelFor && !again) return;
-  if (!fileKey || !panelFor.startsWith(fileKey)) panelView = null; // a new file starts at its first view
+  releasePanelPicture();
+  // A new file starts at its first view, and its pictures at Fit.
+  if (!fileKey || !panelFor.startsWith(fileKey)) { panelView = null; panelZoom = null; }
   panelFor = key;
+  panelFileKey = fileKey;
   panelLoad++;
   panel.hidden = !open;
   if (!open) {

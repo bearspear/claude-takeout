@@ -1625,18 +1625,15 @@ const SIZE_SCRIPT = `<script>(function(){function r(){try{var d=document.documen
 // holds it and the bar (−, percentage, +, Fit), so the bar doesn't scroll. The frame and bar are reused
 // when the same box gets a new controller (the gallery's next picture), so focus in them isn't lost.
 // opts.plainWheel: a plain wheel zooms too (the gallery). opts.natural: the picture's size at 100%.
+// opts.onError: called once when the picture fails to load, or loads with no width (controller.failed is set).
+// Sizing waits until the box has a size: a detached or hidden box is fitted by the ResizeObserver once shown.
 function pictureZoom(box, img, opts = {}) {
   const doc = box.ownerDocument;
   const make = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
   let frame = box.parentElement && box.parentElement.classList.contains('zoom-frame') ? box.parentElement : null;
   if (!frame) {
+    // Each place sizes its frame in CSS (.gallery-pop > .zoom-frame, #panel-body > .zoom-frame, ...).
     frame = make('div', 'zoom-frame');
-    if (box.isConnected) {
-      const cs = getComputedStyle(box);
-      frame.style.flex = cs.flex;
-      frame.style.minHeight = cs.minHeight;
-      frame.style.minWidth = cs.minWidth;
-    }
     if (box.parentNode) box.replaceWith(frame);
     frame.append(box);
   }
@@ -1662,7 +1659,8 @@ function pictureZoom(box, img, opts = {}) {
   let zoom = 1;
   let atFit = true;
   let pending = null; // a state to restore once the picture is ready
-  const controller = { frame, dragged: false };
+  let loaded = false; // the picture has loaded, or opts.natural made waiting unnecessary
+  const controller = { frame, dragged: false, failed: false };
 
   const avail = () => {
     const cs = getComputedStyle(box);
@@ -1671,6 +1669,7 @@ function pictureZoom(box, img, opts = {}) {
       height: box.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom),
     };
   };
+  const hasSize = () => { const a = avail(); return Number.isFinite(a.width) && Number.isFinite(a.height) && a.width > 0 && a.height > 0; };
   const fitNow = () => fitZoom(natural, avail());
   const range = () => pictureRange(fitNow(), natural);
   // The picture's top left in the scroll content, and a viewport point in the box's client area.
@@ -1703,21 +1702,37 @@ function pictureZoom(box, img, opts = {}) {
   const setFit = () => apply(0, null, true);
   const setZoom = (z, point) => apply(z, point);
 
+  // Natural size and Fit, once the picture is known and the box has a size; the ResizeObserver calls it again.
   function ready() {
-    if (natural) return;
+    if (natural || !loaded || controller.failed || !hasSize()) return;
     const n = opts.natural;
     if (n && n.width > 0 && n.height > 0) natural = { width: n.width, height: n.height };
     else if (img.naturalWidth > 0 && img.naturalHeight > 0) natural = { width: img.naturalWidth, height: img.naturalHeight };
-    else { const a = avail(); natural = { width: Math.max(1, a.width), height: Math.max(1, a.height) }; }
+    else { const a = avail(); natural = { width: a.width, height: a.height }; }
     zoom = fitNow();
     setFit();
     if (pending) { const s = pending; pending = null; controller.restore(s); }
   }
-  if (opts.natural || (img.complete && img.naturalWidth)) ready();
-  else { on(img, 'load', ready, { once: true }); on(img, 'error', ready, { once: true }); }
+  function fail() {
+    if (controller.failed) return;
+    controller.failed = true;
+    if (typeof opts.onError === 'function') opts.onError(controller);
+  }
+  // An <img> with no src is complete too; only one with a src that has no width has failed.
+  const failedAlready = () => img.complete && !!img.getAttribute('src') && !img.naturalWidth;
+  const onLoad = () => { if (!img.naturalWidth) { fail(); return; } loaded = true; ready(); };
+  if (img.complete && img.naturalWidth) loaded = true;
+  else if (failedAlready()) fail();
+  else {
+    if (opts.natural) loaded = true;
+    on(img, 'load', onLoad);
+    on(img, 'error', fail);
+  }
+  ready();
 
   const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
-    if (!natural) return;
+    if (!natural) { ready(); return; }
+    if (!hasSize()) return;
     if (atFit) setFit();
     else { const { min, max } = range(); if (zoom < min || zoom > max) setZoom(zoom); else box.classList.toggle('can-drag', canPan()); }
   }) : null;

@@ -1,6 +1,7 @@
 // Zoom and pan in the chat viewer over file:// in Chromium: the gallery opens a picture at Fit, a plain
 // wheel zooms about the pointer, a drag pans without closing, double-click and keys, and an inline
-// diagram opens as a one-item gallery.
+// diagram opens as a one-item gallery. In the side panel and the upload popup pictures zoom in place,
+// and SVG files show as pictures, falling back to the sandboxed frame when the strict parser refuses them.
 const { chromium } = require(process.env.PW);
 const fs = require('fs'), os = require('os'), path = require('path'), zlib = require('zlib');
 const { buildHtml } = require('./make-viewer.js');
@@ -48,6 +49,29 @@ const chat = {
   ],
 };
 
+const cf = (id, p, text) => use(id, 'create_file', { path: p, file_text: text });
+const out = n => `/mnt/user-data/outputs/${n}`;
+const CHART1 = '<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1200"><rect x="100" y="100" width="1400" height="1000" fill="#69c"/></svg>';
+const CHART2 = '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"><rect x="50" y="50" width="700" height="500" fill="#c69"/></svg>';
+const BARE = '<svg width="400" height="300"><rect width="400" height="300" fill="#9c6"/></svg>';
+const NBSP = '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><text x="10" y="40">a&nbsp;b</text></svg>';
+const HUGE = '<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100"><rect width="100000" height="100" fill="#999"/></svg>';
+const PCT = '<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 900 600"><rect width="900" height="600" fill="#c96"/></svg>';
+const PHOTO = png(1200, 800);
+const panelChat = {
+  uuid: 'p', name: 'Panel pictures', model: 'claude-x', created_at: at(4), updated_at: at(9), settings: {}, current_leaf_message_uuid: 'pa2',
+  chat_messages: [
+    msg('ph1', null, 'human', 4, [{ type: 'text', text: 'draw' }]),
+    msg('pa1', 'ph1', 'assistant', 5, [
+      { type: 'text', text: 'Drawn.' },
+      cf('c1', out('chart.svg'), CHART1), cf('c2', out('bare.svg'), BARE), cf('c3', out('nbsp.svg'), NBSP),
+      cf('c4', out('huge.svg'), HUGE), cf('c5', out('pct.svg'), PCT), use('c7', 'present_files', { filepaths: [out('pic.png')] }),
+    ]),
+    { ...msg('ph2', 'pa1', 'human', 6, [{ type: 'text', text: 'smaller, and here is a photo' }]), files_v2: [{ file_uuid: 'u-png', file_name: 'photo.png', success: true }] },
+    msg('pa2', 'ph2', 'assistant', 7, [{ type: 'text', text: 'Smaller.' }, cf('c6', out('chart.svg'), CHART2)]),
+  ],
+};
+
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zoom-'));
   const file = path.join(dir, 'viewer.html');
@@ -57,7 +81,18 @@ const chat = {
   for (const n of [1, 2, 3]) { fs.writeFileSync(path.join(dir, 'images', `k${n}_Picture.png`), n === 1 ? BIG : SMALL); saved[`https://img.example/${n}.png`] = `images/k${n}_Picture.png`; }
   const index = {};
   const artifacts = core.extractArtifacts(chat, null, index);
-  fs.writeFileSync(file, buildHtml([chat], '2026-11-15T12:00:00Z', () => ({ webImages: saved, artifacts, artifactIndex: index, widgetFile: core.widgetFile, widgetKey: core.widgetKey })));
+  const pIndex = {};
+  const pArtifacts = core.extractArtifacts(panelChat, null, pIndex);
+  // A picture Claude made: its bytes are in artefacts/, so it has no text.
+  pArtifacts['pic.png'] = '';
+  pIndex['/mnt/user-data/outputs/pic.png'] = { path: '/mnt/user-data/outputs/pic.png', filename: 'pic.png', versions: ['pic.png'], messages: ['pa1'] };
+  fs.mkdirSync(path.join(dir, 'artefacts'));
+  fs.writeFileSync(path.join(dir, 'artefacts', 'pic.png'), BIG);
+  fs.mkdirSync(path.join(dir, 'uploads'));
+  fs.writeFileSync(path.join(dir, 'uploads', 'p02_photo.png'), PHOTO);
+  fs.writeFileSync(file, buildHtml([chat, panelChat], '2026-11-15T12:00:00Z', c => (c.uuid === 'p'
+    ? { folder: '', artifacts: pArtifacts, artifactIndex: pIndex, uploads: { 'u-png': { path: 'uploads/p02_photo.png', text: null } } }
+    : { webImages: saved, artifacts, artifactIndex: index, widgetFile: core.widgetFile, widgetKey: core.widgetKey })));
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
   const check = (n, ok, x = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n} ${ok ? '' : x}`); };
@@ -174,6 +209,22 @@ const chat = {
   await page.keyboard.press('Escape');
   check('gallery: Right resets to Fit; Left/Right still change picture; Escape closes', pos2 === '2 of 3' && pos1 === '1 of 3' && back === fitPct && await page.locator('.veil.gallery').count() === 0, `${pos2} ${pos1} ${back}`);
 
+  // At the last picture Next is disabled: Tab from Previous, the last stop that can take focus, wraps to Close.
+  await page.locator('.web-mosaic .tile').first().click();
+  await page.waitForSelector('.gallery-pop .zoom-level', { state: 'attached' });
+  await page.keyboard.press('ArrowRight');
+  await page.keyboard.press('ArrowRight');
+  await page.locator('.gallery-nav .prev').focus();
+  // A dispatched Tab moves nothing by itself, so only the trap can take focus to Close.
+  const wrapped = await page.evaluate(() => {
+    const e = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    document.activeElement.dispatchEvent(e);
+    return e.defaultPrevented && !!document.activeElement && document.activeElement.matches('.gallery-pop > .close');
+  });
+  const nextOff = await page.locator('.gallery-nav .next').isDisabled();
+  await page.keyboard.press('Escape');
+  check('gallery: Tab skips a disabled last button and wraps', nextOff && wrapped, `next disabled ${nextOff}, wrapped ${wrapped}`);
+
   const diagram = page.locator('figure.diagram');
   const opener = diagram.locator('button.diagram-open');
   await opener.focus().catch(() => {});
@@ -194,6 +245,141 @@ const chat = {
   await diagram.hover();
   await diagram.locator('.diagram-more').click();
   check('diagram: the … menu doesn\'t open the gallery', await page.locator('.veil.gallery').count() === 0 && await diagram.locator('.diagram-menu').isVisible());
+
+  // ---- The side panel and the upload popup ----
+  await page.goto('file://' + file + '#chat=p');
+  await page.waitForSelector('.msg');
+  const plevel = () => page.locator('#panel-body .zoom-level').textContent().catch(() => null);
+  const pbox = page.locator('#panel-body .zoom-box');
+  const pimg = page.locator('#panel-body .zoom-box img');
+  // The Fit zoom of a picture of that size in the panel's picture area.
+  const panelFit = (w, h) => pbox.evaluate((b, [w, h]) => {
+    const cs = getComputedStyle(b);
+    const aw = b.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+    const ah = b.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+    return Math.min(1, aw / w, ah / h);
+  }, [w, h]).catch(() => -1);
+  const openCard = async (name, n = 0) => {
+    await page.locator('.art', { hasText: name }).nth(n).click();
+    await page.waitForSelector('#panel:not([hidden])');
+  };
+  const loaded = async () => {
+    await pimg.waitFor({ state: 'attached', timeout: 3000 }).catch(() => {});
+    await pimg.evaluate(i => (i.complete ? 0 : new Promise(r => { i.addEventListener('load', r); i.addEventListener('error', r); }))).catch(() => {});
+    await settle();
+  };
+
+  await openCard('pic.png');
+  await loaded();
+  await pbox.focus().catch(() => {});
+  await page.keyboard.press('1');
+  await settle();
+  const pb = await pbox.boundingBox().catch(() => null);
+  if (pb) await page.mouse.move(pb.x + pb.width / 2, pb.y + pb.height / 2);
+  const top0 = await pbox.evaluate(b => b.scrollTop).catch(() => -1);
+  await page.mouse.wheel(0, 200);
+  await settle();
+  const top1 = await pbox.evaluate(b => b.scrollTop).catch(() => -1);
+  check('panel image: plain wheel scrolls the panel, doesn\'t zoom', top0 >= 0 && top1 > top0 && (await plevel()) === '100%', `${top0} -> ${top1} at ${await plevel()}`);
+  await page.keyboard.down('Control');
+  await page.mouse.wheel(0, -200);
+  await page.keyboard.up('Control');
+  await settle();
+  check('panel image: Ctrl+wheel zooms', parseFloat(await plevel()) > 100, await plevel());
+
+  const shownLater = await page.evaluate(src => new Promise(done => {
+    const host = document.createElement('div');
+    host.style.cssText = 'position:fixed;left:0;top:0;width:300px;height:200px;display:none;flex-direction:column';
+    const b = document.createElement('div');
+    b.style.cssText = 'flex:1;min-height:0';
+    host.append(b);
+    document.body.append(host);
+    const i = document.createElement('img');
+    i.onload = () => {
+      let c;
+      try { c = pictureZoom(b, i); } catch (e) { done({ error: e.message }); return; }
+      host.style.display = 'flex';
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        const w = i.getBoundingClientRect().width, bw = b.clientWidth;
+        const text = host.querySelector('.zoom-level').textContent;
+        c.destroy(); host.remove();
+        done({ w, bw, text });
+      }));
+    };
+    b.append(i);
+    i.src = src;
+  }), await pimg.getAttribute('src', { timeout: 3000 }).catch(() => ''));
+  check('panel image: refits after the panel is shown', !shownLater.error && Number.isFinite(shownLater.w) && shownLater.w > 0 && shownLater.w <= shownLater.bw && !/NaN/.test(shownLater.text), JSON.stringify(shownLater));
+
+  await openCard('chart.svg', 0);
+  await loaded();
+  const src = await pimg.getAttribute('src', { timeout: 3000 }).catch(() => '');
+  check('panel svg: shown as <img>', /^data:image\/svg\+xml/.test(src || '') && await page.locator('#panel-body iframe').count() === 0, `${src && src.slice(0, 40)} frames ${await page.locator('#panel-body iframe').count()}`);
+  await pbox.focus().catch(() => {});
+  await page.keyboard.press('1');
+  await page.keyboard.press('+');
+  await settle();
+  const z1 = await plevel();
+  await page.locator('#panel-head .ver', { hasText: 'v2' }).click();
+  await loaded();
+  const z2 = await plevel();
+  const v2src = await pimg.getAttribute('src', { timeout: 3000 }).catch(() => '');
+  check('panel svg: version switch keeps the zoom (percentage)', z1 === '125%' && z2 === '125%' && v2src !== src && /^data:image\/svg\+xml/.test(v2src || ''), `${z1} -> ${z2}`);
+
+  await openCard('pct.svg');
+  await loaded();
+  const pctFit = await panelFit(900, 600);
+  const pctStart = await plevel();
+  await pbox.focus().catch(() => {});
+  await page.keyboard.press('1');
+  await settle();
+  const pctW = await pimg.evaluate(i => i.getBoundingClientRect().width).catch(() => -1);
+  check('panel: another file resets to Fit', pctStart === `${Math.round(pctFit * 100)}%`, `${pctStart} fit ${pctFit}`);
+  check('panel svg: width="100%" uses the viewBox', Math.abs(pctW - 900) < 1 && (await plevel()) === '100%', `${pctW}`);
+  await openCard('chart.svg', 1);
+  await loaded();
+  const backFit = await panelFit(800, 600);
+  check('panel: back to a file shown before starts at Fit', (await plevel()) === `${Math.round(backFit * 100)}%`, `${await plevel()} fit ${backFit}`);
+
+  for (const [name, label] of [['bare.svg', 'no xmlns'], ['nbsp.svg', '&nbsp;']]) {
+    await openCard(name);
+    const frame = await page.waitForSelector('#panel-body iframe.preview', { timeout: 3000 }).catch(() => null);
+    const srcdoc = frame ? await frame.getAttribute('srcdoc') : '';
+    const sandbox = frame ? await frame.getAttribute('sandbox') : '';
+    check(`panel svg: ${label} falls back to the frame`, !!frame && sandbox === 'allow-scripts' && srcdoc.includes('<svg') && await page.locator('#panel-body .zoom-box').count() === 0,
+      `frame ${!!frame} boxes ${await page.locator('#panel-body .zoom-box').count()}`);
+  }
+
+  await openCard('huge.svg');
+  await loaded();
+  await pbox.focus().catch(() => {});
+  let biggest = 0;
+  for (let k = 0; k < 20; k++) {
+    await page.keyboard.press('+');
+    const r = await pimg.evaluate(i => ({ w: parseFloat(i.style.width), h: parseFloat(i.style.height) })).catch(() => ({ w: Infinity, h: 0 }));
+    biggest = Math.max(biggest, r.w, r.h);
+  }
+  check('huge SVG: + stops at the cap', biggest > 0 && biggest <= 32768, `${biggest}`);
+
+  await page.locator('#panel-head .close').click();
+  await page.locator('.chip', { hasText: 'photo.png' }).click();
+  const popImg = page.locator('.pop .zoom-box img');
+  await popImg.waitFor({ state: 'attached', timeout: 3000 }).catch(() => {});
+  await popImg.evaluate(i => (i.complete ? 0 : new Promise(r => i.addEventListener('load', r)))).catch(() => {});
+  await settle();
+  let reached = false, left = false;
+  for (let k = 0; k < 8 && !reached; k++) {
+    await page.keyboard.press('Tab');
+    const where = await page.evaluate(() => ({ box: !!document.activeElement.closest('.pop .zoom-box') && document.activeElement.classList.contains('zoom-box'), inside: !!document.activeElement.closest('.pop') }));
+    reached = where.box;
+    if (!where.inside) left = true;
+  }
+  await page.keyboard.press('1');
+  await page.keyboard.press('+');
+  const popLevel = await page.locator('.pop .zoom-level').textContent().catch(() => null);
+  check('upload popup: the picture zooms; Tab reaches the picture area', reached && !left && popLevel === '125%', `reached ${reached} left ${left} level ${popLevel}`);
+  await page.keyboard.press('Escape');
+  check('upload popup: Escape closes', await page.locator('.veil').count() === 0);
 
   check('no network requests', requests.length === 0, requests.join());
   check('no page errors', errors.length === 0, errors.join(' | '));
