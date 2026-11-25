@@ -1556,7 +1556,7 @@ test('a single export without errors.txt turns amber when the chat looks incompl
 });
 
 test('the viewer chat of an export carries its files\' warnings', async () => {
-  const data = Object.assign(turns([use('1', 'create_file', { path: '/home/claude/page.html', file_text: '<p>a</p>' }), use('2', 'bash_tool', { command: "sed -i 's/a/b/' /home/claude/page.html" })]), { uuid: 'fl', name: 'fl', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' });
+  const data = Object.assign(turns([use('1', 'create_file', { path: '/home/claude/page.html', file_text: '<p>a</p>' }), use('2', 'bash_tool', { command: "sed -i 's/a.*/b/' /home/claude/page.html" })]), { uuid: 'fl', name: 'fl', created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-01T00:00:00Z' });
   const { chat } = await runFolder(exportPopup(), data);
   assert.deepStrictEqual(Object.values(chat.files).map(f => [f.name, f.flag]), [['page.html', 'script']]);
 });
@@ -5269,4 +5269,201 @@ test('readmeNoteLines groups by kind', () => {
   assert.strictEqual(lines.slice(j).filter((l) => l.startsWith('- `')).length, 1);
   assert.ok(lines.includes('- `body_2.html`: about body_2.html'));
   assert.ok(!lines.includes('### Renamed files'));
+});
+
+// ---- Replay of literal sed -i and cat >> appends (spec section 3) ----
+
+// JS and Python give the same text for a file.
+const bothReplay = (data, file, want) => {
+  assert.strictEqual(artifacts(data)[file], want, 'JS ' + file);
+  assert.strictEqual(pythonArtifacts(data)[file], want, 'Python ' + file);
+};
+// The warnings the detector gives once extractArtifacts' replayed commands are passed to it.
+const opaqueAfterReplay = (data) => {
+  const replayed = new Set();
+  const index = {};
+  fn('extractArtifacts')(data, null, index, replayed);
+  const c = collector();
+  fn('detectOpaqueMutations')(data, c, { replayed, index });
+  return { warnings: c.warnings, replayed };
+};
+const PAGE = '<line y2="92" a="1"/><line y2="92"/>\nx <line y2="92"/>\n';
+
+test('replay: sed -i after cd replays, per line', () => {
+  const data = turns(
+    [use('w', 'Write', { file_path: '/home/claude/x/page.html', content: PAGE })],
+    [use('s', 'bash_tool', { command: "cd /home/claude/x && sed -i 's|<line y2=\"92\"|<line y2=\"116\"|' page.html" })],
+  );
+  bothReplay(data, 'page.html', '<line y2="116" a="1"/><line y2="92"/>\nx <line y2="116"/>\n');
+  bothReplay(data, 'page_v1.html', PAGE);
+  const { warnings, replayed } = opaqueAfterReplay(data);
+  assert.deepStrictEqual([...replayed], ['s|/home/claude/x/page.html']);
+  assert.strictEqual(warnings.length, 0);
+});
+
+test('replay: sed -i with g, -e twice, -i.bak and two files', () => {
+  const two = (command) => turns(
+    [use('w1', 'Write', { file_path: '/h/a.txt', content: 'a a\na.a\n' }), use('w2', 'Write', { file_path: '/h/b.md', content: 'a/a\n' })],
+    [use('s', 'Bash', { command })],
+  );
+  bothReplay(two("sed -i 's/a/b/' /h/a.txt"), 'a.txt', 'b a\nb.a\n');
+  bothReplay(two("sed -i 's/a/b/g' /h/a.txt"), 'a.txt', 'b b\nb.b\n');
+  bothReplay(two("sed -i -e 's/a/b/' -e 's/b/c/g' /h/a.txt"), 'a.txt', 'c a\nc.a\n');
+  bothReplay(two("sed -i.bak 's/a\\.a/X/' /h/a.txt"), 'a.txt', 'a a\nX\n');
+  const both = two("sed -i 's#a\\/a#Y#;' /h/b.md");
+  bothReplay(both, 'b.md', 'a/a\n');  // two commands in one script: not a shape, unchanged
+  const files = two("cd /h && sed -i 's/a/Z/g' a.txt b.md && grep -c Z a.txt");
+  bothReplay(files, 'a.txt', 'Z Z\nZ.Z\n');
+  bothReplay(files, 'b.md', 'Z/Z\n');
+  assert.strictEqual(opaqueAfterReplay(files).warnings.length, 0);
+});
+
+test('replay: shapes that are not literal stay opaque, unchanged, with a warning', () => {
+  const original = 'a.b axb a ab\n';
+  for (const command of [
+    "sed -i 's/a.b/c/' /h/page.html",
+    "sed -i 's/x/&y/' /h/page.html",
+    "sed -i 's/\\(a\\)/\\1/' /h/page.html",
+    "sed -i 's/a/b/' /h/page.html | tee /h/log.txt",
+    "sed -i 's/a/b/' /h/page.html && cat /h/page.html > /h/copy.html",
+    "sed -i \"s/a/$X/\" /h/page.html",
+    "sed -E -i 's/a/b/' /h/page.html",
+    "sed -i 's/a/b/' /h/page.html && python3 build.py",
+    "sed -i 's/a/b/' page.html",
+  ]) {
+    const data = turns([use('w', 'Write', { file_path: '/h/page.html', content: original })], [use('s', 'bash_tool', { command })]);
+    bothReplay(data, 'page.html', original);
+    const { warnings, replayed } = opaqueAfterReplay(data);
+    assert.strictEqual(replayed.size, 0, command);
+    assert.strictEqual(warnings.length, 1, command);
+  }
+});
+
+test('replay: cat >> appends a quoted heredoc; an unquoted one with $ stays opaque', () => {
+  const append = (command, first = use('w', 'Write', { file_path: '/h/page.html', content: 'one\n' })) =>
+    turns([first], [use('s', 'bash_tool', { command })]);
+  const quoted = append("cat >> /h/page.html << 'E'\nmore\nE");
+  bothReplay(quoted, 'page.html', 'one\nmore\n');
+  assert.strictEqual(opaqueAfterReplay(quoted).warnings.length, 0);
+  bothReplay(append('cat >> /h/page.html <<E\nplain\nE'), 'page.html', 'one\nplain\n');
+  // A heredoc-made file lost its last newline in the export; the append puts it back.
+  bothReplay(append("cat >>/h/page.html << 'E'\nmore\nE", use('w', 'bash_tool', { command: "cat > /h/page.html << 'E'\none\nE" })), 'page.html', 'one\nmore\n');
+  const dollar = append('cat >> /h/page.html << E\n$HOME\nE');
+  bothReplay(dollar, 'page.html', 'one\n');
+  assert.strictEqual(opaqueAfterReplay(dollar).warnings.length, 1);
+});
+
+test('replay: a failed command, or one whose directory is unknown, is not replayed', () => {
+  const failed = turns(
+    [use('w', 'Write', { file_path: '/x/f.html', content: 'a\n' })],
+    [use('s', 'bash_tool', { command: "cd /x && sed -i 's/a/b/' f.html && grep -c zz f.html" }), result('s', true)],
+  );
+  bothReplay(failed, 'f.html', 'a\n');
+  assert.strictEqual(opaqueAfterReplay(failed).warnings.length, 1);
+  const conditional = turns(
+    [use('w', 'Write', { file_path: '/x/f.html', content: 'a\n' }), use('w2', 'Write', { file_path: '/y/f.html', content: 'a\n' })],
+    [use('c', 'bash_tool', { command: 'cd /x' }), use('d', 'bash_tool', { command: 'if test -d /y; then cd /y; fi' })],
+    [use('s', 'bash_tool', { command: "sed -i 's/a/b/' f.html" })],
+  );
+  bothReplay(conditional, 'f.html', 'a\n');
+});
+
+test('replay: stops at the first opaque command on a file and never resumes', () => {
+  const data = turns(
+    [use('w', 'Write', { file_path: '/h/p.html', content: 'a c\n' })],
+    [use('s1', 'bash_tool', { command: "sed -i 's/a/b/' /h/p.html" })],
+    [use('py', 'bash_tool', { command: "python3 -c \"import re;s=open('/h/p.html').read();open('/h/p.html','w').write(re.sub('c','d',s))\"" })],
+    [use('s2', 'bash_tool', { command: "sed -i 's/b/e/' /h/p.html" })],
+  );
+  bothReplay(data, 'p.html', 'b c\n');
+  bothReplay(data, 'p_v2.html', 'b c\n');
+  const { warnings, replayed } = opaqueAfterReplay(data);
+  assert.deepStrictEqual([...replayed], ['s1|/h/p.html']);
+  assert.strictEqual(warnings.length, 1);
+  assert.match(warnings[0].message, /2 commands/);
+});
+
+test('replay: a copy to outputs or a read does not stop a later replay', () => {
+  const data = turns(
+    [use('w', 'Write', { file_path: '/h/p.html', content: 'a\n' })],
+    [use('c', 'bash_tool', { command: 'cp /h/p.html /mnt/user-data/outputs/ && wc -l /h/p.html' })],
+    [use('s', 'bash_tool', { command: "sed -i 's/a/b/' /h/p.html" })],
+  );
+  bothReplay(data, 'p.html', 'b\n');
+});
+
+test('commandCwds: a cd after then, do, else, { or ! is unknown, for later commands too', () => {
+  for (const command of ['if test -d /b; then cd /b; fi', 'for d in /b; do cd $d; done', 'test -d /b || { cd /b; }', '! cd /b', 'if false; then :; else cd /b; fi']) {
+    const data = turns([use('a', 'bash_tool', { command: 'cd /a' }), use('b', 'bash_tool', { command }), use('c', 'bash_tool', { command: 'ls' })]);
+    const cwds = fn('commandCwds')(fn('getMessageChain')(data));
+    assert.strictEqual(cwds.get('b'), null, command);
+    assert.strictEqual(cwds.get('c'), null, command);
+  }
+});
+
+test('replay: populateConversationFolder gives no warning for a replayed sed, and the file has the edit', async () => {
+  const files = {};
+  const data = turns(
+    [use('w', 'Write', { file_path: '/h/page.html', content: 'a\n' })],
+    [use('s', 'bash_tool', { command: "sed -i 's/a/b/' /h/page.html" })],
+  );
+  data.uuid = 'c-replay';
+  sandbox.__data = data;
+  sandbox.__files = files;
+  const output = await vm.runInContext("populateConversationFolder(({ file(n, c) { __files[n] = c; } }), __data, null, 'org')", sandbox);
+  assert.strictEqual(Array.from(output.errorCollector.warnings).filter((w) => w.type === 'artifact_opaque_mutation').length, 0);
+  assert.strictEqual(String(files['artefacts/page.html']).replace(/^﻿/, ''), 'b\n');
+});
+
+test('replay helpers: commandCwds, literalSwapCommand and commandTouches agree in JS and Python', () => {
+  const commands = [
+    'ls', 'cd /home/claude/x && ls', 'python3 run.py', 'cd /tmp; python3 a.py', "cat > /h/s.py << 'EOF'\ncd /nowhere\nEOF",
+    'cd lorber && ls', 'cd ~', "cd /a && ls; cd /b && sed -i 's/a/b/' page.html", "cd /a || exit 1\nsed -i 's/a/b/' page.html",
+    "python3 -c \"import os;os.chdir('/b')\"", 'pushd /b', '(cd /b && ls)', 'if x; then cd /y; fi', 'cd "/q q" ; ls',
+    "cd /h && sed -i -e 's|a\\|b|c|g' -e 's/x/y/' p.html q.md && grep -c y p.html", "sed -i.bak 's/a\\.b/\\&/' /h/p.html",
+    "cat >> /h/p.html << 'E'\nmore\n\tE\nE", "cat <<-E >> /h/p.html\n\tx\n\tE", "cat >> p.html << E\n$x\nE", "sed -n '1,5p' /h/p.html; echo hi",
+    "sed -i 's/a/b/' /h/p.html | tee x", 'cp /h/p.html /out/ && cp /h/q.md /out/q2.md', "python3 - << 'PY'\nopen('p.html','w')\nPY",
+    "cat > /h/p.html << E\n$HOME\nE", "[ -f /h/p.html ] && sed -i 's/a/b/' /h/p.html", "sed -i 's/a/b/' *.html", 'echo x >> /h/p.html',
+  ];
+  const known = ['/h/p.html', '/h/q.md', '/out/q2.md', '/out/p.html', 'p.html'];
+  const data = turns(commands.map((command, i) => use('c' + i, 'bash_tool', { command })));
+  const core = require('../export-core.js');
+  const cwds = core.commandCwds(core.getMessageChain(data));
+  const js = commands.map((command, i) => {
+    const cwd = cwds.get('c' + i);
+    return { cwd, swap: core.literalSwapCommand(command, cwd), touches: [...core.commandTouches(command, cwd, known)].sort() };
+  });
+  const script = [
+    'import json, sys',
+    `sys.path.insert(0, ${JSON.stringify(REPO)})`,
+    'import extract_artifacts as ea',
+    'data, known = json.load(sys.stdin)',
+    'msgs = ea.get_message_chain(data)',
+    'cwds = ea.command_cwds(msgs)',
+    'out = []',
+    'for b in msgs[-1]["content"]:',
+    '    cwd = cwds.get(b["id"])',
+    '    swap = ea.literal_swap_command(b["input"]["command"], cwd)',
+    '    if swap is not None:',
+    '        swap = {"edits": [dict(e, subs=[{"from": f, "to": t, "global": g} for f, t, g in e["subs"]]) if e["kind"] == "sed" else e for e in swap]}',
+    '    out.append({"cwd": cwd, "swap": swap, "touches": sorted(ea.command_touches(b["input"]["command"], cwd, known))})',
+    'print(json.dumps(out))',
+  ].join('\n');
+  const python = JSON.parse(execFileSync('python3', ['-B', '-c', script], { input: JSON.stringify([data, known]) }).toString());
+  assert.deepStrictEqual(python, plain(js));
+  // A few values pinned, so both being wrong the same way still fails.
+  assert.strictEqual(js[12].cwd, null);
+  assert.deepStrictEqual(js[14].swap.edits.map((e) => e.path), ['/h/p.html', '/h/q.md']);
+  assert.deepStrictEqual(js[14].swap.edits[0].subs, [{ from: 'a|b', to: 'c', global: true }, { from: 'x', to: 'y', global: false }]);
+  assert.strictEqual(js[15].swap.edits[0].subs[0].to, '&');
+  assert.strictEqual(js[16].swap, null, 'a tab before the delimiter needs <<-');
+  assert.strictEqual(js[17].swap.edits[0].text, 'x\n');
+  assert.strictEqual(js[18].swap, null);
+  assert.deepStrictEqual(js[19].swap, { edits: [] });
+  assert.deepStrictEqual(js[21].touches, ['/out/p.html', '/out/q2.md']);
+  assert.deepStrictEqual(js[22].touches, ['/h/p.html', '/out/p.html', 'p.html']);
+  assert.deepStrictEqual(js[23].touches, ['/h/p.html']);
+  assert.ok(js[24].swap && js[24].swap.edits.length === 1);
+  assert.strictEqual(js[25].swap, null);
+  assert.strictEqual(js[26].swap, null);
 });

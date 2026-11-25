@@ -622,9 +622,10 @@ function getCodeFence(content) {
 // getMessageChain, isBashTool, the heredoc helpers and extractArtifacts are in export-core.js
 
 // Detect bash_tool commands that mutate a tracked artifact in a way the
-// declarative replay (create_file / str_replace / rewrite / heredoc) can't
-// reconstruct. Emits one `artifact_opaque_mutation` warning per changed
-// file (all its commands merged), pointing the user at `replay_bash.py`.
+// declarative replay (create_file / str_replace / rewrite / heredoc, and a
+// literal sed -i or cat >> passed in as options.replayed) can't reconstruct.
+// Emits one `artifact_opaque_mutation` warning per changed file (all its
+// commands merged), pointing the user at `replay_bash.py`.
 //
 // We deliberately do NOT try to replay bash scripts here. The companion CLI
 // `replay_bash.py` runs the actual scripts in an isolated tmpdir with full
@@ -2095,7 +2096,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   for (const problem of chatHealth(data)) addHealth(problem.message, problem.check);
 
   const artifactIndex = {};
-  const artifacts = extractArtifacts(data, errorCollector, artifactIndex);
+  const replayedEdits = new Set();  // literal sed -i / cat >> the replay applied, not opaque
+  const artifacts = extractArtifacts(data, errorCollector, artifactIndex, replayedEdits);
   const { attachments: textAttachments, idToFilename: attachmentIdMap, byMessage: attachmentFiles } = extractTextAttachments(data);
   const uploadedFiles = extractUploadedFiles(data, organizationId);
   const presentedFiles = extractPresentedFiles(data);
@@ -2438,7 +2440,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // CLI for recovery. See docs/WASM_REPLAY_APPROACH.md for
   // why we don't try to interpret bash scripts in the extension. It runs before
   // the presented files, which use its warnings.
-  detectOpaqueMutations(data, errorCollector, { index: artifactIndex });
+  detectOpaqueMutations(data, errorCollector, { index: artifactIndex, replayed: replayedEdits });
 
   // Download presented files (files Claude showed the user). One the replay
   // already rebuilt is skipped, unless the replay is known to be off for it (an

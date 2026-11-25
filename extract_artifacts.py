@@ -76,11 +76,11 @@ TYPE_TO_EXT = {
 # not. heredoc_files returns (path, body) for each, in command order, like heredocMatches
 # and heredocBody in export-core.js.
 HEREDOC_RE = re.compile(
-    r"cat\s*>\s*(\S+?)\s*<<-?\s*(['\"]?)([A-Za-z0-9_]+)\2[^\n]*\n(?:(.*?)\n)??[ \t]*\3[ \t]*(?=\n|\Z)",
+    r"cat\s*>(?!>)\s*(\S+?)\s*<<-?\s*(['\"]?)([A-Za-z0-9_]+)\2[^\n]*\n(?:(.*?)\n)??[ \t]*\3[ \t]*(?=\n|\Z)",
     re.DOTALL,
 )
 HEREDOC_TARGET_LAST_RE = re.compile(
-    r"cat\s+<<-?\s*(['\"]?)([A-Za-z0-9_]+)\1[ \t]*>\s*(\S+)[^\n]*\n(?:(.*?)\n)??[ \t]*\2[ \t]*(?=\n|\Z)",
+    r"cat\s+<<-?\s*(['\"]?)([A-Za-z0-9_]+)\1[ \t]*>(?!>)\s*(\S+)[^\n]*\n(?:(.*?)\n)??[ \t]*\2[ \t]*(?=\n|\Z)",
     re.DOTALL,
 )
 
@@ -98,6 +98,412 @@ def heredoc_files(command: str) -> list[tuple[str, str]]:
     return out
 
 
+def heredoc_matches(command: str) -> list[tuple[int, str, str, str, Optional[str]]]:
+    """heredocMatches in export-core.js: (start, whole match, path, quote, body) per cat > heredoc,
+    in command order. The path has its quotes removed; body is None when empty."""
+    found = [(m.start(), m.group(0), m.group(1), m.group(2), m.group(4)) for m in HEREDOC_RE.finditer(command or "")]
+    found += [(m.start(), m.group(0), m.group(3), m.group(1), m.group(4)) for m in HEREDOC_TARGET_LAST_RE.finditer(command or "")]
+    return [(start, whole, re.sub(r"^['\"]|['\"]$", "", path), quote, body)
+            for start, whole, path, quote, body in sorted(found, key=lambda f: f[0])]
+
+
+# ---- Working directories and sandbox paths (commandCwds ... resolveSandboxPath in export-core.js) ----
+
+def normalize_sandbox_path(p) -> str:
+    """normalizeSandboxPath: . and .. segments and repeated or trailing slashes removed."""
+    text = str(p or "")
+    absolute = text.startswith("/")
+    parts: list[str] = []
+    for seg in text.split("/"):
+        if seg in ("", "."):
+            continue
+        if seg == "..":
+            if parts and parts[-1] != "..":
+                parts.pop()
+            elif not absolute:
+                parts.append(seg)
+            continue
+        parts.append(seg)
+    return ("/" if absolute else "") + "/".join(parts)
+
+
+CWD_HEREDOC_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z0-9_]+)\1([^\n]*)\n(?:[\s\S]*?\n)??[ \t]*\2[ \t]*(?=\n|\Z)")
+CD_RE = re.compile(r"(^|[;&|\n])[ \t]*cd(?:[ \t]+(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|()]+)))?[ \t]*(?=\Z|[;&|\n)])")
+ANY_CD_RE = re.compile(r"(?:^|[;&|\n(`])[ \t]*cd(?=[ \t;&|\n)]|\Z)")
+PUSHD_RE = re.compile(r"(?:^|[;&|\n(`])[ \t]*(?:pushd|popd)(?=[ \t;&|\n)]|\Z)")
+CHDIR_RE = re.compile(r"\bchdir\s*\(", re.ASCII)
+COND_CD_RE = re.compile(r"(?:[{!]|\b(?:then|do|else|elif))[ \t]*cd(?=[ \t;&|\n)]|\Z)", re.ASCII)
+LEAD_CD_RE = re.compile(r"\s*cd[ \t]+(?:\"([^\"]*)\"|'([^']*)'|([^\s;&|()]+))[ \t]*(?:&&|;|\n)")
+
+
+def is_bash_tool(name) -> bool:
+    return name in ("bash_tool", "Bash")
+
+
+def command_cwds(messages: list[dict]) -> dict:
+    """commandCwds: each bash tool_use id's working directory, or None when unknown."""
+    cwds: dict = {}
+    carried = None
+
+    def target(dirs, base):
+        d = next((x for x in dirs if x is not None), None)
+        if d is None or d == "" or d == "-" or d.startswith("~"):
+            return None
+        if d.startswith("/"):
+            return normalize_sandbox_path(d)
+        return normalize_sandbox_path(base + "/" + d) if base else None
+
+    for msg in messages or []:
+        for block in (msg or {}).get("content") or []:
+            if not isinstance(block, dict) or block.get("type") != "tool_use" or not is_bash_tool(block.get("name")):
+                continue
+            raw = str((block.get("input") or {}).get("command") or "")
+            command = CWD_HEREDOC_RE.sub(lambda m: m.group(3), raw)
+            cds = len(ANY_CD_RE.findall(command))
+            lead = LEAD_CD_RE.match(command)
+            other = bool(CHDIR_RE.search(raw) or PUSHD_RE.search(command) or COND_CD_RE.search(command))
+            own = carried
+            if other or cds > 1 or (cds == 1 and not lead):
+                own = None
+            elif lead:
+                own = target(lead.groups(), carried)
+            cwds[block.get("id")] = own
+            if other:
+                carried = None
+            else:
+                for m in CD_RE.finditer(command):
+                    carried = target(m.groups()[1:], carried)
+    return cwds
+
+
+def resolve_sandbox_path(word, cwd, known_paths) -> tuple[Optional[str], list[str]]:
+    """resolveSandboxPath: (path or None, candidates)."""
+    text = str(word or "")
+    known = list(known_paths or [])
+    if text.startswith("/"):
+        path = normalize_sandbox_path(text)
+        return path, [path]
+    rel = normalize_sandbox_path(text)
+    if cwd:
+        path = normalize_sandbox_path(cwd + "/" + text)
+        if path not in known and rel in known:
+            path = rel
+        return path, [path]
+    if not rel or rel.startswith(".."):
+        return None, []
+    candidates = [p for p in known if p == rel or normalize_sandbox_path(p).endswith("/" + rel)]
+    return (candidates[0], candidates) if len(candidates) == 1 else (None, candidates)
+
+
+# ---- Literal text swaps (literalCommands ... commandTouches in export-core.js) ----
+
+APPEND_WORD = r"""([^\s'"<>;&|$`]+|'[^'\n]*'|"[^"$`\\\n]*")"""
+APPEND_RE = re.compile(r"cat[ \t]*>>[ \t]*" + APPEND_WORD + r"""[ \t]*<<(-?)[ \t]*(['"]?)([A-Za-z0-9_]+)\3[ \t]*\n(?:([\s\S]*?)\n)??(\t*)\4(?=\n|\Z)""")
+APPEND_TARGET_LAST_RE = re.compile(r"""cat[ \t]+<<(-?)[ \t]*(['"]?)([A-Za-z0-9_]+)\2[ \t]*>>[ \t]*""" + APPEND_WORD + r"""[ \t]*\n(?:([\s\S]*?)\n)??(\t*)\3(?=\n|\Z)""")
+APPEND_MARK = "\x01"
+
+
+def literal_commands(text: str) -> Optional[list[list[str]]]:
+    """literalCommands: simple commands as word lists when every word is literal, else None."""
+    commands: list[list[str]] = []
+    words: list[str] = []
+    word = ""
+    started = False
+    quote = None
+
+    def word_end(c):
+        return c is None or c in (" ", "\t", "\n", ";")
+
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        nxt = text[i + 1] if i + 1 < n else None
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                word += ch
+            i += 1
+            continue
+        if quote == '"':
+            if ch == '"':
+                quote = None
+            elif ch in "$`":
+                return None
+            elif ch == "\\":
+                if nxt is None or nxt == "\n":
+                    return None
+                if nxt in '"\\$`':
+                    word += nxt
+                    i += 1
+                else:
+                    word += ch
+            else:
+                word += ch
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            started = True
+            i += 1
+            continue
+        if ch == "\\":
+            if nxt is None:
+                return None
+            if nxt != "\n":
+                word += nxt
+                started = True
+            i += 2
+            continue
+        if ch in (" ", "\t", "\n", ";") or (ch == "&" and nxt == "&"):
+            if started:
+                words.append(word)
+            word = ""
+            started = False
+            if ch in ("\n", ";", "&"):
+                if words:
+                    commands.append(words)
+                words = []
+            i += 2 if ch == "&" else 1
+            continue
+        if ch in "[]" and not started and word_end(nxt):
+            word = ch
+            started = True
+            i += 1
+            continue
+        if ch in "|&<>()$`*?[]{}~#!":
+            return None
+        word += ch
+        started = True
+        i += 1
+    if quote:
+        return None
+    if started:
+        words.append(word)
+    if words:
+        commands.append(words)
+    return commands
+
+
+SED_PATTERN_META = ".*[]^$"
+SED_PATTERN_ESCAPES = "./*[]$^"
+SED_REPLACEMENT_ESCAPES = "/\\&"
+
+
+def sed_substitution(script: str) -> Optional[tuple[str, str, bool]]:
+    """sedSubstitution: (from, to, global) for a literal s<d>A<d>B<d>[g], else None."""
+    text = str(script)
+    if len(text) < 4 or text[0] != "s":
+        return None
+    d = text[1]
+    if re.match(r"[\sA-Za-z0-9\\]", d) or d in SED_PATTERN_META:
+        return None
+    pos = [2]
+
+    def part(pattern: bool) -> Optional[str]:
+        out = ""
+        i = pos[0]
+        while i < len(text):
+            c = text[i]
+            if c == d:
+                pos[0] = i + 1
+                return out
+            if c == "\n":
+                return None
+            if c == "\\":
+                if i + 1 >= len(text):
+                    return None
+                nx = text[i + 1]
+                if nx != d and nx not in (SED_PATTERN_ESCAPES if pattern else SED_REPLACEMENT_ESCAPES):
+                    return None
+                out += nx
+                i += 2
+                continue
+            if (c in SED_PATTERN_META) if pattern else c == "&":
+                return None
+            out += c
+            i += 1
+        return None
+
+    frm = part(True)
+    if not frm:
+        return None
+    to = part(False)
+    if to is None:
+        return None
+    flags = text[pos[0]:]
+    if flags not in ("", "g"):
+        return None
+    return frm, to, flags == "g"
+
+
+def apply_sed_substitutions(text: str, subs) -> str:
+    """applySedSubstitutions: the first match on each line, or every one with g."""
+    out = []
+    for line in text.split("\n"):
+        for frm, to, glob in subs:
+            line = line.replace(frm, to) if glob else line.replace(frm, to, 1)
+        out.append(line)
+    return "\n".join(out)
+
+
+READ_ONLY_TOOLS = {"grep", "head", "tail", "wc", "cat", "ls", "echo", "printf", "test", "["}
+SED_PRINT_RE = re.compile(r"(?:[0-9]+|\$)(?:,(?:[0-9]+|\$))?p\Z")
+APPEND_MARK_RE = re.compile("\x01([0-9]+)\x01\\Z")
+
+
+def literal_steps(command, copies: bool = False) -> Optional[list[dict]]:
+    """literalSteps: the steps of a command made only of cd, read-only tools, literal sed -i,
+    cat >> appends and (copies) cp, else None."""
+    raw = str(command or "")
+    if APPEND_MARK in raw:
+        return None
+    found = [(m.start(), m.end(), m.group(1), m.group(2), m.group(3), m.group(5), m.group(6)) for m in APPEND_RE.finditer(raw)]
+    found += [(m.start(), m.end(), m.group(4), m.group(1), m.group(2), m.group(5), m.group(6)) for m in APPEND_TARGET_LAST_RE.finditer(raw)]
+    found.sort(key=lambda f: f[0])
+    appends: list[dict] = []
+    text = ""
+    at = 0
+    for start, end, word, dash, quote, body, tabs in found:
+        if start < at:
+            return None
+        if tabs and not dash:
+            return None
+        if not quote and body is not None and re.search(r"[$`\\]", body):
+            return None
+        if dash and body is not None:
+            body = re.sub(r"^\t+", "", body, flags=re.M)
+        text += raw[at:start] + APPEND_MARK + str(len(appends)) + APPEND_MARK
+        at = end
+        words = literal_commands(word)
+        if not words or len(words) != 1 or len(words[0]) != 1:
+            return None
+        appends.append({"kind": "append", "file": words[0][0], "text": "" if body is None else body + "\n"})
+    text += raw[at:]
+    commands = literal_commands(text)
+    if commands is None:
+        return None
+    steps: list[dict] = []
+    for words in commands:
+        mark = APPEND_MARK_RE.match(words[0])
+        if mark:
+            if len(words) != 1:
+                return None
+            steps.append(appends[int(mark.group(1))])
+            continue
+        if any(APPEND_MARK in w for w in words):
+            return None
+        tool, args = words[0], words[1:]
+        if tool == "cd":
+            if len(args) != 1:
+                return None
+            continue
+        if tool == "sed":
+            if len(args) >= 2 and args[0] == "-n" and SED_PRINT_RE.match(args[1]) and not any(w.startswith("-") for w in args[2:]):
+                continue
+            in_place = False
+            scripts: list[str] = []
+            positional: list[str] = []
+            i = 0
+            while i < len(args):
+                w = args[i]
+                if w.startswith("-i") or w == "--in-place" or w.startswith("--in-place="):
+                    in_place = True
+                elif w == "-e":
+                    if i + 1 >= len(args):
+                        return None
+                    i += 1
+                    scripts.append(args[i])
+                elif w.startswith("-"):
+                    return None
+                else:
+                    positional.append(w)
+                i += 1
+            if not scripts and positional:
+                scripts.append(positional.pop(0))
+            if not in_place or not scripts or not positional:
+                return None
+            subs = [sed_substitution(sc) for sc in scripts]
+            if any(sub is None for sub in subs):
+                return None
+            steps.append({"kind": "sed", "files": positional, "subs": subs})
+            continue
+        if copies and tool == "cp":
+            if len(args) < 2 or any(w.startswith("-") for w in args):
+                return None
+            steps.append({"kind": "copy", "sources": args[:-1], "dest": args[-1]})
+            continue
+        if tool in READ_ONLY_TOOLS:
+            continue
+        return None
+    return steps
+
+
+def literal_swap_command(command, cwd) -> Optional[list[dict]]:
+    """literalSwapCommand: the command's edits ({path, kind, subs|text}) in order, else None."""
+    steps = literal_steps(command)
+    if steps is None:
+        return None
+
+    def resolve(word):
+        if word.startswith("/"):
+            return normalize_sandbox_path(word)
+        return normalize_sandbox_path(cwd + "/" + word) if cwd else None
+
+    edits = []
+    for step in steps:
+        for file in (step["files"] if step["kind"] == "sed" else [step["file"]]):
+            path = resolve(file)
+            if not path:
+                return None
+            edits.append({"path": path, "kind": "sed", "subs": step["subs"]} if step["kind"] == "sed"
+                         else {"path": path, "kind": "append", "text": step["text"]})
+    return edits
+
+
+def command_touches(command, cwd, known: list[str]) -> set[str]:
+    """commandTouches: the known files a bash command not replayed may have changed."""
+    raw = str(command or "")
+    known_set = set(known)
+    touched: set[str] = set()
+    rest = raw
+    for start, whole, path, quote, body in reversed(heredoc_matches(raw)):
+        if quote == "" and re.search(r"[$`\\]", body or ""):
+            p, _ = resolve_sandbox_path(path, cwd, known)
+            if p and p in known_set:
+                touched.add(p)
+        header = whole.split("\n", 1)[0]
+        tail = (re.search(r"<<-?\s*(['\"]?)[A-Za-z0-9_]+\1[ \t]*>(?!>)\s*\S+(.*)\Z", header)
+                or re.search(r"<<-?\s*(['\"]?)[A-Za-z0-9_]+\1(.*)\Z", header))
+        rest = rest[:start] + (tail.group(2) if tail else "") + rest[start + len(whole):]
+    steps = literal_steps(rest, copies=True)
+    if steps is None:
+        for k in known:
+            name = k.split("/")[-1]
+            if name and name in rest:
+                touched.add(k)
+        return touched
+
+    def mark(word):
+        p, candidates = resolve_sandbox_path(word, cwd, known)
+        for c in ([p] if p else candidates):
+            if c in known_set:
+                touched.add(c)
+
+    for step in steps:
+        if step["kind"] == "sed":
+            for f in step["files"]:
+                mark(f)
+        elif step["kind"] == "append":
+            mark(step["file"])
+        else:
+            mark(step["dest"])
+            for src in step["sources"]:
+                mark(re.sub(r"/+\Z", "", step["dest"]) + "/" + src.split("/")[-1])
+    return touched
+
+
 @dataclass
 class ArtifactState:
     """Running state for one artifact across the conversation."""
@@ -105,6 +511,8 @@ class ArtifactState:
     basename: str
     versions: list[str] = field(default_factory=list)
     edited_this_turn: bool = True
+    # The text is a heredoc's body, whose last newline the export leaves out; an append puts it back.
+    missing_newline: bool = False
 
 
 @dataclass
@@ -454,7 +862,8 @@ def widget_file(inp) -> Optional[tuple]:
     )
 
 
-def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict] = None) -> dict[str, str]:
+def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict] = None,
+                      replayed: Optional[set] = None) -> dict[str, str]:
     """Return {filename: content} including all per-turn versions.
 
     Mirrors extractArtifacts() in export-core.js. The returned dict contains
@@ -463,21 +872,34 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
 
     names, when given, is filled with {state key: {"filename": ..., "versions":
     [...]}}, the file names each path was written under, as the JS index is.
+
+    replayed, when given, gets "<tool use id>|<path>" for each literal sed -i or
+    cat >> replayed on a known file, as in the JS.
     """
     messages = get_message_chain(data)
     failed_ids = failed_tool_use_ids(messages)
+    cwds = command_cwds(messages)
+    opaque: set[str] = set()  # state keys a bash command changed in a way not replayed
     state: dict[str, ArtifactState] = {}
     docs: dict[str, dict] = {}  # Claude Docs: 'doc:<node id>' -> document being rebuilt
     results_by_id = {b.get("tool_use_id"): b for m in messages for b in (m.get("content") or [])
                      if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id")}
 
-    def set_content(key: str, content: str, basename: str) -> None:
+    def set_content(key: str, content: str, basename: str, missing_newline: bool = False) -> None:
         s = state.get(key)
         if s is None:
-            state[key] = ArtifactState(current=content, basename=basename)
+            state[key] = ArtifactState(current=content, basename=basename, missing_newline=missing_newline)
         else:
             s.current = content
             s.edited_this_turn = True
+            s.missing_newline = missing_newline
+
+    def path_keys() -> list[str]:
+        return [k for k in state if k.startswith("/") or not re.match(r"(artifact|doc|widget):", k)]
+
+    def known_key(path: str) -> Optional[str]:
+        key = path if path in state else next((k for k in state if k.startswith("/") and normalize_sandbox_path(k) == path), None)
+        return key if key and key not in opaque else None
 
     for msg in messages:
         for block in (msg.get("content") or []):
@@ -633,10 +1055,32 @@ def extract_artifacts(data: dict, warnings: list[Warning], names: Optional[dict]
 
             elif name in ("bash_tool", "Bash"):
                 command = inp.get("command") or ""
-                for filepath, content in heredoc_files(command):
+                creates = heredoc_files(command)
+                for filepath, content in creates:
                     filename = basename_of(filepath)
                     if filename and content:
-                        set_content(filepath, content, filename)
+                        set_content(filepath, content, filename, True)
+                # A literal sed -i or cat >> on known files is replayed in place; a failed
+                # command may have stopped before or after its edit, so it isn't.
+                cwd = cwds.get(block.get("id"))
+                swap = None if creates or block.get("id") in failed_ids else literal_swap_command(command, cwd)
+                keys = [known_key(e["path"]) for e in swap] if swap is not None else []
+                if swap is not None and all(keys):
+                    for edit, key in zip(swap, keys):
+                        s = state[key]
+                        before = s.current
+                        if edit["kind"] == "sed":
+                            s.current = apply_sed_substitutions(s.current, edit["subs"])
+                        else:
+                            s.current = (s.current + "\n" if s.missing_newline else s.current) + edit["text"]
+                            s.missing_newline = False
+                        if s.current != before:
+                            s.edited_this_turn = True
+                        if replayed is not None:
+                            replayed.add(f"{block.get('id')}|{key}")
+                else:
+                    for key in command_touches(command, cwd, path_keys()):
+                        opaque.add(key)
 
         # End-of-turn snapshot: any artifact edited during this message gets
         # a new version. Snapshot on both senders defensively.
