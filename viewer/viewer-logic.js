@@ -1614,7 +1614,9 @@ function pageFit(report, containerWidth) {
 }
 
 // Appended to every preview document. Inline scripts run under PREVIEW_CSP; the opaque origin needs target '*'.
-const SIZE_SCRIPT = `<script>(function(){function r(){try{var d=document.documentElement;window.top.postMessage({type:'ct-size',width:d.scrollWidth,view:d.clientWidth},'*')}catch(e){}}window.addEventListener('load',r);window.addEventListener('resize',r)})()</script>`;
+// The load report can come before the frame's first real layout (it then reads 0 or the view's width), so a
+// ResizeObserver on the root reports again once the page has been laid out.
+const SIZE_SCRIPT = `<script>(function(){function r(){try{var d=document.documentElement;window.top.postMessage({type:'ct-size',width:d.scrollWidth,view:d.clientWidth},'*')}catch(e){}}window.addEventListener('load',r);window.addEventListener('resize',r);try{new ResizeObserver(function(){r()}).observe(document.documentElement)}catch(e){}})()</script>`;
 
 // ---- Zoom: DOM controllers ----
 // Page code only; never called at load. Works inside a shadow root: it touches only the elements it is
@@ -1850,6 +1852,98 @@ function pictureZoom(box, img, opts = {}) {
   return controller;
 }
 
+// The zoom of a sandboxed page, applied from outside: the frame is laid out at wrapper size ÷ zoom and scaled
+// by zoom from its top left, inside the wrapper (div.page-zoom) that clips it. A ResizeObserver on the wrapper
+// keeps Fit width right for its new width. The bar (−, percentage, +,
+// Fit width, Actual size) sits on the wrapper's edge. Fit width waits for the page's own size report
+// (SIZE_SCRIPT), taken only from opts.source() (default: the frame's window); it stays disabled for a page
+// that fits. The page's own events stay its own: no wheel, drag or keys over it.
+function pageZoom(wrapper, frame, opts = {}) {
+  const doc = wrapper.ownerDocument;
+  const win = doc.defaultView;
+  const make = (tag, cls, text) => { const n = doc.createElement(tag); if (cls) n.className = cls; if (text) n.textContent = text; return n; };
+  const MIN = 0.25, MAX = 2;
+  wrapper.classList.add('page-zoom');
+  if (frame.parentNode !== wrapper) wrapper.append(frame);
+  let bar = wrapper.querySelector(':scope > .zoom-bar');
+  if (!bar) {
+    bar = make('div', 'zoom-bar');
+    const button = (cls, text, label) => { const b = make('button', cls, text); b.type = 'button'; b.setAttribute('aria-label', label); return b; };
+    const out = make('output', 'zoom-level');
+    out.setAttribute('aria-live', 'polite');
+    bar.append(button('zoom-out', '−', 'Zoom out'), out, button('zoom-in', '+', 'Zoom in'),
+      button('zoom-fit', 'Fit width', 'Fit width'), button('zoom-100', '100%', 'Actual size'));
+    wrapper.append(bar);
+  }
+  bar.hidden = false;
+  const levelOut = bar.querySelector('.zoom-level');
+  const fitButton = bar.querySelector('.zoom-fit');
+  const off = new AbortController();
+  const on = (target, type, fn, o = {}) => target.addEventListener(type, fn, { ...o, signal: off.signal });
+  let zoom = 1;
+  let report = null; // the last size report that said the page is wider than its frame
+  let fit = null; // { fit, enabled } from pageFit, null until a report counts
+
+  // The CSS (.page-zoom > .preview) lays the frame out at 100% ÷ zoom of the wrapper and scales it by zoom,
+  // so the frame itself gets no new attribute.
+  function apply(z) {
+    zoom = clampZoom(z, MIN, MAX);
+    wrapper.style.setProperty('--page-zoom', String(zoom));
+    levelOut.textContent = `${Math.round(zoom * 100)}%`;
+  }
+  function setFit(f) {
+    fit = f;
+    fitButton.disabled = !(f && f.enabled);
+  }
+  const fitWidth = () => { if (fit && fit.enabled) apply(fit.fit); };
+
+  const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(() => {
+    if (report) { const f = pageFit(report, wrapper.clientWidth); if (f) setFit(f); }
+  }) : null;
+  if (ro) ro.observe(wrapper);
+
+  // A report made while zoomed out was laid out wider than the wrapper, so "it fits" says nothing about the
+  // wrapper's width: the last report that counted stands (Fit width would otherwise disable itself).
+  on(win, 'message', e => {
+    if (!frame.isConnected) { off.abort(); if (ro) ro.disconnect(); return; }
+    const source = opts.source ? opts.source() : frame.contentWindow;
+    if (!source || e.source !== source) return;
+    const f = pageFit(e.data, wrapper.clientWidth);
+    if (!f) return;
+    if (f.enabled) { report = e.data; setFit(f); }
+    else if (zoom >= 1 - 1e-6) { report = null; setFit(f); }
+  });
+
+  const step = dir => apply(stepZoom(zoom, dir, MIN, MAX));
+  const controller = { frame, wrapper };
+  controller.key = e => {
+    if (e.ctrlKey || e.metaKey || e.altKey) return false;
+    if (e.key === '+' || e.key === '=') step(1);
+    else if (e.key === '-') step(-1);
+    else if (e.key === '0') { if (fit && fit.enabled) fitWidth(); else apply(1); }
+    else if (e.key === '1') apply(1);
+    else return false;
+    e.preventDefault();
+    return true;
+  };
+  on(bar, 'keydown', e => { if (controller.key(e)) e.stopPropagation(); });
+  on(bar.querySelector('.zoom-out'), 'click', () => step(-1));
+  on(bar.querySelector('.zoom-in'), 'click', () => step(1));
+  on(fitButton, 'click', fitWidth);
+  on(bar.querySelector('.zoom-100'), 'click', () => apply(1));
+
+  setFit(null);
+  apply(1);
+  controller.state = () => ({ zoom });
+  controller.restore = s => { if (s && Number.isFinite(Number(s.zoom))) apply(Number(s.zoom)); };
+  controller.destroy = () => {
+    off.abort();
+    if (ro) ro.disconnect();
+    bar.hidden = true;
+  };
+  return controller;
+}
+
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
 }

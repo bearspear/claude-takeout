@@ -1581,12 +1581,12 @@ let openFile = null; // { file, version } as the hash has it
 let panelFor = ''; // what the panel shows, so a hash change that leaves it alone doesn't reload a frame
 let panelView = null;
 // The picture in the panel and its zoom, kept across versions of one file. Ruling: a state restores only into the
-// same kind of controller ('picture' here; 'page' for a frame's own zoom).
+// same kind of controller ('picture', or 'page' for a frame's own zoom).
 let panelFileKey = ''; // `${chat}\n${file}\n`, as showPanel builds it, without the version
 let panelPicture = null; // { fileKey, kind, controller }
 let panelZoom = null; // { fileKey, kind, state }
 
-// Keeps the zoom of the picture the panel shows, then lets it go. Called before the panel body changes.
+// Keeps the zoom of the picture or page the panel shows, then lets it go. Called before the panel body changes.
 function releasePanelPicture() {
   if (!panelPicture) return;
   const { fileKey, kind, controller } = panelPicture;
@@ -1602,6 +1602,15 @@ function panelPictureZoom(make) {
   panelPicture = { fileKey, kind: 'picture', controller: made.zoom };
   if (panelZoom && panelZoom.fileKey === fileKey && panelZoom.kind === 'picture') made.zoom.restore(panelZoom.state);
   return made;
+}
+
+// The same for a page in the panel: starts where this file's last version was, else at 100%.
+function panelPageZoom(wrapper, frame) {
+  const fileKey = panelFileKey;
+  const controller = pageZoom(wrapper, frame);
+  panelPicture = { fileKey, kind: 'page', controller };
+  if (panelZoom && panelZoom.fileKey === fileKey && panelZoom.kind === 'page') controller.restore(panelZoom.state);
+  return controller;
 }
 
 // Siblings are found by name, newest text of the last file with that name.
@@ -1651,18 +1660,13 @@ function previewNodes(chat, file, version) {
     const fallback = zoom => {
       if (panelPicture && panelPicture.controller === zoom) panelPicture = null;
       zoom.destroy();
-      if (shown && shown.parentNode) shown.replaceWith(...svgPageNodes(chat, file, version));
+      if (shown && shown.parentNode) shown.replaceWith(...pageNodes(chat, file, version));
     };
     const { frame, zoom } = panelPictureZoom(() => zoomPaper(svgDataUrl(version.text), file.name || '', { natural: svgNaturalSize(version.text), onError: fallback }));
-    if (zoom.failed) return svgPageNodes(chat, file, version);
+    if (zoom.failed) return pageNodes(chat, file, version);
     shown = frame;
     return [frame];
   }
-  return pageNodes(chat, file, version);
-}
-
-// An SVG the picture can't show, as a page: today's sandboxed frame (the one place a page's own zoom bar goes).
-function svgPageNodes(chat, file, version) {
   return pageNodes(chat, file, version);
 }
 
@@ -1691,7 +1695,10 @@ function pageNodes(chat, file, version) {
   // An added page is no part of the chat that happens to be open, so it gets none of that chat's files.
   const doc = previewDoc(version.text, file.added ? () => null : siblingLookup(chat));
   const frame = previewFrame(doc.srcdoc, file.name || '');
-  return doc.remote ? [el('div', 'file-note', REMOTE_NOTE), frame] : [frame];
+  // HTML, a scripted SVG and an SVG the picture refused: the page's own zoom bar.
+  const wrapper = el('div', 'page-zoom');
+  panelPageZoom(wrapper, frame);
+  return doc.remote ? [el('div', 'file-note', REMOTE_NOTE), wrapper] : [wrapper];
 }
 
 function panelButton(className, text, pressed, onClick) {

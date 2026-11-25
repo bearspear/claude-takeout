@@ -72,6 +72,23 @@ const panelChat = {
   ],
 };
 
+// Pages: a fluid one with a button, one laid out 1600 px wide, a scripted SVG, and one whose nested frame
+// posts a false size report to the viewer.
+const FLUID = '<!doctype html><html><body><p>Fluid text that wraps to whatever width the frame has, as most pages do.</p><button id="b" onclick="console.log(\'fluid-click\')">Press</button></body></html>';
+const WIDE = '<!doctype html><html><body style="margin:0"><div style="width:1600px;height:300px;background:#69c">wide</div></body></html>';
+const SCRIPTED = '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300" onload="void 0"><rect width="400" height="300" fill="#69c"/></svg>';
+const SPOOF = '<!doctype html><html><body><p>spoof</p><iframe srcdoc="<script>function s(){window.top.postMessage({type:\'ct-size\',width:99999,view:1},\'*\')}s();setTimeout(s,200);setTimeout(s,600)</script>"></iframe></body></html>';
+const pageChat = {
+  uuid: 'g', name: 'Pages', model: 'claude-x', created_at: at(10), updated_at: at(12), settings: {}, current_leaf_message_uuid: 'ga1',
+  chat_messages: [
+    msg('gh1', null, 'human', 10, [{ type: 'text', text: 'pages' }]),
+    msg('ga1', 'gh1', 'assistant', 11, [
+      { type: 'text', text: 'Made.' },
+      cf('g1', out('fluid.html'), FLUID), cf('g2', out('wide.html'), WIDE), cf('g3', out('scripted.svg'), SCRIPTED), cf('g4', out('spoof.html'), SPOOF),
+    ]),
+  ],
+};
+
 (async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'zoom-'));
   const file = path.join(dir, 'viewer.html');
@@ -83,6 +100,8 @@ const panelChat = {
   const artifacts = core.extractArtifacts(chat, null, index);
   const pIndex = {};
   const pArtifacts = core.extractArtifacts(panelChat, null, pIndex);
+  const gIndex = {};
+  const gArtifacts = core.extractArtifacts(pageChat, null, gIndex);
   // A picture Claude made: its bytes are in artefacts/, so it has no text.
   pArtifacts['pic.png'] = '';
   pIndex['/mnt/user-data/outputs/pic.png'] = { path: '/mnt/user-data/outputs/pic.png', filename: 'pic.png', versions: ['pic.png'], messages: ['pa1'] };
@@ -90,8 +109,9 @@ const panelChat = {
   fs.writeFileSync(path.join(dir, 'artefacts', 'pic.png'), BIG);
   fs.mkdirSync(path.join(dir, 'uploads'));
   fs.writeFileSync(path.join(dir, 'uploads', 'p02_photo.png'), PHOTO);
-  fs.writeFileSync(file, buildHtml([chat, panelChat], '2026-11-15T12:00:00Z', c => (c.uuid === 'p'
+  fs.writeFileSync(file, buildHtml([chat, panelChat, pageChat], '2026-11-15T12:00:00Z', c => (c.uuid === 'p'
     ? { folder: '', artifacts: pArtifacts, artifactIndex: pIndex, uploads: { 'u-png': { path: 'uploads/p02_photo.png', text: null } } }
+    : c.uuid === 'g' ? { folder: '', artifacts: gArtifacts, artifactIndex: gIndex }
     : { webImages: saved, artifacts, artifactIndex: index, widgetFile: core.widgetFile, widgetKey: core.widgetKey })));
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
@@ -99,6 +119,13 @@ const panelChat = {
   const page = await (await browser.newContext({ viewport: { width: 1200, height: 900 } })).newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
+  const logs = [];
+  page.on('console', m => logs.push(m.text()));
+  // Every size report the viewer's window receives, accepted or not.
+  await page.addInitScript(() => {
+    window.__sizes = [];
+    window.addEventListener('message', e => { if (e.data && e.data.type === 'ct-size') window.__sizes.push(e.data); });
+  });
   const requests = [];
   await page.route('**/*', r => { const u = r.request().url(); if (u.startsWith('file:')) return r.continue(); requests.push(u); return r.abort(); });
   await page.goto('file://' + file + '#chat=z');
@@ -380,6 +407,97 @@ const panelChat = {
   check('upload popup: the picture zooms; Tab reaches the picture area', reached && !left && popLevel === '125%', `reached ${reached} left ${left} level ${popLevel}`);
   await page.keyboard.press('Escape');
   check('upload popup: Escape closes', await page.locator('.veil').count() === 0);
+
+
+  // ---- Pages in the side panel ----
+  await page.goto('file://' + file + '#chat=g');
+  await page.waitForSelector('.msg');
+  const glevel = () => page.locator('#panel-body .page-zoom .zoom-level').textContent({ timeout: 3000 }).catch(() => null);
+  const gframe = page.locator('#panel-body .page-zoom iframe.preview');
+  const scaleOf = () => gframe.evaluate(f => { const t = getComputedStyle(f).transform; if (!t || t === 'none') return 1; return parseFloat(t.slice(t.indexOf('(') + 1)); }).catch(() => -1);
+  const sizes = () => page.evaluate(() => window.__sizes.length);
+  // Waits for the shown page to report its size (a report after `from` reports), then a frame.
+  const reported = async (from, pred = () => true) => {
+    await page.waitForFunction(n => window.__sizes.length > n, from, { timeout: 3000 }).catch(() => {});
+    await settle();
+  };
+  const fitBtn = page.locator('#panel-body .page-zoom .zoom-fit');
+  const bar = page.locator('#panel-body .page-zoom .zoom-bar');
+
+  let n0 = await sizes();
+  await openCard('fluid.html');
+  await reported(n0);
+  const start = await glevel();
+  const s0 = await scaleOf();
+  await page.locator('#panel-body .page-zoom .zoom-in').click({ timeout: 3000 }).catch(() => {});
+  await settle();
+  const in1 = await glevel(), s1 = await scaleOf();
+  const geo = await page.locator('#panel-body .page-zoom').evaluate(w => { const f = w.querySelector('iframe'); return { ww: w.clientWidth, fw: f.offsetWidth }; }).catch(() => ({}));
+  await page.locator('#panel-body .page-zoom .zoom-out').click({ timeout: 3000 }).catch(() => {});
+  await page.locator('#panel-body .page-zoom .zoom-out').click({ timeout: 3000 }).catch(() => {});
+  await settle();
+  const out2 = await glevel(), s2 = await scaleOf();
+  check('page: starts at 100%, + and − change the frame\'s scale',
+    start === '100%' && Math.abs(s0 - 1) < 1e-3 && in1 === '125%' && Math.abs(s1 - 1.25) < 1e-3 && Math.abs(geo.fw - geo.ww / 1.25) < 1.5 && out2 === '90%' && Math.abs(s2 - 0.9) < 1e-3,
+    `${start} ${s0} | ${in1} ${s1} ${JSON.stringify(geo)} | ${out2} ${s2}`);
+  check('page: fluid page has Fit width disabled', await fitBtn.count() === 1 && await fitBtn.isDisabled({ timeout: 3000 }).catch(() => null), `count ${await fitBtn.count()}`);
+
+  // Clicks inside the page still reach it: at 150% the button is where the scale puts it.
+  await bar.focus().catch(() => {});
+  await page.locator('#panel-body .page-zoom .zoom-100').focus().catch(() => {});
+  await page.keyboard.press('1');
+  await page.keyboard.press('+');
+  await page.keyboard.press('+');
+  await settle();
+  const at150 = await glevel();
+  const fb = await gframe.boundingBox().catch(() => null);
+  const bb = await page.frameLocator('#panel-body .page-zoom iframe.preview').locator('#b').evaluate(b => { const r = b.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }).catch(() => null);
+  if (fb && bb) await page.mouse.click(fb.x + bb.x * 1.5, fb.y + bb.y * 1.5);
+  await page.waitForTimeout(200);
+  check('page: clicks inside the page still reach it', at150 === '150%' && logs.includes('fluid-click'), `${at150} ${!!fb} ${!!bb} logs ${logs.join(',')}`);
+
+  n0 = await sizes();
+  await openCard('wide.html');
+  await reported(n0);
+  await page.waitForFunction(() => { const b = document.querySelector('#panel-body .page-zoom .zoom-fit'); return b && !b.disabled; }, null, { timeout: 3000 }).catch(() => {});
+  const wideStart = await glevel();
+  const enabled = await fitBtn.isEnabled({ timeout: 3000 }).catch(() => null).catch(() => false);
+  await fitBtn.click({ timeout: 3000 }).catch(() => {});
+  await settle();
+  const cw = await page.locator('#panel-body .page-zoom').evaluate(w => w.clientWidth).catch(() => 0);
+  const wfit = Math.min(1, Math.max(0.25, cw / 1600));
+  const ws = await scaleOf();
+  await page.waitForTimeout(300);
+  check('page: wide page\'s Fit width zooms to container ÷ 1600',
+    wideStart === '100%' && enabled && Math.abs(ws - wfit) < 1e-3 && (await glevel()) === `${Math.round(wfit * 100)}%` && await fitBtn.isEnabled({ timeout: 3000 }).catch(() => null),
+    `start ${wideStart} enabled ${enabled} scale ${ws} want ${wfit} level ${await glevel()} still ${await fitBtn.isEnabled({ timeout: 3000 }).catch(() => null)}`);
+  await page.locator('#panel-body .page-zoom .zoom-100').click({ timeout: 3000 }).catch(() => {});
+  await settle();
+  check('page: Actual size goes back to 100%', (await glevel()) === '100%' && Math.abs((await scaleOf()) - 1) < 1e-3, await glevel());
+  await bar.locator('.zoom-in').focus().catch(() => {});
+  await page.keyboard.press('0');
+  await settle();
+  check('page: 0 is Fit width when enabled', (await glevel()) === `${Math.round(wfit * 100)}%`, await glevel());
+
+  await openCard('spoof.html');
+  await page.waitForFunction(() => window.__sizes.some(s => s.width === 99999), null, { timeout: 3000 }).catch(() => {});
+  await page.waitForTimeout(800);
+  const spoofed = await page.evaluate(() => window.__sizes.some(s => s.width === 99999));
+  check('page: a message from another window is ignored', spoofed && await fitBtn.count() === 1 && await fitBtn.isDisabled({ timeout: 3000 }).catch(() => null) && (await glevel()) === '100%', `posted ${spoofed} disabled ${await fitBtn.isDisabled({ timeout: 3000 }).catch(() => null).catch(() => null)} ${await glevel()}`);
+
+  await openCard('scripted.svg');
+  await gframe.waitFor({ state: 'attached', timeout: 3000 }).catch(() => {});
+  check('page: scripted SVG stays a frame with the page bar',
+    await gframe.count() === 1 && (await gframe.getAttribute("sandbox", { timeout: 3000 }).catch(() => null)) === 'allow-scripts' && await page.locator('#panel-body .zoom-box').count() === 0 && (await glevel()) === '100%',
+    `frames ${await gframe.count()} level ${await glevel()}`);
+
+  await page.goto('file://' + file + '#chat=p');
+  await page.waitForSelector('.msg');
+  await openCard('bare.svg');
+  await gframe.waitFor({ state: 'attached', timeout: 3000 }).catch(() => {});
+  await page.locator('#panel-body .page-zoom .zoom-in').click({ timeout: 3000 }).catch(() => {});
+  await settle();
+  check('page: SVG fallback (no xmlns) gets the page bar', await gframe.count() === 1 && (await glevel()) === '125%' && Math.abs((await scaleOf()) - 1.25) < 1e-3, `frames ${await gframe.count()} level ${await glevel()}`);
 
   check('no network requests', requests.length === 0, requests.join());
   check('no page errors', errors.length === 0, errors.join(' | '));

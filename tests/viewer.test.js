@@ -2360,4 +2360,6 @@ test('preview documents end with the measuring script', () => {
   assert.ok(previewDoc('<p>x</p>', () => null).srcdoc.endsWith(SIZE_SCRIPT));
   assert.ok(artifactPreviewDoc('<p>x</p>', 'index.html', {}).srcdoc.endsWith(SIZE_SCRIPT));
   assert.ok(/postMessage/.test(SIZE_SCRIPT) && /ct-size/.test(SIZE_SCRIPT) && /top/.test(SIZE_SCRIPT));
+  // The load report can precede the first layout; the root's ResizeObserver reports again after it.
+  assert.ok(/new ResizeObserver\(/.test(SIZE_SCRIPT) && /observe\(document\.documentElement\)/.test(SIZE_SCRIPT));
 });
