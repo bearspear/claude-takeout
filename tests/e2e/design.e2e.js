@@ -271,6 +271,16 @@ async function writeOut(zip) {
     const allIn = [];
     for (const name of ['Home A', 'Templated', 'With pictures', 'Hostile board', 'Far away', 'Not saved']) allIn.push(await inView(name));
     check(`${label}: canvas: Fit shows the whole design`, parseFloat(fitLevel) < 20 && allIn.every(Boolean), JSON.stringify([fitLevel, allIn]));
+    // Far out (under 20%) boards are tiles: no frames run (v1.23.3); from 20% they come back.
+    await page.waitForTimeout(300);
+    const farFramesAtFit = await page.locator('.design-canvas .board-frame iframe').count();
+    const tiles = await page.locator('.design-canvas.far .design-board .board-body.tile').count();
+    check(`${label}: canvas: far out, boards are tiles with no frames`, farFramesAtFit === 0 && tiles >= 5, JSON.stringify([farFramesAtFit, tiles]));
+    await press('zoom-in');
+    let backFrames = 0;
+    for (let i = 0; i < 40 && !backFrames; i++) { await page.waitForTimeout(50); backFrames = await page.locator('.design-board', { hasText: 'Home A' }).locator('iframe').count(); }
+    check(`${label}: canvas: zoomed in to ${await level()}, frames come back`, (await level()) === '25%' && backFrames === 1 && await page.locator('.design-canvas .board-body.tile').count() === 0, JSON.stringify([await level(), backFrames]));
+    await press('zoom-fit');
     await press('zoom-out', 3);
     check(`${label}: canvas: − goes below Fit, down to 10%`, (await level()) === '10%', String(await level()));
     // A resize at Fit fits again; zoomed, the zoom stays.
@@ -290,7 +300,8 @@ async function writeOut(zip) {
     // a plain wheel zooms, a drag anywhere moves the canvas.
     const mode = () => page.locator('.canvas-modes[role="group"] .canvas-mode[aria-pressed="true"]').evaluateAll(bs => bs.map(b => b.dataset.mode)).catch(() => []);
     const modeButton = m => page.locator(`.canvas-modes button.canvas-mode[data-mode="${m}"]`);
-    const framePE = () => page.locator('.design-board', { hasText: 'Home A' }).locator('iframe').evaluate(f => getComputedStyle(f).pointerEvents, null, { timeout: 1000 }).catch(() => null);
+    // On the frame's holder, which stays when a far-out board is a tile.
+    const framePE = () => page.locator('.design-board', { hasText: 'Home A' }).locator('.board-frame').evaluate(f => getComputedStyle(f).pointerEvents, null, { timeout: 1000 }).catch(() => null);
     const modeGroup = await page.locator('.design-view > .canvas-modes').evaluate(g => ({ label: g.getAttribute('aria-label'),
       buttons: [...g.querySelectorAll('button.canvas-mode')].map(b => `${b.getAttribute('aria-label')}:${b.getAttribute('aria-pressed')}:${!!b.querySelector('svg')}`) }), null, { timeout: 1000 }).catch(() => null);
     check(`${label}: canvas: opens in Move; the pill is the arrow (Interact) and the hand (Move)`, !!modeGroup && modeGroup.label === 'Canvas mode' && modeGroup.buttons.join() === 'Interact (V):false:true,Move (H):true:true', JSON.stringify(modeGroup));
