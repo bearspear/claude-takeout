@@ -254,6 +254,79 @@ function heredocFiles(command) {
   return heredocMatches(command).map((match) => ({ path: heredocPath(match), text: heredocBody(match) }));
 }
 
+// A sandbox path with . and .. segments and repeated or trailing slashes removed. '..' above the root stays at the root.
+function normalizeSandboxPath(p) {
+  const text = String(p || '');
+  const absolute = text.startsWith('/');
+  const parts = [];
+  for (const seg of text.split('/')) {
+    if (seg === '' || seg === '.') continue;
+    if (seg === '..') { if (parts.length && parts[parts.length - 1] !== '..') parts.pop(); else if (!absolute) parts.push(seg); continue; }
+    parts.push(seg);
+  }
+  return (absolute ? '/' : '') + parts.join('/');
+}
+
+// Any heredoc's body, with the rest of its first line kept: a body is input, not shell.
+const CWD_HEREDOC_RE = /<<-?\s*(['"]?)(\w+)\1([^\n]*)\n(?:[\s\S]*?\n)??[ \t]*\2[ \t]*(?=\n|$)/g;
+// A cd at the start of a simple command (the command's start, or after ;, &&, ||, | or a newline),
+// with its directory quoted or bare; no directory, or ~ or -, is a cd the export can't follow.
+const CD_RE = /(^|[;&|\n])[ \t]*cd(?:[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|()]+)))?[ \t]*(?=$|[;&|\n)])/g;
+
+// Each bash tool_use's working directory, by its id: its own leading cd (followed by && or ;), else
+// the directory the last cd of an earlier bash command in the chain left (the sandbox shell keeps it
+// between calls), else null. A relative cd resolves against the directory before it; a cd that can't
+// be followed (none, ~, -, or relative to an unknown one) leaves it unknown (null). cd inside a
+// heredoc body or a subshell ( ... ) is ignored.
+function commandCwds(messages) {
+  const cwds = new Map();
+  let carried = null;
+  const target = (m, base) => {
+    const dir = m[2] !== undefined ? m[2] : m[3] !== undefined ? m[3] : m[4];
+    if (dir === undefined || dir === '' || dir === '-' || dir.startsWith('~')) return null;
+    if (dir.startsWith('/')) return normalizeSandboxPath(dir);
+    return base ? normalizeSandboxPath(base + '/' + dir) : null;
+  };
+  for (const msg of messages || []) {
+    for (const block of (msg && msg.content) || []) {
+      if (!block || block.type !== 'tool_use' || !isBashTool(block.name)) continue;
+      const command = String((block.input && block.input.command) || '').replace(CWD_HEREDOC_RE, '$3');
+      let own = carried;
+      const lead = /^\s*cd[ \t]+(?:"([^"]*)"|'([^']*)'|([^\s;&|()]+))[ \t]*(?:&&|;|\n)/.exec(command);
+      if (lead) own = target([null, null, lead[1], lead[2], lead[3]], carried);
+      cwds.set(block.id, own);
+      for (const m of command.matchAll(CD_RE)) carried = target(m, carried);
+    }
+  }
+  return cwds;
+}
+
+// What file a word in a command names. Absolute: itself. Relative with a working directory: the
+// directory joined with it (or the word itself when that is a known path and the join is not, for a
+// file Claude wrote by a relative path). With no directory: the one known path ending in the word
+// (its basename, or its last segments), else path null and every such known path as candidates.
+function resolveSandboxPath(word, cwd, knownPaths) {
+  const text = String(word || '');
+  const known = Array.from(knownPaths || []);
+  if (text.startsWith('/')) { const path = normalizeSandboxPath(text); return { path, candidates: [path] }; }
+  const rel = normalizeSandboxPath(text);
+  if (cwd) {
+    let path = normalizeSandboxPath(cwd + '/' + text);
+    if (!known.includes(path) && known.includes(rel)) path = rel;
+    return { path, candidates: [path] };
+  }
+  if (!rel || rel.startsWith('..')) return { path: null, candidates: [] };
+  const candidates = known.filter((p) => p === rel || normalizeSandboxPath(p).endsWith('/' + rel));
+  return candidates.length === 1 ? { path: candidates[0], candidates } : { path: null, candidates };
+}
+
+// Whether a file lies in a folder or below it, by whole path segments: /a/de-luce/x is not under /a/de.
+function isUnderFolder(file, folder) {
+  const dir = normalizeSandboxPath(folder);
+  const path = normalizeSandboxPath(file);
+  return path.startsWith(dir === '/' ? '/' : dir + '/') && path !== dir;
+}
+
 // A title made safe as a file name: letters, digits and marks from any script, _ and -, with spaces
 // as _, at most 60 characters. '' when nothing is left. extract_artifacts.py's safe_file_title matches.
 function safeFileTitle(label) {
@@ -1934,7 +2007,7 @@ if (typeof module !== 'undefined' && module.exports) {
     escapeHtmlText, formatTimestamp, mdLinkText, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
     sortArtifactRows, artifactRowNotes, artifactSource, artifactUrl, artifactLocal, artifactVersionLinks, ARTIFACT_THUMB_PERMISSION_STATUS, artifactsChangedLine,
     artifactThumbsLine, ARTIFACTS_UNLISTED_HEADING, ARTIFACTS_NO_LIST, splitListedRows, artifactsIndexMd, artifactsIndexHtml,
-    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
+    fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, isUnderFolder, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote,
     WIDGET_CSS, isWidgetTool, widgetKey, widgetFile, webImagesOf, isImageResultTool, webImageKey, WEB_IMAGE_TYPES, webImageName, toolImagesOf, toolImageName,
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
     publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact, artifactForeign,

@@ -1346,6 +1346,83 @@ test('detectOpaqueMutations: every changed file, Path variables, ./name, globs, 
   assert.strictEqual(warned("echo '<li><a href=\"foo.html\">foo.html</a></li>' >> /home/claude/index.html"), 'index.html');
 });
 
+test('commandCwds: own cd wins, earlier cd carries, none is null', () => {
+  const data = turns(
+    [use('a', 'bash_tool', { command: 'ls' })],
+    [use('b', 'bash_tool', { command: 'cd /home/claude/x && ls' }), use('c', 'Bash', { command: 'python3 run.py' })],
+    [use('d', 'bash_tool', { command: 'cd /tmp; python3 a.py' }), use('e', 'bash_tool', { command: "cat > /h/s.py << 'EOF'\ncd /nowhere\nEOF" })],
+    [use('f', 'bash_tool', { command: 'cd lorber && ls' }), use('g', 'create_file', { path: '/x', file_text: '' }), use('h', 'bash_tool', { command: 'cd ~' }), use('i', 'bash_tool', { command: 'ls' })],
+  );
+  const cwds = fn('commandCwds')(fn('getMessageChain')(data));
+  assert.strictEqual(cwds.get('a'), null);
+  assert.strictEqual(cwds.get('b'), '/home/claude/x');
+  assert.strictEqual(cwds.get('c'), '/home/claude/x');
+  assert.strictEqual(cwds.get('d'), '/tmp');
+  assert.strictEqual(cwds.get('e'), '/tmp', 'a cd inside a heredoc body is text');
+  assert.strictEqual(cwds.get('f'), '/tmp/lorber', 'a relative cd resolves against the carried directory');
+  assert.ok(!cwds.has('g'), 'only bash commands');
+  assert.strictEqual(cwds.get('i'), null, 'a cd the export cannot follow leaves the directory unknown');
+});
+
+test('resolveSandboxPath: relative under cwd, unique basename without cwd, ambiguous gives candidates', () => {
+  const resolve = (word, cwd, known) => plain(fn('resolveSandboxPath')(word, cwd, known));
+  const known = ['/home/claude/verb/body.html', '/home/claude/verb/lorber/body.html', '/home/claude/notes.md'];
+  assert.deepStrictEqual(resolve('/abs/x.html', '/home/claude', known), { path: '/abs/x.html', candidates: ['/abs/x.html'] });
+  assert.deepStrictEqual(resolve('body.html', '/home/claude/verb/lorber', known).path, '/home/claude/verb/lorber/body.html');
+  assert.deepStrictEqual(resolve('./lorber/../body.html', '/home/claude/verb', known).path, '/home/claude/verb/body.html');
+  assert.deepStrictEqual(resolve('../notes.md', '/home/claude/verb', known).path, '/home/claude/notes.md');
+  assert.deepStrictEqual(resolve('notes.md', null, known), { path: '/home/claude/notes.md', candidates: ['/home/claude/notes.md'] });
+  assert.deepStrictEqual(resolve('body.html', null, known), { path: null, candidates: ['/home/claude/verb/body.html', '/home/claude/verb/lorber/body.html'] });
+  assert.deepStrictEqual(resolve('lorber/body.html', null, known).path, '/home/claude/verb/lorber/body.html');
+  assert.deepStrictEqual(resolve('other.html', null, known), { path: null, candidates: [] });
+});
+
+test('isUnderFolder compares segments', () => {
+  const under = fn('isUnderFolder');
+  assert.strictEqual(under('/home/claude/de-luce/x.html', '/home/claude/de'), false);
+  assert.strictEqual(under('/a/b/out/x.odt', '/a/b'), true);
+  assert.strictEqual(under('/a/b/x.odt', '/a/b/'), true);
+  assert.strictEqual(under('/a/b', '/a/b'), false);
+});
+
+test('detectOpaqueMutations: names the file under cd and merges its commands', () => {
+  const data = turns(
+    [use('1', 'Write', { file_path: '/home/claude/verb/body.html', content: 'a' }), use('2', 'Write', { file_path: '/home/claude/verb/lorber/body.html', content: 'a' })],
+    [use('3', 'bash_tool', { command: "cd /home/claude/verb/lorber && python3 - <<'E'\nimport re\np='body.html';s=open(p).read()\nopen(p,'w').write(re.sub('a','b',s))\nE" })],
+    [use('4', 'bash_tool', { command: "cd /home/claude/verb/lorber && python3 - <<'E'\nimport re\np='body.html';s=open(p).read()\nopen(p,'w').write(re.sub('a','b',s))\nE" })],
+  );
+  const index = {};
+  artifacts(data, null, index);
+  assert.strictEqual(index['/home/claude/verb/lorber/body.html'].filename, 'body_2.html');
+  const c = collector();
+  const out = fn('detectOpaqueMutations')(data, c, { index });
+  assert.strictEqual(c.warnings.length, 1);
+  assert.strictEqual(c.warnings[0].filename, 'body_2.html');
+  assert.strictEqual(c.warnings[0].details.path, '/home/claude/verb/lorber/body.html');
+  assert.match(c.warnings[0].message, /2 commands/);
+  const entry = out.byFile.get('/home/claude/verb/lorber/body.html');
+  assert.deepStrictEqual(plain({ ...entry }), { path: '/home/claude/verb/lorber/body.html', filename: 'body_2.html', msgIndexes: [3, 5], lastMsgIndex: 5, count: 2, resolved: true });
+  // A replayed command is skipped.
+  const skipped = collector();
+  fn('detectOpaqueMutations')(data, skipped, { index, replayed: new Set(['3|/home/claude/verb/lorber/body.html']) });
+  assert.match(skipped.warnings[0].message, /Changed by 1 command the export/);
+});
+
+test('detectOpaqueMutations: a name two files share, with no cd, is filed under both and unresolved', () => {
+  const data = turns(
+    [use('1', 'Write', { file_path: '/home/claude/a/page.html', content: 'a' }), use('2', 'Write', { file_path: '/home/claude/b/page.html', content: 'a' })],
+    [use('3', 'bash_tool', { command: "sed -i 's/a/b/' page.html" })],
+  );
+  const out = fn('detectOpaqueMutations')(data, collector());
+  assert.deepStrictEqual([...out.byFile.keys()].sort(), ['/home/claude/a/page.html', '/home/claude/b/page.html']);
+  assert.ok([...out.byFile.values()].every((e) => e.resolved === false));
+  const one = turns(
+    [use('1', 'Write', { file_path: '/home/claude/a/page.html', content: 'a' }), use('2', 'Write', { file_path: '/home/claude/b/page.html', content: 'a' })],
+    [use('3', 'bash_tool', { command: "cd /home/claude/b && sed -i 's/a/b/' page.html" })],
+  );
+  assert.deepStrictEqual([...fn('detectOpaqueMutations')(one, collector()).byFile.keys()], ['/home/claude/b/page.html']);
+});
+
 test('heredocs written as cat << EOF > path or cat >path << EOF are tracked, in every implementation', () => {
   const data = turns([
     use('1', 'bash_tool', { command: "cat << 'EOF' > /home/claude/app.py\nprint(1)\nEOF" }),

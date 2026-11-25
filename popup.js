@@ -623,8 +623,8 @@ function getCodeFence(content) {
 
 // Detect bash_tool commands that mutate a tracked artifact in a way the
 // declarative replay (create_file / str_replace / rewrite / heredoc) can't
-// reconstruct. Emits one `artifact_opaque_mutation` warning per distinct
-// command, pointing the user at `replay_bash.py` for recovery.
+// reconstruct. Emits one `artifact_opaque_mutation` warning per changed
+// file (all its commands merged), pointing the user at `replay_bash.py`.
 //
 // We deliberately do NOT try to replay bash scripts here. The companion CLI
 // `replay_bash.py` runs the actual scripts in an isolated tmpdir with full
@@ -697,7 +697,12 @@ function shellWords(segment) {
 // Any heredoc's body taken out, the rest of its first line kept: the body is input, not shell.
 const ANY_HEREDOC_RE = /<<-?\s*(['"]?)(\w+)\1([^\n]*)\n(?:[\s\S]*?\n)??[ \t]*\2[ \t]*(?=\n|$)/g;
 
-function detectOpaqueMutations(data, errorCollector) {
+// options.index: extractArtifacts' index (key -> { filename, ... }), for each file's name in artefacts/.
+// options.replayed: toolUseId + '|' + path keys of commands already replayed, skipped here.
+// Returns { opaqueMutations (one per command and file), byFile (path -> { path, filename, msgIndexes,
+// lastMsgIndex, count, resolved }) }. resolved is false when a command named the file only by a name
+// several known files share, with no working directory to tell them apart (or a glob with none).
+function detectOpaqueMutations(data, errorCollector, { replayed = new Set(), index = {} } = {}) {
   const messages = getMessageChain(data);
   const basenameOf = (p) => (p || '').split('/').pop();
 
@@ -723,6 +728,8 @@ function detectOpaqueMutations(data, errorCollector) {
       }
     }
   }
+  const known = Array.from(knownArtifactPaths);
+  const cwds = commandCwds(messages);
 
   const opaqueMutations = [];
 
@@ -730,14 +737,12 @@ function detectOpaqueMutations(data, errorCollector) {
   // that writes to a tracked artifact and isn't a heredoc create (those are
   // handled declaratively by extractArtifacts).
   //
-  // An artifact may be referenced several ways:
+  // An artifact may be referenced several ways, each resolved against the
+  // command's working directory (commandCwds) by resolveSandboxPath:
   //   • Full sandbox path:   open('/home/claude/booklet/foo.html','w')
-  //   • Just the basename:   `cd <dir> && open('foo.html','w')`
+  //   • A relative name:     `cd <dir> && open('foo.html','w')`
   //   • Via a variable:      f='foo.html'; open(f,'w').write(...)
-  // We pre-scan for `<var> = '<literal>'` bindings whose literal matches
-  // either a full path or the basename of a known artifact, then look for
-  // write-back patterns that reference the path, the basename, or any such
-  // aliasing variable.
+  //   • A glob:              sed -i ... *.html
   for (let mi = 0; mi < messages.length; mi++) {
     const msg = messages[mi];
     for (let bi = 0; bi < (msg.content || []).length; bi++) {
@@ -745,6 +750,33 @@ function detectOpaqueMutations(data, errorCollector) {
       if (block.type !== 'tool_use' || !isBashTool(block.name)) continue;
       const rawCommand = (block.input && block.input.command) || '';
       if (!rawCommand) continue;
+      const cwd = cwds.has(block.id) ? cwds.get(block.id) : null;
+
+      // The files this command changes: path -> resolved.
+      const hits = new Map();
+      const hit = (path, resolved) => {
+        if (!knownArtifactPaths.has(path)) return;
+        hits.set(path, (hits.has(path) ? hits.get(path) : true) && resolved);
+      };
+      // A word naming a file: its path, a relative name, or a glob.
+      const target = (word) => {
+        if (!word) return;
+        if (/[*?]/.test(word)) {
+          const full = word.startsWith('/') ? normalizeSandboxPath(word) : cwd ? normalizeSandboxPath(cwd + '/' + word) : null;
+          const re = (w) => new RegExp('^' + w.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
+          if (full) {
+            const glob = re(full);
+            for (const ap of known) if (glob.test(ap)) hit(ap, true);
+          } else if (!word.includes('/')) {
+            const glob = re(word);
+            for (const ap of known) if (glob.test(basenameOf(ap))) hit(ap, false);
+          }
+          return;
+        }
+        const { path, candidates } = resolveSandboxPath(word, cwd, known);
+        if (path) hit(path, true);
+        else for (const c of candidates) hit(c, false);
+      };
 
       // extractArtifacts already handled each `cat > path << DELIM` heredoc, so drop
       // the whole heredoc, body included: a body is text, and `<a href>about.html`
@@ -758,113 +790,89 @@ function detectOpaqueMutations(data, errorCollector) {
       // An unquoted delimiter means bash expanded $, ` and \ in the body, so the
       // file Claude got differs from the text in the command.
       for (const match of catHeredocs) {
-        if (match[2] === '' && /[$`\\]/.test(match[4] || '')) {
-          opaqueMutations.push({ artifactPath: heredocPath(match), msgIndex: mi, blockIndex: bi, command: rawCommand });
-        }
+        if (match[2] === '' && /[$`\\]/.test(match[4] || '')) hit(heredocPath(match), true);
       }
 
-      // Map variable name -> the artifact path it aliases (path or basename), as a string
-      // (f = 'foo.html') or a Path (p = Path('/home/claude/foo.html')).
-      const varToArtifact = {};
+      // Python: open(p, 'w' / 'a' / 'x' / 'r+' ..., encoding=...), open(file=p, mode='w'),
+      // Path(p).write_text(...) and p.write_text(...), p a literal or a variable bound to one
+      // (f = 'foo.html', or p = Path('/home/claude/foo.html')).
+      const bindings = {};
       const varBindingRe = /(?:^|[\s;])\s*(\w+)\s*=\s*(?:(?:pathlib\.)?Path\(\s*)?(['"])((?:\\.|(?!\2).)*)\2/g;
       let vbm;
       while ((vbm = varBindingRe.exec(command)) !== null) {
-        const varName = vbm[1];
-        const value = vbm[3].replace(/^\.\//, '');
-        for (const ap of knownArtifactPaths) {
-          if (value === ap || value === basenameOf(ap)) {
-            varToArtifact[varName] = ap;
-            break;
-          }
+        (bindings[vbm[1]] = bindings[vbm[1]] || []).push(vbm[3]);
+      }
+      const operand = "(?:(['\"])((?:\\\\.|(?!\\1).)*)\\1|([A-Za-z_]\\w*))";
+      const pyWriteRes = [
+        new RegExp("open\\(\\s*(?:file\\s*=\\s*)?" + operand + "\\s*,\\s*(?:mode\\s*=\\s*)?['\"](?:[wax][bt]?\\+?|r[bt]?\\+)['\"]", 'g'),
+        new RegExp("Path\\(\\s*" + operand + "\\s*\\)\\s*\\.write_(?:text|bytes)\\s*\\(", 'g'),
+        new RegExp("(?:^|[^\\w.)\\]])()()([A-Za-z_]\\w*)\\s*\\.\\s*write_(?:text|bytes)\\s*\\(", 'g'),
+      ];
+      for (const re of pyWriteRes) {
+        for (const m of command.matchAll(re)) {
+          if (m[2] !== undefined && m[1]) target(m[2]);
+          else if (m[3]) for (const value of bindings[m[3]] || []) target(value);
         }
       }
-      const globbed = /[*?]/.test(shellCommand);
 
-      for (const ap of knownArtifactPaths) {
-        const basename = basenameOf(ap);
-        const escapedPath = ap.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const escapedBase = basename.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const aliasVars = Object.keys(varToArtifact).filter(v => varToArtifact[v] === ap);
-
-        const referenced =
-          command.includes(ap) ||
-          command.includes(basename) ||
-          aliasVars.length > 0 ||
-          globbed;
-        if (!referenced) continue;
-
-        // Write-back patterns, against the full path or the basename (not as part of a
-        // longer name) or an aliasing variable.
-        const lit = "['\"](?:\\./)?(?:" + escapedPath + "|" + escapedBase + ")['\"]";
-        const varAlt = aliasVars.map(v => '\\b' + v + '\\b').join('|');
-        const target = aliasVars.length > 0 ? "(?:" + lit + "|" + varAlt + ")" : lit;
-        // Python: open(p, 'w' / 'a' / 'x' / 'r+' ..., encoding=...), open(file=p, mode='w'),
-        // Path(p).write_text(...) and p.write_text(...) for a Path variable.
-        const pyWriteRe = new RegExp(
-          "open\\(\\s*(?:file\\s*=\\s*)?" + target + "\\s*,\\s*(?:mode\\s*=\\s*)?['\"](?:[wax][bt]?\\+?|r[bt]?\\+)['\"]" +
-          "|Path\\(\\s*" + target + "\\s*\\)\\s*\\.write_(?:text|bytes)\\s*\\(" +
-          (varAlt ? "|(?:" + varAlt + ")\\s*\\.\\s*write_(?:text|bytes)\\s*\\(" : '')
-        );
-        // A shell word names the file as its path, its name, ./name, or a glob matching either.
-        const names = new Set([ap, basename]);
-        const globRe = (word) => new RegExp('^' + word.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]') + '$');
-        const isTarget = (word) => {
-          const w = word.replace(/^\.\//, '');
-          if (names.has(w)) return true;
-          if (!/[*?]/.test(w)) return false;
-          const re = globRe(w);
-          return w.includes('/') ? re.test(ap) : re.test(basename);
-        };
-        // Shell, one simple command at a time: a redirect into the file, sed/perl/awk
-        // in place, tee, or cp/mv/install onto it.
-        const shellWrites = shellSegments(shellCommand).some((segment) => {
-          const { words, redirects } = shellWords(segment);
-          if (redirects.some(isTarget)) return true;
-          if (words[0] === 'sudo') words.shift();
-          const tool = words[0];
-          const args = words.slice(1);
-          if (tool === 'sed' || tool === 'perl') {
-            const inPlace = args.some((w) => /^-[a-zA-Z]*i/.test(w) || w.startsWith('--in-place'));
-            return inPlace && args.some(isTarget);
-          }
-          if (tool === 'awk' || tool === 'gawk') {
-            const inPlace = args.some((w, i) => (w === '-i' && args[i + 1] === 'inplace') || w === '-iinplace' || w === '--include=inplace');
-            return inPlace && args.some(isTarget);
-          }
-          if (tool === 'tee') return args.some(isTarget);
-          if (tool === 'cp' || tool === 'mv' || tool === 'install') return args.length > 1 && isTarget(args[args.length - 1]);
-          if (tool === 'dd') return args.some((w) => w.startsWith('of=') && isTarget(w.slice(3)));
-          return false;
-        });
-
-        if (pyWriteRe.test(command) || shellWrites) {
-          // Every file the command changes is recorded, not just the first.
-          opaqueMutations.push({ artifactPath: ap, msgIndex: mi, blockIndex: bi, command: rawCommand });
+      // Shell, one simple command at a time: a redirect into the file, sed/perl/awk
+      // in place, tee, cp/mv/install onto it, or dd of=.
+      for (const segment of shellSegments(shellCommand)) {
+        const { words, redirects } = shellWords(segment);
+        redirects.forEach(target);
+        if (words[0] === 'sudo') words.shift();
+        const tool = words[0];
+        const args = words.slice(1);
+        if (tool === 'sed' || tool === 'perl') {
+          if (args.some((w) => /^-[a-zA-Z]*i/.test(w) || w.startsWith('--in-place'))) args.filter((w) => !w.startsWith('-')).forEach(target);
+        } else if (tool === 'awk' || tool === 'gawk') {
+          if (args.some((w, i) => (w === '-i' && args[i + 1] === 'inplace') || w === '-iinplace' || w === '--include=inplace')) args.filter((w) => !w.startsWith('-')).forEach(target);
+        } else if (tool === 'tee') {
+          args.filter((w) => !w.startsWith('-')).forEach(target);
+        } else if (tool === 'cp' || tool === 'mv' || tool === 'install') {
+          if (args.length > 1) target(args[args.length - 1]);
+        } else if (tool === 'dd') {
+          args.filter((w) => w.startsWith('of=')).forEach((w) => target(w.slice(3)));
         }
+      }
+
+      // Every file the command changes is recorded, not just the first.
+      for (const [path, resolved] of hits) {
+        if (replayed.has(block.id + '|' + path)) continue;
+        opaqueMutations.push({ artifactPath: path, msgIndex: mi, blockIndex: bi, toolUseId: block.id, resolved, command: rawCommand });
       }
     }
   }
 
-  // Surface every distinct opaque mutation as an `artifact_opaque_mutation`
-  // warning. De-dupe by (basename, command) so the same script appearing
-  // twice doesn't get listed twice. The recovery hint points users at the
-  // companion `replay_bash.py` CLI.
-  const seenCommands = new Set();
+  // One entry per file: all its commands merged and counted.
+  const byFile = new Map();
   for (const om of opaqueMutations) {
-    const key = basenameOf(om.artifactPath) + '|' + om.command;
-    if (seenCommands.has(key)) continue;
-    seenCommands.add(key);
-    if (errorCollector) {
+    const own = Object.prototype.hasOwnProperty.call(index, om.artifactPath) ? index[om.artifactPath] : null;
+    let entry = byFile.get(om.artifactPath);
+    if (!entry) {
+      entry = { path: om.artifactPath, filename: (own && own.filename) || basenameOf(om.artifactPath), msgIndexes: [], lastMsgIndex: om.msgIndex, count: 0, resolved: true };
+      byFile.set(om.artifactPath, entry);
+    }
+    entry.count++;
+    if (!entry.msgIndexes.includes(om.msgIndex)) entry.msgIndexes.push(om.msgIndex);
+    entry.lastMsgIndex = Math.max(entry.lastMsgIndex, om.msgIndex);
+    entry.resolved = entry.resolved && om.resolved;
+  }
+
+  // One `artifact_opaque_mutation` warning per file. The recovery hint points
+  // users at the companion `replay_bash.py` CLI.
+  if (errorCollector) {
+    for (const entry of byFile.values()) {
       errorCollector.addWarning(
         'artifact_opaque_mutation',
-        basenameOf(om.artifactPath),
-        `A bash command modified ${basenameOf(om.artifactPath)} in a way the exporter cannot replay declaratively (it's not a create_file, str_replace, or heredoc). The exported artifact may differ from what Claude actually produced. Use replay_bash.py to reconstruct.`,
-        { path: om.artifactPath, note: 'Run: python3 replay_bash.py <this-export-folder>' }
+        entry.filename,
+        `Changed by ${entry.count} command${entry.count === 1 ? '' : 's'} the export can't replay.`,
+        { path: entry.path, msgIndexes: entry.msgIndexes, note: 'Run: python3 replay_bash.py <this-export-folder>' }
       );
     }
   }
 
-  return { opaqueMutations };
+  return { opaqueMutations, byFile };
 }
 
 // Extract text attachments from messages (pasted files with extracted_content)
@@ -2430,7 +2438,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   // CLI for recovery. See docs/WASM_REPLAY_APPROACH.md for
   // why we don't try to interpret bash scripts in the extension. It runs before
   // the presented files, which use its warnings.
-  detectOpaqueMutations(data, errorCollector);
+  detectOpaqueMutations(data, errorCollector, { index: artifactIndex });
 
   // Download presented files (files Claude showed the user). One the replay
   // already rebuilt is skipped, unless the replay is known to be off for it (an
