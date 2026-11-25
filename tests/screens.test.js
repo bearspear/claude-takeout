@@ -1000,7 +1000,17 @@ test('warningGroups uses plain words for the common types', () => {
   assert.strictEqual(line('presented_file', 2), '2 files Claude made could not be downloaded (x)');
   assert.strictEqual(line('delivered_file'), '1 file Claude made could not be downloaded (x)');
   assert.strictEqual(line('project_doc', 2), '2 project documents not saved (x)');
-  assert.strictEqual(line('claude_doc_unreplayed', 2), '2 claude_doc_unreplayed warnings (x)');
+  assert.strictEqual(line('doc_diagram', 2), '2 diagrams not included (x)');
+  assert.strictEqual(line('claude_doc_unreplayed'), '1 Claude Docs edit not rebuilt (x)');
+  assert.strictEqual(line('artifact_basename_collision'), '1 file renamed (x)');
+});
+
+test('the web_image hint names the cause, and Settings only for the no-permission warning', () => {
+  const c = new (loadPopup().fn('ExportErrorCollector'))('n', 'u');
+  const hint = (note) => c._getRecoveryHint('web_image', { note });
+  assert.ok(!/Settings/.test(hint('HTTP 403')));
+  assert.match(hint('HTTP 403'), /403/);
+  assert.match(hint('No permission to fetch images from other sites'), /Settings/);
 });
 
 test('Done points Export All at each chat folder for errors.txt', async () => {

@@ -139,7 +139,10 @@ class ExportErrorCollector {
         return 'A picture Claude looked at in the chat (a photo it opened, a page it rendered) could not be downloaded from claude.ai. Export again later; it is still shown in the chat on claude.ai.';
 
       case 'web_image':
-        return 'An image Claude found with image search could not be saved: the site refused it, it is gone, or Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to it. To save these images, turn on Settings > Save web images and artifact card pictures (Chrome asks once), then export again.';
+        if (String(details.note || '').startsWith('No permission')) {
+          return 'Claude Takeout may not fetch images from other sites. The link in full_chat.md still points to each image. To save these images, turn on Settings > Save web images and artifact card pictures (Chrome asks once), then export again.';
+        }
+        return 'An image Claude found with image search could not be saved: the site refused it (403) or it is gone (404); nothing in Claude Takeout can fetch it. The link in full_chat.md still points to it.';
 
       case 'published_page':
         return 'A page Claude published on claude.ai (publish_files) could not be saved, or only in part, or its file names were changed to be safe on disk. The chat itself is exported. Open the page on claude.ai (link in the note) while signed in, and export again; a page that was unpublished or deleted can no longer be saved.';
@@ -3312,7 +3315,7 @@ async function saveWebImages(folder, data, errorCollector, onProgress = null) {
   if (!images.length) return saved;
   if (!(await webImagesAllowed())) {
     errorCollector.addWarning('web_image', 'images/', `${images.length} image${images.length === 1 ? '' : 's'} from web searches ${images.length === 1 ? 'was' : 'were'} not saved: Claude Takeout may not fetch images from other sites.`,
-      { note: 'Turn on Settings > Save web images and artifact card pictures, then export again. The links in full_chat.md still work.' });
+      { note: 'No permission to fetch images from other sites' });
     return saved;
   }
   const fetchImage = async (url) => {
@@ -6473,6 +6476,9 @@ const WARNING_NOUNS = {
   presented_file: ['file Claude made could not be downloaded', 'files Claude made could not be downloaded'],
   delivered_file: ['file Claude made could not be downloaded', 'files Claude made could not be downloaded'],
   project_doc: ['project document not saved', 'project documents not saved'],
+  doc_diagram: ['diagram not included', 'diagrams not included'],
+  claude_doc_unreplayed: ['Claude Docs edit not rebuilt', 'Claude Docs edits not rebuilt'],
+  artifact_basename_collision: ['file renamed', 'files renamed'],
 };
 
 // Warnings grouped by type, one line each: "<count> <noun phrase> (<example>)".
