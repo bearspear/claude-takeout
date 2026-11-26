@@ -261,6 +261,8 @@ If `viewer.html` couldn't be built at all, the export still downloads and the st
 
 In the combined viewer, a **Sessions** entry (shown only when the export has sessions) lists them, and a session opens as a read-only transcript with thinking and tool steps folded and subagent steps under their Agent step. Search finds a session's prompts and replies, never its tool output, and labels those results "Session". An artifact made in a session shows "Made in session <title>", and the session links its artifacts.
 
+A page a session published (claude.ai's Artifact tool) gets a card in the reply that published it, as in a chat. The card, and the artifact's link in the session's top bar, open the page in the side panel from the copy in `artifacts/`, with its versions, Open file and Download; the panel's **Open artifact** goes to the Artifacts screen. A page that isn't in the export shows its card with the claude.ai link only. `build_viewer.js` gives older archives' sessions the same cards.
+
 ### Per-turn artifact versions
 
 When Claude creates an artifact and then edits it multiple times (`create_file` followed by `str_replace`s), the export captures **every intermediate state**, not just the final one:

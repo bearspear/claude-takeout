@@ -2811,3 +2811,39 @@ test('a folder with only an unreadable session is not an archive', () => {
   put(root, 'sessions/Only/session.json', sessionJson('s1', {}, 2));
   assert.deepStrictEqual(findArchives(root).archives, []);
 });
+
+// ---- v1.25.1: a session's published pages get cards from the on-disk artifacts store ----
+test("build_viewer gives a session's published pages cards from the artifacts store, previews in parts", async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  LAYOUTS.v18(root);
+  const publish = (id, ver, n) => [
+    { type: 'assistant', uuid: `call-${id}`, created_at: '2026-11-02T00:00:00Z', message: { role: 'assistant', content: [{ type: 'tool_use', id, name: 'Artifact', input: { file_path: '/home/user/guide.html' } }] } },
+    { type: 'user', uuid: `res-${id}`, created_at: '2026-11-02T00:00:01Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: `Published /home/user/guide.html at https://claude.ai/artifact/${G_ID} (Version ${n}, version id ${ver})` }] }] } },
+  ];
+  put(root, 'sessions/Guide_work/session.json', JSON.stringify({
+    format: 1, session: { id: 'cse_g', title: 'Guide work', config: { origin: 'desktop_app' }, created_at: '2026-11-01T00:00:00Z', last_event_at: '2026-11-03T00:00:00Z',
+      external_metadata: { artifacts: [{ artifact_id: G_U, title: 'Guide' }] } },
+    events: [{ type: 'user', uuid: 'p1', created_at: '2026-11-01T00:00:00Z', message: { role: 'user', content: 'Write the guide' } }, ...publish('t1', 'v1', 1), ...publish('t2', 'v2', 2)],
+  }));
+  const res = await writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  const data = viewerData(root);
+  const s = data.sessions[0];
+  const id = s.pages && s.pages[G_U];
+  const file = id && s.chat.files[id];
+  assert.ok(file, JSON.stringify(s.pages));
+  assert.strictEqual(file.name, 'Guide');
+  assert.strictEqual(file.artifact, G_ID);
+  assert.deepStrictEqual(file.versions.map(v => [v.label, v.href, v.text, v.start]), [
+    ['v1', `artifacts/${AF}/v1/index.html`, null, 'index.html'], ['v2', `artifacts/${AF}/v2/index.html`, null, 'index.html']]);
+  // Each version's preview is a part the viewer loads: the older one's own, the current one the view's.
+  const parts = {};
+  for (const name of fs.readdirSync(path.join(root, 'viewer-files')).filter(n => n.endsWith('.js'))) {
+    const { n, data: d } = loadPart(fs.readFileSync(path.join(root, 'viewer-files', name), 'utf8'));
+    parts[n] = d;
+  }
+  const textOf = v => parts[v.part][v.key].texts.find(t => t[0] === v.start)[1];
+  assert.deepStrictEqual(file.versions.map(textOf), [G1, G2]);
+  assert.ok(!fs.readFileSync(path.join(root, 'viewer.html'), 'utf8').includes('<p>G1'), 'no page text in viewer.html');
+});

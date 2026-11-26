@@ -2774,3 +2774,107 @@ test('a session\'s artifacts join the Artifacts screen\'s views both ways, by sh
   assert.deepStrictEqual(sessionsMaking(view, [s, { id: 'cse_2', artifacts: [other] }, null]), [{ id: 'cse_1', title: '<b>T</b>' }]);
   assert.deepStrictEqual(sessionsMaking(view, undefined), []);
 });
+
+// ---- v1.25.1: a session's published pages, as a chat's (cards opening the side panel) ----
+const S_ART = 'abcdef01-2345-4678-89ab-cdef01234567';
+const S_OTHER = '11111111-2222-4333-8444-555555555555';
+const S_ART_ID = require('../export-core.js').uuidToBase58(S_ART);
+const S_OTHER_ID = require('../export-core.js').uuidToBase58(S_OTHER);
+const S_DIR = `artifacts/Session_page_${S_ART_ID}`;
+// An Artifact tool publish in a session: the call, then claude.ai's reply naming the page and its version.
+const sessionPublish = (id, shortId, ver, n) => [
+  ev(`call-${id}`, 'assistant', [{ type: 'tool_use', id, name: 'Artifact', input: { file_path: '/home/user/work/page.html', description: 'A page' } }]),
+  ev(`res-${id}`, 'user', [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: `Published /home/user/work/page.html at https://claude.ai/artifact/${shortId} (Version ${n}, version id ${ver})` }] }]),
+];
+const sessionPublishEvents = () => [
+  ev('p1', 'user', [{ type: 'text', text: 'Make a page' }]),
+  ...sessionPublish('t1', S_ART_ID, 'ver1', 1),
+  ev('p2', 'user', [{ type: 'text', text: 'Change it' }]),
+  ...sessionPublish('t2', S_ART_ID, 'ver2', 2),
+  ...sessionPublish('t3', S_OTHER_ID, 'ver9', 1),
+];
+// The export's artifacts store, as buildViewerData takes it: the artifact step's view (its current version's preview
+// part) and the store record (artifact.json with dir, versionOrder and versionPlaces: an older version's own part).
+const sessionStore = () => ({
+  views: [{ id: S_ART_ID, title: 'Session page', kind: 'Page', folder: `${S_DIR}/ver2`, start: 'index.html', startSaved: 'index.html', part: 3, key: 'a0', url: `https://claude.ai/artifact/${S_ART_ID}` }],
+  records: [{
+    format: 2, uuid: S_ART, shortId: S_ART_ID, url: `https://claude.ai/artifact/${S_ART_ID}`, title: 'Session page', listed: true, current: 'ver2',
+    start: 'index.html', needsRuntime: false, dir: S_DIR, versionOrder: ['ver1', 'ver2'],
+    versions: {
+      ver1: { folder: 'ver1', files: [{ path: 'index.html', savedAs: 'index.html' }], start: 'index.html', startSaved: 'index.html', saved: true, publishedIn: [] },
+      ver2: { folder: 'ver2', files: [{ path: 'index.html', savedAs: 'index.html' }, { path: 'app.css', savedAs: 'app.css' }], start: 'index.html', startSaved: 'index.html', saved: true, publishedIn: [] },
+    },
+    versionPlaces: { ver1: { folder: `${S_DIR}/ver1`, part: 2, key: 'a1', startKind: 'html' } },
+  }],
+});
+
+test("a session's publishes become published-page cards from the artifacts store, previews in parts", () => {
+  const s = V.buildViewerSession(sessionOf(), sessionPublishEvents(), { folder: 'sessions/Fix_the_build_abc', artifacts: sessionStore() });
+  const { chat } = s;
+  const fileOf = uuid => s.pages && chat.files[s.pages[uuid]];
+  const page = fileOf(S_ART);
+  assert.ok(page, JSON.stringify(s.pages));
+  assert.strictEqual(page.name, 'Session page');
+  assert.strictEqual(page.kind, 'html');
+  assert.strictEqual(page.artifact, S_ART_ID);
+  assert.deepStrictEqual(page.published, { url: `https://claude.ai/artifact/${S_ART_ID}`, current: false, needsRuntime: false });
+  // No text in the page: each version's preview is the artifact step's part (the current one the view's, an older one its own).
+  assert.deepStrictEqual(page.versions, [
+    { label: 'v1', text: null, href: `${S_DIR}/ver1/index.html`, same: false, ver: 'ver1', part: 2, key: 'a1', start: 'index.html' },
+    { label: 'v2', text: null, href: `${S_DIR}/ver2/index.html`, same: false, ver: 'ver2', part: 3, key: 'a0', start: 'index.html' },
+  ]);
+  // Not in the store: the card with the claude.ai link only, as a chat's page that wasn't saved.
+  const other = fileOf(S_OTHER);
+  assert.strictEqual(other.kind, 'missing');
+  assert.deepStrictEqual(other.published, { url: `https://claude.ai/artifact/${S_OTHER_ID}`, current: false, needsRuntime: false });
+  assert.ok(other.versions.every(v => v.text === null && v.href === null));
+  assert.ok(!('artifact' in other));
+  // One card per publish, in the reply that published it; the tool lines no longer carry their own link.
+  const cards = chat.messages.flatMap(m => m.blocks.filter(b => b.t === 'card').map(b => [m.id, chat.files[b.file].name, b.version]));
+  assert.deepStrictEqual(cards, [['call-t1', 'Session page', 0], ['call-t2', 'Session page', 1], ['call-t2', 'page', 0]]);
+  assert.ok(chat.messages.every(m => m.blocks.filter(b => b.t === 'tool').every(b => !b.published)));
+});
+
+test("a session's publish with no artifacts store gets the card with the claude.ai link only", () => {
+  const s = V.buildViewerSession(sessionOf(), sessionPublishEvents(), { folder: 'sessions/x' });
+  const page = s.chat.files[s.pages[S_ART]];
+  assert.strictEqual(page.kind, 'missing');
+  assert.strictEqual(page.published.url, `https://claude.ai/artifact/${S_ART_ID}`);
+  assert.deepStrictEqual(page.versions.map(v => [v.label, v.href, v.text]), [['ver1', null, null], ['ver2', null, null]]);
+});
+
+test('a session that published nothing has no pages', () => {
+  const s = V.buildViewerSession(sessionOf(), [ev('e1', 'user', [{ type: 'text', text: 'hi' }])], { folder: 'sessions/x', artifacts: sessionStore() });
+  assert.ok(!('pages' in s));
+  assert.deepStrictEqual(s.chat.files, {});
+});
+
+test('session hashes carry the open file and version', () => {
+  assert.deepStrictEqual(parseHash('#session=cse_ab&file=f1&version=2'), { session: 'cse_ab', file: 'f1', version: 2 });
+  assert.deepStrictEqual(parseHash('#session=cse_ab&msg=u1&file=f1&version=0'), { session: 'cse_ab', msg: 'u1', file: 'f1', version: 0 });
+  assert.strictEqual(formatHash({ session: 'cse_ab', msg: 'u1', file: 'f1', version: 0 }), '#session=cse_ab&msg=u1&file=f1&version=0');
+  assert.strictEqual(formatHash({ session: 'cse_ab', file: null, version: null }), '#session=cse_ab');
+  assert.deepStrictEqual(parseHash(formatHash({ session: 'cse_ab', file: 'f 1', version: 3 })), { session: 'cse_ab', file: 'f 1', version: 3 });
+});
+
+test('partText reads a file version from a part: its text, or the start file of an artifact preview payload', () => {
+  const { partText } = require('../viewer/viewer-logic.js');
+  assert.strictEqual(partText('plain', null), 'plain');
+  assert.strictEqual(partText({ texts: [['app.css', 'x'], ['index.html', '<p>A</p>']], images: [] }, 'index.html'), '<p>A</p>');
+  assert.strictEqual(partText({ texts: [['app.css', 'x']], images: [] }, 'index.html'), null);
+  assert.strictEqual(partText({ texts: 'no' }, 'index.html'), null);
+  assert.strictEqual(partText(undefined, 'index.html'), null);
+  assert.strictEqual(partText({ texts: [['index.html', 5]] }, 'index.html'), null);
+});
+
+test("partSiblings finds a payload's files beside its start file, by bare name", () => {
+  const { partSiblings } = require('../viewer/viewer-logic.js');
+  const payload = { texts: [['site/index.html', 'I'], ['site/app.css', 'C'], ['app.js', 'J'], ['__proto__', 'P']], images: [] };
+  const look = partSiblings(payload, 'site/index.html');
+  assert.strictEqual(look('app.css'), 'C');
+  assert.strictEqual(look('app.js'), null);
+  assert.strictEqual(look('index.html'), null);
+  assert.strictEqual(partSiblings(payload, 'index.html')('__proto__'), 'P');
+  assert.strictEqual(partSiblings(payload, 'index.html')('constructor'), null);
+  assert.strictEqual(partSiblings('text', 'index.html'), null);
+});

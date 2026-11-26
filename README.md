@@ -402,6 +402,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.25.1
+
+- **A session's artifacts open beside it in the viewer** - Each page a Cowork or Claude Code session published now gets a card in the reply that published it, as a chat's published page does, instead of a folded step. Click the card and the page opens in the side panel with its preview, its version menu, Open file and Download, read from the copy in the export's `artifacts/` folder. The artifact links in the session's top bar open the same panel, and the panel's **Open artifact** still goes to the Artifacts screen. Back and Forward open and close the panel. A page that isn't in the export shows the card with its claude.ai link. The old-archive tools (`build_viewer.js`, `merge_archives.js`) give sessions the same cards from an archive's artifacts.
+
 ### v1.25.0
 
 - **Cowork and Claude Code sessions in Export All** - claude.ai lists Cowork sessions (from the desktop app) and Claude Code sessions (run from the command line with remote control) apart from your chats, so Export All never saved them. A third checkbox on the main screen, **Sessions** ("Claude Code and Cowork", on by default, under Chats and Artifacts), now saves each Cowork session in a `sessions/` folder: `transcript.md` (your prompts, Claude's replies, thinking and one line per tool step), `README.md` (dates, counts and the artifacts it made, linked), `session.json` and its `images/`. `index.md` lists them in a Sessions table. Sessions can be exported alone: then no chat list is asked for and `index.md` says chats were not ticked. **Changes only** takes a session again when it has new activity, also when no chat changed, and works with Sessions alone. Count doesn't count sessions, so with Sessions ticked the panel never says "Nothing changed".

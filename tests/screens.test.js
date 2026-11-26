@@ -1771,6 +1771,44 @@ test('the sessions step is done after the viewer step starts, also with no sessi
   assert.strictEqual(states.sessions, 'done');
 });
 
+test("Export All gives a session's published artifact a card from the artifacts store (v1.25.1)", async () => {
+  const { list, chats } = oneChat();
+  const shortId = require('../export-core.js').uuidToBase58(S_ART);
+  const frames = [{ slug: S_ART, title: 'Panel', typeSlug: '', typeTitle: '', sourceSurface: 'code', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }];
+  const pages = { [S_ART]: { title: 'Panel', live: P_LIVE, versions: { [P_LIVE]: { files: { 'index.html': '<p>Panel</p>' } } } } };
+  const events = [
+    ...sessionEventsFixture(),
+    { type: 'assistant', uuid: 'e5', created_at: '2026-11-20T10:00:05Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu2', name: 'Artifact', input: { file_path: '/home/user/panel.html', description: 'Panel' } }] } },
+    { type: 'user', uuid: 'e6', created_at: '2026-11-20T10:00:06Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu2', content: [{ type: 'text', text: `Published /home/user/panel.html at https://claude.ai/artifact/${shortId} (Version 1, version id ${P_LIVE})` }] }] } },
+  ];
+  const viewerSessions = [];
+  const fakeViewer = (sb) => {
+    sb.__viewer = (opts) => { viewerSessions.push(...JSON.parse(JSON.stringify(opts.sessions || []))); };
+    vm.runInContext('writeViewer = async (zip, chats, opts) => { __viewer(opts); zip.file("viewer.html", "<html>"); return true; }', sb);
+  };
+  const { result, saved } = await bulkRun({ list, chats, frames, pages, setup: fakeViewer, options: { withArtifacts: true },
+    sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage(events) } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(viewerSessions.length, 1);
+  const v = viewerSessions[0];
+  const id = v.pages && v.pages[S_ART];
+  const file = id && v.chat.files[id];
+  assert.ok(file, JSON.stringify(v.pages));
+  const artFolder = Object.keys(saved.written).find((n) => /^artifacts\/[^/]+\/artifact\.json$/.test(n)).split('/')[1];
+  const verFolder = Object.keys(saved.written).find((n) => n.startsWith(`artifacts/${artFolder}/`) && n.endsWith('/index.html')).split('/')[2];
+  assert.strictEqual(file.name, 'Panel');
+  assert.strictEqual(file.artifact, shortId);
+  assert.strictEqual(file.versions.length, 1);
+  const ver = file.versions[0];
+  assert.strictEqual(ver.href, `artifacts/${encodeURIComponent(artFolder)}/${verFolder}/index.html`);
+  assert.strictEqual(ver.text, null, 'no page text in viewer.html');
+  assert.ok(Number.isSafeInteger(ver.part) && ver.part > 0 && /^a\d+$/.test(ver.key) && ver.start === 'index.html', JSON.stringify(ver));
+  const partBody = String(saved.written[`viewer-files/part-${String(ver.part).padStart(4, '0')}.js`]);
+  assert.ok(partBody.includes('<p>Panel<\\/p>'), `the preview is in that part: ${partBody.slice(0, 200)}`);
+  const cards = v.chat.messages.flatMap((m) => m.blocks.filter((b) => b.t === 'card'));
+  assert.deepStrictEqual(cards, [{ t: 'card', file: id, version: 0 }]);
+});
+
 test('runSessionStep builds each session for the viewer, images by relative path', async () => {
   const { sandbox } = exportPopup();
   const written = {};
