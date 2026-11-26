@@ -134,3 +134,86 @@ test('keepSession masks titles and tolerates odd shapes', () => {
   assert.strictEqual(k.config, undefined);
   assert.deepStrictEqual(k.external_metadata.artifacts, [{ artifact_id: 'a', title: '[masked]' }]);
 });
+
+// ---- Task 4: transcript, README, images ----
+const C = require('../export-core.js');
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3]).toString('base64');
+const JPG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3]).toString('base64');
+const img = (data) => ({ type: 'image', source: { type: 'base64', media_type: 'image/png', data } });
+
+test('sessionImages saves PNG and JPEG by leading bytes and skips others', () => {
+  const events = [
+    user([img(PNG)]),
+    user([{ type: 'tool_result', tool_use_id: 't', content: [img(JPG), img(Buffer.from('hello world!').toString('base64'))] }]),
+  ];
+  const before = JSON.stringify(events);
+  const r = C.sessionImages(events);
+  assert.strictEqual(JSON.stringify(events), before);
+  assert.deepStrictEqual(r.images.map((i) => i.name), ['1.png', '2.jpg']);
+  assert.deepStrictEqual(r.events[0].message.content[0], { type: 'image', file: 'images/1.png' });
+  const c = r.events[1].message.content[0].content;
+  assert.deepStrictEqual(c[0], { type: 'image', file: 'images/2.jpg' });
+  assert.match(c[1].missing, /^not saved \(/);
+  assert.strictEqual(r.skipped, 1);
+});
+
+test('sessionImages leaves out an image over 5 MB', () => {
+  const big = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(5 * 1024 * 1024 + 10)]).toString('base64');
+  const r = C.sessionImages([user([img(big)])]);
+  assert.strictEqual(r.images.length, 0);
+  assert.match(r.events[0].message.content[0].missing, /5 MB/);
+});
+
+test('promptKind labels compaction, commands and output', () => {
+  assert.strictEqual(C.promptKind('This session is being continued from a previous conversation that ran out'), 'compaction');
+  assert.strictEqual(C.promptKind('<command-name>/clear</command-name>'), 'command');
+  assert.strictEqual(C.promptKind('<local-command-stdout>ok</local-command-stdout>'), 'command-output');
+  assert.strictEqual(C.promptKind('hello'), 'prompt');
+});
+
+test('sessionTranscriptMd cuts a long tool result at 2 KB', () => {
+  const events = [
+    user([{ type: 'text', text: 'run it' }]),
+    ev('assistant', { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }] }),
+    user([{ type: 'tool_result', tool_use_id: 't1', content: 'x'.repeat(3000) }]),
+  ];
+  const md = C.sessionTranscriptMd({ title: 'T', config: {} }, events);
+  assert.ok(md.includes('x'.repeat(2048)) && !md.includes('x'.repeat(2049)));
+  assert.match(md, /\[… 952 more characters in session\.json\]/);
+  assert.match(md, /Bash/);
+});
+
+test('sessionTranscriptMd marks a compaction', () => {
+  const md = C.sessionTranscriptMd({ title: 'T' }, [
+    user([{ type: 'text', text: 'hi' }]),
+    { type: 'system', subtype: 'compact_boundary', uuid: 'c' },
+    user([{ type: 'text', text: 'This session is being continued from a previous conversation' }]),
+    { uuid: 's', type: 'user', stub: 'too large (9 MB)' },
+  ]);
+  assert.match(md, /— Conversation compacted —/);
+  assert.match(md, /Summary of the earlier conversation/);
+  assert.match(md, /\[event too large to keep\]/);
+});
+
+test('sessionReadmeMd links artifacts in the export and on claude.ai', () => {
+  const uuid = '12345678-1234-4234-8234-123456789abc';
+  const md = C.sessionReadmeMd({ id: 'cse_abcdefghijklmnop', title: 'T', config: {} }, [
+    user([{ type: 'text', text: 'hi' }]),
+    ev('assistant', { role: 'assistant', content: [{ type: 'tool_use', id: 't', name: 'Bash', input: {} }] }),
+    { type: 'result', uuid: 'r', total_cost_usd: 1.234 },
+  ], [{ uuid, title: 'Local', href: '../../artifacts/Local_x/' }, { uuid, title: 'Remote', href: null }]);
+  assert.match(md, /\(\.\.\/\.\.\/artifacts\/Local_x\/\)/);
+  assert.ok(md.includes(`https://claude.ai/artifact/${C.uuidToBase58(uuid)}`));
+  assert.match(md, /Turns: 1/);
+  assert.match(md, /Tool calls: 1/);
+  assert.match(md, /\$1\.23/);
+  assert.strictEqual(C.sessionShortId('cse_abcdefghijklmnop'), 'efghijklmnop');
+});
+
+test('sessionReadmeMd escapes titles', () => {
+  const t = '[x](javascript:alert(1)) <img onerror=1>';
+  const md = C.sessionReadmeMd({ title: t }, [], [{ uuid: 'u', title: t, href: 'a/' }]);
+  assert.ok(!md.includes('](javascript:'));
+  assert.ok(!md.includes('<img'));
+  assert.ok(md.includes('\\[x\\]'));
+});

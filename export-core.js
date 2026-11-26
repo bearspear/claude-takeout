@@ -3002,6 +3002,195 @@ ${viewer ? `<p class="viewer"><a href="${up}viewer.html">Open the artifacts view
 `;
 }
 
+// ==== Code and Cowork sessions (pure) ====
+// Kept events come from session-core.js. A prompt is a user event whose content is not only tool_result blocks.
+
+const SESSION_IMAGE_MAX = 5 * 1024 * 1024;
+const SESSION_RESULT_CUT = 2048;
+const SESSION_STUB_LINE = '[event too large to keep]';
+
+const sessionShortId = (id) => String(id || '').replace(/^cse_/, '').slice(-12);
+
+function sessionFence(content) {
+  const runs = String(content || '').match(/`+/g) || [];
+  return '`'.repeat(Math.max(3, runs.reduce((n, r) => Math.max(n, r.length), 0) + 1));
+}
+
+function sessionFenced(text, lang) {
+  const fence = sessionFence(text);
+  return `${fence}${lang || ''}\n${text}\n${fence}`;
+}
+
+function promptKind(text) {
+  const t = String(text || '');
+  if (/^This session is being continued from a previous conversation/.test(t)) return 'compaction';
+  if (/^\s*<command-name>/.test(t)) return 'command';
+  if (/^\s*<local-command-stdout>/.test(t)) return 'command-output';
+  return 'prompt';
+}
+
+// Image type by the first decoded bytes, or '' when it is none of PNG, JPEG, GIF, WebP.
+function sessionImageType(base64) {
+  let bytes;
+  try { bytes = Buffer.from(String(base64 || '').slice(0, 64), 'base64'); } catch (e) { return ''; }
+  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'jpg';
+  if (bytes.length >= 4 && bytes.toString('latin1', 0, 4) === 'GIF8') return 'gif';
+  if (bytes.length >= 12 && bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WEBP') return 'webp';
+  return '';
+}
+
+// Copies of the events with each base64 image replaced by a reference to images/<n>.<ext> (or a reason it was not saved).
+function sessionImages(events) {
+  const images = [];
+  let skipped = 0;
+  const convert = (block) => {
+    if (!block || block.type !== 'image') return block;
+    const src = block.source;
+    if (!src || src.type !== 'base64' || typeof src.data !== 'string') { skipped++; return { type: 'image', missing: 'not saved (no image data)' }; }
+    const data = src.data;
+    const size = Math.floor(data.length * 3 / 4) - (data.endsWith('==') ? 2 : data.endsWith('=') ? 1 : 0);
+    if (size > SESSION_IMAGE_MAX) { skipped++; return { type: 'image', missing: 'not saved (over 5 MB)' }; }
+    const ext = sessionImageType(data);
+    if (!ext) { skipped++; return { type: 'image', missing: 'not saved (not a PNG, JPEG, GIF or WebP picture)' }; }
+    images.push({ name: `${images.length + 1}.${ext}`, base64: data });
+    return { type: 'image', file: `images/${images.length}.${ext}` };
+  };
+  const out = (events || []).map((e) => {
+    const content = e && e.message && e.message.content;
+    if (!Array.isArray(content)) return e;
+    const blocks = content.map((b) => {
+      if (b && b.type === 'tool_result' && Array.isArray(b.content)) return { ...b, content: b.content.map(convert) };
+      return convert(b);
+    });
+    return { ...e, message: { ...e.message, content: blocks } };
+  });
+  return { events: out, images, skipped };
+}
+
+const sessionContent = (e) => (e && e.message && Array.isArray(e.message.content) ? e.message.content : []);
+const isSessionPrompt = (e) => e && e.type === 'user' && e.message && !sessionContent(e).every((b) => b && b.type === 'tool_result') ;
+const sessionPromptText = (e) => sessionContent(e).filter((b) => b && b.type === 'text').map((b) => b.text || '').join('\n');
+const safeHeading = (t) => mdLinkText(t).replace(/[()]/g, '\\$&').replace(/</g, '&lt;');
+
+function sessionImageLine(b) {
+  return b.file ? `![](${b.file})` : `[image ${b.missing || 'not saved'}]`;
+}
+
+function sessionResultText(b) {
+  const c = b.content;
+  const parts = [];
+  for (const item of Array.isArray(c) ? c : [c]) {
+    if (item == null) continue;
+    if (typeof item === 'string') parts.push(item);
+    else if (item.type === 'text') parts.push(item.text || '');
+    else if (item.type === 'image') parts.push(sessionImageLine(item));
+    else if (item.type === 'tool_reference') parts.push(`[tool reference${item.tool_name ? ': ' + item.tool_name : ''}]`);
+  }
+  return parts.join('\n');
+}
+
+function sessionToolLine(use) {
+  const input = use.input || {};
+  const hint = input.command || input.file_path || input.path || input.pattern || input.url || input.query || input.description || '';
+  const first = String(hint).split('\n')[0].slice(0, 120);
+  return `**Tool: ${use.name || 'unknown'}**${first ? ` \`${first.replace(/`/g, "'")}\`` : ''}`;
+}
+
+function sessionTranscriptMd(session, events) {
+  const s = session || {};
+  const cfg = s.config || {};
+  const lines = [`# ${safeHeading(s.title || 'Untitled session')}`, ''];
+  const meta = [];
+  if (s.created_at) meta.push(`Started: ${formatTimestamp(s.created_at)}`);
+  if (s.updated_at) meta.push(`Updated: ${formatTimestamp(s.updated_at)}`);
+  if (cfg.origin) meta.push(`Origin: ${cfg.origin}`);
+  if (cfg.model) meta.push(`Model: ${cfg.model}`);
+  if (meta.length) lines.push(meta.join(' · '), '');
+  const all = events || [];
+  const results = new Map();
+  for (const e of all) for (const b of sessionContent(e)) if (b && b.type === 'tool_result') results.set(b.tool_use_id, b);
+  const used = new Set();
+  let turn = 0;
+  for (const e of all) {
+    if (!e) continue;
+    if (e.stub) { lines.push(SESSION_STUB_LINE, ''); continue; }
+    if (e.type === 'system' && e.subtype === 'compact_boundary') { lines.push('— Conversation compacted —', ''); continue; }
+    if (e.type === 'user' && isSessionPrompt(e)) {
+      const text = sessionPromptText(e);
+      const kind = promptKind(text);
+      if (kind === 'prompt') { turn++; lines.push(`## Prompt ${turn}`, ''); }
+      else lines.push(`## ${{ compaction: 'Summary of the earlier conversation', command: 'Command', 'command-output': 'Command output' }[kind]}`, '');
+      if (e.created_at) lines.push(`*${formatTimestamp(e.created_at)}*`, '');
+      for (const b of sessionContent(e)) {
+        if (b.type === 'text' && b.text) lines.push(kind === 'prompt' ? b.text : sessionFenced(b.text, 'text'), '');
+        else if (b.type === 'image') lines.push(sessionImageLine(b), '');
+      }
+      continue;
+    }
+    if (e.type === 'assistant' && e.message) {
+      for (const b of sessionContent(e)) {
+        if (!b) continue;
+        if (b.type === 'text' && b.text) lines.push(b.text, '');
+        else if (b.type === 'thinking' && b.thinking) lines.push('Thought process', '', sessionFenced(b.thinking, 'text'), '');
+        else if (b.type === 'image') lines.push(sessionImageLine(b), '');
+        else if (b.type === 'tool_use') {
+          lines.push(sessionToolLine(b), '');
+          let input = '';
+          try { input = JSON.stringify(b.input || {}, null, 2); } catch (err) { input = '{}'; }
+          lines.push(sessionFenced(input, 'json'), '');
+          const r = results.get(b.id);
+          if (r) {
+            used.add(b.id);
+            const text = sessionResultText(r);
+            const cut = text.length > SESSION_RESULT_CUT;
+            lines.push(r.is_error ? 'Result (error):' : 'Result:', '', sessionFenced(cut ? text.slice(0, SESSION_RESULT_CUT) : text, 'text'));
+            if (cut) lines.push(`[… ${text.length - SESSION_RESULT_CUT} more characters in session.json]`);
+            lines.push('');
+            for (const item of Array.isArray(r.content) ? r.content : []) if (item && item.type === 'image') lines.push(sessionImageLine(item), '');
+          }
+        }
+      }
+    }
+  }
+  return lines.join('\n').replace(/\n{3,}/g, '\n\n').trimEnd() + '\n';
+}
+
+function sessionReadmeMd(session, events, artifactLinks) {
+  const s = session || {};
+  const cfg = s.config || {};
+  const all = events || [];
+  let turns = 0;
+  let tools = 0;
+  let cost = null;
+  for (const e of all) {
+    if (!e || e.stub) continue;
+    if (e.type === 'user' && isSessionPrompt(e) && promptKind(sessionPromptText(e)) === 'prompt') turns++;
+    for (const b of e.type === 'assistant' ? sessionContent(e) : []) if (b && b.type === 'tool_use') tools++;
+    if (e.type === 'result' && typeof e.total_cost_usd === 'number') cost = (cost || 0) + e.total_cost_usd;
+  }
+  const lines = [`# ${safeHeading(s.title || 'Untitled session')}`, ''];
+  if (s.id) lines.push(`- Session: ${sessionShortId(s.id)}`);
+  if (cfg.origin) lines.push(`- Origin: ${cfg.origin}`);
+  if (cfg.model) lines.push(`- Model: ${cfg.model}`);
+  if (s.created_at) lines.push(`- Started: ${formatTimestamp(s.created_at)}`);
+  if (s.updated_at) lines.push(`- Updated: ${formatTimestamp(s.updated_at)}`);
+  lines.push(`- Turns: ${turns}`, `- Tool calls: ${tools}`);
+  if (cost != null) lines.push(`- Cost: $${cost.toFixed(2)}`);
+  lines.push('', 'Files: transcript.md, session.json', '');
+  const links = Array.isArray(artifactLinks) ? artifactLinks : [];
+  if (links.length) {
+    lines.push('## Artifacts', '');
+    for (const a of links) {
+      const href = a.href || `https://claude.ai/artifact/${uuidToBase58(a.uuid)}`;
+      lines.push(`- [${safeHeading(a.title || 'Untitled')}](${href})`);
+    }
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     escapeHtmlText, formatTimestamp, mdLinkText, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
@@ -3012,5 +3201,6 @@ if (typeof module !== 'undefined' && module.exports) {
     extractArtifacts, extractUploadedFiles, extractPresentedFiles, extractDeliveredFiles, extractAttachedFiles, getModelName, buildViewerDeliveries, viewerProject, chatHealth, KNOWN_BLOCK_TYPES, viewerFlags, warningsFromReport, OPENABLE_EXTENSIONS, openableName,
     publishedStart, isPublishedText, publishedNeedsRuntime, DESIGN_CANVAS_PATH, previewRank, PREVIEW_ITEM_MAX, PREVIEW_TOTAL_MAX, PREVIEW_IMAGE_TYPES, previewKind, CLAUDE_DOCS_TYPE, isClaudeDocsArtifact, isSharedArtifact, artifactForeign,
     artifactFileKind, artifactStartKind, artifactView,
+    sessionShortId, promptKind, sessionImages, sessionTranscriptMd, sessionReadmeMd,
   };
 }
