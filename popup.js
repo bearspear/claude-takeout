@@ -5264,7 +5264,9 @@ function exportProgress(options, { phase, done, total, sub = '', warnings = 0 })
 // the main screen's All / Changes only choice decides (settings.megaZipScope: 'all', the default, or 'changes').
 // options.directory: a folder from showDirectoryPicker; the export goes into a new folder inside it
 // instead of a ZIP download. options.withArtifacts: whether to save claude.ai's artifacts too (default: the
-// Artifacts checkbox, settings.exportAllArtifacts). options.onProgress: progress events (exportProgress). options.signal:
+// Artifacts checkbox, settings.exportAllArtifacts). options.withChats (default true): false asks claude.ai for no
+// chat list and writes no chat folders. options.withSessions (default true): false asks for no session list, so no
+// session is written or recorded. options.onProgress: progress events (exportProgress). options.signal:
 // { stopped }, checked before each chat, artifact and older version; when set, the run ends as 'stopped' (stoppedRun).
 // Resolves to a run result (runResult); never throws.
 // The least time between two chat requests in Export All.
@@ -5274,6 +5276,8 @@ const TAB_GONE_REASON = 'The claude.ai tab closed or stopped answering';
 
 async function bulkExportZip(options = {}) {
   const changesOnly = options && typeof options.changesOnly === 'boolean' ? options.changesOnly : settings.megaZipScope === 'changes';
+  const withChats = !(options && options.withChats === false);
+  const withSessions = !(options && options.withSessions === false);
   const directory = options && options.directory ? options.directory : null;
   const runStartedAt = new Date().toISOString();
   const target = { kind: directory ? 'folder' : 'zip', name: '' };
@@ -5303,14 +5307,15 @@ async function bulkExportZip(options = {}) {
   // Get all conversations
   // Awaited to the end, so the export lock holds until every file is written.
   try {
-  const response = await new Promise((resolve) => chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations', withAccountName: true },
+  // Without Chats, only the org and the account name (for the export's name) are asked for.
+  const response = await new Promise((resolve) => chrome.tabs.sendMessage(tab.id, { action: 'fetchAllConversations', withAccountName: true, ...(withChats ? {} : { withoutChats: true }) },
     (r) => resolve(chrome.runtime && chrome.runtime.lastError ? { error: chrome.runtime.lastError.message } : r)));
   return await (async () => {
     if (!response || response.error) {
       return result('failed', runWarningText((response && response.error) || 'Could not fetch the conversation list.'));
     }
 
-    const listedChats = Array.isArray(response.data) ? response.data : [];
+    const listedChats = withChats && Array.isArray(response.data) ? response.data : [];
     const listedCount = listedChats.length;
     const org = response.orgId || orgId || '';
     const startedAt = new Date().toISOString();
@@ -5319,7 +5324,7 @@ async function bulkExportZip(options = {}) {
     const since = record && record.at ? record.at : null;
     const conversations = since ? changedSince(listedChats, record.chats) : listedChats;
     const kind = since ? 'changes' : 'full';
-    if (changesOnly && !since) notes.push('There is no earlier export from this browser, so every chat is exported.');
+    if (changesOnly && !since) notes.push(`There is no earlier export from this browser, so every ${withChats ? 'chat' : 'session'} is exported.`);
     // The first call injects content.js if the tab needs it; the rest message it directly.
     const fetchPublished = tabPublishedFetcher(tab.id);
     // claude.ai's artifacts, listed before the chats so a changes run knows whether any changed. A failed list
@@ -5346,19 +5351,21 @@ async function bulkExportZip(options = {}) {
     let sessionListError = null;
     let sessionsUnavailable = false;
     let sessionListIncomplete = false;
-    try {
-      const reply = await sendToTab(tab.id, { action: 'listSessions' });
-      if (reply && (reply.error === 'HTTP 403' || reply.error === 'HTTP 404')) {
-        sessionsUnavailable = true;
-        notes.push(SESSIONS_UNAVAILABLE_NOTE);
-      } else if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.sessions)) {
-        sessionListError = reply && (reply.error || reply.connectionError) ? publishedCode(reply) : 'bad response';
-      } else {
-        sessionList = reply.sessions.filter((x) => x && typeof x.id === 'string' && x.id !== '');
-        sessionListIncomplete = reply.incomplete === true;
+    if (withSessions) {
+      try {
+        const reply = await sendToTab(tab.id, { action: 'listSessions' });
+        if (reply && (reply.error === 'HTTP 403' || reply.error === 'HTTP 404')) {
+          sessionsUnavailable = true;
+          notes.push(SESSIONS_UNAVAILABLE_NOTE);
+        } else if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.sessions)) {
+          sessionListError = reply && (reply.error || reply.connectionError) ? publishedCode(reply) : 'bad response';
+        } else {
+          sessionList = reply.sessions.filter((x) => x && typeof x.id === 'string' && x.id !== '');
+          sessionListIncomplete = reply.incomplete === true;
+        }
+      } catch (e) {
+        sessionListError = 'unexpected error';
       }
-    } catch (e) {
-      sessionListError = 'unexpected error';
     }
     const sessionPicks = sessionsToFetch(since ? changedSessions(sessionList, record.sessions) : sessionList, settings);
     const includedSessions = sessionPicks.fetch;
@@ -5624,43 +5631,47 @@ async function bulkExportZip(options = {}) {
 
     // Create index.md at root
     const indexLines = [
-      since ? `# Claude Takeout - Changes since ${formatTimestamp(since)}` : '# Claude Takeout - All Conversations',
+      since ? `# Claude Takeout - Changes since ${formatTimestamp(since)}` : withChats ? '# Claude Takeout - All Conversations' : '# Claude Takeout',
       '',
       `**Exported:** ${formatTimestamp(new Date().toISOString())}`,
-      `**Total Conversations:** ${exported}`,
     ];
-    if (since) indexLines.push('This archive holds only the chats that are new or changed since that export. Keep it with the earlier archives.');
+    if (!withChats) {
+      indexLines.push('', 'Chats: not exported (not ticked)');
+    } else {
+      indexLines.push(`**Total Conversations:** ${exported}`);
+      if (since) indexLines.push('This archive holds only the chats that are new or changed since that export. Keep it with the earlier archives.');
 
-    // Add summary of file-level issues
-    if (totalFileErrors > 0 || totalFileWarnings > 0) {
-      const issueParts = [];
-      if (totalFileErrors > 0) issueParts.push(`${totalFileErrors} file error${totalFileErrors > 1 ? 's' : ''}`);
-      if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
-      indexLines.push(`**Issues:** ${issueParts.join(', ')} (see errors.txt in affected folders)`);
-    }
-    if (incomplete) {
-      indexLines.push(`**Looks incomplete:** ${incomplete} chat${incomplete === 1 ? '' : 's'}; claude.ai's data may have changed (see errors.txt in those folders)`);
-    }
-    // Chats listed against chats exported, so a list that came back short or a chat that failed shows.
-    indexLines.push(`**Listed by claude.ai:** ${total}`);
+      // Add summary of file-level issues
+      if (totalFileErrors > 0 || totalFileWarnings > 0) {
+        const issueParts = [];
+        if (totalFileErrors > 0) issueParts.push(`${totalFileErrors} file error${totalFileErrors > 1 ? 's' : ''}`);
+        if (totalFileWarnings > 0) issueParts.push(`${totalFileWarnings} warning${totalFileWarnings > 1 ? 's' : ''}`);
+        indexLines.push(`**Issues:** ${issueParts.join(', ')} (see errors.txt in affected folders)`);
+      }
+      if (incomplete) {
+        indexLines.push(`**Looks incomplete:** ${incomplete} chat${incomplete === 1 ? '' : 's'}; claude.ai's data may have changed (see errors.txt in those folders)`);
+      }
+      // Chats listed against chats exported, so a list that came back short or a chat that failed shows.
+      indexLines.push(`**Listed by claude.ai:** ${total}`);
 
-    indexLines.push(
-      '',
-      '## Conversations',
-      '',
-      '| # | Conversation | Messages | Created | Issues |',
-      '|---|--------------|----------|---------|--------|'
-    );
+      indexLines.push(
+        '',
+        '## Conversations',
+        '',
+        '| # | Conversation | Messages | Created | Issues |',
+        '|---|--------------|----------|---------|--------|'
+      );
 
-    indexEntries.forEach((entry, i) => {
-      const issueCount = (entry.fileErrors || 0) + (entry.fileWarnings || 0);
-      const issueStr = issueCount > 0 ? `${issueCount}` : '-';
-      indexLines.push(`| ${i + 1} | [${entry.name}](${entry.folder}/README.md) | ${entry.messages} | ${entry.created} | ${issueStr} |`);
-    });
+      indexEntries.forEach((entry, i) => {
+        const issueCount = (entry.fileErrors || 0) + (entry.fileWarnings || 0);
+        const issueStr = issueCount > 0 ? `${issueCount}` : '-';
+        indexLines.push(`| ${i + 1} | [${entry.name}](${entry.folder}/README.md) | ${entry.messages} | ${entry.created} | ${issueStr} |`);
+      });
 
-    if (errors.length > 0) {
-      indexLines.push('', '## Failed Conversations', '');
-      errors.forEach(err => indexLines.push(`- ${err}`));
+      if (errors.length > 0) {
+        indexLines.push('', '## Failed Conversations', '');
+        errors.forEach(err => indexLines.push(`- ${err}`));
+      }
     }
 
     if (withArtifacts) {
@@ -6550,7 +6561,7 @@ async function runArtifactStep(root, opts = {}) {
 const SESSION_PAGE_CAP = 100;                     // pages of 200 events per session
 const SESSION_BYTES_CAP = 64 * 1024 * 1024;       // kept events per session, JSON in UTF-8
 const SESSION_ZIP_BUDGET = 256 * 1024 * 1024;     // kept events of all sessions in one ZIP
-const SESSIONS_LEFT_OUT_HINT = '(Settings, Include Claude Code CLI sessions)';
+const SESSIONS_LEFT_OUT_HINT = '(tick Include CLI sessions under Sessions)';
 const SESSIONS_UNAVAILABLE_NOTE = 'Code and Cowork sessions: not available for this account';
 // Page sizes asked for in turn when content.js answers a page is too large to send (over 32 MB kept).
 const SESSION_PAGE_LADDER = [200, 50, 10, 1];
@@ -6858,37 +6869,48 @@ function formatStamp(iso) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-// What Export selected runs for the ticked parts. Changes only needs a record and Chats.
-function exportPlan({ chats, artifacts, scope, hasRecord }) {
-  const changesAllowed = !!(hasRecord && chats);
+// What Export selected runs for the ticked parts: Export All (bulk) with Chats or Sessions, Export Artifacts with
+// Artifacts alone. Changes only needs a record and Chats or Sessions.
+function exportPlan({ chats, artifacts, sessions, scope, hasRecord }) {
+  const changesAllowed = !!(hasRecord && (chats || sessions));
   return {
-    run: chats ? 'bulk' : artifacts ? 'artifacts' : null,
+    run: chats || sessions ? 'bulk' : artifacts ? 'artifacts' : null,
     changesOnly: scope === 'changes' && changesAllowed,
+    withChats: !!chats,
     withArtifacts: !!artifacts,
+    withSessions: !!sessions,
     changesAllowed,
   };
 }
 
-// True when Changes only is chosen, the counts are in, and the ticked parts have nothing new.
+// Plans made before Sessions had a box (withChats missing) take chats with every bulk run.
+const planChats = (plan) => plan.run === 'bulk' && plan.withChats !== false;
+
+// True when Changes only is chosen, the counts are in, and the ticked parts have nothing new. Count doesn't count
+// sessions, so with Sessions ticked it can't say nothing changed.
 function nothingChanged(plan, counts) {
-  if (!plan.changesOnly || !counts) return false;
-  return !counts.changedChats && !(plan.withArtifacts && counts.changedArtifacts);
+  if (!plan.changesOnly || !counts || plan.withSessions) return false;
+  return !(planChats(plan) && counts.changedChats) && !(plan.withArtifacts && counts.changedArtifacts);
 }
 
 // stale: counts older than the cache limit, which show their numbers but not "Nothing changed".
 function everythingSummary({ plan, counts, format, since, isPopup, stale = false }) {
-  if (!plan.run) return 'Tick Chats or Artifacts.';
+  if (!plan.run) return 'Tick Chats, Artifacts or Sessions.';
   const parts = [];
-  const chats = plan.run === 'bulk';
+  const chats = planChats(plan);
+  const items = [];
   if (counts) {
     const word = (n, one) => `${n} ${plan.changesOnly ? 'changed ' : ''}${one}${n === 1 ? '' : 's'}`;
-    const items = [];
     if (chats) items.push(word(plan.changesOnly ? counts.changedChats : counts.chats, 'chat'));
     if (plan.withArtifacts) items.push(word(plan.changesOnly ? counts.changedArtifacts : counts.artifacts, 'artifact'));
-    parts.push(`${items.join(' and ')}.`);
+    if (items.length) parts.push(`${items.join(' and ')}.`);
   }
+  // Count doesn't count sessions: they are named, without a number.
+  // With chats or artifacts and no counts, the boxes say it.
+  if (plan.withSessions && items.length) parts.push('Plus Claude Code and Cowork sessions.');
+  else if (plan.withSessions && !chats && !plan.withArtifacts) parts.push('Claude Code and Cowork sessions.');
   parts.push(plan.changesOnly ? `Only what changed since the last Export All, ${since}.` : 'Everything, whatever was exported before.');
-  if (!chats && since) parts.push('Changes only needs Chats ticked.');
+  if (plan.run === 'artifacts' && since) parts.push('Changes only needs Chats or Sessions ticked.');
   if (!stale && nothingChanged(plan, counts)) parts.push(`Nothing changed since ${since}.`);
   parts.push(format === 'zip'
     ? 'One ZIP download when it finishes.'
@@ -6897,7 +6919,7 @@ function everythingSummary({ plan, counts, format, since, isPopup, stale = false
 }
 
 function exportDisabledReason(plan, counts, since) {
-  if (!plan.run) return 'Tick Chats or Artifacts.';
+  if (!plan.run) return 'Tick Chats, Artifacts or Sessions.';
   if (nothingChanged(plan, counts)) return since ? `Nothing changed since ${since}.` : 'Nothing changed since the last Export All.';
   return '';
 }
@@ -6959,9 +6981,9 @@ function doneTargetText(result) {
 
 function runSteps(plan) {
   const steps = [];
-  if (plan.run === 'bulk') steps.push('chats');
+  if (planChats(plan)) steps.push('chats');
   if (plan.run === 'artifacts' || (plan.run === 'bulk' && plan.withArtifacts)) steps.push('artifacts');
-  if (plan.run === 'bulk') steps.push('sessions');
+  if (plan.run === 'bulk' && plan.withSessions !== false) steps.push('sessions');
   if (steps.length) steps.push('viewer');
   return steps;
 }
@@ -6991,9 +7013,10 @@ function chatSavedLine(label, bytes, warnings = 0) {
 function runTitleText(plan, totals = {}) {
   const part = (key, one) => (Number.isFinite(totals[key]) ? `${totals[key]} ${one}${totals[key] === 1 ? '' : 's'}` : `${one}s`);
   const parts = [];
-  if (plan.run === 'bulk') parts.push(part('chats', 'chat'));
+  if (planChats(plan)) parts.push(part('chats', 'chat'));
+  // Beside chats, sessions are named once the run has some; alone, from the start.
+  if (plan.run === 'bulk' && plan.withSessions !== false && (Number(totals.sessions) > 0 || !planChats(plan))) parts.push(part('sessions', 'session'));
   if (plan.run === 'artifacts' || (plan.run === 'bulk' && plan.withArtifacts)) parts.push(part('artifacts', 'artifact'));
-  if (plan.run === 'bulk' && Number(totals.sessions) > 0) parts.splice(1, 0, part('sessions', 'session'));
   const head = parts.slice(0, -1).join(', ');
   return `Exporting ${head ? `${head} and ` : ''}${parts[parts.length - 1]}`;
 }
@@ -7003,8 +7026,8 @@ function savedText(result, plan) {
   const s = result.saved || {};
   const n = (x) => Number(x) || 0;
   const items = [];
-  if (plan.run === 'bulk') items.push(`${n(s.chats)} chat${n(s.chats) === 1 ? '' : 's'}`);
-  if (plan.run === 'bulk' && n(s.sessions) > 0) items.push(`${n(s.sessions)} session${n(s.sessions) === 1 ? '' : 's'}`);
+  if (planChats(plan)) items.push(`${n(s.chats)} chat${n(s.chats) === 1 ? '' : 's'}`);
+  if (plan.run === 'bulk' && (n(s.sessions) > 0 || (!planChats(plan) && plan.withSessions !== false))) items.push(`${n(s.sessions)} session${n(s.sessions) === 1 ? '' : 's'}`);
   if (plan.run === 'artifacts' || plan.withArtifacts || n(s.artifacts)) {
     const v = n(s.versions);
     items.push(`${n(s.artifacts)} artifact${n(s.artifacts) === 1 ? '' : 's'}${v ? ` (${v} version${v === 1 ? '' : 's'})` : ''}`);
@@ -7030,7 +7053,8 @@ function stoppedReasonText(result, plan) {
   if ((m = /^Export (?:All|Artifacts) failed: (.*)$/.exec(r))) return `The export ran into an error (${m[1]})`;
   if (/^Sign in to claude\.ai/.test(r)) return 'claude.ai says you are signed out';
   if ((m = /^Could not fetch the artifact list: (.*?)\.?$/.exec(r))) return `claude.ai's artifact list could not be loaded (${m[1]})`;
-  if (plan && plan.run === 'bulk') return `claude.ai's chat list could not be loaded (${r.replace(/\.$/, '')})`;
+  if (plan && planChats(plan)) return `claude.ai's chat list could not be loaded (${r.replace(/\.$/, '')})`;
+  if (plan && plan.run === 'bulk') return `claude.ai could not be reached (${r.replace(/\.$/, '')})`;
   return r;
 }
 
@@ -7038,9 +7062,9 @@ function stoppedSavedText(result, plan) {
   if (result.target.kind === 'zip') return 'Nothing was saved. A ZIP is written only when the export finishes.';
   const s = result.saved || {};
   if (!result.target.name) return 'Nothing was saved.';
-  if (!(Number(s.chats) || Number(s.artifacts))) return `Nothing was saved into ${result.target.name}.`;
-  const one = (Number(s.chats) || 0) + (Number(s.artifacts) || 0) === 1;
-  // Changes only needs Chats, so an artifacts-only run says nothing about it.
+  if (!(Number(s.chats) || Number(s.artifacts) || Number(s.sessions))) return `Nothing was saved into ${result.target.name}.`;
+  const one = (Number(s.chats) || 0) + (Number(s.artifacts) || 0) + (Number(s.sessions) || 0) === 1;
+  // Changes only needs Chats or Sessions, so an artifacts-only run says nothing about it.
   const recorded = plan && plan.run === 'bulk' ? ' They are not recorded, so the next Changes only export takes them again.' : '';
   return `${savedText(result, plan)} ${one ? 'was' : 'were'} saved into ${result.target.name}.${recorded}`;
 }
@@ -7263,6 +7287,7 @@ function currentPlan() {
   return exportPlan({
     chats: settings.exportAllChats !== false,
     artifacts: settings.exportAllArtifacts !== false,
+    sessions: settings.exportAllSessions !== false,
     scope: settings.megaZipScope,
     hasRecord: !!panel.record,
   });
@@ -7287,6 +7312,7 @@ function renderEverything() {
   const artifactsOn = settings.exportAllArtifacts !== false;
 
   // Changes only: hidden with no record of an Export All here, disabled (struck through) with only Artifacts.
+  const sessionsOn = settings.exportAllSessions !== false;
   const scopeChanges = $('scopeChanges');
   scopeChanges.hidden = !panel.record;
   scopeChanges.disabled = !!panel.record && !plan.changesAllowed;
@@ -7294,6 +7320,8 @@ function renderEverything() {
   setPressed(scopeChanges, plan.changesOnly);
   $('pickChats').checked = settings.exportAllChats !== false;
   $('pickArtifacts').checked = artifactsOn;
+  $('pickSessions').checked = sessionsOn;
+  $('exportCliSessions').checked = settings.exportCliSessions === true;
   $('chatsSub').textContent = artifactsOn ? 'With their files and pages' : 'Pages they published still go in artifacts/';
   const c = panel.counts;
   $('chatCount').textContent = c ? String(plan.changesOnly ? c.changedChats : c.chats) : '–';
@@ -7302,7 +7330,9 @@ function renderEverything() {
   setPressed($('formatFolder'), !zip);
   setPressed($('formatZip'), zip);
   // Off claude.ai everything here is disabled.
-  for (const id of ['scopeAll', 'pickChats', 'pickArtifacts', 'formatFolder', 'formatZip']) $(id).disabled = !panel.onClaude;
+  for (const id of ['scopeAll', 'pickChats', 'pickArtifacts', 'pickSessions', 'formatFolder', 'formatZip']) $(id).disabled = !panel.onClaude;
+  // The CLI choice is part of Sessions: disabled while Sessions is unticked, its value kept.
+  $('exportCliSessions').disabled = !panel.onClaude || !sessionsOn;
   if (!panel.onClaude) scopeChanges.disabled = true;
 
   const count = $('countBtn');
@@ -7389,6 +7419,8 @@ document.getElementById('scopeChanges').addEventListener('click', () => {
 });
 document.getElementById('pickChats').addEventListener('change', (e) => setChoice(() => { settings.exportAllChats = !!e.target.checked; }));
 document.getElementById('pickArtifacts').addEventListener('change', (e) => setChoice(() => { settings.exportAllArtifacts = !!e.target.checked; }));
+document.getElementById('pickSessions').addEventListener('change', (e) => setChoice(() => { settings.exportAllSessions = !!e.target.checked; }));
+document.getElementById('exportCliSessions').addEventListener('change', (e) => setChoice(() => { settings.exportCliSessions = !!e.target.checked; }));
 document.getElementById('formatFolder').addEventListener('click', () => setChoice(() => { settings.megaFormat = 'folder'; }));
 document.getElementById('formatZip').addEventListener('click', () => setChoice(() => { settings.megaFormat = 'zip'; }));
 
@@ -7529,7 +7561,7 @@ async function runSelectedNow(plan, options) {
   let result;
   try {
     result = plan.run === 'bulk'
-      ? await bulkExportZip({ changesOnly: plan.changesOnly, directory, withArtifacts: plan.withArtifacts, onProgress: runProgress, onTarget: runTarget, signal: run.signal })
+      ? await bulkExportZip({ changesOnly: plan.changesOnly, directory, withChats: plan.withChats, withArtifacts: plan.withArtifacts, withSessions: plan.withSessions, onProgress: runProgress, onTarget: runTarget, signal: run.signal })
       : await exportArtifacts({ directory, onProgress: runProgress, onTarget: runTarget, signal: run.signal, ask: options ? options.ask : null });
   } catch (e) {
     result = runResult({ outcome: 'failed', reason: runWarningText((e && e.message) || String(e)), target: { kind: directory ? 'folder' : 'zip', name: '' } });
@@ -7546,10 +7578,10 @@ async function runSelectedNow(plan, options) {
 // Export selected goes to a folder unless ZIP is chosen. The folder picker must open straight from the click.
 // The popup closes when it opens, or when the claude.ai tab is clicked, which would end a run inside it, so from
 // the popup the side panel opens instead, folder or ZIP, with a note saying what to click there. The note carries
-// the choices: { scope, chats, artifacts, format: 'folder' | 'zip' }.
+// the choices: { scope, chats, artifacts, sessions, format: 'folder' | 'zip' }.
 function handoffChoices(format) {
   const plan = currentPlan();
-  return { scope: plan.changesOnly ? 'changes' : 'all', chats: plan.run === 'bulk', artifacts: plan.withArtifacts, format };
+  return { scope: plan.changesOnly ? 'changes' : 'all', chats: plan.withChats, artifacts: plan.withArtifacts, sessions: plan.withSessions, format };
 }
 // ask(): optional, called in a ZIP export's click to start a permission request; its promise reaches run as
 // options.ask. Folder mode never asks: showDirectoryPicker needs the click's activation, and a request would
@@ -7609,13 +7641,15 @@ function endHandoff() {
 }
 document.getElementById('handoffDismiss').addEventListener('click', endHandoff);
 
-// The note's choices, or null when its shape is wrong (a note from an older version has no choices).
+// The note's choices, or null when its shape is wrong (a note from an older version has no choices; one from
+// before the Sessions box has no sessions, which means true, as the box's default).
 function handoffFrom(note) {
   if (!note || typeof note !== 'object' || !Number.isFinite(note.at) || Date.now() - note.at > 60000) return null;
   const c = note.choices;
   if (!c || typeof c !== 'object' || (c.scope !== 'all' && c.scope !== 'changes') || (c.format !== 'folder' && c.format !== 'zip')) return null;
-  if (typeof c.chats !== 'boolean' || typeof c.artifacts !== 'boolean' || (!c.chats && !c.artifacts)) return null;
-  return { scope: c.scope, chats: c.chats, artifacts: c.artifacts, format: c.format };
+  const sessions = c.sessions === undefined ? true : c.sessions;
+  if (typeof c.chats !== 'boolean' || typeof c.artifacts !== 'boolean' || typeof sessions !== 'boolean' || (!c.chats && !c.artifacts && !sessions)) return null;
+  return { scope: c.scope, chats: c.chats, artifacts: c.artifacts, sessions, format: c.format };
 }
 
 // An open sidebar takes a note the popup writes later, the same way.
@@ -7637,9 +7671,11 @@ async function takeHandoff() {
     settings.megaZipScope = c.scope;
     settings.exportAllChats = c.chats;
     settings.exportAllArtifacts = c.artifacts;
+    settings.exportAllSessions = c.sessions;
     settings.megaFormat = c.format;
     saveSettings();
-    const parts = c.chats && c.artifacts ? 'chats and artifacts' : c.chats ? 'chats' : 'artifacts';
+    const ticked = [c.chats && 'chats', c.artifacts && 'artifacts', c.sessions && 'sessions'].filter(Boolean);
+    const parts = ticked.length > 1 ? `${ticked.slice(0, -1).join(', ')} and ${ticked[ticked.length - 1]}` : ticked[0];
     const choices = `Your choices came along: ${c.scope === 'changes' ? 'Changes only' : 'All'}, ${parts}, ${c.format === 'zip' ? 'ZIP' : 'Folder'}.`;
     document.getElementById('handoffText').textContent = c.format === 'zip'
       ? `Continued from the popup, which closes when you click elsewhere and would stop the export. ${choices} Click Export selected to start.`
@@ -7664,7 +7700,8 @@ const defaultSettings = {
   megaFormat: 'folder',  // 'folder' | 'zip': where Export selected goes (main screen)
   exportAllChats: true,  // Export selected takes the chats (main screen)
   exportAllArtifacts: true,  // Export selected takes claude.ai's artifacts (main screen)
-  exportCliSessions: false,  // Export All also takes Claude Code CLI sessions (Settings)
+  exportAllSessions: true,  // Export selected takes Claude Code and Cowork sessions (main screen)
+  exportCliSessions: false,  // with Sessions, also Claude Code CLI sessions (main screen, under Sessions)
   showShortcuts: true,
   useSidePanel: false
 };
@@ -7706,8 +7743,6 @@ function applySettings() {
   document.getElementById('filenameStyle').value = settings.filenameStyle;
   document.getElementById('includeThinking').checked = settings.includeThinking;
   document.getElementById('showShortcuts').checked = settings.showShortcuts;
-  const cliBox = document.getElementById('exportCliSessions');
-  if (cliBox) cliBox.checked = settings.exportCliSessions === true;
 
   // Side panel checkbox (may not exist in all views)
   const sidePanelCheckbox = document.getElementById('useSidePanel');
@@ -7767,11 +7802,6 @@ document.getElementById('filenameStyle').addEventListener('change', (e) => {
 
 document.getElementById('includeThinking').addEventListener('change', (e) => {
   settings.includeThinking = e.target.checked;
-  saveSettings();
-});
-
-document.getElementById('exportCliSessions').addEventListener('change', (e) => {
-  settings.exportCliSessions = !!e.target.checked;
   saveSettings();
 });
 

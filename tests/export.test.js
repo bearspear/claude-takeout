@@ -3387,7 +3387,7 @@ test('an artifact folder\'s title part is at most 200 UTF-8 bytes', async () => 
 test('a throw mid-export ends the run failed, shows Export stopped and re-enables the buttons', async () => {
   const frames = [art(U(1), 'One')];
   const pages = { [U(1)]: livePage('One', { 'index.html': 'a' }) };
-  const setup = (sb) => vm.runInContext("settings.megaFormat = 'zip'; settings.exportAllChats = false; artifactsIndexMd = () => { throw new Error('boom'); }", sb);
+  const setup = (sb) => vm.runInContext("settings.megaFormat = 'zip'; settings.exportAllChats = false; settings.exportAllSessions = false; artifactsIndexMd = () => { throw new Error('boom'); }", sb);
   const { result, popup, saved } = await runArtifacts({ frames, pages, setup });
   const sb = popup.sandbox;
   assert.strictEqual(saved, null);
@@ -3631,7 +3631,7 @@ test('Export Artifacts asks for the permission in a ZIP export\'s click, only wh
     });
     const sb = popup.sandbox;
     await tick();
-    vm.runInContext(`settings.megaFormat = '${format}'; settings.exportAllChats = false`, sb);
+    vm.runInContext(`settings.megaFormat = '${format}'; settings.exportAllChats = false; settings.exportAllSessions = false`, sb);
     let ran = null;
     vm.runInContext('exportArtifacts = async (o) => { globalThis.__ran = o; }', sb);
     sb.window.showDirectoryPicker = async () => { order.push(['picker']); return new FakeDir(); };
@@ -4356,8 +4356,8 @@ test('Export All never asks for the web permission', async () => {
   }
 });
 
-test('exportAllChats and exportAllArtifacts default to true and round-trip through the main screen\'s boxes', async () => {
-  for (const [key, id] of [['exportAllChats', 'pickChats'], ['exportAllArtifacts', 'pickArtifacts']]) {
+test('exportAllChats, exportAllArtifacts and exportAllSessions default to true and round-trip through the main screen\'s boxes', async () => {
+  for (const [key, id] of [['exportAllChats', 'pickChats'], ['exportAllArtifacts', 'pickArtifacts'], ['exportAllSessions', 'pickSessions']]) {
     const sb = exportPopup().sandbox;
     assert.strictEqual(vm.runInContext(`defaultSettings.${key}`, sb), true);
     const box = sb.document.getElementById(id);

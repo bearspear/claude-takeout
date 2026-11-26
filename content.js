@@ -549,7 +549,8 @@
           return;
         }
         try {
-          const conversations = await fetchAllConversations(id);
+          // withoutChats: an Export All with Chats unticked needs only the org and the account name.
+          const conversations = request.withoutChats ? [] : await fetchAllConversations(id);
           const accountName = request.withAccountName ? await fetchAccountName() : null;
           sendResponse({ data: conversations, orgId: id, accountName });
         } catch (e) {

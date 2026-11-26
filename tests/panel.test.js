@@ -462,6 +462,23 @@ const tests = {
     const full = await new Promise((r) => onMessage({ action: 'fetchAllConversations', withAccountName: true }, {}, r));
     assert.strictEqual(full.accountName, 'Mika Example', 'full name when there is no display name');
   },
+  'content.js answers withoutChats with the org and name, and asks for no chat list': async () => {
+    const urls = [];
+    let onMessage;
+    const sandbox = {
+      window: { addEventListener() {}, location: {} }, console: { log() {} }, setTimeout,
+      document: { createElement: () => ({}), head: { appendChild() {} }, cookie: 'lastActiveOrg=11111111-0000-4000-8000-000000000001' },
+      fetch: async (u) => { urls.push(u); return { ok: true, json: async () => (/\/api\/account$/.test(u) ? { display_name: 'Mika' } : [{ uuid: 'x' }]) }; },
+      chrome: {
+        runtime: { getURL: (p) => p, lastError: null, onMessage: { addListener: (f) => { onMessage = f; } }, sendMessage() {} },
+        storage: { local: { set() {}, remove() {}, get: (k, cb) => cb({}) } },
+      },
+    };
+    vm.runInNewContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), sandbox);
+    const r = await new Promise((res) => onMessage({ action: 'fetchAllConversations', withAccountName: true, withoutChats: true }, {}, res));
+    assert.deepStrictEqual(JSON.parse(JSON.stringify(r)), { data: [], orgId: '11111111-0000-4000-8000-000000000001', accountName: 'Mika' });
+    assert.ok(!urls.some((u) => u.includes('chat_conversations')), urls.join());
+  },
   'publishedPageInfo sends X-Frame-CP, drops the type runtime and bad paths, and returns no token': async () => {
     const h = publishedHarness();
     const res = await h.call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
