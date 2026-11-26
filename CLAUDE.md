@@ -337,7 +337,7 @@ If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a
     "megaFormat": "folder" | "zip",     // main screen: Folder (showDirectoryPicker, createDiskFolder) or ZIP
     "exportAllChats": true,             // main screen: the Chats box of Export selected
     "exportAllArtifacts": true,         // main screen: the Artifacts box; Artifacts alone (Chats and Sessions off) is the old Export Artifacts
-    "exportAllSessions": true,          // main screen: the Sessions box (Claude Code and Cowork); can be ticked alone, Changes only works with it
+    "exportAllSessions": true,          // main screen: the Sessions box (Claude Code and Cowork); can be ticked alone, Changes only works with it; loadSettings stores false for an older setup with Chats off
     "exportCliSessions": false,         // main screen, under Sessions: Include CLI sessions (run on your computer); disabled while Sessions is unticked
     "showShortcuts": true,
     "useSidePanel": false

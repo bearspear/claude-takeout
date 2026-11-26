@@ -1977,3 +1977,28 @@ test('Sessions alone exports sessions without asking for chats', async () => {
   assert.deepStrictEqual(store.exportRecord['org-1'].chats, {});
   assert.deepStrictEqual(store.exportRecord['org-1'].sessions, { [S_COWORK]: '2026-11-20T11:00:00Z' });
 });
+
+test('an upgrade keeps an Artifacts-only setup: no stored exportAllSessions with Chats off means Sessions off', async () => {
+  const run = async (exporterSettings) => {
+    const store = { exporterSettings };
+    const { sandbox, fn } = loadPopup({ before: (sb) => {
+      sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
+      sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+    } });
+    await fn('loadSettings')();
+    await sleep(5);
+    return { plan: JSON.parse(JSON.stringify(fn('currentPlan')())), box: sandbox.document.getElementById('pickSessions').checked, store };
+  };
+  const old = await run({ exportAllChats: false, exportAllArtifacts: true });
+  assert.strictEqual(old.plan.run, 'artifacts');
+  assert.strictEqual(old.plan.withSessions, false);
+  assert.strictEqual(old.box, false);
+  assert.strictEqual(old.store.exporterSettings.exportAllSessions, false, 'saved');
+  const chatsOn = await run({ exportAllChats: true });
+  assert.strictEqual(chatsOn.plan.withSessions, true);
+  assert.strictEqual(chatsOn.box, true);
+  const explicit = await run({ exportAllChats: false, exportAllArtifacts: true, exportAllSessions: true });
+  assert.strictEqual(explicit.plan.withSessions, true);
+  assert.strictEqual(explicit.plan.run, 'bulk');
+  assert.strictEqual(explicit.box, true);
+});

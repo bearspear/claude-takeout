@@ -1161,6 +1161,7 @@ test('merge takes the newest copy of a session', async () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8'));
   assert.deepStrictEqual(manifest.sessions.items.map(i => [i.id, i.folder]).sort(), [['s1', 'sessions/Fix'], ['s2', 'sessions/Only_a']]);
   assert.strictEqual(manifest.sessions.listed, 2);
+  assert.ok(r.warnings.some(w => /Odd\/session\.json.*format/.test(w)), JSON.stringify(r.warnings));
   const index = fs.readFileSync(path.join(dest, 'index.md'), 'utf8');
   assert.match(index, /## Sessions\n\n\| # \| Session \| Origin \| Last activity \| Folder \|/);
   assert.ok(index.includes('| 1 | S s1 | - | 2026-10-05T00:00:00Z | [sessions/Fix](sessions/Fix/README.md) |'), index);

@@ -7714,6 +7714,12 @@ async function loadSettings() {
     const stored = await chrome.storage.local.get(['exporterSettings', 'useSidePanel']);
     if (stored.exporterSettings) {
       settings = { ...defaultSettings, ...stored.exporterSettings };
+      // Upgrade from before the Sessions box: Chats off was the Artifacts-only export, which a ticked Sessions box
+      // would turn into Export All. Such a setup starts with Sessions off, and keeps it.
+      if (!('exportAllSessions' in stored.exporterSettings) && stored.exporterSettings.exportAllChats === false) {
+        settings.exportAllSessions = false;
+        saveSettings();
+      }
     }
     // Top-level useSidePanel takes precedence (set by background.js listener)
     if (typeof stored.useSidePanel === 'boolean') {
