@@ -4868,7 +4868,7 @@ async function sendToTab(tabId, message) {
     if (!tab || !/^https:\/\/claude\.ai\//.test(String(tab.url || ''))) return { connectionError: 'not a claude.ai tab' };
   }
   try {
-    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['session-core.js', 'content.js'] });
   } catch (e) {
     return { connectionError: e.message };
   }
