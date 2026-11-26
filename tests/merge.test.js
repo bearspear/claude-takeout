@@ -94,6 +94,7 @@ test('merges a full archive and a changes archive into a new folder with one vie
   const index = fs.readFileSync(path.join(dest, 'index.md'), 'utf8');
   assert.match(index, /^﻿# Claude Takeout - Merged archive/);
   assert.match(index, /\[Chat b\]\(Chat_b\/README\.md\)/);
+  assert.doesNotMatch(index, /## Sessions/, 'no Sessions table without sessions');
   const viewer = fs.readFileSync(path.join(dest, 'viewer.html'), 'utf8');
   assert.ok(!viewer.includes('old viewer'));
   const data = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(viewer)[1]);
@@ -1160,7 +1161,10 @@ test('merge takes the newest copy of a session', async () => {
   const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8'));
   assert.deepStrictEqual(manifest.sessions.items.map(i => [i.id, i.folder]).sort(), [['s1', 'sessions/Fix'], ['s2', 'sessions/Only_a']]);
   assert.strictEqual(manifest.sessions.listed, 2);
-  assert.ok(r.warnings.some(w => /Odd\/session\.json.*format/.test(w)), JSON.stringify(r.warnings));
+  const index = fs.readFileSync(path.join(dest, 'index.md'), 'utf8');
+  assert.match(index, /## Sessions\n\n\| # \| Session \| Origin \| Last activity \| Folder \|/);
+  assert.ok(index.includes('| 1 | S s1 | - | 2026-10-05T00:00:00Z | [sessions/Fix](sessions/Fix/README.md) |'), index);
+  assert.ok(index.includes('| 2 | S s2 | - | 2026-10-01T00:00:00Z | [sessions/Only_a](sessions/Only_a/README.md) |'), index);
   const viewer = fs.readFileSync(path.join(dest, 'viewer.html'), 'utf8');
   const data = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(viewer)[1]);
   assert.deepStrictEqual(data.sessions.map(s => s.id).sort(), ['s1', 's2']);
@@ -1186,7 +1190,9 @@ test('merging two sessions-only archives keeps the newest copy, counts skipped o
   const r = await merge([a, b], { out: path.join(tmp, 'out'), now: NOW });
   assert.strictEqual(r.status, 'written', r.reason);
   assert.match(fs.readFileSync(path.join(r.dest, 'sessions', 'Fix', 'session.json'), 'utf8'), /newer/);
+  assert.match(fs.readFileSync(path.join(r.dest, 'index.md'), 'utf8'), /## Sessions/);
   const manifest = JSON.parse(fs.readFileSync(path.join(r.dest, 'export-manifest.json'), 'utf8'));
-  assert.deepStrictEqual([manifest.sessions.listed, manifest.sessions.leftOut], [1, 1]);
+  assert.deepStrictEqual([manifest.sessions.listed, manifest.sessions.skipped], [1, 1]);
+  assert.ok(!('leftOut' in manifest.sessions), 'a merge counts skipped files, not sessions left out');
   assert.strictEqual(r.viewer.status, 'written', r.viewer.reason);
 });

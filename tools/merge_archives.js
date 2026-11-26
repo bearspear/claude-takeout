@@ -574,7 +574,8 @@ function pickNewest(copies) {
 
 const cell = s => String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
 
-function indexMd(chats, sources, at, artifacts = 0) {
+// sessions: the sessions copied (pickSessions, with .out set), listed in a Sessions table when there are any.
+function indexMd(chats, sources, at, artifacts = 0, sessions = []) {
   const lines = [
     '# Claude Takeout - Merged archive',
     '',
@@ -589,6 +590,17 @@ function indexMd(chats, sources, at, artifacts = 0) {
     '|---|--------------|---------|------|',
     ...chats.map((c, i) => `| ${i + 1} | [${cell(c.name || 'Untitled')}](${encodeURI(c.out)}/README.md) | ${cell(c.updatedAt || '')} | ${cell(c.source)} |`),
   ];
+  if (sessions.length) {
+    const origin = s => (s && s.config && typeof s.config.origin === 'string' && s.config.origin) || (s && typeof s.environment_kind === 'string' && s.environment_kind) || '';
+    lines.push(
+      '',
+      '## Sessions',
+      '',
+      '| # | Session | Origin | Last activity | Folder |',
+      '|---|---------|--------|---------------|--------|',
+      ...sessions.map((x, i) => `| ${i + 1} | ${cell(x.title || 'Untitled session')} | ${cell(origin(x.session)) || '-'} | ${cell(x.last || '') || '-'} | [${cell(`sessions/${x.out}`).replace(/[[\]]/g, '\\$&')}](${encodeURI(`sessions/${x.out}`)}/README.md) |`),
+    );
+  }
   return '\uFEFF' + lines.join('\n') + '\n';
 }
 
@@ -749,14 +761,15 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       if (reports.length) fs.writeFileSync(path.join(building, 'artifacts', 'errors.txt'), `# Artifact warnings from the merged archives\n\n${reports.join('\n')}`, { flag: 'wx' });
     }
     rewriteLinks(chosen, stores, written ? written.places : new Map(), building, report);
-    fs.writeFileSync(path.join(building, 'index.md'), indexMd(chosen, sources, at, merged.length), { flag: 'wx' });
+    fs.writeFileSync(path.join(building, 'index.md'), indexMd(chosen, sources, at, merged.length, sessionsChosen), { flag: 'wx' });
     fs.writeFileSync(path.join(building, 'export-manifest.json'), JSON.stringify({
       format: 1, exported_at: at, kind: 'merged', since: null, listed: null,
       sources: sources.map(s => s.label),
       chats: chosen.map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updatedAt, folder: c.out, from: c.source })),
       // readArtifactStore reads this key for listFetched.
       // decided_at and listed_at: when claude.ai's lists were asked, so a later merge ranks this one by them.
-      ...(sessionsChosen.length ? { sessions: { listed: sessionsChosen.length, leftOut: sessionsChosen.skipped,
+      // skipped: session.json files that could not be read (an export's leftOut counts sessions it chose not to fetch).
+      ...(sessionsChosen.length ? { sessions: { listed: sessionsChosen.length, skipped: sessionsChosen.skipped,
         items: sessionsChosen.map(x => ({ id: x.id, title: x.title, folder: `sessions/${x.out}`, last_event_at: x.last })) } } : {}),
       ...(written && hadList ? { artifacts: { listed: written.listed, thumbs: written.thumbs, decided_at: merged.decidedAt,
         listed_at: Object.fromEntries(merged.filter(m => m.listed && m.listedAt).map(m => [m.uuid, m.listedAt])) } } : {}),

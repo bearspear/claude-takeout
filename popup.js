@@ -5048,11 +5048,12 @@ function sessionStamp(x) {
   return '';
 }
 
-// CLI sessions (environment_kind 'bridge') are left out unless settings.exportCliSessions is true.
+// An allow-list: with settings.exportCliSessions off, only cloud sessions (environment_kind 'anthropic_cloud', Cowork)
+// are fetched; CLI sessions ('bridge') and any other or missing kind are left out and counted. With it on, all are.
 function sessionsToFetch(list, settings) {
   const items = (Array.isArray(list) ? list : []).filter(Boolean);
   const on = !!settings && settings.exportCliSessions === true;
-  const fetch = items.filter((x) => on || x.environment_kind !== 'bridge');
+  const fetch = items.filter((x) => on || x.environment_kind === 'anthropic_cloud');
   return { fetch, leftOut: items.length - fetch.length };
 }
 
@@ -5340,12 +5341,17 @@ async function bulkExportZip(options = {}) {
     }
     // Claude Code and Cowork sessions, listed up front so a changes run knows whether any changed. A failed list is
     // one warning and no sessions; the chats and artifacts export as usual. CLI sessions only with the setting.
+    // A 403 or 404 means the account has no sessions to give: a note, not a warning.
     let sessionList = [];
     let sessionListError = null;
+    let sessionsUnavailable = false;
     let sessionListIncomplete = false;
     try {
       const reply = await sendToTab(tab.id, { action: 'listSessions' });
-      if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.sessions)) {
+      if (reply && (reply.error === 'HTTP 403' || reply.error === 'HTTP 404')) {
+        sessionsUnavailable = true;
+        notes.push(SESSIONS_UNAVAILABLE_NOTE);
+      } else if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.sessions)) {
         sessionListError = reply && (reply.error || reply.connectionError) ? publishedCode(reply) : 'bad response';
       } else {
         sessionList = reply.sessions.filter((x) => x && typeof x.id === 'string' && x.id !== '');
@@ -5579,7 +5585,7 @@ async function bulkExportZip(options = {}) {
       emit('sessions', 0, includedSessions.length, '');
       sessionStep = await runSessionStep(megaZip, {
         sessions: includedSessions, artifactFolders, signal, run: !!run, budget: run ? Infinity : SESSION_ZIP_BUDGET, usedFolders: usedFolderNames,
-        fetchPage: (id, after) => sendToTab(tab.id, { action: 'fetchSessionEvents', id, after }),
+        fetchPage: (id, after, limit) => sendToTab(tab.id, { action: 'fetchSessionEvents', id, after, limit }),
         onProgress: (done, n, sub, info = {}) => {
           // On disk, each session is written as it is done: the run result counts it now.
           if (run && Number.isFinite(info.written)) saved.sessions = info.written;
@@ -5676,7 +5682,9 @@ async function bulkExportZip(options = {}) {
 
     // Claude Code and Cowork sessions: what was listed, saved and left out, the issues, and a row per session saved.
     const sessionRows = sessionStep ? sessionStep.rows : [];
-    if (sessionListError || sessionList.length) {
+    if (sessionsUnavailable) {
+      indexLines.push('', '## Sessions', '', 'Sessions: not available for this account');
+    } else if (sessionListError || sessionList.length) {
       indexLines.push('', '## Sessions', '');
       if (sessionListError) {
         indexLines.push(`Sessions: not exported (${sessionListError})`);
@@ -5684,7 +5692,7 @@ async function bulkExportZip(options = {}) {
         indexLines.push(`- Listed by claude.ai: ${sessionList.length}${sessionListIncomplete ? ' (may be incomplete)' : ''}`);
         if (since) indexLines.push(`- New or changed since that export: ${includedSessions.length + sessionPicks.leftOut}`);
         indexLines.push(`- Saved: ${sessionRows.length}`);
-        if (sessionPicks.leftOut) indexLines.push(`- CLI sessions not exported: ${sessionPicks.leftOut} ${SESSIONS_LEFT_OUT_HINT}`);
+        if (sessionPicks.leftOut) indexLines.push(`- Sessions not exported (Claude Code CLI or other): ${sessionPicks.leftOut} ${SESSIONS_LEFT_OUT_HINT}`);
       }
       if (sessionWarnings.length) indexLines.push('', '**Session issues:**', '', ...sessionWarnings.map((w) => `- ${runWarningText(w)}`));
       if (sessionRows.length) {
@@ -6543,6 +6551,9 @@ const SESSION_PAGE_CAP = 100;                     // pages of 200 events per ses
 const SESSION_BYTES_CAP = 64 * 1024 * 1024;       // kept events per session, JSON in UTF-8
 const SESSION_ZIP_BUDGET = 256 * 1024 * 1024;     // kept events of all sessions in one ZIP
 const SESSIONS_LEFT_OUT_HINT = '(Settings, Include Claude Code CLI sessions)';
+const SESSIONS_UNAVAILABLE_NOTE = 'Code and Cowork sessions: not available for this account';
+// Page sizes asked for in turn when content.js answers a page is too large to send (over 32 MB kept).
+const SESSION_PAGE_LADDER = [200, 50, 10, 1];
 
 // A prompt the owner typed (not a tool result, a compaction summary or a command), for the turn count.
 function sessionTurns(events) {
@@ -6563,7 +6574,7 @@ const sessionCellText = (t) => mdLinkText(String(t || '')).replace(/[()|]/g, '\\
 // Saves each session into root: sessions/<Title>_<shortId>/ with session.json ({ format: 1, session, events }, images
 // as references), transcript.md and README.md (BOM) and images/<n>.<ext>. opts: { sessions (kept, to fetch),
 // artifactFolders (Map: artifact uuid, lowercase -> its folder in artifacts/), fetchPage(id, after) -> content.js's
-// fetchSessionEvents reply, signal ({ stopped }: checked before each session and between its pages; the session in
+// fetchSessionEvents reply (limit: SESSION_PAGE_LADDER; a 'too large' reply is asked again smaller), signal ({ stopped }: checked before each session and between its pages; the session in
 // hand is dropped), run (on disk: flush after each session), budget (bytes of kept events for all sessions; past it
 // the rest are skipped with one warning), usedFolders (lowercase names to claim against; folder names are claimed
 // in it), onProgress(done, total, sub, { written }) }. A session is paged while hasMore, at most SESSION_PAGE_CAP
@@ -6594,16 +6605,20 @@ async function runSessionStep(root, opts = {}) {
       const events = [];
       let bytes = 0;
       let after = null;
-      let pages = 0;
+      let asked = 0;  // events asked for; the cap is SESSION_PAGE_CAP full pages, so smaller pages count as part of one
+      let rung = 0;   // SESSION_PAGE_LADDER index; once smaller, the session's later pages stay that size
       let problem = '';  // why the session is incomplete; it is then not recorded
       let gone = false;
       let overBudget = false;
       for (;;) {
         if (stopped()) { out.stopped = true; break; }
-        if (pages >= SESSION_PAGE_CAP) { problem = `cut at ${SESSION_PAGE_CAP} pages of events`; break; }
+        if (asked >= SESSION_PAGE_CAP * SESSION_PAGE_LADDER[0]) { problem = `cut at ${SESSION_PAGE_CAP} pages of events`; break; }
+        const limit = SESSION_PAGE_LADDER[rung];
         let reply;
-        try { reply = await fetchPage(s.id, after); } catch (e) { reply = { error: 'unexpected error' }; }
-        pages++;
+        try { reply = await fetchPage(s.id, after, limit); } catch (e) { reply = { error: 'unexpected error' }; }
+        // Too large to send: the same page again, smaller. Not a gone tab, and not a page.
+        if (reply && reply.error === 'too large' && rung < SESSION_PAGE_LADDER.length - 1) { rung++; continue; }
+        asked += limit;
         if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.events)) {
           gone = !!(reply && reply.connectionError);
           problem = `events could not be loaded (${reply && (reply.error || reply.connectionError) ? publishedCode(reply) : 'bad response'})`;
@@ -7388,8 +7403,9 @@ function setStep(name, state) {
 function beginRunScreen(plan, directory) {
   const $ = (id) => document.getElementById(id);
   activeRun = { plan, steps: runSteps(plan), totals: {}, signal: { stopped: false }, zip: !directory };
+  // The Sessions row shows only once the run has sessions to fetch (its first sessions event, runProgress).
   for (const name of ['chats', 'artifacts', 'sessions', 'viewer']) {
-    $(`step-${name}`).hidden = !activeRun.steps.includes(name);
+    $(`step-${name}`).hidden = name === 'sessions' || !activeRun.steps.includes(name);
     setStep(name, 'pending');
     $(`step-${name}-count`).textContent = '';
     $(`step-${name}-sub`).textContent = '';
@@ -7415,6 +7431,7 @@ function runProgress(ev) {
   const at = run.steps.indexOf(ev.phase);
   if (at < 0) return;
   if (ev.phase !== 'viewer') run.totals[ev.phase] = ev.total;
+  if (ev.phase === 'sessions') $('step-sessions').hidden = false;
   const finished = ev.phase === 'viewer' && ev.done >= ev.total;
   run.steps.forEach((name, i) => setStep(name, i < at || (i === at && finished) ? 'done' : i === at ? 'current' : 'pending'));
   if (ev.phase !== 'viewer') $(`step-${ev.phase}-count`).textContent = `${ev.done} of ${ev.total}`;

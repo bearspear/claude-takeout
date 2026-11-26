@@ -61,8 +61,8 @@ function maskKeys(text) {
 const SECRET_RES = [
   /sk-ant-[A-Za-z0-9_-]+/g,
   /github_pat_[A-Za-z0-9_]+/g,
-  /gh[po]_[A-Za-z0-9]+/g,
-  /AKIA[0-9A-Z]{16}/g,
+  /gh[pousr]_[A-Za-z0-9]+/g,
+  /(?:AKIA|ASIA)[0-9A-Z]{16}/g,
   /xox[bp]-[A-Za-z0-9-]+/g,
   /Bearer [A-Za-z0-9._~+\/=-]{20,}/gi,
 ];

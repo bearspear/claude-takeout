@@ -83,7 +83,7 @@ const sessionPages=[{data:[ev(1,'user','Plan the trip'),ev(2,'assistant',[{type:
   check('project file downloaded once',projectDownloads===1,String(projectDownloads));
   const sk=Object.keys(g).filter(k=>k.startsWith('sessions/'));
   const idx=await panel.evaluate(async b64=>{const z=await JSZip.loadAsync(Uint8Array.from(atob(b64),c=>c.charCodeAt(0)));return z.file('index.md').async('string')},fs.readFileSync(await dl.path()).toString('base64'));
-  check('Export All saves the Cowork session and leaves the CLI one out',sk.some(k=>/^sessions\/Cowork_trip_[^/]+\/session\.json$/.test(k))&&sk.some(k=>k.endsWith('/transcript.md'))&&!sk.some(k=>/CLI_work/.test(k))&&/CLI sessions not exported: 1/.test(idx)&&cliEventRequests===0,sk.join()+' | '+cliEventRequests);
+  check('Export All saves the Cowork session and leaves the CLI one out',sk.some(k=>/^sessions\/Cowork_trip_[^/]+\/session\.json$/.test(k))&&sk.some(k=>k.endsWith('/transcript.md'))&&!sk.some(k=>/CLI_work/.test(k))&&/Sessions not exported \(Claude Code CLI or other\): 1/.test(idx)&&cliEventRequests===0,sk.join()+' | '+cliEventRequests);
   check('session: both pages of events kept',await panel.evaluate(async b64=>{const z=await JSZip.loadAsync(Uint8Array.from(atob(b64),c=>c.charCodeAt(0)));const n=Object.keys(z.files).find(k=>/session\.json$/.test(k));return n&&JSON.parse(await z.file(n).async('string')).events.length===4},fs.readFileSync(await dl.path()).toString('base64')));
   check('no errors.txt for project chats',!Object.keys(g).some(k=>k.endsWith('errors.txt')));
   const mv=await viewerOf(await dl.path());

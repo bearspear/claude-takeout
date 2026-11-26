@@ -1355,6 +1355,18 @@ test('sessionsToFetch leaves CLI sessions out unless the setting is on', () => {
   assert.deepStrictEqual([r.fetch.length, r.leftOut], [2, 0]);
 });
 
+test('sessionsToFetch takes only cloud sessions with the switch off: an unknown or missing kind is left out', () => {
+  const { fn } = loadPopup();
+  const f = fn('sessionsToFetch');
+  const list = [{ id: 'cse_a', environment_kind: 'anthropic_cloud' }, { id: 'cse_b', environment_kind: 'byoc' }, { id: 'cse_c' }, { id: 'cse_d', environment_kind: null }];
+  let r = f(list, { exportCliSessions: false });
+  assert.deepStrictEqual([r.fetch.map((x) => x.id), r.leftOut], [['cse_a'], 3]);
+  r = f(list, {});
+  assert.deepStrictEqual([r.fetch.map((x) => x.id), r.leftOut], [['cse_a'], 3]);
+  r = f(list, { exportCliSessions: true });
+  assert.deepStrictEqual([r.fetch.length, r.leftOut], [4, 0]);
+});
+
 test('saveExportRecord keeps sessions and joins them', async () => {
   const { sandbox, fn } = loadPopup();
   const store = { exportRecord: { 'org-1': { at: 'x', chats: {}, sessions: { cse_a: 't1' } } } };
@@ -1455,14 +1467,14 @@ test('a CLI session is left out unless the setting is on', async () => {
   const sessionPages = { [S_COWORK]: onePage(), [S_CLI]: onePage() };
   const off = await bulkRun({ list, chats, sessions, sessionPages });
   assert.deepStrictEqual(off.asks.map((m) => m.id), [S_COWORK], 'no events request for the CLI session');
-  assert.match(off.saved.written['index.md'], /CLI sessions not exported: 1 \(Settings, Include Claude Code CLI sessions\)/);
+  assert.match(off.saved.written['index.md'], /Sessions not exported \(Claude Code CLI or other\): 1 \(Settings, Include Claude Code CLI sessions\)/);
   assert.strictEqual(off.result.saved.sessions, 1);
   assert.strictEqual(sessionDir(off.saved.written, S_CLI), null);
   assert.strictEqual(JSON.parse(off.saved.written['export-manifest.json']).sessions.leftOut, 1);
   const on = await bulkRun({ list, chats, sessions, sessionPages, setup: (sb) => vm.runInContext('settings.exportCliSessions = true', sb) });
   assert.deepStrictEqual(on.asks.map((m) => m.id).sort(), [S_COWORK, S_CLI].sort());
   assert.ok(sessionDir(on.saved.written, S_CLI));
-  assert.doesNotMatch(on.saved.written['index.md'], /CLI sessions not exported/);
+  assert.doesNotMatch(on.saved.written['index.md'], /Sessions not exported/);
   assert.strictEqual(on.result.saved.sessions, 2);
 });
 
@@ -1496,14 +1508,14 @@ test('Changes only exports a session-only change', async () => {
 
 test('a failed session list is one warning and the chats export', async () => {
   const { list, chats } = oneChat();
-  const { result, saved, asks } = await bulkRun({ list, chats, sessions: { error: 'HTTP 403' } });
+  const { result, saved, asks } = await bulkRun({ list, chats, sessions: { error: 'HTTP 401' } });
   assert.strictEqual(result.outcome, 'done', result.reason);
   assert.strictEqual(result.saved.chats, 1);
   const mine = result.warningList.filter((w) => w.type === 'session');
   assert.strictEqual(mine.length, 1, JSON.stringify(result.warningList));
-  assert.match(mine[0].text, /HTTP 403/);
+  assert.match(mine[0].text, /HTTP 401/);
   assert.strictEqual(asks.length, 0);
-  assert.match(saved.written['index.md'], /Sessions: not exported \(HTTP 403\)/);
+  assert.match(saved.written['index.md'], /Sessions: not exported \(HTTP 401\)/);
   assert.ok(!Object.keys(saved.written).some((n) => n.startsWith('sessions/')));
 });
 
@@ -1621,11 +1633,14 @@ test('the sessions step is done after the viewer step starts, also with no sessi
   const states = {};
   p.sandbox.__state = (name, state) => { states[name] = state; };
   vm.runInContext('setStep = (name, state) => __state(name, state)', p.sandbox);
-  p.el('step-sessions').hidden = true;
+  p.el('step-sessions').hidden = false;
   p.fn('beginRunScreen')({ run: 'bulk', withArtifacts: false, changesOnly: false }, null);
-  assert.strictEqual(p.el('step-sessions').hidden, false);
+  assert.strictEqual(p.el('step-sessions').hidden, true, 'hidden until a sessions event');
   assert.strictEqual(states.sessions, 'pending');
   p.fn('runProgress')({ phase: 'chats', done: 1, total: 1, sub: 'A', warnings: 0 });
+  assert.strictEqual(p.el('step-sessions').hidden, true);
+  p.fn('runProgress')({ phase: 'sessions', done: 0, total: 1, sub: '', warnings: 0 });
+  assert.strictEqual(p.el('step-sessions').hidden, false, 'shown on the first sessions event');
   p.fn('runProgress')({ phase: 'viewer', done: 0, total: 1, sub: '', warnings: 0 });
   assert.strictEqual(states.sessions, 'done');
 });
@@ -1677,6 +1692,100 @@ test('runSessionStep keeps a session whose later page fails, warned and not reco
   assert.match(out.warnings.join('\n'), /events could not be loaded \(HTTP 500\); saved as far as it got/);
   const readme = Object.entries(written).find(([n]) => n.endsWith('/README.md'))[1];
   assert.match(readme, /\*\*Incomplete:\*\*/);
+});
+
+test('runSessionStep asks again with a smaller page when a page is too large', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const asks = [];
+  const page = onePage()[0];
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async (id, after, limit) => {
+    asks.push([after, limit]);
+    return limit > 10 ? { error: 'too large' } : JSON.parse(JSON.stringify(page));
+  } };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.deepStrictEqual(asks, [[null, 200], [null, 50], [null, 10]]);
+  assert.strictEqual(out.written, 1);
+  assert.deepStrictEqual(out.saved.map((x) => x.id), [S_COWORK]);
+  assert.deepStrictEqual(out.warnings, []);
+});
+
+test('runSessionStep keeps the smaller page for the rest of the session', async () => {
+  const { sandbox } = exportPopup();
+  const asks = [];
+  const evs = sessionEventsFixture();
+  const first = { events: evs.slice(0, 2), lastId: 'e2', hasMore: true };
+  const second = { events: evs.slice(2), lastId: 'e4', hasMore: false };
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async (id, after, limit) => {
+    asks.push([after, limit]);
+    if (limit > 50) return { error: 'too large' };
+    return JSON.parse(JSON.stringify(after ? second : first));
+  } };
+  sandbox.__root = fakeZip({});
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.deepStrictEqual(asks, [[null, 200], [null, 50], ['e2', 50]]);
+  assert.deepStrictEqual(out.saved.map((x) => x.id), [S_COWORK]);
+});
+
+test('runSessionStep warns when even one event is too large, never treats it as a gone tab', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const asks = [];
+  const b = coworkSession({ id: 'cse_01SecondSessionXyz', title: 'Second' });
+  const page = onePage()[0];
+  sandbox.__args = { sessions: [coworkSession(), b], fetchPage: async (id, after, limit) => {
+    asks.push([id, limit]);
+    return id === S_COWORK ? { error: 'too large' } : JSON.parse(JSON.stringify(page));
+  } };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.deepStrictEqual(asks, [[S_COWORK, 200], [S_COWORK, 50], [S_COWORK, 10], [S_COWORK, 1], [b.id, 200]]);
+  assert.deepStrictEqual(out.saved.map((x) => x.id), [b.id], 'the too-large session is not recorded; the next one is fetched');
+  assert.strictEqual(out.warnings.length, 1, out.warnings.join('\n'));
+  assert.match(out.warnings[0], /Session "Panel refresh": events could not be loaded \(too large\); not exported/);
+  assert.doesNotMatch(out.warnings.join('\n'), /stopped answering/);
+});
+
+test('runSessionStep: a too-large later page keeps what came before, warned and not recorded', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const first = { ...onePage()[0], hasMore: true, lastId: 'e4' };
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async (id, after) => (after ? { error: 'too large' } : JSON.parse(JSON.stringify(first))) };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.strictEqual(out.written, 1);
+  assert.deepStrictEqual(out.saved, []);
+  assert.match(out.warnings.join('\n'), /events could not be loaded \(too large\); saved as far as it got/);
+});
+
+test('Export All passes the page size to content.js', async () => {
+  const { list, chats } = oneChat();
+  const { asks } = await bulkRun({ list, chats, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.deepStrictEqual(asks.map((m) => m.limit), [200]);
+});
+
+for (const status of [403, 404]) {
+  test(`a session list answered HTTP ${status} means no sessions for this account: a note, no warning`, async () => {
+    const { list, chats } = oneChat();
+    const { result, saved } = await bulkRun({ list, chats, sessions: { error: `HTTP ${status}` } });
+    assert.strictEqual(result.outcome, 'done', result.reason);
+    assert.ok(!result.warningList.some((x) => x.type === 'session'), JSON.stringify(result.warningList));
+    assert.strictEqual(result.warnings, result.warningList.length);
+    assert.ok(result.notes.includes('Code and Cowork sessions: not available for this account'), JSON.stringify(result.notes));
+    assert.match(saved.written['index.md'], /## Sessions\n\nSessions: not available for this account/);
+    assert.doesNotMatch(saved.written['index.md'], /Session list could not be loaded/);
+    assert.ok(!('sessions' in JSON.parse(saved.written['export-manifest.json'])));
+  });
+}
+
+test('a session list answered HTTP 500 is one session warning', async () => {
+  const { list, chats } = oneChat();
+  const { result, saved } = await bulkRun({ list, chats, sessions: { error: 'HTTP 500' } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.deepStrictEqual(result.warningList.filter((x) => x.type === 'session').map((x) => x.text), ['Session list could not be loaded (HTTP 500)']);
+  assert.ok(!result.notes.some((n) => /not available/.test(n)));
+  assert.match(saved.written['index.md'], /Sessions: not exported \(HTTP 500\)/);
 });
 
 test('changedSessions takes a session without last_event_at the first time', () => {

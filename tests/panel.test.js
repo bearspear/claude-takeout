@@ -961,6 +961,50 @@ test('fetchSessionEvents asks one page of 200 after the given id', async () => {
   assert.ok(Array.isArray(res.events));
 });
 
+test('fetchSessionEvents takes a page size from 1 to 200, else 200', async () => {
+  const body = { data: [], last_id: null, has_more: false };
+  for (const [limit, want] of [[50, 50], [1, 1], [200, 200], [0, 200], [201, 200], [2.5, 200], ['10', 200], [undefined, 200], [-3, 200]]) {
+    const h = contentWith([{ status: 200, body }]);
+    await h.send({ action: 'fetchSessionEvents', id: 'cse_abc1', limit });
+    assert.ok(h.urls[0].includes(`/v1/sessions/cse_abc1/events?limit=${want}`) && !h.urls[0].includes(`limit=${want}0`), `${limit}: ${h.urls[0]}`);
+  }
+});
+
+test('fetchSessionEvents answers too large, without events, when the kept page is over 32 MB', async () => {
+  const big = 'a'.repeat(1900 * 1024);
+  const data = Array.from({ length: 18 }, (_, i) => ({ uuid: 'e' + i, type: 'user', created_at: 't', message: { role: 'user', content: big } }));
+  const h = contentWith([{ status: 200, body: { data, last_id: 'e17', has_more: false } }]);
+  const res = await h.send({ action: 'fetchSessionEvents', id: 'cse_abc1' });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(res)), { error: 'too large' });
+  const small = contentWith([{ status: 200, body: { data: data.slice(0, 16), last_id: 'e15', has_more: false } }]);
+  const ok = await small.send({ action: 'fetchSessionEvents', id: 'cse_abc1' });
+  assert.strictEqual(ok.events.length, 16, 'under 32 MB the page is answered');
+});
+
+test('content.js run twice in one tab registers one message listener', () => {
+  let listeners = 0;
+  const sandbox = {
+    window: { addEventListener() {}, location: {} }, TextEncoder, console: { log() {} }, setTimeout,
+    document: { createElement: () => ({}), head: { appendChild() {} }, cookie: '' },
+    fetch: async () => ({ ok: false, status: 500 }),
+    chrome: {
+      runtime: { id: 'ext', getURL: (p) => p, lastError: null, onMessage: { addListener: () => { listeners++; } }, sendMessage() {} },
+      storage: { local: { set() {}, remove() {}, get: (k, cb) => cb({}) } },
+    },
+  };
+  vm.createContext(sandbox);
+  const src = fs.readFileSync(path.join(REPO, 'content.js'), 'utf8');
+  vm.runInContext(src, sandbox);
+  vm.runInContext(src, sandbox);
+  assert.strictEqual(listeners, 1);
+  assert.ok(sandbox.__claudeTakeoutContent, 'the marker is on the isolated world');
+  // A script left behind by a reloaded extension (its runtime gone) does not block a fresh one.
+  sandbox.chrome.runtime.id = undefined;
+  sandbox.chrome = { ...sandbox.chrome, runtime: { ...sandbox.chrome.runtime, id: 'ext2' } };
+  vm.runInContext(src, sandbox);
+  assert.strictEqual(listeners, 2);
+});
+
 test('fetchSessionEvents refuses a bad id', async () => {
   const h = contentWith([{ status: 200, body: {} }]);
   assert.deepStrictEqual(JSON.parse(JSON.stringify(await h.send({ action: 'fetchSessionEvents', id: '../x' }))), { error: 'bad id' });

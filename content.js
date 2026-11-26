@@ -4,6 +4,14 @@
 (function() {
   'use strict';
 
+  // Loaded once per tab: sendToTab injects this file again only into a tab whose script stopped answering, and a
+  // second copy must not add a second message listener. A copy left behind by a reloaded extension (its runtime id
+  // gone) doesn't count, so a fresh one still loads after a reload.
+  const previous = globalThis.__claudeTakeoutContent;
+  if (previous && typeof previous.alive === 'function' && previous.alive()) return;
+  const runtime = chrome.runtime;
+  globalThis.__claudeTakeoutContent = { alive: () => { try { return !!(runtime && runtime.id); } catch (e) { return false; } } };
+
   // Inject the fetch interceptor into the page
   const script = document.createElement('script');
   script.src = chrome.runtime.getURL('injected.js');
@@ -98,15 +106,22 @@
     return { sessions, incomplete: r.raw.data.length >= 100, orgId };
   }
 
-  // One page of a session's events, kept and masked.
-  async function fetchSessionEvents(orgId, id, after) {
+  // A kept page above this many bytes of JSON is not sent: Chrome's messages stop near 64 MiB. The panel asks again
+  // with a smaller limit.
+  const SESSION_MESSAGE_CAP = 32 * 1024 * 1024;
+
+  // One page of a session's events, kept and masked. limit: an integer from 1 to 200, else SESSION_PAGE_LIMIT.
+  async function fetchSessionEvents(orgId, id, after, limit) {
     const CT = globalThis.CTSession;
-    let path = `/v1/sessions/${id}/events?limit=${CT.SESSION_PAGE_LIMIT}`;
+    const n = Number.isInteger(limit) && limit >= 1 && limit <= CT.SESSION_PAGE_LIMIT ? limit : CT.SESSION_PAGE_LIMIT;
+    let path = `/v1/sessions/${id}/events?limit=${n}`;
     if (typeof after === 'string' && after) path += '&after_id=' + encodeURIComponent(after);
     const r = await sessionRequest(orgId, path);
     if (r.error) return r;
     if (!r.raw || !Array.isArray(r.raw.data)) return { error: 'bad response' };
-    return CT.sessionPage(r.raw);
+    const page = CT.sessionPage(r.raw);
+    if (new TextEncoder().encode(JSON.stringify(page)).length > SESSION_MESSAGE_CAP) return { error: 'too large' };
+    return page;
   }
 
   // Fetch all conversations list
@@ -573,7 +588,7 @@
           return;
         }
         try {
-          sendResponse(request.action === 'listSessions' ? await listSessions(id) : await fetchSessionEvents(id, request.id, request.after));
+          sendResponse(request.action === 'listSessions' ? await listSessions(id) : await fetchSessionEvents(id, request.id, request.after, request.limit));
         } catch (e) {
           sendResponse({ error: 'bad response' });
         }
