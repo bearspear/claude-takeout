@@ -2187,17 +2187,19 @@ function generateLinksAndSources(urls, webSources) {
 // root: { root, byUuid: Map, usedDirs: Set }. Without it, files go in this folder.
 // folderName is this folder's path from the ZIP root, for the viewer's links.
 // A chat claude.ai made when an artifact was opened (startedWithArtifact) with no messages (chain: getMessageChain):
-// { title, href } for openedArtifactLine, or null. In Export All (shared), an artifact the step saves gets its store
-// record now (its folder name, ../artifacts/<folder>/, and its listed title); otherwise its claude.ai page.
+// { uuid, title, href, local } for openedArtifactLine, or null. href is its claude.ai page. In Export All (shared), an
+// artifact the step is to save gets its store record now (its folder name and listed title): local is
+// ../artifacts/<folder>/, which the chat's files get only once the step has written it (openedLinks in bulkExportZip).
 function openedArtifactOf(data, chain, shared = null) {
   const uuid = startedWithArtifact(data);
   if (!uuid || (Array.isArray(chain) && chain.length)) return null;
   const listed = shared && shared.listedArtifacts instanceof Map ? shared.listedArtifacts.get(uuid) : null;
+  const href = `https://claude.ai/artifact/${uuidToBase58(uuid) || uuid}`;
   if (shared && shared.store && shared.includedArtifactIds instanceof Set && shared.includedArtifactIds.has(uuid)) {
     const rec = publishedStoreRecord(shared, { uuid, title: listed ? listed.title : '' });
-    return { title: rec.title || '', href: `../${shared.store.prefix}${encodePath(rec.dir)}/` };
+    return { uuid, title: rec.title || '', href, local: `../${shared.store.prefix}${encodePath(rec.dir)}/` };
   }
-  return { title: listed ? artifactText(listed.title) : '', href: `https://claude.ai/artifact/${uuidToBase58(uuid) || uuid}` };
+  return { uuid, title: listed ? artifactText(listed.title) : '', href, local: null };
 }
 
 async function populateConversationFolder(folder, data, onProgress = null, organizationId = null, sharedProjects = null, folderName = '', fetchPublished = null) {
@@ -3077,7 +3079,8 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
   const openedFrom = openedArtifactOf(data, messages, sharedProjects);
   // The Markdown links to what this export really saved.
   const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames, webImages, toolImages, publishedLinks: pageLinks, openedFrom };
-  addFileWithBOM(folder, 'full_chat.md', convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking, ...saved }));
+  const fullChatMd = convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking, ...saved });
+  addFileWithBOM(folder, 'full_chat.md', fullChatMd);
   const integratedChatMd = convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking, ...saved });
   addFileWithBOM(folder, 'integrated_chat.md', integratedChatMd);
   folder.file('integrated_chat.txt', markdownToPlainText(integratedChatMd));
@@ -3236,7 +3239,21 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
   }
 
-  addFileWithBOM(folder, 'README.md', readmeLines.join('\n'));
+  const readmeMd = readmeLines.join('\n');
+  addFileWithBOM(folder, 'README.md', readmeMd);
+  // The artifact this empty chat was opened from, once the artifact step has written its folder: its lines link there.
+  if (openedFrom && openedFrom.local && sharedProjects && Array.isArray(sharedProjects.openedLinks)) {
+    const remote = openedArtifactLine(openedFrom.title, openedFrom.href);
+    const local = openedArtifactLine(openedFrom.title, openedFrom.local);
+    const swap = (text) => text.split(remote).join(local);
+    sharedProjects.openedLinks.push({ uuid: openedFrom.uuid, relink: () => {
+      addFileWithBOM(folder, 'README.md', swap(readmeMd));
+      addFileWithBOM(folder, 'full_chat.md', swap(fullChatMd));
+      const integrated = swap(integratedChatMd);
+      addFileWithBOM(folder, 'integrated_chat.md', integrated);
+      folder.file('integrated_chat.txt', markdownToPlainText(integrated));
+    } });
+  }
 
   // The viewer's copy of this chat. It can only fail by itself: the chat is
   // already written, so a failure is reported and the export carries on.
@@ -5442,7 +5459,7 @@ async function bulkExportZip(options = {}) {
     const listedArtifacts = new Map((artifactList ? artifactList.artifacts : []).map((a) => [String(a.slug).toLowerCase(), a]));
     // includedArtifactIds: the artifacts the step will save, so a chat opened from one can link its folder.
     const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), store, listedArtifacts, previewWanted: publishedPreviewWanted(includedArtifacts),
-      includedArtifactIds: new Set(includedArtifacts.map((a) => String(a.slug).toLowerCase())) };
+      includedArtifactIds: new Set(includedArtifacts.map((a) => String(a.slug).toLowerCase())), openedLinks: [] };
     // A Claude Docs artifact's uuid -> the chat in this export that rebuilt its text (the latest), for its artifact.json note.
     const docChats = new Map();
     const viewerChats = [];
@@ -5605,6 +5622,11 @@ async function bulkExportZip(options = {}) {
         },
       });
       writeFailures.push(...step.writeFailures);
+      // Chats opened from an artifact the step wrote link its folder now (they link claude.ai until then).
+      for (const o of sharedProjects.openedLinks) {
+        try { if (store.written(store.record(o.uuid))) o.relink(); } catch (e) { /* the claude.ai link stays */ }
+      }
+      if (run && sharedProjects.openedLinks.length) writeFailures.push(...await megaZip.flush());
     }
     if (stopRequested()) return await stoppedRun();
     // The sessions, after the artifacts so a session's README links the artifact folders it made. Skipped, like the

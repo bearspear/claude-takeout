@@ -1840,6 +1840,29 @@ test('Export All: a chat opened from an artifact says so, links the artifact fol
   assert.ok(!('opened' in viewerData.chats.find((c) => c.id === 'c-gone')));
 });
 
+test('an artifact chat links claude.ai when the artifact step never runs (the tab went away)', async () => {
+  const opened = { uuid: 'c-open', name: 'Takeout page', created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-20T10:00:00Z', current_leaf_message_uuid: null,
+    settings: { started_with_artifact: { artifact_uuid: S_ART } }, chat_messages: [] };
+  const later = Object.assign(loadFixture(), { uuid: 'c-later', updated_at: '2026-01-01T00:00:00Z' });
+  const list = [{ uuid: 'c-open', name: opened.name, updated_at: opened.updated_at }, { uuid: 'c-later', name: later.name, updated_at: later.updated_at }];
+  const frames = [{ slug: S_ART, title: 'Panel', typeSlug: '', typeTitle: '', sourceSurface: 'code', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }];
+  const pages = { [S_ART]: { title: 'Panel', live: P_LIVE, versions: { [P_LIVE]: { files: { 'index.html': '<p>Panel</p>' } } } } };
+  const goneTab = (sb) => {
+    const send = sb.chrome.tabs.sendMessage;
+    sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+      if (msg.action === 'fetchConversation' && msg.conversationId === 'c-later') { sb.chrome.runtime.lastError = { message: 'Could not establish connection. Receiving end does not exist.' }; cb(undefined); sb.chrome.runtime.lastError = undefined; return; }
+      send(id, msg, cb);
+    };
+  };
+  const { result, saved } = await bulkRun({ list, chats: { 'c-open': opened, 'c-later': later }, frames, pages, setup: goneTab, options: { withArtifacts: true } });
+  assert.ok(result, 'a run result');
+  const w = saved.written;
+  assert.ok(!Object.keys(w).some((n) => /^artifacts\/[^/]+\/artifact\.json$/.test(n)), 'the artifact step did not run: ' + Object.keys(w).join());
+  const readme = w[Object.keys(w).find((n) => n.startsWith('Takeout') && n.endsWith('/README.md'))];
+  assert.ok(readme.includes(`This chat was opened from the artifact [Panel](https://claude.ai/artifact/${require('../export-core.js').uuidToBase58(S_ART)}) and has no messages.`), readme);
+  assert.ok(!readme.includes('../artifacts/'));
+});
+
 test('runSessionStep builds each session for the viewer, images by relative path', async () => {
   const { sandbox } = exportPopup();
   const written = {};

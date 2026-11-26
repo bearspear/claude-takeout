@@ -814,14 +814,13 @@
       group.forEach((p, i) => {
         const ver = p.ver || (rec && typeof rec.current === 'string' ? rec.current : '');
         const rv = ver ? known.find(x => x.ver === ver) || null : null;
-        const key = rv ? `v:${rv.ver}` : `p:${p.ver}`;
-        if (byVer.has(key)) { byVer.get(key).publishes.push(...p.publishes); return; }
-        byVer.set(key, { p, rv, publishes: p.publishes.slice(), order: rv ? known.indexOf(rv) : known.length + i + (p.current ? group.length : 0) });
+        if (byVer.has(ver)) { byVer.get(ver).publishes.push(...p.publishes); return; }
+        byVer.set(ver, { p, rv, ver, publishes: p.publishes.slice(), order: rv ? known.indexOf(rv) : known.length + i + (p.current ? group.length : 0) });
       });
-      const versions = [...byVer.values()].map(({ p, rv, publishes: list, order }) => {
+      const versions = [...byVer.values()].map(({ rv, ver, publishes: list, order }) => {
         const publishes = list.map(x => ({ ...x }));
         if (!rv || !rv.startSaved) {
-          return { ver: p.ver, folderName: '', label: rv ? rv.label : p.ver || 'current', order,
+          return { ver, folderName: '', label: rv ? rv.label : ver || 'current', order,
             start: null, startSaved: null, same: false, writtenAs: null, incomplete: true, needsRuntime: false, text: null, publishes };
         }
         const own = rv.part != null ? { part: rv.part, key: rv.key } : rv.current && view && Number.isSafeInteger(view.part) && view.part > 0 && typeof view.key === 'string' ? { part: view.part, key: view.key } : null;

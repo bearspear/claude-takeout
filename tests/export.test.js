@@ -6523,3 +6523,14 @@ test('chatHealth: an empty chat opened from an artifact is healthy', () => {
   const d = { created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-20T10:00:00Z', chat_messages: [], settings: { started_with_artifact: { artifact_uuid: 'abcdef01-2345-4678-89ab-cdef01234567' } } };
   assert.deepStrictEqual(healthOf(d), []);
 });
+
+test('chatHealth: an artifact chat renamed or reopened later is still healthy', () => {
+  const d = { created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-22T10:00:00Z', chat_messages: [], settings: { started_with_artifact: { artifact_uuid: 'abcdef01-2345-4678-89ab-cdef01234567' } } };
+  assert.deepStrictEqual(healthOf(d), []);
+  assert.deepStrictEqual(healthOf({ ...d, settings: {} }), ['no_messages'], 'a plain chat still warns');
+});
+
+test('openedArtifactLine escapes Markdown in the title as the index cells do', () => {
+  const { openedArtifactLine } = require('../export-core.js');
+  assert.strictEqual(openedArtifactLine('<b>x</b>*y*_z_', 'u/'), 'This chat was opened from the artifact [\\<b\\>x\\</b\\>\\*y\\*\\_z\\_](u/) and has no messages.');
+});

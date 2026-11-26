@@ -2939,3 +2939,18 @@ test('an artifact-opened chat the store lacks gets the listed title only; one wi
   assert.ok(!('opened' in d2.chats[0]));
   assert.deepStrictEqual(d2.chats[0].files, {});
 });
+
+test("a session's card holds a current version once even when the store hasn't saved it", () => {
+  const store = sessionStore();
+  store.records[0].current = 'ver7'; // claude.ai's current version, not among the saved ones
+  const urlOnly = id => [
+    ev(`call-${id}`, 'assistant', [{ type: 'tool_use', id, name: 'mcp__claude-artifacts__publish_files', input: { title: 'Session page', files: [{ path: '/home/user/page.html' }] } }]),
+    ev(`res-${id}`, 'user', [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: JSON.stringify({ url: `https://claude.ai/artifact/${S_ART_ID}`, title: 'Session page' }) }] }]),
+  ];
+  const prompt = id => ev(id, 'user', [{ type: 'text', text: 'Go' }]);
+  const events = [prompt('p1'), ...sessionPublish('t1', S_ART_ID, 'ver7', 7), prompt('p2'), ...urlOnly('t2')];
+  const s = V.buildViewerSession(sessionOf(), events, { folder: 'sessions/x', artifacts: store });
+  const page = s.chat.files[s.pages[S_ART]];
+  assert.deepStrictEqual(page.versions.map(v => [v.label, v.ver, v.href]), [['ver7', 'ver7', null]]);
+  assert.deepStrictEqual(s.chat.messages.flatMap(m => m.blocks.filter(b => b.t === 'card').map(b => b.version)), [0, 0]);
+});

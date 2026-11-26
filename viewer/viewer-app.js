@@ -980,6 +980,12 @@ function openedFromLine(chat) {
     link.title = 'The artifact on claude.ai. It is not in this export.';
   }
   line.append(title ? 'Opened from the artifact ' : 'Opened from ', link);
+  if (file) {
+    const button = el('button', 'open-artifact', 'Open artifact');
+    button.type = 'button';
+    button.addEventListener('click', () => navigate({ chat: chat.id, file, version: opened.version }));
+    line.append(' ', button);
+  }
   return line;
 }
 
@@ -1976,7 +1982,8 @@ function navigate(state, options = {}) {
   const leaf = chain.length ? chain[chain.length - 1].id : null;
   let open = resolveFile(chat.files, want.file, want.version, allAdded);
   // A chat opened from an artifact, with no messages: that artifact in the side panel, when the chat is drawn anew.
-  if (!open && !want.file && !chat.messages.length && chat.opened && chat.opened.file && `${chat.id}\n${leaf}` !== drawn) {
+  // Not when the viewer opens on it with no hash (options.landing): its Open artifact button does that.
+  if (!open && !options.landing && !want.file && !chat.messages.length && chat.opened && chat.opened.file && `${chat.id}\n${leaf}` !== drawn) {
     open = resolveFile(chat.files, chat.opened.file, chat.opened.version, allAdded);
   }
   const hash = formatHash({ chat: chat.id, leaf, file: open && open.file, version: open && open.version });
@@ -3020,7 +3027,7 @@ function start() {
   if (routeArtifacts(location.hash)) return;
   if (routeLists(location.hash)) return;
   const first = parseHash(location.hash);
-  if (data.chats.length || (first.session && sessionsById.has(first.session))) navigate(first, { replace: true });
+  if (data.chats.length || (first.session && sessionsById.has(first.session))) navigate(first, { replace: true, landing: !first.chat && !first.session });
   else if (artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); }
   else if (allSessions.length) { history.replaceState(null, '', '#sessions'); routeLists('#sessions'); }
 }

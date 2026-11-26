@@ -141,7 +141,8 @@ function chatHealth(data) {
   const problems = [];
   const d = data && typeof data === 'object' ? data : {};
   const messages = Array.isArray(d.chat_messages) ? d.chat_messages : null;
-  const changed = Date.parse(d.updated_at) - Date.parse(d.created_at) > 5000;
+  // A chat claude.ai made when an artifact was opened has no messages however often it was renamed or reopened.
+  const changed = Date.parse(d.updated_at) - Date.parse(d.created_at) > 5000 && !startedWithArtifact(d);
   if (!messages || (!messages.length && changed)) {
     problems.push({ check: 'no_messages', message: messages
       ? 'claude.ai returned no messages for this chat, although it was changed after it was created.'
@@ -2810,8 +2811,9 @@ function startedWithArtifact(data) {
 // The Markdown line for such a chat with no messages: where it came from, linked (href: the export's artifact folder,
 // else its claude.ai page).
 function openedArtifactLine(title, href) {
-  const t = String(title || '').trim();
-  return t ? `This chat was opened from the artifact [${mdLinkText(t)}](${href}) and has no messages.`
+  // Escaped as the index cells are (artifactsIndexMd), so a title can't add emphasis, HTML or a heading.
+  const t = mdLinkText(String(title || '').trim()).replace(/[<>|*_`#]/g, '\\$&');
+  return t ? `This chat was opened from the artifact [${t}](${href}) and has no messages.`
     : `This chat was opened from [an artifact](${href}) and has no messages.`;
 }
 

@@ -307,8 +307,15 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   check('Open artifact goes to the Artifacts screen', await pp.locator('#artifacts-screen').isVisible());
 
   // Opened from a search hit: msg stays in the hash, and a card click doesn't jump back to the hit.
-  const sh = await open(`file://${pub}#chat=c1`);
-  await sh.waitForSelector('.msg');
+  // The viewer opened with no hash lands on its newest chat, here one opened from an artifact: the line and an Open
+  // artifact button, no panel until it is clicked.
+  const sh = await open(`file://${pub}`);
+  await sh.waitForSelector('#chat .opened-from');
+  await sh.waitForTimeout(300);
+  check('landing on an artifact chat: the line, no panel', (await sh.evaluate(() => location.hash)) === '#chat=c-open' && !(await sh.locator('#panel').isVisible()));
+  await sh.click('#chat .opened-from button.open-artifact');
+  await sh.waitForFunction(() => ((document.querySelector('#panel:not([hidden]) iframe.preview') || {}).srcdoc || '').includes('Version two'));
+  check('its Open artifact button opens the panel', /^#chat=c-open&file=[^&]+&version=1$/.test(await sh.evaluate(() => location.hash)));
   await sh.locator('.find input').fill('purple');
   await sh.waitForFunction(() => !document.getElementById('results').hidden && document.querySelector('#results .group'));
   await sh.click('#results .group .snip');
@@ -333,7 +340,8 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   // A chat opened from an artifact: the line, and the artifact in the side panel at once.
   const oc = await open(`file://${pub}#chat=c-open`);
   await oc.waitForSelector('#chat .opened-from');
-  check('an artifact-opened chat says where it came from', (await oc.textContent('#chat .opened-from')) === 'Opened from the artifact Shipped page', await oc.textContent('#chat .opened-from'));
+  check('an artifact-opened chat says where it came from', (await oc.textContent('#chat .opened-from a')) === 'Shipped page'
+    && (await oc.textContent('#chat .opened-from')).startsWith('Opened from the artifact Shipped page') && (await oc.locator('#chat .opened-from button.open-artifact').count()) === 1, await oc.textContent('#chat .opened-from'));
   await oc.waitForFunction(() => ((document.querySelector('#panel:not([hidden]) iframe.preview') || {}).srcdoc || '').includes('Version two'));
   check('it opens the artifact in the side panel, its current version', /^#chat=c-open&file=[^&]+&version=1$/.test(await oc.evaluate(() => location.hash)), await oc.evaluate(() => location.hash));
   await oc.locator('#panel-head .close').click();
@@ -342,6 +350,7 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   check('closing the panel keeps it closed', !(await oc.locator('#panel').isVisible()) && (await oc.locator('#chat .opened-from').count()) === 1);
   await oc.evaluate(() => { location.hash = '#chat=c-gone'; });
   await oc.waitForFunction(() => (document.querySelector('#chat .opened-from') || {}).textContent === 'Opened from an artifact');
+  check('one the export lacks has no Open artifact button', (await oc.locator('#chat .opened-from button').count()) === 0);
   const goneLink = await oc.$eval('#chat .opened-from a', a => [a.getAttribute('href'), a.target, a.rel]);
   check('one the export lacks links to claude.ai, no panel', goneLink[0] === `https://claude.ai/artifact/${GONE_ID}` && goneLink[1] === '_blank' && /noopener/.test(goneLink[2])
     && !(await oc.locator('#panel').isVisible()), JSON.stringify(goneLink));
