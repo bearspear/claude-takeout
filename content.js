@@ -34,19 +34,26 @@
   }
 
   // Fetch a single conversation
+  // A 429 (claude.ai asking to slow down) or a 5xx is tried again, up to CHAT_RETRY_WAITS.length times: after its
+  // Retry-After (seconds, up to 30) when it gives one, else after the next of these waits. Anything else fails at once.
+  const CHAT_RETRY_WAITS = [2000, 5000, 10000];
   async function fetchConversation(orgId, conversationId) {
     const url = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${conversationId}?tree=True&rendering_mode=messages&render_all_tools=true`;
 
-    const response = await fetch(url, {
-      credentials: 'include',
-      headers: { 'Accept': 'application/json' }
-    });
-
-    if (!response.ok) {
-      throw new Error(`Failed to fetch conversation: ${response.status}`);
+    for (let attempt = 0; ; attempt++) {
+      const response = await fetch(url, {
+        credentials: 'include',
+        headers: { 'Accept': 'application/json' }
+      });
+      if (response.ok) return await response.json();
+      const s = response.status;
+      if ((s === 429 || s >= 500) && attempt < CHAT_RETRY_WAITS.length) {
+        const after = parseFloat(response.headers && response.headers.get ? response.headers.get('Retry-After') : '');
+        await publishedDelay(Number.isFinite(after) && after >= 0 && after <= 30 ? after * 1000 : CHAT_RETRY_WAITS[attempt]);
+        continue;
+      }
+      throw new Error(`Failed to fetch conversation: ${s}`);
     }
-
-    return await response.json();
   }
 
   // Fetch all conversations list

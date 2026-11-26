@@ -404,7 +404,7 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ### v1.24.3
 
-- **Faster Export All** - The next chat is fetched while the current one is written, instead of one after the other with a fixed pause after each. Requests to claude.ai keep the same pace (one at a time, at least 200 ms apart). Images Claude looked at in a chat download four at a time.
+- **Faster Export All** - The next chat is fetched while the current one is written, instead of one after the other with a fixed pause after each. Requests to claude.ai keep the same pace (one at a time, at least 200 ms apart), and a chat claude.ai asks to slow down for (429), or fails to send on its side, is tried again up to three times after a pause instead of failing. Images Claude looked at in a chat download four at a time.
 - **Faster search in big viewers** - The search index holds each message's text once instead of three times, and a snippet is only cut for the results the sidebar shows, so searching a large Export All uses less memory and answers sooner.
 - **Snappier Projects and Chats pages** - Filters remember the folded titles between keystrokes, chats are sorted once, and opening a chat finds its project at once.
 - **The panel's This chat card** counts a chat's files once per version of the chat, not on every refresh.
