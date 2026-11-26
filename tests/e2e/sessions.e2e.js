@@ -83,8 +83,11 @@ const DES_ART = '33333333-4444-4555-8666-777777777777';
 const DES_ID = uuidToBase58(DES_ART);
 const DES_DIR = `artifacts/Panel_mockups_${DES_ID}`;
 const DES_VIEW = { id: DES_ID, title: 'Panel mockups', kind: 'Design', typed: true, docs: false, shared: false, public: false, createdAt: iso(80), updatedAt: iso(82),
-  folder: `${DES_DIR}/dv1`, start: 'index.html', startSaved: 'index.html', startKind: 'html', files: [{ path: 'index.html', savedAs: 'index.html' }, { path: 'project/canvas.json', savedAs: 'project/canvas.json' }],
-  url: `https://claude.ai/artifact/${DES_ID}`, ver: 'dv1' };
+  folder: `${DES_DIR}/dv1`, start: 'index.html', startSaved: 'index.html', startKind: 'html',
+  files: [{ path: 'index.html', savedAs: 'index.html' }, { path: 'project/canvas.json', savedAs: 'project/canvas.json' }, { path: 'project/Main.dc.html', savedAs: 'project/Main.dc.html' }],
+  url: `https://claude.ai/artifact/${DES_ID}`, ver: 'dv1', part: 1, key: 'a2' };
+const DES_CANVAS = JSON.stringify({ v: 3, title: 'Panel mockups', boards: { 'Main.dc.html': { x: 0, y: 0, w: 300, h: 200, title: 'Home board' } } });
+const DES_BOARD = '<!doctype html><html><body><div style="width:300px;height:200px">Board one body</div></body></html>';
 const DES_RECORD = {
   format: 2, uuid: DES_ART, shortId: DES_ID, url: `https://claude.ai/artifact/${DES_ID}`, title: 'Panel mockups', listed: true, current: 'dv1', start: 'index.html', needsRuntime: true,
   dir: DES_DIR, versionOrder: ['dv1'],
@@ -96,7 +99,8 @@ const PAGE_V1 = '<!doctype html><p>Version one of the shipped page</p>';
 const PAGE_V2 = '<!doctype html><link rel="stylesheet" href="app.css"><p>Version two of the shipped page</p><img src="dot.png" alt="dot">';
 const DOT = `data:image/png;base64,${'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='}`;
 const PAGE_CSS = 'p { color: rebeccapurple }';
-const PART = `window.__archivePart(1, ${JSON.stringify({ a0: { texts: [['index.html', PAGE_V2], ['app.css', PAGE_CSS]], images: [['dot.png', DOT]] }, a1: { texts: [['index.html', PAGE_V1]], images: [] } })});`;
+const PART = `window.__archivePart(1, ${JSON.stringify({ a0: { texts: [['index.html', PAGE_V2], ['app.css', PAGE_CSS]], images: [['dot.png', DOT]] }, a1: { texts: [['index.html', PAGE_V1]], images: [] },
+  a2: { texts: [['index.html', '<!doctype html><p>Loading…</p>'], ['project/canvas.json', DES_CANVAS], ['project/Main.dc.html', DES_BOARD]], images: [] } })});`;
 const FOLDER_P = 'sessions/Ship_it_p1';
 const SESSION_P = buildViewerSession({
   id: 'cse_p1', title: 'Ship it', config: { origin: 'cowork' }, created_at: iso(80), last_event_at: iso(90),
@@ -374,13 +378,19 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   check('one the export lacks links to claude.ai, no panel', goneLink[0] === `https://claude.ai/artifact/${GONE_ID}` && goneLink[1] === '_blank' && /noopener/.test(goneLink[2])
     && !(await oc.locator('#panel').isVisible()), JSON.stringify(goneLink));
   await oc.evaluate(() => { location.hash = '#chat=c-design'; });
-  await oc.waitForSelector('#panel:not([hidden]) .design-note');
-  const designLink = await oc.$eval('#panel .design-note a', a => a.getAttribute('href'));
-  check('a Design opens in the panel as a note linking its canvas, not claude.ai\'s loader', designLink === `#a=${DES_ID}`
-    && (await oc.locator('#panel iframe.preview').count()) === 0, designLink);
-  await oc.click('#panel .design-note a');
-  await oc.waitForFunction(() => location.hash.startsWith('#a='));
-  check('its link opens the Artifacts screen', await oc.locator('#artifacts-screen').isVisible());
+  // A Design: its canvas in the side panel (the Artifacts screen's page, embedded), never claude.ai's loader.
+  await oc.waitForFunction(() => { const h = document.querySelector('#panel:not([hidden]) .panel-canvas'); return h && h.shadowRoot && h.shadowRoot.querySelector('.design-board'); });
+  const des = await oc.evaluate(() => { const r = document.querySelector('#panel .panel-canvas').shadowRoot;
+    const board = r.querySelector('.design-board');
+    return { title: board.querySelector('.board-title').textContent, frame: !!board.querySelector('iframe'), home: getComputedStyle(r.getElementById('home')).display,
+      pageTitle: getComputedStyle(r.getElementById('page-title')).display, loader: [...r.querySelectorAll('iframe')].some(f => /Loading…/.test(f.srcdoc || '')) }; });
+  check('a Design shows its canvas in the side panel', des.title === 'Home board' && des.frame && !des.loader, JSON.stringify(des));
+  check('the embedded page has no grid or title of its own', des.home === 'none' && des.pageTitle === 'none', JSON.stringify(des));
+  check('it keeps the chat: hash, page title, no note', /^#chat=c-design&file=/.test(await oc.evaluate(() => location.hash)) && (await oc.title()).startsWith('Opened design')
+    && (await oc.locator('#panel .design-note').count()) === 0 && !(await oc.locator('#artifacts-screen').isVisible()), await oc.title());
+  await oc.locator('#panel-head .close').click();
+  await oc.waitForFunction(() => !location.hash.includes('file='));
+  check('closing the panel removes the canvas', (await oc.locator('.panel-canvas').count()) === 0);
   await oc.evaluate(() => { location.hash = '#chat=c-msgs'; });
   await oc.waitForFunction(() => document.getElementById('title').textContent === 'Opened and used');
   check('a chat with messages is unchanged', (await oc.locator('#chat .opened-from').count()) === 0 && /A real prompt/.test(await oc.textContent('#chat')) && !(await oc.locator('#panel').isVisible()));

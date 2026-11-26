@@ -402,6 +402,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.25.3
+
+- **A Design's boards in the side panel** - A Design that a session published, or that an empty chat was opened from, now shows its canvas right in the side panel: the boards from `project/canvas.json`, drawn offline, with the same zoom, Move and Interact, and Open alone as on the Artifacts screen. The panel's version buttons switch the canvas between versions; a version saved before the Design had boards shows the Design's poster. Other typed artifacts keep the v1.25.2 note linking the Artifacts screen.
+
 ### v1.25.2
 
 - **Designs no longer stay on "Loading…" in the side panel** - A Design (or another of claude.ai's typed artifacts) starts from claude.ai's own loader page, which never finishes away from claude.ai. When a session or a chat opened from an artifact shows one in the side panel, the panel now says it only runs on claude.ai and links its canvas on the Artifacts screen, which draws the boards offline. The Code view still shows the files.
