@@ -5199,6 +5199,9 @@ function exportProgress(options, { phase, done, total, sub = '', warnings = 0 })
 // Artifacts checkbox, settings.exportAllArtifacts). options.onProgress: progress events (exportProgress). options.signal:
 // { stopped }, checked before each chat, artifact and older version; when set, the run ends as 'stopped' (stoppedRun).
 // Resolves to a run result (runResult); never throws.
+// A run that ends because the claude.ai tab stopped answering (closed, reloaded away, or navigated off claude.ai).
+const TAB_GONE_REASON = 'The claude.ai tab closed or stopped answering';
+
 async function bulkExportZip(options = {}) {
   const changesOnly = options && typeof options.changesOnly === 'boolean' ? options.changesOnly : settings.megaZipScope === 'changes';
   const directory = options && options.directory ? options.directory : null;
@@ -5316,7 +5319,7 @@ async function bulkExportZip(options = {}) {
     };
     // Stop: what is on disk stays, with its artifact.json and error files; no index, manifest or viewer is written
     // and nothing is recorded, so the next Changes only export takes it all again. A ZIP is discarded.
-    const stoppedRun = async () => {
+    const stoppedRun = async (reason = 'You stopped it') => {
       if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
       pendingWarnings = () => 0;
       warningList.push(...collectorRunWarnings(artifactCollector));
@@ -5338,7 +5341,7 @@ async function bulkExportZip(options = {}) {
       } else {
         Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
       }
-      return result('stopped', 'You stopped it');
+      return result('stopped', reason);
     };
 
     for (let ci = 0; ci < conversations.length; ci++) {
@@ -5346,13 +5349,10 @@ async function bulkExportZip(options = {}) {
       if (stopRequested()) break;
       emit('chats', exported + errors.length, total, conv.name || 'Untitled');
       try {
-        // Fetch full conversation
-        const result = await new Promise((resolve) => {
-          chrome.tabs.sendMessage(tab.id, {
-            action: 'fetchConversation',
-            conversationId: conv.uuid
-          }, resolve);
-        });
+        // Fetch full conversation. sendToTab injects content.js again into a tab that lost it; a tab that still
+        // doesn't answer is gone (closed, or moved off claude.ai), and the run ends as stopped.
+        const result = await sendToTab(tab.id, { action: 'fetchConversation', conversationId: conv.uuid });
+        if (result.connectionError) return await stoppedRun(TAB_GONE_REASON);
 
         if (result.error) {
           throw new Error(result.error);
@@ -6076,9 +6076,9 @@ async function saveArtifact(root, a, ctx) {
   // Every older version claude.ai keeps (v1.21), after the current one, oldest to newest, whichever way the current
   // one was saved (fetched, kept whole from the store, or a chat's own file). A failure here leaves the current
   // version saved: only the older versions count as not saved.
-  if (!docs && !failed && !state.publishedSignedOut && rec.current) {
+  if (!docs && !failed && rec.current) {
     try {
-      if (!rec.history.includes(rec.current)) {
+      if (!state.publishedSignedOut && !rec.history.includes(rec.current)) {
         const reply = await fetchPublished({ action: 'publishedPageInfo', uuid, ver: rec.current });
         const info = publishedSignedOutReply(reply) ? (signOut(), null) : cleanPublishedInfo(reply);
         if (info && !info.error && info.history.length >= rec.history.length) rec.history = info.history;
@@ -6129,25 +6129,26 @@ async function saveArtifact(root, a, ctx) {
 // one the store has whole or as a chat's file (sameAs). claude.ai answering 404 or listing no files: settled (gone,
 // not retried). Any other failure, or a version saved short of a file: failed, warned once per artifact (codes
 // only). An older Cowork/Claude Code version listed from the live version (listFromLive) is unverified, and a file it
-// lacks is missing without failing it. A 401 stops (ctx.signOut). Each saved version's preview goes to
+// lacks is missing without failing it. A 401 stops (ctx.signOut): every version not yet tried is unfetched, and
+// the artifact is not whole (runArtifactStep), so the next Export Changes fetches them. Each saved version's preview goes to
 // ctx.placeOlder(rec, ver, payload) at once. ctx.onVersion(i, n) (optional) is told before each version is fetched,
 // i counting from 1 in rec.history (n long); ctx.stopped() (optional) true ends the loop before the next version.
-// Returns { settled, saved, failed }.
+// Returns { settled, saved, failed, unfetched }.
 async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNote = '' } = {}) {
   const { fetchPublished, state, warn, store } = ctx;
-  const out = { settled: [], saved: [], failed: [] };
+  const out = { settled: [], saved: [], failed: [], unfetched: [] };
   const problems = [];
   for (let i = 0; i < rec.history.length; i++) {
     const ver = rec.history[i];
     if (ver === rec.current || skip.has(ver)) continue;
-    if (state.publishedSignedOut) break;
-    // Stop (ctx.stopped): the versions saved so far stay.
-    if (typeof ctx.stopped === 'function' && ctx.stopped()) break;
     const prev = rec.versions.get(ver);
     if (storeVersionWhole(prev) || (prev && prev.sameAs)) { out.saved.push(ver); continue; }
+    if (state.publishedSignedOut) { out.unfetched.push(ver); continue; }
+    // Stop (ctx.stopped): the versions saved so far stay.
+    if (typeof ctx.stopped === 'function' && ctx.stopped()) break;
     if (typeof ctx.onVersion === 'function') ctx.onVersion(i + 1, rec.history.length);
     const reply = await fetchPublished({ action: 'publishedPageInfo', uuid: rec.uuid, ver });
-    if (publishedSignedOutReply(reply)) { ctx.signOut(); break; }
+    if (publishedSignedOutReply(reply)) { ctx.signOut(); out.unfetched.push(ver); continue; }
     const info = cleanPublishedInfo(reply);
     if (info.error) {
       if (info.status === 404) out.settled.push(ver);
@@ -6171,7 +6172,6 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
     if (got.saved && typeof ctx.placeOlder === 'function') ctx.placeOlder(rec, ver, artifactPayload(got));
     if (got.saved && !v.incomplete && (info.listFromLive || !got.missing.length)) out.saved.push(ver);
     else { out.failed.push(ver); problems.push(...(got.problems.length ? got.problems : ['not saved'])); }
-    if (state.publishedSignedOut) break;
   }
   if (out.failed.length) {
     warn(name, `Artifact "${name}": ${artifactCount(out.failed.length, 'older version')} could not be saved: ${[...new Set(problems)].join(', ')}.`, openNote);
@@ -6316,7 +6316,7 @@ async function runArtifactStep(root, opts = {}) {
       rows.push(saved.row);
       entries.push(saved.entry);
       whole.push(!!(saved.meta && !saved.meta.incomplete && !(saved.meta.missing && saved.meta.missing.length) && !saved.view.notExported
-        && !(saved.history && saved.history.failed.length)));
+        && !(saved.history && (saved.history.failed.length || (saved.history.unfetched && saved.history.unfetched.length)))));
       {
         const m = saved.meta || {};
         const currentOk = !!(m.ver && !m.incomplete && !(m.missing && m.missing.length) && !saved.view.notExported);
@@ -6702,7 +6702,7 @@ function durationText(startedAt, endedAt) {
 function stoppedReasonText(result, plan) {
   const r = String(result.reason || '').trim() || 'unknown error';
   let m;
-  if (r === 'You stopped it') return r;
+  if (r === 'You stopped it' || r === TAB_GONE_REASON) return r;
   if (/^Please navigate to claude\.ai/.test(r)) return 'This tab is not on claude.ai';
   if ((m = /^Could not make a folder there: (.*)$/.exec(r))) return `The folder could not be written (${m[1]})`;
   if ((m = /^Zip generation failed: (.*)$/.exec(r))) return `The ZIP could not be made (${m[1]})`;
@@ -7182,9 +7182,24 @@ function showStopped(result, plan) {
 
 // Export selected: the plan from the main screen's choices, run with the Exporting screen, ending on Done or
 // Export stopped. options: { directory } in folder mode, { ask } (card pictures) for an artifacts-only ZIP.
+// One Export selected at a time across the popup and every sidebar: navigator.locks is shared by the extension's
+// pages, so two runs never overwrite each other's export record. The in-page flag (exportRunning) can't see the others.
+const EXPORT_LOCK = 'claude-takeout-export';
 async function runSelected(options = {}) {
   const plan = currentPlan();
   if (!plan.run) return null;
+  const locks = typeof navigator !== 'undefined' && navigator.locks && typeof navigator.locks.request === 'function' ? navigator.locks : null;
+  if (!locks) return runSelectedNow(plan, options);
+  return locks.request(EXPORT_LOCK, { ifAvailable: true }, (lock) => {
+    if (!lock) {
+      flashSummary('Another export is running in the popup or a sidebar. Try again when it ends.');
+      return null;
+    }
+    return runSelectedNow(plan, options);
+  });
+}
+
+async function runSelectedNow(plan, options) {
   endHandoff();
   const directory = options && options.directory ? options.directory : null;
   const run = beginRunScreen(plan, directory);
@@ -7206,28 +7221,36 @@ async function runSelected(options = {}) {
 }
 
 // Export selected goes to a folder unless ZIP is chosen. The folder picker must open straight from the click.
-// The popup closes when it opens, so from the popup the side panel opens instead, with a note saying what to
-// click there. The note carries the choices: { scope, chats, artifacts, format: 'folder' }.
-function handoffChoices() {
+// The popup closes when it opens, or when the claude.ai tab is clicked, which would end a run inside it, so from
+// the popup the side panel opens instead, folder or ZIP, with a note saying what to click there. The note carries
+// the choices: { scope, chats, artifacts, format: 'folder' | 'zip' }.
+function handoffChoices(format) {
   const plan = currentPlan();
-  return { scope: plan.changesOnly ? 'changes' : 'all', chats: plan.run === 'bulk', artifacts: plan.withArtifacts, format: 'folder' };
+  return { scope: plan.changesOnly ? 'changes' : 'all', chats: plan.run === 'bulk', artifacts: plan.withArtifacts, format };
 }
 // ask(): optional, called in a ZIP export's click to start a permission request; its promise reaches run as
 // options.ask. Folder mode never asks: showDirectoryPicker needs the click's activation, and a request would
 // risk it (turn the permission on in Settings instead).
 function folderExport(name, run, ask = null) {
   return async () => {
-    if (settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function') return ask ? run({ ask: ask() }) : run();
+    const zip = settings.megaFormat === 'zip' || typeof window.showDirectoryPicker !== 'function';
+    if (IS_POPUP && chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
+      // The note is stored before the panel opens, in the same click task (sidePanel.open needs the user
+      // gesture, so nothing is awaited first). A panel that fails to open takes the note back, so a sidebar
+      // opened later doesn't apply it unasked.
+      const session = chrome.storage.session;
+      if (session) session.set({ folderExportNote: { at: Date.now(), choices: handoffChoices(zip ? 'zip' : 'folder') } }).catch(() => {});
+      chrome.sidePanel.open({ tabId: currentTabId }).then(() => window.close())
+        .catch((e) => {
+          if (session) session.remove('folderExportNote').catch(() => {});
+          flashSummary(`Could not open the side panel: ${e.message}`);
+        });
+      return;
+    }
+    // A popup without the side panel API runs a ZIP here (it ends if the popup closes).
+    if (zip) return ask ? run({ ask: ask() }) : run();
     if (IS_POPUP) {
-      if (chrome.sidePanel && chrome.sidePanel.open && currentTabId != null) {
-        // The note is stored before the panel opens, in the same click task (sidePanel.open needs the user
-        // gesture, so nothing is awaited first).
-        if (chrome.storage.session) chrome.storage.session.set({ folderExportNote: { at: Date.now(), choices: handoffChoices() } }).catch(() => {});
-        chrome.sidePanel.open({ tabId: currentTabId }).then(() => window.close())
-          .catch((e) => { flashSummary(`Could not open the side panel: ${e.message}`); });
-      } else {
-        flashSummary(`${name} to a folder runs in the side panel. Open it, or choose ZIP.`);
-      }
+      flashSummary(`${name} to a folder runs in the side panel. Open it, or choose ZIP.`);
       return;
     }
     let directory;
@@ -7267,9 +7290,9 @@ document.getElementById('handoffDismiss').addEventListener('click', endHandoff);
 function handoffFrom(note) {
   if (!note || typeof note !== 'object' || !Number.isFinite(note.at) || Date.now() - note.at > 60000) return null;
   const c = note.choices;
-  if (!c || typeof c !== 'object' || (c.scope !== 'all' && c.scope !== 'changes') || c.format !== 'folder') return null;
+  if (!c || typeof c !== 'object' || (c.scope !== 'all' && c.scope !== 'changes') || (c.format !== 'folder' && c.format !== 'zip')) return null;
   if (typeof c.chats !== 'boolean' || typeof c.artifacts !== 'boolean' || (!c.chats && !c.artifacts)) return null;
-  return { scope: c.scope, chats: c.chats, artifacts: c.artifacts, format: 'folder' };
+  return { scope: c.scope, chats: c.chats, artifacts: c.artifacts, format: c.format };
 }
 
 // An open sidebar takes a note the popup writes later, the same way.
@@ -7291,10 +7314,13 @@ async function takeHandoff() {
     settings.megaZipScope = c.scope;
     settings.exportAllChats = c.chats;
     settings.exportAllArtifacts = c.artifacts;
-    settings.megaFormat = 'folder';
+    settings.megaFormat = c.format;
     saveSettings();
     const parts = c.chats && c.artifacts ? 'chats and artifacts' : c.chats ? 'chats' : 'artifacts';
-    document.getElementById('handoffText').textContent = `Continued from the popup. Chrome lets only the sidebar pick a folder. Your choices came along: ${c.scope === 'changes' ? 'Changes only' : 'All'}, ${parts}, Folder. Click Export selected to pick where it goes.`;
+    const choices = `Your choices came along: ${c.scope === 'changes' ? 'Changes only' : 'All'}, ${parts}, ${c.format === 'zip' ? 'ZIP' : 'Folder'}.`;
+    document.getElementById('handoffText').textContent = c.format === 'zip'
+      ? `Continued from the popup, which closes when you click elsewhere and would stop the export. ${choices} Click Export selected to start.`
+      : `Continued from the popup. Chrome lets only the sidebar pick a folder. ${choices} Click Export selected to pick where it goes.`;
     document.getElementById('handoffNote').hidden = false;
     document.body.classList.add('handoff');
     renderEverything();
@@ -7454,7 +7480,9 @@ document.getElementById('helpLink').addEventListener('click', (e) => {
 const SHORTCUT_BUTTONS = { m: 'exportMd', e: 'exportMdEmbed', z: 'exportZip', j: 'exportJson', a: 'exportSelected', r: 'refresh' };
 document.addEventListener('keydown', (e) => {
   if (!e.altKey || currentScreen !== 'main') return;
-  const id = SHORTCUT_BUTTONS[String(e.key || '').toLowerCase()];
+  // e.code names the key pressed: on macOS, Option+Z types 'Ω', so e.key would never match.
+  const letter = /^Key([A-Z])$/.exec(String(e.code || ''));
+  const id = SHORTCUT_BUTTONS[letter ? letter[1].toLowerCase() : String(e.key || '').toLowerCase()];
   if (!id) return;
   document.getElementById(id).click();
   e.preventDefault();

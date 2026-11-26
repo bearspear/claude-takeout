@@ -177,6 +177,7 @@ function publishedFetcher(pages) {
     const ver = msg.ver === '' ? page.live : msg.ver;
     const v = page.versions[ver];
     if (!v) return { error: 'HTTP 404', status: 404 };
+    if (msg.action === 'publishedPageInfo' && v.infoError) return v.infoError;
     if (msg.action === 'publishedPageInfo') {
       return {
         ver, title: page.title, history: page.history || Object.keys(page.versions), rejected: v.rejected || [],

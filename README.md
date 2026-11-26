@@ -402,6 +402,14 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.24.1
+
+- **Export selected from the popup runs in the sidebar** - The popup closes when it loses focus, for example when you click the claude.ai tab, and a ZIP export running inside it was lost with no message. Like a folder export, the popup now opens the sidebar with your choices (ZIP included) carried over; click **Export selected** there. If the sidebar can't open, the choices aren't left behind for later.
+- **A closed or reloaded claude.ai tab** - Export All asks the tab again after a reload (re-injecting its helper) instead of failing every chat that is left, and stops with "The claude.ai tab closed or stopped answering" when the tab is gone. A stopped folder export keeps what it wrote.
+- **Older artifact versions after a sign-out** - When claude.ai answers 401 partway through an artifact's older versions, the artifact is no longer recorded as complete, so the next **Changes only** export fetches the versions it missed.
+- **One export at a time across the popup and sidebars** - Two **Export selected** runs in different pages could overwrite each other's record of what was exported. A second one now says another export is running.
+- **Shortcuts on macOS** - The Alt (Option) shortcuts now work on a Mac, where Option+letter types a symbol.
+
 ### v1.24.0
 
 - **Projects and All chats in the viewer** - In a viewer with more than one chat, the sidebar now has **Projects** and **Chats** entries above a shorter Recents list of the 30 newest chats, with **View all** below it. **Projects** is a grid of cards (name, description, chat count, last update) with a filter box; a card opens the project's page: its chats, newest first, beside its instructions and knowledge files. **Chats** lists every chat, 200 at a time with **Show more**, each with a link to its project. A chat's project section has **Open project**, and shows "Project · <name>" when the project has no instructions or knowledge. The sidebar shows Projects only when some chat belongs to a project. Filter boxes are on Projects, on Chats, and on a project page only when it has more than 10 chats; press `/` on a page to jump to its filter. The filter ignores case, not accents, and clears when you leave the page. Projects in the viewer now carry their id, description and last update, and the same project in several chats is shown once, from its newest copy.
