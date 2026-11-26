@@ -4832,10 +4832,17 @@ function sendOnce(tabId, message) {
 
 // Message a tab, injecting content.js if it isn't there. A tab that was open
 // when the extension was installed or reloaded has no working content script.
+// Only a tab still on claude.ai gets content.js: a tab that moved to another site (where the optional https
+// permission would let the injection through) answers as unreachable.
 async function sendToTab(tabId, message) {
   const response = await sendOnce(tabId, message);
   if (!response.connectionError) return response;
 
+  if (chrome.tabs && typeof chrome.tabs.get === 'function') {
+    let tab = null;
+    try { tab = await chrome.tabs.get(tabId); } catch (e) { tab = null; }
+    if (!tab || !/^https:\/\/claude\.ai\//.test(String(tab.url || ''))) return { connectionError: 'not a claude.ai tab' };
+  }
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
   } catch (e) {
@@ -5199,7 +5206,7 @@ function exportProgress(options, { phase, done, total, sub = '', warnings = 0 })
 // Artifacts checkbox, settings.exportAllArtifacts). options.onProgress: progress events (exportProgress). options.signal:
 // { stopped }, checked before each chat, artifact and older version; when set, the run ends as 'stopped' (stoppedRun).
 // Resolves to a run result (runResult); never throws.
-// A run that ends because the claude.ai tab stopped answering (closed, reloaded away, or navigated off claude.ai).
+// Export All's warning when the claude.ai tab stopped answering (closed, or navigated off claude.ai).
 const TAB_GONE_REASON = 'The claude.ai tab closed or stopped answering';
 
 async function bulkExportZip(options = {}) {
@@ -5319,7 +5326,7 @@ async function bulkExportZip(options = {}) {
     };
     // Stop: what is on disk stays, with its artifact.json and error files; no index, manifest or viewer is written
     // and nothing is recorded, so the next Changes only export takes it all again. A ZIP is discarded.
-    const stoppedRun = async (reason = 'You stopped it') => {
+    const stoppedRun = async () => {
       if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
       pendingWarnings = () => 0;
       warningList.push(...collectorRunWarnings(artifactCollector));
@@ -5341,18 +5348,20 @@ async function bulkExportZip(options = {}) {
       } else {
         Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
       }
-      return result('stopped', reason);
+      return result('stopped', 'You stopped it');
     };
 
+    let tabGone = false;
     for (let ci = 0; ci < conversations.length; ci++) {
       const conv = conversations[ci];
       if (stopRequested()) break;
       emit('chats', exported + errors.length, total, conv.name || 'Untitled');
       try {
         // Fetch full conversation. sendToTab injects content.js again into a tab that lost it; a tab that still
-        // doesn't answer is gone (closed, or moved off claude.ai), and the run ends as stopped.
+        // doesn't answer is gone (closed, or moved off claude.ai): no more chats are asked for, the artifact step is
+        // skipped, and the export ends with what it has, warned, so only the chats saved are recorded.
         const result = await sendToTab(tab.id, { action: 'fetchConversation', conversationId: conv.uuid });
-        if (result.connectionError) return await stoppedRun(TAB_GONE_REASON);
+        if (result.connectionError) { tabGone = true; break; }
 
         if (result.error) {
           throw new Error(result.error);
@@ -5429,9 +5438,15 @@ async function bulkExportZip(options = {}) {
     // pictures only when the optional permission is already there: Export All never asks. The step never throws,
     // and its warnings go to artifacts/errors.txt.
     if (stopRequested()) return await stoppedRun();
+    if (tabGone) {
+      const left = conversations.length - exported - errors.length;
+      const text = `${TAB_GONE_REASON}: ${left} chat${left === 1 ? '' : 's'} not exported${includedArtifacts.length ? ', and no artifacts' : ''}`;
+      errors.push(text);
+      warningList.push({ type: 'chat', text: runWarningText(text) });
+    }
     let picturesAllowed = false;
     let parts = null;
-    if (includedArtifacts.length) {
+    if (includedArtifacts.length && !tabGone) {
       const count = includedArtifacts.length;
       emit('artifacts', 0, count, '');
       try { picturesAllowed = await webImagesAllowed(); } catch (e) { picturesAllowed = false; }
@@ -6702,7 +6717,7 @@ function durationText(startedAt, endedAt) {
 function stoppedReasonText(result, plan) {
   const r = String(result.reason || '').trim() || 'unknown error';
   let m;
-  if (r === 'You stopped it' || r === TAB_GONE_REASON) return r;
+  if (r === 'You stopped it') return r;
   if (/^Please navigate to claude\.ai/.test(r)) return 'This tab is not on claude.ai';
   if ((m = /^Could not make a folder there: (.*)$/.exec(r))) return `The folder could not be written (${m[1]})`;
   if ((m = /^Zip generation failed: (.*)$/.exec(r))) return `The ZIP could not be made (${m[1]})`;
@@ -7480,9 +7495,12 @@ document.getElementById('helpLink').addEventListener('click', (e) => {
 const SHORTCUT_BUTTONS = { m: 'exportMd', e: 'exportMdEmbed', z: 'exportZip', j: 'exportJson', a: 'exportSelected', r: 'refresh' };
 document.addEventListener('keydown', (e) => {
   if (!e.altKey || currentScreen !== 'main') return;
-  // e.code names the key pressed: on macOS, Option+Z types 'Ω', so e.key would never match.
-  const letter = /^Key([A-Z])$/.exec(String(e.code || ''));
-  const id = SHORTCUT_BUTTONS[letter ? letter[1].toLowerCase() : String(e.key || '').toLowerCase()];
+  // The letter typed (e.key) follows the keyboard layout (QWERTZ, AZERTY); on macOS Option+Z types 'Ω', so a key
+  // that types no ASCII letter falls back to the key pressed (e.code).
+  const typed = String(e.key || '');
+  const physical = /^Key([A-Z])$/.exec(String(e.code || ''));
+  const letter = /^[a-z]$/i.test(typed) ? typed.toLowerCase() : physical ? physical[1].toLowerCase() : typed.toLowerCase();
+  const id = SHORTCUT_BUTTONS[letter];
   if (!id) return;
   document.getElementById(id).click();
   e.preventDefault();

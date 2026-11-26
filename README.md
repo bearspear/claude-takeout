@@ -405,10 +405,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 ### v1.24.1
 
 - **Export selected from the popup runs in the sidebar** - The popup closes when it loses focus, for example when you click the claude.ai tab, and a ZIP export running inside it was lost with no message. Like a folder export, the popup now opens the sidebar with your choices (ZIP included) carried over; click **Export selected** there. If the sidebar can't open, the choices aren't left behind for later.
-- **A closed or reloaded claude.ai tab** - Export All asks the tab again after a reload (re-injecting its helper) instead of failing every chat that is left, and stops with "The claude.ai tab closed or stopped answering" when the tab is gone. A stopped folder export keeps what it wrote.
+- **A closed or reloaded claude.ai tab** - Export All asks the tab again after a reload (re-injecting its helper, only into a claude.ai page) instead of failing every chat that is left. When the tab is gone, it stops asking and finishes with the chats it has, ZIP or folder, with a warning saying how many were not exported; only the exported chats are recorded, so **Changes only** takes the rest next time.
 - **Older artifact versions after a sign-out** - When claude.ai answers 401 partway through an artifact's older versions, the artifact is no longer recorded as complete, so the next **Changes only** export fetches the versions it missed.
 - **One export at a time across the popup and sidebars** - Two **Export selected** runs in different pages could overwrite each other's record of what was exported. A second one now says another export is running.
-- **Shortcuts on macOS** - The Alt (Option) shortcuts now work on a Mac, where Option+letter types a symbol.
+- **Shortcuts on macOS** - The Alt (Option) shortcuts now work on a Mac, where Option+letter types a symbol; other keyboard layouts keep the letter they type.
 
 ### v1.24.0
 

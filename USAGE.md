@@ -91,7 +91,7 @@ A ZIP contains one folder per conversation, plus an `index.md` master table and 
 
 **Export selected from the popup.** The popup closes when it loses focus (a click on the claude.ai tab closes it), which would end an export inside it, and Chrome only lets the side panel ask for a folder. So from the popup, **Export selected** (Folder or ZIP) opens the side panel with your choices carried over and a note; click **Export selected** there. Dismiss the note to keep your own choices. One **Export selected** runs at a time across the popup and every sidebar; a second says another export is running.
 
-**If the claude.ai tab closes or reloads.** Export All asks the tab again after a reload. When the tab is gone, the export stops with "The claude.ai tab closed or stopped answering"; a folder export keeps the chats already written, and nothing is recorded.
+**If the claude.ai tab closes or reloads.** Export All asks the tab again after a reload. When the tab is gone (closed, or moved off claude.ai), it asks for no more chats, skips the artifacts and finishes with the chats it has, with the warning "The claude.ai tab closed or stopped answering: N chats not exported". Only the exported chats are recorded, so **Changes only** takes the rest next time.
 
 **Stop.** Stopping a folder export keeps the files already written, writes no viewer, index or manifest, and records nothing, so the next Changes only export takes those chats again. Stopping a ZIP export downloads nothing.
 

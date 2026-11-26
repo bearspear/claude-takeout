@@ -1126,15 +1126,19 @@ const twoTabChats = () => {
   const list = [{ uuid: 'c-a', name: 'Chat A', updated_at: '2026-01-01T00:00:00Z' }, { uuid: 'c-b', name: 'Chat B', updated_at: '2026-01-02T00:00:00Z' }];
   return { list, chats: { 'c-a': a, 'c-b': b } };
 };
-const lostTab = ({ reinjects }) => (sb) => {
+// The tab stops answering from the chat numbered from (0 = the first). reinjects: injecting content.js works.
+// url: what chrome.tabs.get says the tab shows.
+const lostTab = ({ reinjects, from = 0, url = 'https://claude.ai/chat/x' }) => (sb) => {
   const plain = sb.chrome.tabs.sendMessage;
   let injected = false;
   sb.__fetches = 0;
-  sb.chrome.scripting = { executeScript: async () => { if (!reinjects) throw new Error('No tab with id: 1.'); injected = true; } };
+  sb.__injects = 0;
+  sb.chrome.tabs.get = async (id) => ({ id, url });
+  sb.chrome.scripting = { executeScript: async () => { sb.__injects++; if (!reinjects) throw new Error('No tab with id: 1.'); injected = true; } };
   sb.chrome.tabs.sendMessage = (id, msg, cb) => {
     if (msg.action === 'fetchConversation') {
       sb.__fetches++;
-      if (!injected) {
+      if (!injected && sb.__fetches > from) {
         sb.chrome.runtime.lastError = { message: 'Could not establish connection. Receiving end does not exist.' };
         cb(undefined);
         sb.chrome.runtime.lastError = null;
@@ -1153,20 +1157,40 @@ test('Export All re-injects content.js when the tab stopped answering', async ()
   assert.ok(!result.warningList.some((w) => w.type === 'chat'), JSON.stringify(result.warningList));
 });
 
-test('Export All stops when the claude.ai tab is gone, not failing every chat', async () => {
+const threeTabChats = () => {
   const { list, chats } = twoTabChats();
+  chats['c-c'] = Object.assign(loadFixture(), { uuid: 'c-c', name: 'Chat C' });
+  list.push({ uuid: 'c-c', name: 'Chat C', updated_at: '2026-01-03T00:00:00Z' });
+  return { list, chats };
+};
+
+test('Export All keeps what it has when the claude.ai tab is gone, ZIP included, and asks it nothing more', async () => {
+  const { list, chats } = threeTabChats();
   let sb = null;
-  const { result, store } = await bulkRun({ list, chats, setup: (s) => { sb = s; lostTab({ reinjects: false })(s); } });
-  assert.strictEqual(result.outcome, 'stopped');
-  assert.match(result.reason, /claude\.ai tab/);
-  assert.strictEqual(sb.__fetches, 1, 'the first chat is asked once (injecting fails), the second never');
-  assert.ok(!store.exportRecord, 'nothing is recorded');
-  const text = vm.runInContext('stoppedReasonText', sb)(result, { run: 'bulk' });
-  assert.match(text, /claude\.ai tab/);
-  assert.ok(!/chat list could not be loaded/.test(text), text);
+  const { result, store, saved } = await bulkRun({ list, chats, setup: (s) => { sb = s; lostTab({ reinjects: false, from: 1 })(s); } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.ok(saved, 'the ZIP is downloaded with the chat already exported');
+  assert.ok(Object.keys(saved.written).some((n) => n.startsWith('Chat_A/')), Object.keys(saved.written).join());
+  assert.strictEqual(result.saved.chats, 1);
+  assert.strictEqual(sb.__fetches, 2, 'the third chat is never asked for');
+  const mine = result.warningList.filter((w) => /claude\.ai tab closed or stopped answering/.test(w.text));
+  assert.strictEqual(mine.length, 1, JSON.stringify(result.warningList));
+  assert.match(mine[0].text, /2 chats not exported/);
+  assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats), ['c-a'], 'only the exported chat is recorded');
+  assert.match(saved.written['index.md'], /claude\.ai tab closed or stopped answering/);
 });
 
-test('Alt shortcuts follow the key pressed, not the character macOS Option types', () => {
+test('content.js is never injected into a tab that left claude.ai', async () => {
+  const { list, chats } = twoTabChats();
+  let sb = null;
+  const { result } = await bulkRun({ list, chats, setup: (s) => { sb = s; lostTab({ reinjects: true, url: 'https://example.com/' })(s); } });
+  assert.strictEqual(sb.__injects, 0);
+  assert.strictEqual(sb.__fetches, 1);
+  assert.strictEqual(result.saved.chats, 0);
+  assert.ok(result.warningList.some((w) => /claude\.ai tab closed or stopped answering/.test(w.text)), JSON.stringify(result.warningList));
+});
+
+test('Alt shortcuts take the letter typed, and the key pressed when Option types a symbol', () => {
   const p = panelOn('https://claude.ai/new');
   const clicked = [];
   for (const id of ['exportZip', 'exportMd', 'exportSelected']) p.el(id).click = () => { clicked.push(id); };
@@ -1174,6 +1198,12 @@ test('Alt shortcuts follow the key pressed, not the character macOS Option types
   p.seen.keydown({ altKey: true, key: 'µ', code: 'KeyM', preventDefault() {} });
   p.seen.keydown({ altKey: true, key: 'å', code: 'KeyA', preventDefault() {} });
   assert.deepStrictEqual(clicked, ['exportZip', 'exportMd', 'exportSelected']);
+  // QWERTZ: the Z key sits where QWERTY has Y; AZERTY: A where QWERTY has Q.
+  clicked.length = 0;
+  p.seen.keydown({ altKey: true, key: 'z', code: 'KeyY', preventDefault() {} });
+  p.seen.keydown({ altKey: true, key: 'y', code: 'KeyZ', preventDefault() {} });
+  p.seen.keydown({ altKey: true, key: 'a', code: 'KeyQ', preventDefault() {} });
+  assert.deepStrictEqual(clicked, ['exportZip', 'exportSelected']);
 });
 
 test('popup ZIP export hands off to the side panel too, with ZIP in the note', async () => {
