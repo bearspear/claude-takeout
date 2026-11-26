@@ -6454,3 +6454,30 @@ test('an artifact kept from the store after an earlier 401 is not whole while it
   assert.ok(!infoCalls(fetcher).some(([u]) => u === U(2)), 'its kept version is not fetched again');
   assert.deepStrictEqual(out.whole, [false, false]);
 });
+
+// Images Claude viewed: downloaded a few at a time, written and warned in the chat's order.
+test('saveToolImages fetches in parallel and keeps the order of files and warnings', async () => {
+  const uuids = ['aaaaaaaa-1', 'bbbbbbbb-2', 'cccccccc-3', 'dddddddd-4', 'eeeeeeee-5'];
+  const data = { chat_messages: [{ content: uuids.flatMap((u, i) => [
+    { type: 'tool_use', id: `t${i}`, name: 'Read', input: { file_path: `/x/pic${i}.png` } },
+    { type: 'tool_result', tool_use_id: `t${i}`, content: [{ type: 'image', file_uuid: u, preview_url: `/api/org/files/${u}/preview` }] },
+  ]) }] };
+  let inFlight = 0, most = 0;
+  const png = Buffer.from('89504e470d0a1a0a', 'hex');
+  const popup = exportPopup({ routes: [[/\/files\/.*\/preview$/, async (url) => {
+    inFlight++; most = Math.max(most, inFlight);
+    await new Promise((r) => setTimeout(r, url.includes('aaaaaaaa') ? 30 : 5));
+    inFlight--;
+    if (url.includes('cccccccc')) return { ok: false, status: 404 };
+    return { ok: true, status: 200, headers: { get: () => 'image/png' }, blob: async () => new Blob([png], { type: 'image/png' }) };
+  }]] });
+  const folder = zipStub();
+  const warnings = [];
+  popup.sandbox.__args = { folder, data, collector: { addWarning: (type, name) => warnings.push(name) } };
+  const saved = await vm.runInContext('saveToolImages(__args.folder, __args.data, __args.collector)', popup.sandbox);
+  assert.ok(most > 1, `at most ${most} at once`);
+  assert.ok(most <= 4, `at most ${most} at once`);
+  assert.deepStrictEqual(Object.keys(folder.written), ['images/aaaaaaaa_pic0.png', 'images/bbbbbbbb_pic1.png', 'images/dddddddd_pic3.png', 'images/eeeeeeee_pic4.png']);
+  assert.deepStrictEqual(Object.keys(saved), ['aaaaaaaa-1', 'bbbbbbbb-2', 'dddddddd-4', 'eeeeeeee-5']);
+  assert.deepStrictEqual(warnings, ['pic2']);
+});

@@ -1277,3 +1277,45 @@ test('Export selected waits for a run in another page', async () => {
   await vm.runInContext('runSelected()', pages[1].sandbox);
   assert.deepStrictEqual(ran, [0, 1]);
 });
+
+// Export All asks for the next chat while it writes the current one, one request at a time.
+test('Export All fetches the next chat while it writes the current one', async () => {
+  const { list, chats } = threeTabChats();
+  const log = [];
+  let inFlight = 0, most = 0;
+  const { result } = await bulkRun({ list, chats, setup: (sb) => {
+    const plain = sb.chrome.tabs.sendMessage;
+    sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+      if (msg.action !== 'fetchConversation') return plain(id, msg, cb);
+      log.push(`fetch ${msg.conversationId}`);
+      inFlight++; most = Math.max(most, inFlight);
+      setTimeout(() => { inFlight--; plain(id, msg, cb); }, 5);
+    };
+    sb.__log = log;
+    sb.__slow = () => new Promise((r) => setTimeout(r, 30)); // a write takes longer than the gap (0 ms here)
+    vm.runInContext(`populateConversationFolder = ((orig) => async (...a) => {
+      __log.push('write ' + a[1].uuid); const r = await orig(...a); await __slow(); __log.push('wrote ' + a[1].uuid); return r;
+    })(populateConversationFolder)`, sb);
+  } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(result.saved.chats, 3);
+  assert.ok(log.indexOf('fetch c-b') < log.indexOf('wrote c-a'), log.join(', '));
+  assert.ok(log.indexOf('fetch c-c') < log.indexOf('wrote c-b'), log.join(', '));
+  assert.strictEqual(most, 1, 'one chat request at a time');
+});
+
+// The card's file count replays the chat's files once per version of the chat, not on every refresh.
+test('the This chat card counts files once per chat version', async () => {
+  const chat = Object.assign(loadFixture(), { uuid: CHAT_U, name: 'Trip notes' });
+  const p = panelOn(`https://claude.ai/chat/${CHAT_U}`, { chat });
+  await sleep(50);
+  p.sandbox.__replays = 0;
+  vm.runInContext('extractArtifacts = ((orig) => (...a) => { __replays++; return orig(...a); })(extractArtifacts)', p.sandbox);
+  const before = p.el('chatMeta').textContent;
+  for (let i = 0; i < 3; i++) vm.runInContext('updateUI(JSON.parse(__chat), "org-1")', Object.assign(p.sandbox, { __chat: JSON.stringify(chat) }));
+  assert.strictEqual(p.sandbox.__replays, 0, 'the count from the first load is reused');
+  assert.strictEqual(p.el('chatMeta').textContent, before);
+  const changed = Object.assign(JSON.parse(JSON.stringify(chat)), { updated_at: '2099-01-01T00:00:00Z' });
+  vm.runInContext('updateUI(JSON.parse(__chat), "org-1")', Object.assign(p.sandbox, { __chat: JSON.stringify(changed) }));
+  assert.strictEqual(p.sandbox.__replays, 1, 'a changed chat is counted again');
+});

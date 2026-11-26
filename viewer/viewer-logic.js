@@ -298,6 +298,7 @@ const NO_IMAGE = 'Image not available offline';
 const URL_TEXT = /[a-z][a-z0-9+.-]*:\/\/|(^|\s)(\/\/|www\.)/i;
 const NO_IMAGE_SPAN = '<span class="no-image">(?:Image|(\\d+) images) not available offline</span>';
 const NO_IMAGE_RUN = new RegExp(NO_IMAGE_SPAN + '(?:(?:\\s|<br>|</?p>)*' + NO_IMAGE_SPAN + ')+', 'g');
+const NO_IMAGE_ONE = new RegExp(NO_IMAGE_SPAN, 'g');
 
 function noImageHtml(count) {
   return '<span class="no-image">' + (count > 1 ? count + ' images not available offline' : NO_IMAGE) + '</span>';
@@ -307,7 +308,7 @@ function noImageHtml(count) {
 function collapseNoImage(html) {
   return html.replace(NO_IMAGE_RUN, run => {
     let count = 0;
-    run.replace(new RegExp(NO_IMAGE_SPAN, 'g'), (span, n) => { count += +n || 1; return span; });
+    run.replace(NO_IMAGE_ONE, (span, n) => { count += +n || 1; return span; });
     return noImageHtml(count);
   });
 }

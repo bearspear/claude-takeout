@@ -3399,23 +3399,38 @@ function askForCardPictures() {
 
 // Images Claude looked at (a photo it opened with Read), which claude.ai keeps and only links: downloaded
 // from claude.ai into images/. Returns file uuid -> 'images/<name>'. A failure is a tool_image warning.
+// Fetched TOOL_IMAGE_WORKERS at a time; written and warned afterwards in the chat's order.
+const TOOL_IMAGE_WORKERS = 4;
 async function saveToolImages(folder, data, errorCollector) {
   const saved = {};
-  for (const img of toolImagesOf(data)) {
-    try {
-      const res = await fetch(`https://claude.ai${img.url}`, { credentials: 'include', headers: { Accept: 'image/*' } });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const type = String((res.headers && res.headers.get && res.headers.get('content-type')) || '').split(';')[0].trim().toLowerCase();
-      const blob = await res.blob();
-      const ext = WEB_IMAGE_TYPES[type] || WEB_IMAGE_TYPES[String(blob.type || '').toLowerCase()];
-      if (!ext) throw new Error(`not a PNG, JPEG, GIF or WebP image (${type || blob.type || 'no type'})`);
-      const name = toolImageName(img, ext);
-      folder.file(`images/${name}`, blob);
-      saved[img.uuid] = `images/${name}`;
-    } catch (err) {
-      errorCollector.addWarning('tool_image', img.base || img.uuid, `Image Claude viewed not saved: ${err.message}`, { uuid: img.uuid, path: img.url });
+  const images = toolImagesOf(data);
+  const got = new Array(images.length);
+  const fetchOne = async (img) => {
+    const res = await fetch(`https://claude.ai${img.url}`, { credentials: 'include', headers: { Accept: 'image/*' } });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const type = String((res.headers && res.headers.get && res.headers.get('content-type')) || '').split(';')[0].trim().toLowerCase();
+    const blob = await res.blob();
+    const ext = WEB_IMAGE_TYPES[type] || WEB_IMAGE_TYPES[String(blob.type || '').toLowerCase()];
+    if (!ext) throw new Error(`not a PNG, JPEG, GIF or WebP image (${type || blob.type || 'no type'})`);
+    return { blob, ext };
+  };
+  let next = 0;
+  const worker = async () => {
+    while (next < images.length) {
+      const i = next++;
+      try { got[i] = { ok: await fetchOne(images[i]) }; } catch (err) { got[i] = { err }; }
     }
-  }
+  };
+  await Promise.all(Array.from({ length: Math.min(TOOL_IMAGE_WORKERS, images.length) }, worker));
+  images.forEach((img, i) => {
+    if (got[i].ok) {
+      const name = toolImageName(img, got[i].ok.ext);
+      folder.file(`images/${name}`, got[i].ok.blob);
+      saved[img.uuid] = `images/${name}`;
+    } else {
+      errorCollector.addWarning('tool_image', img.base || img.uuid, `Image Claude viewed not saved: ${got[i].err.message}`, { uuid: img.uuid, path: img.url });
+    }
+  });
   return saved;
 }
 
@@ -3515,7 +3530,7 @@ function displayLines(name, input, result, webImages = {}, up = '') {
   products.forEach((p, n) => {
     lines.push(`#### ${String(p.name || '').trim()}${p.price ? ` (${p.price})` : ''}`, '');
     if (p.blurb) lines.push(String(p.blurb), '');
-    const pics = images.filter((img) => img && new RegExp(`^product_${n}_`).test(String(img.id || '')))
+    const pics = images.filter((img) => img && String(img.id || '').startsWith(`product_${n}_`))
       .map((img) => Object.prototype.hasOwnProperty.call(webImages, img.url) ? webImages[img.url] : null).filter(Boolean);
     if (pics.length) lines.push(pics.map((f) => `![${mdLinkText(p.name || 'Product')}](${up}${f.split('/').map(encodeURIComponent).join('/')})`).join(' '), '');
   });
@@ -4727,6 +4742,15 @@ const CHAT_CARD_TEXT = {
 const CHAT_BUTTONS = ['exportZip', 'exportMd', 'exportMdEmbed', 'exportJson'];
 const plural = (n, one) => `${n} ${one}${n === 1 ? '' : 's'}`;
 
+// The card's file count: a full replay of the chat's files (extractArtifacts), kept for the last chat version seen, so
+// a refresh or a tab switch back doesn't replay it again.
+let fileCountMemo = { key: null, n: 0 };
+function chatFileCount(data) {
+  const key = `${data.uuid}|${data.updated_at || ''}|${(data.chat_messages || []).length}|${data.current_leaf_message_uuid || ''}`;
+  if (fileCountMemo.key !== key) fileCountMemo = { key, n: Object.keys(extractArtifacts(data)).length };
+  return fileCountMemo.n;
+}
+
 function updateUI(data, org, { preserveStatus = false, state = null, detail = '' } = {}) {
   const $ = (id) => document.getElementById(id);
   if (org) {
@@ -4745,7 +4769,7 @@ function updateUI(data, org, { preserveStatus = false, state = null, detail = ''
     title.textContent = name;
     title.title = name;
     // "Files" are what extractArtifacts finds in the chat; "artifacts" stays the word for claude.ai's artifacts.
-    meta.textContent = `${getModelName(data)} · ${plural(getMessageChain(data).length, 'message')} · ${plural(Object.keys(extractArtifacts(data)).length, 'file')}`;
+    meta.textContent = `${getModelName(data)} · ${plural(getMessageChain(data).length, 'message')} · ${plural(chatFileCount(data), 'file')}`;
   } else {
     title.textContent = '';
     title.title = '';
@@ -5206,6 +5230,8 @@ function exportProgress(options, { phase, done, total, sub = '', warnings = 0 })
 // Artifacts checkbox, settings.exportAllArtifacts). options.onProgress: progress events (exportProgress). options.signal:
 // { stopped }, checked before each chat, artifact and older version; when set, the run ends as 'stopped' (stoppedRun).
 // Resolves to a run result (runResult); never throws.
+// The least time between two chat requests in Export All.
+const CHAT_FETCH_GAP = 200;
 // Export All's warning when the claude.ai tab stopped answering (closed, or navigated off claude.ai).
 const TAB_GONE_REASON = 'The claude.ai tab closed or stopped answering';
 
@@ -5352,6 +5378,16 @@ async function bulkExportZip(options = {}) {
     };
 
     let tabGone = false;
+    // The next chat is asked for while this one is written, one request at a time and at least CHAT_FETCH_GAP ms
+    // after the last one started (the pace the fixed pause after each chat used to set). sendToTab never rejects.
+    let lastFetch = 0;
+    const fetchChat = async (conv) => {
+      const wait = lastFetch + CHAT_FETCH_GAP - Date.now();
+      if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+      lastFetch = Date.now();
+      return sendToTab(tab.id, { action: 'fetchConversation', conversationId: conv.uuid });
+    };
+    let nextChat = conversations.length ? fetchChat(conversations[0]) : null;
     for (let ci = 0; ci < conversations.length; ci++) {
       const conv = conversations[ci];
       if (stopRequested()) break;
@@ -5360,8 +5396,9 @@ async function bulkExportZip(options = {}) {
         // Fetch full conversation. sendToTab injects content.js again into a tab that lost it; a tab that still
         // doesn't answer is gone (closed, or moved off claude.ai): no more chats are asked for, the artifact step is
         // skipped, and the export ends with what it has, warned, so only the chats saved are recorded.
-        const result = await sendToTab(tab.id, { action: 'fetchConversation', conversationId: conv.uuid });
+        const result = await nextChat;
         if (result.connectionError) { tabGone = true; break; }
+        nextChat = ci + 1 < conversations.length && !stopRequested() ? fetchChat(conversations[ci + 1]) : null;
 
         if (result.error) {
           throw new Error(result.error);
@@ -5429,9 +5466,6 @@ async function bulkExportZip(options = {}) {
       }
 
       emit('chats', exported + errors.length, total, conv.name || 'Untitled');
-
-      // Small delay to avoid overwhelming
-      await new Promise(r => setTimeout(r, 200));
     }
 
     // claude.ai's artifacts into the store, after the chats: a version a chat saved is not fetched again. Card
