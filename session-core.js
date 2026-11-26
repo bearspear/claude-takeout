@@ -3,28 +3,72 @@
 // It keeps the listed fields, strips system reminders from user text, masks known token shapes and
 // stubs oversized events. Nothing it drops reaches the panel or the archive.
 
+(function () {
 const EVENT_STUB_BYTES = 2 * 1024 * 1024;
 const SESSION_PAGE_LIMIT = 200;
 
-const SYSTEM_REMINDER_RE = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+const REMINDER_TAG_RE = /<(\/?)system-reminder>/g;
 
+// Depth-aware: nested reminders go whole, an unclosed one drops the rest, a stray closing tag is removed.
 function stripSystemReminders(text) {
-  const out = String(text).replace(SYSTEM_REMINDER_RE, '');
+  text = String(text);
+  let out = '';
+  let depth = 0;
+  let pos = 0;
+  REMINDER_TAG_RE.lastIndex = 0;
+  let m;
+  while ((m = REMINDER_TAG_RE.exec(text))) {
+    if (depth === 0) out += text.slice(pos, m.index);
+    if (m[1]) { if (depth > 0) depth--; } else depth++;
+    pos = m.index + m[0].length;
+  }
+  if (depth === 0) out += text.slice(pos);
   return out.trim() === '' ? '' : out;
 }
 
+const KEY_BEGIN_RE = /-----BEGIN [A-Z ]*PRIVATE KEY-----/g;
+const KEY_END_RE = /-----END [A-Z ]*PRIVATE KEY-----/g;
+const BLANK_LINE_RE = /\r?\n[ \t]*\r?\n/g;
+
+// Linear: a BEGIN with no END anywhere after it is masked to the next blank line (or the end), and once
+// no END exists no later BEGIN looks for one.
+function maskKeys(text) {
+  let out = '';
+  let pos = 0;
+  let noEnd = false;
+  KEY_BEGIN_RE.lastIndex = 0;
+  for (;;) {
+    const m = KEY_BEGIN_RE.exec(text);
+    if (!m) break;
+    let end = -1;
+    if (!noEnd) {
+      KEY_END_RE.lastIndex = m.index + m[0].length;
+      const e = KEY_END_RE.exec(text);
+      if (e) end = e.index + e[0].length; else noEnd = true;
+    }
+    if (end < 0) {
+      BLANK_LINE_RE.lastIndex = m.index + m[0].length;
+      const b = BLANK_LINE_RE.exec(text);
+      end = b ? b.index : text.length;
+    }
+    out += text.slice(pos, m.index) + '[masked]';
+    pos = end;
+    KEY_BEGIN_RE.lastIndex = end;
+  }
+  return out + text.slice(pos);
+}
+
 const SECRET_RES = [
-  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g,
   /sk-ant-[A-Za-z0-9_-]+/g,
   /github_pat_[A-Za-z0-9_]+/g,
   /gh[po]_[A-Za-z0-9]+/g,
   /AKIA[0-9A-Z]{16}/g,
   /xox[bp]-[A-Za-z0-9-]+/g,
-  /Bearer [A-Za-z0-9._~+\/=-]{20,}/g,
+  /Bearer [A-Za-z0-9._~+\/=-]{20,}/gi,
 ];
 
 function maskSecrets(text) {
-  let out = String(text);
+  let out = maskKeys(String(text));
   for (const re of SECRET_RES) out = out.replace(re, '[masked]');
   return out;
 }
@@ -38,11 +82,16 @@ function pick(obj, keys) {
 function keepSession(raw) {
   if (!raw || typeof raw.id !== 'string' || !raw.id.startsWith('cse_')) return null;
   const out = pick(raw, ['id', 'title', 'status_bucket', 'environment_kind']);
-  if (raw.config) out.config = pick(raw.config, ['origin', 'model']);
+  if (typeof out.title === 'string') out.title = maskSecrets(out.title);
+  if (raw.config && typeof raw.config === 'object') out.config = pick(raw.config, ['origin', 'model']);
   Object.assign(out, pick(raw, ['created_at', 'updated_at', 'last_event_at']));
   const arts = raw.external_metadata && raw.external_metadata.artifacts;
   if (Array.isArray(arts)) {
-    out.external_metadata = { artifacts: arts.map((a) => pick(a, ['artifact_id', 'title', 'updated_at'])) };
+    out.external_metadata = { artifacts: arts.filter((a) => a && typeof a === 'object').map((a) => {
+      const o = pick(a, ['artifact_id', 'title', 'updated_at']);
+      if (typeof o.title === 'string') o.title = maskSecrets(o.title);
+      return o;
+    }) };
   }
   return out;
 }
@@ -103,6 +152,7 @@ function sessionPage(raw) {
 }
 
 globalThis.CTSession = { stripSystemReminders, maskSecrets, keepSession, keepSessionEvent, sessionPage, EVENT_STUB_BYTES, SESSION_PAGE_LIMIT };
+})();
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = globalThis.CTSession;

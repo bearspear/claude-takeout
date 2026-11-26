@@ -96,3 +96,41 @@ test('sessionPage takes lastId and hasMore from the raw page', () => {
   assert.strictEqual(S.EVENT_STUB_BYTES, 2 * 1024 * 1024);
   assert.strictEqual(S.SESSION_PAGE_LIMIT, 200);
 });
+
+test('session-core.js can run twice in one context (re-injection)', () => {
+  const vm = require('node:vm');
+  const src = require('node:fs').readFileSync(require.resolve('../session-core.js'), 'utf8');
+  const ctx = vm.createContext({});
+  vm.runInContext(src, ctx);
+  assert.doesNotThrow(() => vm.runInContext(src, ctx));
+  assert.strictEqual(vm.runInContext("CTSession.maskSecrets('ghp_' + 'a'.repeat(36))", ctx), '[masked]');
+});
+
+test('maskSecrets masks a truncated private key', () => {
+  assert.strictEqual(S.maskSecrets('-----BEGIN OPENSSH PRIVATE KEY-----\nAAAAB3abc\n...truncated'), '[masked]');
+  assert.strictEqual(S.maskSecrets('x\n-----BEGIN PRIVATE KEY-----\nAAA\nBBB\n\nafter'), 'x\n[masked]\n\nafter');
+  const big = '-----BEGIN RSA PRIVATE KEY-----\n'.repeat(Math.ceil(1024 * 1024 / 32));
+  assert.strictEqual(S.maskSecrets(big), '[masked]');
+  assert.strictEqual(S.maskSecrets('-----BEGIN PRIVATE KEY-----\na\n-----END PRIVATE KEY----- -----BEGIN PRIVATE KEY-----\nb'), '[masked] [masked]');
+});
+
+test('stripSystemReminders handles unclosed and nested tags', () => {
+  assert.strictEqual(S.stripSystemReminders('hi <system-reminder>secret cwd'), 'hi ');
+  assert.strictEqual(S.stripSystemReminders('<system-reminder>a<system-reminder>b</system-reminder>c</system-reminder>x'), 'x');
+  assert.strictEqual(S.stripSystemReminders('a</system-reminder>b'), 'ab');
+});
+
+test('maskSecrets matches Bearer case-insensitively and at string edges', () => {
+  assert.strictEqual(S.maskSecrets('authorization: bearer ' + 'a'.repeat(40)), 'authorization: [masked]');
+  assert.strictEqual(S.maskSecrets('ghp_' + 'a'.repeat(36)), '[masked]');
+  assert.strictEqual(S.maskSecrets('x ' + 'AKIA' + 'ABCDEFGH12345678'), 'x [masked]');
+});
+
+test('keepSession masks titles and tolerates odd shapes', () => {
+  const tok = 'ghp_' + 'a'.repeat(36);
+  const k = S.keepSession({ id: 'cse_1', title: 'T ' + tok, config: 'oops',
+    external_metadata: { artifacts: [{ artifact_id: 'a', title: tok }, 'bad', null, 5] } });
+  assert.strictEqual(k.title, 'T [masked]');
+  assert.strictEqual(k.config, undefined);
+  assert.deepStrictEqual(k.external_metadata.artifacts, [{ artifact_id: 'a', title: '[masked]' }]);
+});
