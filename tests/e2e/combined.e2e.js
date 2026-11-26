@@ -77,7 +77,7 @@ const makeChat = {
     msg('mh1', null, 'human', 7, [{ type: 'text', text: 'make files' }]),
     msg('ma1', 'mh1', 'assistant', 8, [
       ...write('w1', 'notes.md', '# Notes\n\nSome **bold** text.\n\n<script>console.log("MD SCRIPT")</script>'),
-      { type: 'tool_use', id: 'c1', name: 'create_file', input: { path: '/home/claude/chart.svg', file_text: '<svg xmlns="http://www.w3.org/2000/svg"><circle r="5"/><!--V1--></svg>' } },
+      { type: 'tool_use', id: 'c1', name: 'create_file', input: { path: '/home/claude/chart.svg', file_text: '<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20"><circle r="5"/><!--V1--></svg>' } },
       { type: 'tool_result', tool_use_id: 'c1', name: 'create_file', content: [{ type: 'text', text: 'ok' }] },
       ...write('w2', 'page.html', PAGE),
       ...write('w3', 'style.css', 'h1#t { color: rgb(4, 5, 6); }'),

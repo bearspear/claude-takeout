@@ -21,12 +21,6 @@ const ICON_PATHS = {
   wrench: 'M15 6a4 4 0 0 1 5-1l-3 3 1.5 1.5 3-3a4 4 0 0 1-5.5 5L9 18a2 2 0 1 1-3-3l7-6.5A4 4 0 0 1 15 6Z',
 };
 
-const TOOL_ICONS = {
-  web_search: 'search', web_fetch: 'globe', bash_tool: 'terminal', Bash: 'terminal',
-  create_file: 'file', Write: 'file', view: 'file', read_file: 'file', Read: 'file', present_files: 'file',
-  artifacts: 'file', SendUserFile: 'file', str_replace: 'pencil', Edit: 'pencil', str_replace_based_edit_tool: 'pencil',
-};
-
 const SAFE_IMAGE_URI = /^data:image\/(png|jpeg|gif|webp);base64,/;
 const SVG_NS = 'http://www.w3.org/2000/svg';
 
@@ -881,7 +875,8 @@ function renderProject(chat) {
   box.hidden = !items.length && !instructions && !added.length && !entry;
   box.replaceChildren();
   if (box.hidden) return;
-  const name = (project && project.name) || 'Untitled';
+  // The name the lists screen gives it ("Name (2)" for a second project of one name).
+  const name = entry ? entry.name : (project && project.name) || 'Untitled';
   if (entry) {
     const link = el('a', 'open-project', 'Open project');
     link.href = projectHash(entry.key);
@@ -1658,8 +1653,9 @@ function fileDetails(file, version) {
 function previewNodes(chat, file, version) {
   if (file.kind === 'md') return [renderText({ text: version.text, cites: [] }, [])];
   if (file.kind === 'image') return [panelPictureZoom(() => zoomPaper(version.href, file.name || '')).frame];
-  // An SVG shows as a picture, which runs nothing; one with scripts may need them, so it stays a page.
-  if (file.kind === 'svg' && typeof version.text === 'string' && !svgHasScripts(version.text)) {
+  // An SVG shows as a picture, which runs nothing; one with scripts may need them, and one of unknown size would be
+  // cropped, so those stay a page (svgAsPicture).
+  if (file.kind === 'svg' && svgAsPicture(version.text)) {
     let shown = null;
     // The strict XML parser refused it (no xmlns, an HTML entity, a bare &): the forgiving frame shows it.
     const fallback = zoom => {
@@ -1865,10 +1861,12 @@ function navigate(state, options = {}) {
   const leaf = chain.length ? chain[chain.length - 1].id : null;
   const open = resolveFile(chat.files, want.file, want.version, allAdded);
   const hash = formatHash({ chat: chat.id, leaf, file: open && open.file, version: open && open.version });
+  // replaceState can throw (Safari allows 100 calls in 30 s): the hash then stays as it was.
+  const replaceHash = h => { try { history.replaceState(null, '', h); } catch (e) { /* the hash stays */ } };
   if (!options.fromHash && hash !== location.hash) {
-    if (options.replace) history.replaceState(null, '', hash);
+    if (options.replace) replaceHash(hash);
     else location.hash = hash;
-  } else if (options.fromHash && hash !== location.hash) history.replaceState(null, '', hash);
+  } else if (options.fromHash && hash !== location.hash) replaceHash(hash);
   shown = hash;
   if (fromScreen) document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
   if (stepper && stepper.chat !== chat.id) closeStepper();
@@ -1960,6 +1958,36 @@ function showArtifacts(on, titles = null) {
 let listsOn = false;
 let listProjects = []; // projectList over the chats, built once at start
 let listState = null; // { page: 'projects' | 'project' | 'chats', project }: what the screen shows
+let sortedChats = null; // every chat, newest first, for All chats (sorted on its first visit)
+
+// A list page as it was left (filter text, chat rows shown, scroll), kept in its history entry's state while it
+// shows, so Back or Forward to it finds it the same. A new visit (a link, an entry) has no state and starts afresh.
+// Saved after a pause in typing or scrolling, at once on Show more, and any save still waiting is written on a click
+// (capture, before a link's navigation): few history calls (Safari allows 100 in 30 s), none lost on leaving.
+let listSaveTimer = null;
+function saveListView() {
+  clearTimeout(listSaveTimer);
+  const hash = location.hash;
+  if (!listsOn || shown !== hash) return;
+  const screen = document.getElementById('lists-screen');
+  const filter = screen.querySelector('input.list-filter');
+  const list = { hash, query: filter ? filter.value : '', rows: screen.querySelectorAll('a.chat-row').length, scroll: screen.scrollTop };
+  try { history.replaceState({ list }, ''); } catch (e) { /* the page just starts afresh on Back */ }
+}
+function saveListViewSoon() {
+  clearTimeout(listSaveTimer);
+  const hash = location.hash;
+  listSaveTimer = setTimeout(() => { listSaveTimer = null; if (location.hash === hash) saveListView(); }, 300);
+}
+function flushListView() {
+  if (listSaveTimer === null) return;
+  saveListView();
+  listSaveTimer = null;
+}
+function savedListView() {
+  const list = history.state && history.state.list;
+  return list && list.hash === location.hash ? list : null;
+}
 
 function listPageTitle(state) {
   if (state.page === 'project') return state.project.name;
@@ -1974,11 +2002,13 @@ function renderListPage(state) {
   heading.tabIndex = -1;
   const page = el('div', `list-page ${state.page}-page`);
   const now = Date.now();
-  if (state.page === 'projects') projectsPage(page, heading, now);
-  else if (state.page === 'project') projectPage(page, heading, state.project, now);
-  else chatsPage(page, heading, now);
+  const saved = savedListView();
+  const memo = { query: saved ? String(saved.query || '') : '', rows: saved ? Number(saved.rows) || 0 : 0 };
+  if (state.page === 'projects') projectsPage(page, heading, now, memo);
+  else if (state.page === 'project') projectPage(page, heading, state.project, now, memo);
+  else chatsPage(page, heading, now, memo);
   screen.replaceChildren(page);
-  screen.scrollTop = 0;
+  screen.scrollTop = saved ? Number(saved.scroll) || 0 : 0;
 }
 
 const projectHash = key => `#project=${encodeURIComponent(key)}`;
@@ -1992,19 +2022,21 @@ function listFilter(label, onInput) {
   input.setAttribute('aria-label', label);
   input.autocomplete = 'off';
   input.spellcheck = false;
-  input.addEventListener('input', () => onInput(input.value));
+  input.addEventListener('input', () => { onInput(input.value); saveListViewSoon(); });
   return input;
 }
 
-function projectsPage(page, heading, now) {
+function projectsPage(page, heading, now, memo) {
   const grid = el('div', 'project-grid');
   const draw = query => {
     const matches = filterByText(listProjects, query, p => [p.name, p.description]);
     grid.replaceChildren(...matches.map(p => projectCard(p, now)));
     if (!matches.length) grid.append(el('p', 'list-empty', 'No projects match.'));
   };
-  page.append(heading, listFilter('Filter projects', draw), grid);
-  draw('');
+  const filter = listFilter('Filter projects', draw);
+  filter.value = memo.query;
+  page.append(heading, filter, grid);
+  draw(memo.query);
 }
 
 function projectCard(p, now) {
@@ -2017,18 +2049,17 @@ function projectCard(p, now) {
   return card;
 }
 
-// Chat rows, LIST_PAGE at a time with Show more. withProject: name each chat's project, linked to its page.
-function chatRows(chats, now, withProject) {
+// Chat rows, LIST_PAGE at a time with Show more, at least `want` of them at first. projectOf (a Map, or null): name each
+// chat's project, linked to its page.
+function chatRows(chats, now, projectOf, want = 0) {
   const box = el('div', 'chat-rows');
-  const projectOf = new Map();
-  if (withProject) for (const p of listProjects) for (const c of p.chats) projectOf.set(c, p);
   const row = chat => {
     const line = el('div', 'chat-line');
     const link = el('a', 'chat-row', chat.title || 'Untitled');
     link.href = formatHash({ chat: chat.id });
     line.append(link);
     const sub = el('div', 'chat-sub');
-    const p = projectOf.get(chat);
+    const p = projectOf ? projectOf.get(chat) : null;
     if (p) {
       const a = el('a', 'chat-project', p.name);
       a.href = projectHash(p.key);
@@ -2056,35 +2087,42 @@ function chatRows(chats, now, withProject) {
     step();
     const first = list.children[at];
     if (first) first.querySelector('a.chat-row').focus({ preventScroll: true });
+    saveListView();
   });
   box.append(list, more);
   step();
+  while (count < want && count < chats.length) step();
   return box;
 }
 
-// Chat rows and a filter box that redraws them from every chat in `chats`, not only the rows shown.
-function filteredChatRows(chats, now, withProject) {
-  let rows = chatRows(chats, now, withProject);
+// Chat rows and a filter box that redraws them from every chat in `chats`, not only the rows shown. memo: the
+// filter text and rows shown to start from (a page come back to).
+function filteredChatRows(chats, now, withProject, memo) {
+  const projectOf = withProject ? new Map() : null;
+  if (projectOf) for (const p of listProjects) for (const c of p.chats) projectOf.set(c, p);
+  const pick = query => (query.trim() ? filterByText(chats, query, c => [c.title]) : chats);
+  let rows = chatRows(pick(memo.query), now, projectOf, memo.rows);
   const filter = listFilter('Filter chats', query => {
-    const next = chatRows(filterByText(chats, query, c => [c.title]), now, withProject);
+    const next = chatRows(pick(query), now, projectOf);
     rows.replaceWith(next);
     rows = next;
   });
+  filter.value = memo.query;
   return { rows, filter };
 }
 
-function chatsPage(page, heading, now) {
-  const all = recentChats(allChats, allChats.length);
-  const { rows, filter } = filteredChatRows(all, now, true);
-  page.append(heading, el('p', 'list-count', chatCount(all.length)), filter, rows);
+function chatsPage(page, heading, now, memo) {
+  if (!sortedChats) sortedChats = recentChats(allChats, allChats.length);
+  const { rows, filter } = filteredChatRows(sortedChats, now, true, memo);
+  page.append(heading, el('p', 'list-count', chatCount(sortedChats.length)), filter, rows);
 }
 
-// A project's files and documents, as the chat's fold bar and the project page show them.
 // A project's instructions text, or '' when it has none.
 function projectInstructions(project) {
   return project && typeof project.instructions === 'string' ? project.instructions : '';
 }
 
+// A project's files and documents, as the chat's fold bar and the project page show them.
 function projectItems(project) {
   return project ? [
     ...(project.files || []).map(f => ({ name: f.name, href: f.href, text: null })),
@@ -2092,20 +2130,8 @@ function projectItems(project) {
   ] : [];
 }
 
-// About 8 lines of instructions, counting a long line as the lines it wraps to in the panel.
-const INSTRUCTION_LINES = 8;
-const INSTRUCTION_LINE_CHARS = 40;
-function longInstructions(text) {
-  let lines = 0;
-  for (const line of String(text).split('\n')) {
-    lines += Math.max(1, Math.ceil(line.length / INSTRUCTION_LINE_CHARS));
-    if (lines > INSTRUCTION_LINES) return true;
-  }
-  return false;
-}
-
 // entry: a listProjects entry. Its chats share one project object (linkProjects), which holds instructions and knowledge.
-function projectPage(page, heading, entry, now) {
+function projectPage(page, heading, entry, now, memo) {
   const project = entry.chats.length ? entry.chats[0].project : null;
   const back = el('a', 'back');
   back.href = '#projects';
@@ -2115,7 +2141,7 @@ function projectPage(page, heading, entry, now) {
   const cols = el('div', 'project-cols');
   const chats = el('section', 'project-chats');
   chats.append(el('h3', '', `Chats · ${entry.chats.length}`));
-  const { rows, filter } = filteredChatRows(entry.chats, now, false);
+  const { rows, filter } = filteredChatRows(entry.chats, now, false, memo);
   if (entry.chats.length > 10) chats.append(filter);
   chats.append(rows);
   const panel = el('aside', 'project-panel');
@@ -2126,25 +2152,24 @@ function projectPage(page, heading, entry, now) {
   if (instructions.trim()) {
     const text = el('div', 'project-instructions', instructions);
     instr.append(text);
-    if (longInstructions(instructions)) {
-      text.classList.add('collapsed');
-      const toggle = el('button', 'more-toggle', 'Show more');
-      toggle.type = 'button';
-      toggle.setAttribute('aria-expanded', 'false');
-      toggle.addEventListener('click', () => {
-        const open = !text.classList.toggle('collapsed');
-        toggle.textContent = open ? 'Show less' : 'Show more';
-        toggle.setAttribute('aria-expanded', String(open));
-      });
-      instr.append(toggle);
-      // The line count is a guess; once drawn, text that fits whole loses the cut and the toggle.
-      requestAnimationFrame(() => {
-        if (text.isConnected && text.scrollHeight <= text.clientHeight + 1) {
-          text.classList.remove('collapsed');
-          toggle.remove();
-        }
-      });
-    }
+    // Collapsed to about 8 lines (12em); once drawn, text that fits whole loses the cut and the toggle. Measured, not
+    // guessed from its length: wide characters and word wrapping make any line estimate wrong.
+    text.classList.add('collapsed');
+    const toggle = el('button', 'more-toggle', 'Show more');
+    toggle.type = 'button';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.addEventListener('click', () => {
+      const open = !text.classList.toggle('collapsed');
+      toggle.textContent = open ? 'Show less' : 'Show more';
+      toggle.setAttribute('aria-expanded', String(open));
+    });
+    instr.append(toggle);
+    requestAnimationFrame(() => {
+      if (text.isConnected && text.scrollHeight <= text.clientHeight + 1) {
+        text.classList.remove('collapsed');
+        toggle.remove();
+      }
+    });
   } else instr.append(el('p', 'list-empty', 'No instructions'));
   const know = el('section', 'panel-part');
   const items = projectItems(project);
@@ -2160,9 +2185,14 @@ function projectPage(page, heading, entry, now) {
 }
 
 // Opens a lists screen hash, routing it directly when it is already the hash (no hashchange would fire then).
+// An entry or View all starts the page afresh, also when it already shows.
 function openList(hash) {
   if (location.hash !== hash) location.hash = hash;
-  else routeLists(hash);
+  else {
+    clearTimeout(listSaveTimer);
+    try { history.replaceState(null, ''); } catch (e) { /* the state stays */ }
+    routeLists(hash);
+  }
 }
 
 // Shows the screen when hash is one of its own; returns whether it was. An unknown project key shows Projects.
@@ -2762,6 +2792,8 @@ function start() {
     if (arrow && !arrow.disabled) switchTo(arrow);
   });
   window.addEventListener('hashchange', onHashChange);
+  document.getElementById('lists-screen').addEventListener('scroll', () => { if (listsOn) saveListViewSoon(); }, { passive: true });
+  document.addEventListener('click', flushListView, true);
   if (!data.chats.length) document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
   if (routeArtifacts(location.hash)) return;
   if (routeLists(location.hash)) return;

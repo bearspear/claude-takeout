@@ -284,6 +284,64 @@ function projectOf(c) {
   await pages.locator('#lists-screen .chat-line:has(a.chat-row:text-is("Chat 12")) a.chat-project').click();
   await pages.waitForFunction(() => location.hash === '#project=p-b');
   check('all chats: the project link opens the project', (await pages.textContent('#lists-screen h2.list-title')) === BETA.name);
+  // Back to a list page finds it as it was left: the filter, the rows shown and the scroll.
+  await pages.goBack();
+  await pages.waitForFunction(() => document.title === 'Chats - Claude Takeout');
+  const backRows = await pages.$$eval('#lists-screen a.chat-row', l => l.map(a => a.textContent));
+  check('back: the filter is kept', (await cFilter.inputValue()) === 'Chat 12' && backRows.length === 13 && backRows.includes('Chat 12') && backRows.includes('Chat 212'), `${await cFilter.inputValue()} ${backRows.length}`);
+  await cFilter.fill('');
+  await pages.click('#lists-screen button.show-more');
+  // Scrolled, then a row clicked at once (before the save after scrolling would run).
+  await pages.evaluate(() => { document.getElementById('lists-screen').scrollTop = 3000; });
+  await pages.evaluate(() => new Promise(r => requestAnimationFrame(r)));
+  const leftAt = await pages.evaluate(() => document.getElementById('lists-screen').scrollTop);
+  const target = await pages.evaluate(() => {
+    const top = document.getElementById('lists-screen').getBoundingClientRect().top;
+    const a = [...document.querySelectorAll('#lists-screen a.chat-row')].find(x => x.getBoundingClientRect().top > top + 40);
+    const r = a.getBoundingClientRect();
+    return { x: r.left + 10, y: r.top + r.height / 2 };
+  });
+  await pages.mouse.click(target.x, target.y);
+  await pages.waitForFunction(() => location.hash.includes('chat='));
+  await pages.goBack();
+  await pages.waitForFunction(() => document.title === 'Chats - Claude Takeout');
+  await pages.waitForTimeout(100);
+  const backAt = await pages.evaluate(() => document.getElementById('lists-screen').scrollTop);
+  check('back: Show more and the scroll are kept', (await pages.locator('#lists-screen a.chat-row').count()) === 230 && leftAt > 1000 && Math.abs(backAt - leftAt) < 2, `${await pages.locator('#lists-screen a.chat-row').count()} ${leftAt} -> ${backAt}`);
+  await pages.click('#chats-nav');
+  await pages.waitForTimeout(100);
+  check('the Chats entry starts the page afresh', (await pages.locator('#lists-screen a.chat-row').count()) === 200 && (await cFilter.inputValue()) === '' && await pages.evaluate(() => document.getElementById('lists-screen').scrollTop) === 0);
+
+  // Two projects of one name, and instructions that wrap more than the line estimate.
+  {
+    const SAME_A = { id: 's1', name: 'Same', fileDir: 'project/files', fileNames: [], docs: [] };
+    const SAME_B = { id: 's2', name: 'Same', fileDir: 'project/files', fileNames: [], docs: [] };
+    const CJK = { id: 'cjk', name: 'Wide', instructions: Array.from({ length: 6 }, () => '漢'.repeat(40)).join('\n'), fileDir: 'project/files', fileNames: [], docs: [] };
+    const few = [chat(0), chat(1), chat(2), chat(3)];
+    const dup = path.join(dir, 'dup.html');
+    fs.writeFileSync(dup, buildHtml(few, '2026-11-25T12:00:00Z', c => [{ project: SAME_A }, { project: SAME_B }, { project: CJK }, {}][Number(c.uuid.slice(1))]));
+    const dp = await open('file://' + dup);
+    const seen = [];
+    for (const [id, n] of [['c000', 0], ['c001', 1]]) {
+      await dp.evaluate(h => { location.hash = h; }, `#chat=${id}`);
+      await dp.waitForFunction(t => document.title === t, `Chat ${n} - Claude Takeout`);
+      await dp.waitForSelector('#project a.open-project');
+      const line = await dp.textContent('#project .project-line').catch(() => null);
+      await dp.click('#project a.open-project');
+      await dp.waitForFunction(() => location.hash.startsWith('#project='));
+      seen.push([line, await dp.textContent('#lists-screen h2.list-title')]);
+    }
+    check('fold bar: names the project as its page does', seen.every(([l, h]) => l === `Project · ${h}`) && seen.map(x => x[1]).sort().join() === 'Same,Same (2)', JSON.stringify(seen));
+    await dp.evaluate(() => { location.hash = '#project=cjk'; });
+    await dp.waitForFunction(() => document.title === 'Wide - Claude Takeout');
+    await dp.waitForTimeout(100);
+    const cut = await dp.evaluate(() => {
+      const t = document.querySelector('#lists-screen .project-instructions');
+      return { collapsed: t.classList.contains('collapsed'), toggle: !!document.querySelector('#lists-screen .more-toggle') };
+    });
+    check('project page: instructions that wrap past the estimate collapse', cut.collapsed && cut.toggle, JSON.stringify(cut));
+    await dp.close();
+  }
 
   // A phone: the drawer closes on Projects and the cards are one column.
   const phone = await browser.newContext({ viewport: { width: 420, height: 800 } });

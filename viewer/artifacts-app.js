@@ -736,11 +736,11 @@
       return zoomed(key, 'picture', pictureZoom(box, img, opts));
     }
 
-    // An SVG file shows as a picture of its own text, which runs nothing; one with scripts may need them, so it stays a
-    // page. The strict XML parser can refuse what the forgiving frame shows (no xmlns, an HTML entity, a bare &): then
-    // the page, from page().
+    // An SVG file shows as a picture of its own text, which runs nothing; one with scripts may need them, and one of
+    // unknown size would be cropped, so those stay a page (svgAsPicture). The strict XML parser can refuse what the
+    // forgiving frame shows (no xmlns, an HTML entity, a bare &): then the page, from page().
     function svgFrame(text, alt, key, page) {
-      if (svgHasScripts(text)) return page();
+      if (!svgAsPicture(text)) return page();
       let shown = null;
       const fallback = zoom => {
         if (shownZoom && shownZoom.controller === zoom) shownZoom = null;
@@ -1232,6 +1232,8 @@
       });
       on(view, 'pointermove', e => {
         if (!drag || drag.id !== e.pointerId) return;
+        // A mouse released outside the window sent it no pointerup (capture starts only past 4 px): no button, no drag.
+        if (e.pointerType === 'mouse' && e.buttons === 0) { endDrag(); return; }
         const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
         if (!drag.moving) {
           if (Math.hypot(dx, dy) <= 4) return;
