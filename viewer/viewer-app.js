@@ -1763,6 +1763,25 @@ function fileDetails(file, version) {
   return box;
 }
 
+// A published page of one of claude.ai's typed artifacts (a Design, Slides, ...): its start file is claude.ai's own
+// loader, which never finishes offline ("Loading…"). The Artifacts screen draws it (a Design's canvas from
+// project/canvas.json), so the panel points there. The '#a=' hash, or null.
+function typedArtifactHash(file) {
+  if (!artifactsApp || !file || !file.published || typeof file.artifact !== 'string') return null;
+  const view = allArtifactViews.find(v => v && String(v.id) === file.artifact);
+  return view && view.typed === true && !view.docs && parseArtifactHash('#a=' + file.artifact) ? '#a=' + file.artifact : null;
+}
+
+function typedArtifactNote(file, hash) {
+  const view = allArtifactViews.find(v => v && String(v.id) === file.artifact) || {};
+  const kind = typeof view.kind === 'string' && view.kind ? view.kind : 'typed artifact';
+  const note = el('div', 'file-note design-note', `This ${kind === 'Design' ? 'Design' : kind} only runs on claude.ai. `);
+  const link = el('a', '', kind === 'Design' ? 'Open its canvas' : 'Open it on the Artifacts screen');
+  link.href = hash;
+  note.append(link, '.');
+  return note;
+}
+
 function previewNodes(chat, file, version) {
   if (file.kind === 'md') return [renderText({ text: version.text, cites: [] }, [])];
   if (file.kind === 'image') return [panelPictureZoom(() => zoomPaper(version.href, file.name || '')).frame];
@@ -1829,12 +1848,14 @@ function panelButton(className, text, pressed, onClick) {
 function renderPanelBody(chat, file, version, shape) {
   const body = document.getElementById('panel-body');
   releasePanelPicture();
+  const typed = typedArtifactHash(file);
   const flagged = () => {
     if (file.flag) body.prepend(el('div', file.flag === 'draft' || file.flag === 'helper' ? 'file-note' : 'file-note flag-note', flagNote(file)));
-    if (file.published && file.published.needsRuntime) body.prepend(el('div', 'file-note', 'This page uses claude.ai to run, so the preview here may not work. Open it on claude.ai.'));
+    if (file.published && file.published.needsRuntime && !typed) body.prepend(el('div', 'file-note', 'This page uses claude.ai to run, so the preview here may not work. Open it on claude.ai.'));
     if (file.published && version.same) body.prepend(el('div', 'file-note', 'Same as published: claude.ai published this file as Claude wrote it.'));
   };
   if (shape.missing) body.replaceChildren(el('div', 'file-missing', 'This file is not in this export.'));
+  else if (typed && (panelView === 'preview' || !shape.views.length)) body.replaceChildren(typedArtifactNote(file, typed), fileDetails(file, version));
   else if (!shape.views.length) body.replaceChildren(fileDetails(file, version));
   else if (panelView === 'preview') body.replaceChildren(...previewNodes(chat, file, version));
   else {

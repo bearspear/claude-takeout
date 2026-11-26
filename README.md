@@ -402,6 +402,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.25.2
+
+- **Designs no longer stay on "Loading…" in the side panel** - A Design (or another of claude.ai's typed artifacts) starts from claude.ai's own loader page, which never finishes away from claude.ai. When a session or a chat opened from an artifact shows one in the side panel, the panel now says it only runs on claude.ai and links its canvas on the Artifacts screen, which draws the boards offline. The Code view still shows the files.
+
 ### v1.25.1
 
 - **A session's artifacts open beside it in the viewer** - Each page a Cowork or Claude Code session published now gets a card in the reply that published it, as a chat's published page does, instead of a folded step. Click the card and the page opens in the side panel with its preview, its version menu, Open file and Download, read from the copy in the export's `artifacts/` folder. The artifact links in the session's top bar open the same panel, and the panel's **Open artifact** still goes to the Artifacts screen. Back and Forward open and close the panel. A page that isn't in the export shows the card with its claude.ai link. The old-archive tools (`build_viewer.js`, `merge_archives.js`) give sessions the same cards from an archive's artifacts.

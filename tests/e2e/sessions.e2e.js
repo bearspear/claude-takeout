@@ -77,6 +77,21 @@ const PUB_RECORD = {
   versionPlaces: { pv1: { folder: `${PUB_DIR}/pv1`, part: 1, key: 'a1', startKind: 'html' } },
 };
 const PUB_STORE = { views: [PUB_VIEW], records: [PUB_RECORD] };
+// A Design artifact: its start file is claude.ai's loader, which never finishes offline, so the side panel points at
+// its canvas on the Artifacts screen instead of previewing it.
+const DES_ART = '33333333-4444-4555-8666-777777777777';
+const DES_ID = uuidToBase58(DES_ART);
+const DES_DIR = `artifacts/Panel_mockups_${DES_ID}`;
+const DES_VIEW = { id: DES_ID, title: 'Panel mockups', kind: 'Design', typed: true, docs: false, shared: false, public: false, createdAt: iso(80), updatedAt: iso(82),
+  folder: `${DES_DIR}/dv1`, start: 'index.html', startSaved: 'index.html', startKind: 'html', files: [{ path: 'index.html', savedAs: 'index.html' }, { path: 'project/canvas.json', savedAs: 'project/canvas.json' }],
+  url: `https://claude.ai/artifact/${DES_ID}`, ver: 'dv1' };
+const DES_RECORD = {
+  format: 2, uuid: DES_ART, shortId: DES_ID, url: `https://claude.ai/artifact/${DES_ID}`, title: 'Panel mockups', listed: true, current: 'dv1', start: 'index.html', needsRuntime: true,
+  dir: DES_DIR, versionOrder: ['dv1'],
+  versions: { dv1: { folder: 'dv1', files: [{ path: 'index.html', savedAs: 'index.html' }, { path: 'project/canvas.json', savedAs: 'project/canvas.json' }], start: 'index.html', startSaved: 'index.html', saved: true, publishedIn: [] } },
+  versionPlaces: {},
+};
+const LOADER = '<!doctype html><p>Loading…</p>';
 const PAGE_V1 = '<!doctype html><p>Version one of the shipped page</p>';
 const PAGE_V2 = '<!doctype html><link rel="stylesheet" href="app.css"><p>Version two of the shipped page</p><img src="dot.png" alt="dot">';
 const DOT = `data:image/png;base64,${'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='}`;
@@ -102,6 +117,7 @@ const openedChat = (uuid, name, art, messages = []) => ({ uuid, name, model: 'cl
 const OPENED = [
   openedChat('c-open', 'Opened page', PUB_ART.toUpperCase()),
   openedChat('c-gone', 'Opened gone', GONE),
+  openedChat('c-design', 'Opened design', DES_ART),
   openedChat('c-msgs', 'Opened and used', PUB_ART, [{ uuid: 'cm-0', parent_message_uuid: null, sender: 'human', created_at: iso(96), content: [{ type: 'text', text: 'A real prompt' }], attachments: [], files: [], files_v2: [] }]),
 ];
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
@@ -122,9 +138,12 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
     fs.mkdirSync(path.join(dir, PUB_DIR, ver), { recursive: true });
     for (const [name, text] of files) fs.writeFileSync(path.join(dir, PUB_DIR, ver, name), text);
   }
+  fs.mkdirSync(path.join(dir, DES_DIR, 'dv1', 'project'), { recursive: true });
+  fs.writeFileSync(path.join(dir, DES_DIR, 'dv1', 'index.html'), LOADER);
+  fs.writeFileSync(path.join(dir, DES_DIR, 'dv1', 'project', 'canvas.json'), '{}');
   fs.mkdirSync(path.join(dir, 'viewer-files'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'viewer-files', 'part-0001.js'), PART);
-  fs.writeFileSync(pub, buildHtml([...CHATS, ...OPENED], iso(95), () => ({}), { sessions: [SESSION_P], artifacts: { views: [PUB_VIEW], records: [PUB_RECORD], listed: 1, exported: iso(95), since: null } }, { fileScripts: true }));
+  fs.writeFileSync(pub, buildHtml([...CHATS, ...OPENED], iso(95), () => ({}), { sessions: [SESSION_P], artifacts: { views: [PUB_VIEW, DES_VIEW], records: [PUB_RECORD, DES_RECORD], listed: 2, exported: iso(95), since: null } }, { fileScripts: true }));
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
   const check = (n, ok, x = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n} ${ok ? '' : x}`); };
@@ -354,6 +373,14 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   const goneLink = await oc.$eval('#chat .opened-from a', a => [a.getAttribute('href'), a.target, a.rel]);
   check('one the export lacks links to claude.ai, no panel', goneLink[0] === `https://claude.ai/artifact/${GONE_ID}` && goneLink[1] === '_blank' && /noopener/.test(goneLink[2])
     && !(await oc.locator('#panel').isVisible()), JSON.stringify(goneLink));
+  await oc.evaluate(() => { location.hash = '#chat=c-design'; });
+  await oc.waitForSelector('#panel:not([hidden]) .design-note');
+  const designLink = await oc.$eval('#panel .design-note a', a => a.getAttribute('href'));
+  check('a Design opens in the panel as a note linking its canvas, not claude.ai\'s loader', designLink === `#a=${DES_ID}`
+    && (await oc.locator('#panel iframe.preview').count()) === 0, designLink);
+  await oc.click('#panel .design-note a');
+  await oc.waitForFunction(() => location.hash.startsWith('#a='));
+  check('its link opens the Artifacts screen', await oc.locator('#artifacts-screen').isVisible());
   await oc.evaluate(() => { location.hash = '#chat=c-msgs'; });
   await oc.waitForFunction(() => document.getElementById('title').textContent === 'Opened and used');
   check('a chat with messages is unchanged', (await oc.locator('#chat .opened-from').count()) === 0 && /A real prompt/.test(await oc.textContent('#chat')) && !(await oc.locator('#panel').isVisible()));
