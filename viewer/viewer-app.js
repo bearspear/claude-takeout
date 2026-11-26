@@ -1846,8 +1846,10 @@ let drawn = ''; // the chat and leaf in the column, which a change of file leave
 // The only way to change chat, leaf or file. Writes the hash, then renders. options.replace edits the
 // current history entry; options.anchor keeps a message in place; options.fromHash means the hash is already set.
 function navigate(state, options = {}) {
-  const fromArtifacts = artifactsOn;
+  const fromScreen = artifactsOn || listsOn;
   showArtifacts(false);
+  showLists(false);
+  restoreTitles();
   const known = chatsById.get(state.chat);
   const chat = known || allChats[0];
   if (!chat) return;
@@ -1863,7 +1865,7 @@ function navigate(state, options = {}) {
     else location.hash = hash;
   } else if (options.fromHash && hash !== location.hash) history.replaceState(null, '', hash);
   shown = hash;
-  if (fromArtifacts) document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
+  if (fromScreen) document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
   if (stepper && stepper.chat !== chat.id) closeStepper();
   showPanel(chat, open);
   const column = `${chat.id}\n${leaf}`;
@@ -1874,7 +1876,8 @@ function navigate(state, options = {}) {
 
 function onHashChange() {
   if (routeArtifacts(location.hash)) return;
-  if (location.hash === shown && !artifactsOn) return;
+  if (routeLists(location.hash)) return;
+  if (location.hash === shown && !artifactsOn && !listsOn) return;
   // An archive with artifacts and no chats has nothing else to show.
   if (!allChats.length && artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); return; }
   navigate(parseHash(location.hash), { fromHash: true });
@@ -1884,7 +1887,19 @@ function onHashChange() {
 // #artifacts is its grid, #a=<id> an artifact and #ac=<chat>.<file> an In chats file; every other hash is the chat viewer's.
 let artifactsApp = null; // the mounted app, only when the data has artifacts
 let artifactsOn = false;
-let titlesBefore = null; // the chat's page and top bar titles, put back when the screen closes
+// The chat's page and top bar titles, taken when leaving the chat for either screen (Artifacts or the lists screen) and
+// put back only on returning to a chat, so going Projects -> Artifacts -> a chat still ends on the chat's titles.
+let titlesBefore = null;
+
+// The titles to keep when a screen opens: the chat's, or null when a screen already shows (they were kept then).
+function chatTitles() {
+  return artifactsOn || listsOn ? null : { page: document.title, top: document.getElementById('title').textContent };
+}
+
+function restoreTitles() {
+  if (titlesBefore) { document.title = titlesBefore.page; document.getElementById('title').textContent = titlesBefore.top; }
+  titlesBefore = null;
+}
 
 // The entry shows when the screen has something (artifactsEntry): a listed artifact or a file made in a chat.
 function setupArtifacts(data) {
@@ -1906,7 +1921,7 @@ function setupArtifacts(data) {
 function routeArtifacts(hash) {
   if (!artifactsApp) return false;
   // Taken before the app sets the page's title to the artifact's.
-  const titles = artifactsOn ? null : { page: document.title, top: document.getElementById('title').textContent };
+  const titles = chatTitles();
   if (!artifactsApp.route(hash)) return false;
   shown = hash;
   const wasOn = artifactsOn;
@@ -1916,10 +1931,11 @@ function routeArtifacts(hash) {
   return true;
 }
 
-// titles: what to put back when the screen closes (opening only).
+// titles: what to put back on returning to a chat (opening from the chat only). Closing leaves the titles to navigate.
 function showArtifacts(on, titles = null) {
   if (on === artifactsOn) return;
   if (!on && artifactsApp) artifactsApp.route(''); // lets go of an open artifact, whose page would keep running
+  if (on) showLists(false);
   artifactsOn = on;
   document.body.classList.toggle('artifacts-on', on);
   document.getElementById('artifacts-screen').hidden = !on;
@@ -1928,13 +1944,76 @@ function showArtifacts(on, titles = null) {
   if (on) {
     closeStepper();
     closeFilesMenu(false);
-    titlesBefore = titles;
+    if (titles) titlesBefore = titles;
     title.textContent = 'Artifacts';
     document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
-  } else {
-    if (titlesBefore) { document.title = titlesBefore.page; title.textContent = titlesBefore.top; }
-    titlesBefore = null;
   }
+}
+
+// ---- The lists screen: Projects (#projects), a project (#project=<key>) and All chats (#chats), in #lists-screen in
+// place of the chat. Only in a viewer with more than one chat. ----
+let listsOn = false;
+let listProjects = []; // projectList over the chats, built once at start
+let listState = null; // { page: 'projects' | 'project' | 'chats', project }: what the screen shows
+
+function listPageTitle(state) {
+  if (state.page === 'project') return state.project.name;
+  return state.page === 'chats' ? 'Chats' : 'Projects';
+}
+
+// The page itself. state: { page, project } (project: an entry of listProjects, on a project page only).
+function renderListPage(state) {
+  const screen = document.getElementById('lists-screen');
+  const heading = el('h2', 'list-title', listPageTitle(state));
+  heading.tabIndex = -1;
+  screen.replaceChildren(heading);
+  screen.scrollTop = 0;
+}
+
+// Shows the screen when hash is one of its own; returns whether it was. An unknown project key shows Projects.
+function routeLists(hash) {
+  if (allChats.length <= 1) return false;
+  const want = parseListHash(hash);
+  if (!want) return false;
+  const titles = chatTitles();
+  const project = want.page === 'project' ? listProjects.find(p => p.key === want.key) || null : null;
+  listState = project ? { page: 'project', project } : { page: want.page === 'project' ? 'projects' : want.page, project: null };
+  shown = hash;
+  showLists(true, titles);
+  return true;
+}
+
+// titles: what to put back on returning to a chat (opening from the chat only). Opening draws listState's page.
+function showLists(on, titles = null) {
+  if (!on && !listsOn) return;
+  const screen = document.getElementById('lists-screen');
+  const projectsNav = document.getElementById('projects-nav');
+  const chatsNav = document.getElementById('chats-nav');
+  if (!on) {
+    listsOn = false;
+    document.body.classList.remove('lists-on');
+    screen.hidden = true;
+    screen.replaceChildren();
+    projectsNav.setAttribute('aria-current', 'false');
+    chatsNav.setAttribute('aria-current', 'false');
+    return;
+  }
+  showArtifacts(false);
+  if (!listsOn && titles) titlesBefore = titles;
+  listsOn = true;
+  document.body.classList.add('lists-on');
+  screen.hidden = false;
+  closeStepper();
+  closeFilesMenu(false);
+  document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
+  projectsNav.setAttribute('aria-current', String(listState.page !== 'chats'));
+  chatsNav.setAttribute('aria-current', String(listState.page === 'chats'));
+  const name = listPageTitle(listState);
+  document.getElementById('title').textContent = name;
+  document.title = `${name} - Claude Takeout`;
+  renderListPage(listState);
+  const heading = screen.querySelector('h2.list-title');
+  if (heading) heading.focus({ preventScroll: true });
 }
 
 // The artifacts app's way into a chat: chat is an index into the data's chats; the message, when it's there, is
@@ -1980,10 +2059,37 @@ function chatItem(chat) {
   return item;
 }
 
+// A sidebar entry for the lists screen: closes the phone drawer, then opens hash.
+function setupListEntry(id, count, hash) {
+  const nav = document.getElementById(id);
+  nav.querySelector('.n').textContent = String(count);
+  nav.setAttribute('aria-label', `${nav.querySelector('span').textContent}, ${count}`);
+  nav.hidden = false;
+  nav.addEventListener('click', () => {
+    setDrawer(false);
+    if (location.hash !== hash) location.hash = hash;
+    else routeLists(hash);
+  });
+}
+
 function renderSidebar(chats) {
-  const { recents, projects } = groupChats(chats);
   const holder = document.getElementById('recents');
   const list = document.getElementById('chat-list');
+  document.getElementById('archive').textContent = `Archive · ${chats.length} chat${chats.length === 1 ? '' : 's'} · read-only`;
+  if (chats.length > 1) {
+    // Projects live on their own pages: Recents is the newest chats, project chats included.
+    list.append(...recentChats(chats, RECENT_LIMIT).map(chatItem));
+    if (chats.length > RECENT_LIMIT) {
+      const all = el('button', 'view-all', 'View all');
+      all.type = 'button';
+      all.addEventListener('click', () => { setDrawer(false); location.hash = '#chats'; });
+      holder.append(all);
+    }
+    if (listProjects.length) setupListEntry('projects-nav', listProjects.length, '#projects');
+    setupListEntry('chats-nav', chats.length, '#chats');
+    return;
+  }
+  const { recents, projects } = groupChats(chats);
   list.append(...recents.map(chatItem));
   if (!recents.length) holder.firstElementChild.remove();
   for (const project of projects) {
@@ -1992,7 +2098,6 @@ function renderSidebar(chats) {
     holder.append(el('div', 'lab', project.name), group);
   }
   if (!recents.length) list.remove();
-  document.getElementById('archive').textContent = `Archive · ${chats.length} chat${chats.length === 1 ? '' : 's'} · read-only`;
 }
 
 // ---- Search ----
@@ -2444,6 +2549,7 @@ function start() {
   setupStepper();
   allChats = linkProjects(data);
   allChats.forEach(chat => chatsById.set(chat.id, chat));
+  if (allChats.length > 1) listProjects = projectList(allChats, Array.isArray(data.projects) ? data.projects : []);
   renderSidebar(data.chats);
   setupSearch();
   try { setWrap(localStorage.getItem(WRAP_KEY) === '1', false); } catch (e) { /* no storage: off */ }
@@ -2464,6 +2570,7 @@ function start() {
   window.addEventListener('hashchange', onHashChange);
   if (!data.chats.length) document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
   if (routeArtifacts(location.hash)) return;
+  if (routeLists(location.hash)) return;
   if (data.chats.length) navigate(parseHash(location.hash), { replace: true });
   else if (artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); }
 }

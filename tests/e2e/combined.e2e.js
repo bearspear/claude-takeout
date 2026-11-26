@@ -542,6 +542,19 @@ const navs = dir => [
   await page.waitForSelector('#artifacts-screen #grid .card');
   await page.locator('#chat-list .item', { hasText: 'Plain talk' }).click();
   check('the same chat again, from the screen', await shown(page, '#scroll') && (await page.locator('#title').textContent()) === 'Plain talk' && await page.title() === 'Plain talk - Claude Takeout');
+  // Chats -> Artifacts -> the same chat: the screens hide each other and the chat's titles come back.
+  await page.locator('#chats-nav').click();
+  await page.waitForSelector('#lists-screen h2.list-title');
+  await page.locator('#artifacts-nav').click();
+  await page.waitForSelector('#artifacts-screen #grid .card');
+  check('Chats then Artifacts: only the Artifacts screen', !(await shown(page, '#lists-screen')) && (await page.locator('#chats-nav').getAttribute('aria-current')) === 'false');
+  await page.locator('#chats-nav').click();
+  await page.waitForSelector('#lists-screen h2.list-title');
+  check('Artifacts then Chats: only the lists screen', !(await shown(page, '#artifacts-screen')) && (await page.locator('#artifacts-nav').getAttribute('aria-current')) === 'false' && (await page.locator('#title').textContent()) === 'Chats');
+  await page.locator('#artifacts-nav').click();
+  await page.waitForSelector('#artifacts-screen #grid .card');
+  await page.locator('#chat-list .item', { hasText: 'Plain talk' }).click();
+  check('Chats, Artifacts, then the same chat: its titles', await shown(page, '#scroll') && (await page.locator('#title').textContent()) === 'Plain talk' && await page.title() === 'Plain talk - Claude Takeout', await page.title());
   await page.locator('#chat').click();
   await page.keyboard.press('/');
   check('/ on a chat still searches the chats', await page.evaluate(() => document.activeElement && document.activeElement.getAttribute('aria-label') === 'Search all chats'));
