@@ -2682,9 +2682,49 @@ test('buildViewerData keeps sessions apart from chats', () => {
   assert.ok(!('sessions' in buildViewerData(chats, { exported: 'x' })));
 });
 
-test("a chat's top-level image block shows from its saved file", () => {
-  const chat = buildViewerChat({ uuid: 'c', name: 'n', current_leaf_message_uuid: 'a', chat_messages: [
-    { uuid: 'a', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'see' }, { type: 'image', file_uuid: 'f-9' }, { type: 'image', file_uuid: 'f-unknown' }] }] },
-  { folder: 'Chat one', toolImages: { 'f-9': 'images/f9_pic.png' } });
-  assert.deepStrictEqual(chat.messages[0].blocks.slice(1), [{ t: 'image', href: 'Chat%20one/images/f9_pic.png' }, { t: 'image', href: null }]);
+test("a chat's top-level image block shows from its saved file only in a session; a chat's blocks are unchanged", () => {
+  const data = { uuid: 'c', name: 'n', current_leaf_message_uuid: 'a', chat_messages: [
+    { uuid: 'a', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'see' }, { type: 'image', file_uuid: 'f-9' }, { type: 'image', file_uuid: 'f-unknown' }] }] };
+  const ctx = { folder: 'Chat one', toolImages: { 'f-9': 'images/f9_pic.png' } };
+  assert.deepStrictEqual(buildViewerChat(data, ctx).messages[0].blocks, [{ t: 'text', text: 'see', cites: [] }]);
+  assert.deepStrictEqual(buildViewerChat(data, { ...ctx, sessionImages: true }).messages[0].blocks.slice(1), [{ t: 'image', href: 'Chat%20one/images/f9_pic.png' }, { t: 'image', href: null }]);
+});
+
+test('buildViewerSession joins a subagent group with no Agent step to the main branch: one root', () => {
+  const sub = { parent_tool_use_id: 'ag1' };
+  const s = V.buildViewerSession(sessionOf(), [
+    ev('e1', 'user', [{ type: 'text', text: 'Research it' }]),
+    { type: 'assistant', uuid: 'e2', created_at: 'x', stub: 'too large (3 MB)' },
+    ev('c1', 'user', [{ type: 'text', text: 'Find X' }], sub),
+    ev('c2', 'assistant', [{ type: 'text', text: 'X is in x.js' }], sub),
+    ev('e4', 'assistant', [{ type: 'text', text: 'Found it.' }]),
+    ev('e5', 'user', [{ type: 'text', text: 'Thanks' }]),
+  ], { folder: 'sessions/x' });
+  const m = s.chat.messages;
+  assert.strictEqual(m.filter(x => x.parent === null).length, 1, JSON.stringify(m.map(x => [x.id, x.parent])));
+  const ids = new Set(m.map(x => x.id));
+  assert.ok(m.every(x => x.parent === null || ids.has(x.parent)));
+  assert.strictEqual(m.find(x => x.id === 'c1').parent, 'e2');
+  const parents = m.map(x => x.parent).filter(Boolean);
+  assert.strictEqual(new Set(parents).size, parents.length, 'no message has two children: no made-up branch');
+  assert.strictEqual(s.chat.leaf, 'e5');
+});
+
+test('buildViewerSession cuts every tool input string at 2 KB; chats keep theirs', () => {
+  const big = 'w'.repeat(30000);
+  const mid = 'n'.repeat(10000);
+  const s = V.buildViewerSession(sessionOf(), [
+    ev('e1', 'assistant', [{ type: 'tool_use', id: 't1', name: 'Write', input: { file_path: '/a.txt', content: big } },
+      { type: 'tool_use', id: 't2', name: 'MultiEdit', input: { file_path: '/b.txt', edits: [{ old_string: 'o', new_string: mid }] } }]),
+  ], { folder: 'sessions/x' });
+  const [w, e] = s.chat.messages[0].blocks;
+  const marker = '\n[… full input in session.json]';
+  assert.strictEqual(w.input.content, 'w'.repeat(2048) + marker);
+  assert.strictEqual(e.input.edits[0].new_string, 'n'.repeat(2048) + marker);
+  assert.strictEqual(e.input.edits[0].old_string, 'o');
+  assert.strictEqual(w.input.file_path, '/a.txt');
+  assert.ok(!JSON.stringify(s).includes('w'.repeat(2049)));
+  const chat = buildViewerChat({ uuid: 'c', name: 'n', current_leaf_message_uuid: 'a', chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant',
+    content: [{ type: 'tool_use', id: 'u', name: 'create_file', input: { path: '/a', file_text: mid } }] }] }, {});
+  assert.strictEqual(chat.messages[0].blocks[0].input.file_text, mid);
 });

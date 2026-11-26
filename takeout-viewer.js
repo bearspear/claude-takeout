@@ -14,8 +14,10 @@
 //                                      { id, title, origin, created, updated, folder, artifacts: [uuid], chat }. chat is
 //                                      buildViewerChat's shape without project: one flat branch, a reply per prompt,
 //                                      labelled on a compaction or command prompt, tool results cut at 2 KB, images by
-//                                      relative path under folder (sessions/<name>), a subagent's messages in the Agent
-//                                      tool block's children. A top-level image block of any chat is { t: 'image', href }.
+//                                      relative path under folder (sessions/<name>), every tool input string cut at 2 KB,
+//                                      a subagent's messages in the Agent tool block's children (a group with no Agent
+//                                      block joins the main line in time order). With ctx.sessionImages (only set here), a
+//                                      top-level image block is { t: 'image', href }; chats leave it out as before.
 //   buildViewerData(chats, {exported, artifacts, sessions}) { exported, chats, projects, sessions? }, newest update first;
 //                                      sessions (newest activity first) only when given. A chat's project is an
 //                                      index into projects, where identical projects are kept once. artifacts:
@@ -651,8 +653,9 @@
         if (!b) continue;
         if (b.type === 'text') blocks.push({ t: 'text', text: String(b.text || ''), cites: buildCites(b.citations) });
         else if (b.type === 'thinking') blocks.push({ t: 'thinking', text: String(b.thinking || ''), summaries: thinkingSummaries(b), summary: thinkingSummary(b), seconds: thinkingSeconds(b) });
-        else if (b.type === 'image') {
-          // A picture in the message itself, shown from its saved copy (ctx.toolImages); never inline data.
+        else if (b.type === 'image' && c.sessionImages === true) {
+          // A picture in a session's message, shown from its saved copy (ctx.toolImages); never inline data.
+          // Only for sessions (buildViewerSession sets the flag), so a chat's viewer data stays as it was.
           const saved = c.toolImages && typeof c.toolImages === 'object' ? c.toolImages : {};
           const href = typeof b.file_uuid === 'string' && Object.prototype.hasOwnProperty.call(saved, b.file_uuid) ? relHref(c.folder || '', saved[b.file_uuid]) : null;
           blocks.push({ t: 'image', href });
@@ -722,6 +725,26 @@
   const SESSION_RESULT_LIMIT = 2048;
   const SESSION_RESULT_MORE = '\n[… full output in session.json]';
   const SESSION_STUB_TEXT = '[event too large to keep]';
+  const SESSION_INPUT_MORE = '\n[… full input in session.json]';
+
+  // A string cut at SESSION_RESULT_LIMIT characters, never inside a surrogate pair, with more after it.
+  function sessionCut(text, more) {
+    if (text.length <= SESSION_RESULT_LIMIT) return text;
+    let end = SESSION_RESULT_LIMIT;
+    const last = text.charCodeAt(end - 1);
+    if (last >= 0xd800 && last <= 0xdbff) end--;
+    return text.slice(0, end) + more;
+  }
+
+  // A tool call's input with every string in it, nested too, cut for the viewer: a Write's whole file stays in session.json.
+  function cutInput(v, depth = 0) {
+    if (typeof v === 'string') return sessionCut(v, SESSION_INPUT_MORE);
+    if (!v || typeof v !== 'object' || depth > 50) return v;
+    if (Array.isArray(v)) return v.map(x => cutInput(x, depth + 1));
+    const out = {};
+    for (const k of Object.keys(v)) out[k] = cutInput(v[k], depth + 1);
+    return out;
+  }
 
   function sessionLabelText(kind, text) {
     if (kind === 'command') {
@@ -753,13 +776,7 @@
     };
     const adaptResult = b => {
       const items = Array.isArray(b.content) ? b.content : [];
-      let text = resultText(b.content);
-      if (text.length > SESSION_RESULT_LIMIT) {
-        let end = SESSION_RESULT_LIMIT;
-        const last = text.charCodeAt(end - 1);
-        if (last >= 0xd800 && last <= 0xdbff) end--;
-        text = text.slice(0, end) + SESSION_RESULT_MORE;
-      }
+      const text = sessionCut(resultText(b.content), SESSION_RESULT_MORE);
       const imgs = items.filter(it => it && it.type === 'image').map(image);
       return { type: 'tool_result', tool_use_id: b.tool_use_id, is_error: !!b.is_error, content: [...(text ? [{ type: 'text', text }] : []), ...imgs] };
     };
@@ -767,7 +784,8 @@
       if (!b || typeof b !== 'object') return null;
       if (b.type === 'image') return image(b);
       if (b.type === 'tool_result') return adaptResult(b);
-      if (b.type === 'text' || b.type === 'thinking' || b.type === 'tool_use') return b;
+      if (b.type === 'tool_use') return { ...b, input: cutInput(b.input) };
+      if (b.type === 'text' || b.type === 'thinking') return b;
       return null;
     };
     const promptKind = core('promptKind');
@@ -809,19 +827,29 @@
         start(g, e, 'human', { labelled: kind }).content.push({ type: 'text', text: sessionLabelText(kind, text) }, ...blocks.filter(b => b.type !== 'text'));
       } else start(g, e, 'human').content.push(...blocks);
     }
-    // Each message's parent is the one before it in its group, so the main group is the branch the viewer walks.
-    for (const g of groups.values()) g.messages.forEach((m, i) => { m.parent_message_uuid = i ? g.messages[i - 1].uuid : null; });
-    const main = groupOf('').messages;
+    // A subagent group whose Agent call isn't in the session (its event was stubbed) joins the main conversation
+    // where it happened in time, so the session has one root and no made-up branches.
+    const toolIds = new Set();
+    for (const m of order) for (const b of m.content) if (b && b.type === 'tool_use' && b.id != null) toolIds.add(b.id);
+    groupOf('');
+    const mainKeys = new Set([...groups.keys()].filter(k => !k || !toolIds.has(k)));
+    const inMain = new Set();
+    for (const k of mainKeys) for (const m of groups.get(k).messages) inMain.add(m);
+    const main = order.filter(m => inMain.has(m));
+    // Each message's parent is the one before it in its group (the main line counts as one), so the main line is
+    // the branch the viewer walks.
+    const lines = [main, ...[...groups].filter(([k]) => !mainKeys.has(k)).map(([, g]) => g.messages)];
+    for (const line of lines) line.forEach((m, i) => { m.parent_message_uuid = i ? line[i - 1].uuid : null; });
     const model = (cfg && typeof cfg.model === 'string' && cfg.model) || '';
     const chat = buildViewerChat({
       uuid: s.id, name: title, model, created_at: s.created_at || null, updated_at: s.last_event_at || s.updated_at || null,
       chat_messages: order, current_leaf_message_uuid: main.length ? main[main.length - 1].uuid : null
-    }, { folder, toolImages });
+    }, { folder, toolImages, sessionImages: true });
     // Subagent messages move under their Agent step, in order; a group whose step isn't in the session stays in place.
     const byId = new Map(chat.messages.map(m => [m.id, m]));
     const moved = new Set();
     for (const [key, g] of groups) {
-      if (!key) continue;
+      if (mainKeys.has(key)) continue;
       const step = chat.toolBlocks.get(key);
       if (!step) continue;
       step.children = g.messages.map(m => byId.get(m.uuid)).filter(Boolean);
