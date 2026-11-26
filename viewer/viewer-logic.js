@@ -1011,24 +1011,32 @@ function copyText(msg) {
   return parts.join('\n\n');
 }
 
-// Search over every message on every branch, plus titles. One entry per message (and per title, msg null).
+// The searchable text of a message: its text blocks, pasted text and its name, and upload names.
+function messageSearchText(m) {
+  const parts = [];
+  for (const b of m.blocks || []) if (b && b.t === 'text' && b.text) parts.push(b.text);
+  for (const a of m.attachments || []) { if (a.name) parts.push(a.name); if (a.text) parts.push(a.text); }
+  for (const u of m.uploads || []) if (u.name) parts.push(u.name);
+  return parts.join('\n');
+}
+
+// Search over every message on every branch, plus titles. One entry per message (and per title, msg null):
+// { chat, msg, lower } plus the title or the message (src), whose text is rebuilt for a snippet, so a big archive
+// holds only the lowercase copy.
 function buildSearchIndex(chats) {
   const index = [];
   for (const chat of chats) {
     const title = chat.title || '';
-    index.push({ chat: chat.id, msg: null, text: title, lower: title.toLowerCase() });
+    index.push({ chat: chat.id, msg: null, title, lower: title.toLowerCase() });
     for (const m of chat.messages || []) {
-      const parts = [];
-      for (const b of m.blocks || []) if (b && b.t === 'text' && b.text) parts.push(b.text);
-      for (const a of m.attachments || []) { if (a.name) parts.push(a.name); if (a.text) parts.push(a.text); }
-      for (const u of m.uploads || []) if (u.name) parts.push(u.name);
-      if (!parts.length) continue;
-      const text = parts.join('\n');
-      index.push({ chat: chat.id, msg: m.id, text, lower: text.toLowerCase() });
+      const text = messageSearchText(m);
+      if (!text) continue;
+      index.push({ chat: chat.id, msg: m.id, src: m, lower: text.toLowerCase() });
     }
   }
   return index;
 }
+const entryText = e => (e.msg === null ? e.title : messageSearchText(e.src));
 
 // Offset in text that matches `at` in text.toLowerCase(), which differs in length for a few characters.
 function originalOffset(text, at) {
@@ -1080,7 +1088,8 @@ function parseQuery(query) {
 
 // Up to `limit` hits, in index order: { chat, msg (null for a title), snippet, terms }. Each entry must
 // hold every word or phrase (or one of its OR alternatives) and none of the excluded ones. terms: the
-// query's words found in that entry, for highlighting; the snippet is cut around the first of them.
+// query's words found in that entry, for highlighting; the snippet is cut around the first of them, only when
+// read (a getter): the sidebar shows few of a common word's hits.
 function searchChats(index, query, limit = 50) {
   const q = parseQuery(query);
   const hits = [];
@@ -1094,7 +1103,11 @@ function searchChats(index, query, limit = 50) {
       const i = e.lower.indexOf(t);
       if (at < 0 || i < at) { at = i; len = t.length; }
     }
-    hits.push({ chat: e.chat, msg: e.msg, snippet: snippetAt(e.text, e.lower, at, len), terms });
+    let snippet;
+    hits.push({
+      chat: e.chat, msg: e.msg, terms,
+      get snippet() { if (snippet === undefined) snippet = snippetAt(entryText(e), e.lower, at, len); return snippet; },
+    });
   }
   return hits;
 }
@@ -1386,9 +1399,16 @@ const LIST_PAGE = 200;
 const hasDate = c => typeof c.updated === 'string' && !Number.isNaN(Date.parse(c.updated));
 
 // The n newest chats by `updated`; chats without a parseable date come last, ties keep their order. Doesn't mutate.
+// Each date is parsed once (not in the comparator): thousands of chats sort quickly.
 function recentChats(chats, n) {
-  const dated = chats.filter(hasDate).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
-  return dated.concat(chats.filter(c => !hasDate(c))).slice(0, n);
+  const dated = [], undated = [];
+  for (const c of chats) {
+    const t = typeof c.updated === 'string' ? Date.parse(c.updated) : NaN;
+    if (Number.isNaN(t)) undated.push(c);
+    else dated.push({ c, t });
+  }
+  dated.sort((a, b) => b.t - a.t);
+  return dated.map(d => d.c).concat(undated).slice(0, n);
 }
 
 // Projects that have chats: { key, name, description, updated, chats }. key is the project's id, else 'i' + its index in
@@ -1433,11 +1453,20 @@ function projectList(chats, projects) {
 }
 
 // The items where every word of query is in at least one of fields(item), case folded. An empty query keeps all.
-function filterByText(items, query, fields) {
+// cache (optional, a WeakMap a page keeps): each item's folded fields, so typing doesn't fold every item again.
+function filterByText(items, query, fields, cache = null) {
   const words = String(query).trim().split(/\s+/).filter(Boolean).map(w => foldCase(w).lower);
   if (!words.length) return items.slice();
+  const folded = item => {
+    let texts = cache ? cache.get(item) : undefined;
+    if (!texts) {
+      texts = fields(item).map(t => foldCase(t == null ? '' : t).lower);
+      if (cache) cache.set(item, texts);
+    }
+    return texts;
+  };
   return items.filter(item => {
-    const texts = fields(item).map(t => foldCase(t == null ? '' : t).lower);
+    const texts = folded(item);
     return words.every(w => texts.some(t => t.includes(w)));
   });
 }

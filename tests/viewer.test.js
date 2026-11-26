@@ -1373,7 +1373,7 @@ test('fileViews gives audio and video a preview from a link', () => {
 
   test('moveUploadText leaves the search index unchanged', () => {
     const data = buildViewerData([chatWith('c1', [upload('big.md', KB(80) + ' quokka')], [{ name: 'p.txt', text: KB(70) + ' wombat' }])], {});
-    const index = d => buildSearchIndex(linkProjects(JSON.parse(JSON.stringify(d))));
+    const index = d => buildSearchIndex(linkProjects(JSON.parse(JSON.stringify(d)))).map(e => [e.chat, e.msg, e.lower]);
     assert.deepStrictEqual(index(moveUploadText(data).data), index(data));
   });
 
@@ -1411,7 +1411,7 @@ test('fileViews gives audio and video a preview from a link', () => {
     const got = {};
     for (const p of parts) Object.assign(got, runPart(p.body).d);
     assert.deepStrictEqual([got.f0, got.f1], [KB(70) + ' one', KB(70) + ' two']);
-    const index = d => buildSearchIndex(linkProjects(JSON.parse(JSON.stringify(d))));
+    const index = d => buildSearchIndex(linkProjects(JSON.parse(JSON.stringify(d)))).map(e => [e.chat, e.msg, e.lower]);
     assert.deepStrictEqual(index(out), index(data));
   });
 
@@ -2531,4 +2531,37 @@ test('svgAsPicture: a known size and no scripts', () => {
   assert.strictEqual(svgAsPicture(`<svg ${ns} width="600"><rect/></svg>`), false);
   assert.strictEqual(svgAsPicture(`<svg ${ns} width="640" height="480"><script>go()</script></svg>`), false);
   assert.strictEqual(svgAsPicture(null), false);
+});
+
+// Search at archive scale: the index keeps each message's lowercase text only (the text shown is rebuilt from the
+// message for a snippet), and a snippet is cut only when it is read: the sidebar shows 3 a chat, 200 chats.
+test('buildSearchIndex keeps one copy of a message\'s text', () => {
+  const idx = buildSearchIndex(searchable);
+  const m3 = idx.find(e => e.msg === 'm3');
+  assert.ok(!('text' in m3), Object.keys(m3).join());
+  assert.ok(m3.lower.includes('a zebra crossed the road') && m3.lower.includes('pasted stripes') && m3.lower.includes('photo.png'));
+  const title = idx.find(e => e.chat === 'c3' && e.msg === null);
+  assert.ok(!('text' in title) && title.lower === 'beta zebra notes');
+});
+test('searchChats cuts a snippet only when it is read, and the same one each time', () => {
+  const idx = buildSearchIndex(searchable);
+  const [hit] = searchChats(idx, 'stripes');
+  const d = Object.getOwnPropertyDescriptor(hit, 'snippet');
+  assert.strictEqual(typeof d.get, 'function', 'a getter, not a value cut up front');
+  assert.ok(d.enumerable);
+  assert.strictEqual(hit.snippet, hit.snippet);
+  assert.match(hit.snippet, /pasted stripes/);
+  const [t] = searchChats(idx, 'beta');
+  assert.strictEqual(t.snippet, 'Beta zebra notes');
+});
+
+test('filterByText with a cache folds each item once across queries', () => {
+  const items = [{ t: 'CAFÉ plans' }, { t: 'Other' }, { t: 'café two' }];
+  let calls = 0;
+  const fields = i => { calls++; return [i.t]; };
+  const cache = new WeakMap();
+  assert.deepStrictEqual(filterByText(items, 'café', fields, cache).map(i => i.t), ['CAFÉ plans', 'café two']);
+  assert.deepStrictEqual(filterByText(items, 'two', fields, cache).map(i => i.t), ['café two']);
+  assert.deepStrictEqual(filterByText(items, 'plans café', fields, cache).map(i => i.t), ['CAFÉ plans']);
+  assert.strictEqual(calls, 3, 'one fields() call per item');
 });
