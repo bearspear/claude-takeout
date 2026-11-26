@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, artifactTabs, relativeTime, parseArtifactHash } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, artifactTabs, relativeTime, parseArtifactHash, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash } = require('../viewer/viewer-logic.js');
 const { ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT } = require('../viewer/viewer-logic.js');
 
 const msgs = [
@@ -2427,4 +2427,35 @@ test('buildViewerData keeps the new project fields and merges one id', () => {
   assert.strictEqual(c.project.id, 'p-3');
   assert.strictEqual(c.project.description, 'D');
   assert.ok(!('updated' in c.project));
+});
+
+test('recentChats: newest first, undated last, n at most', () => {
+  const c = (id, updated) => ({ id, updated });
+  const got = recentChats([c('a', '2026-01-01T00:00:00Z'), c('b'), c('c', '2026-03-01T00:00:00Z'), c('d', '2026-02-01T00:00:00Z')], 3);
+  assert.deepStrictEqual(got.map(x => x.id), ['c', 'd', 'a']);
+  assert.deepStrictEqual(recentChats([c('b'), c('a', '2026-01-01T00:00:00Z')], 30).map(x => x.id), ['a', 'b']);
+  assert.strictEqual(RECENT_LIMIT, 30); assert.strictEqual(LIST_PAGE, 200);
+});
+test('projectList: keyed by id or index, named, sorted by latest activity', () => {
+  const P1 = { id: 'p1', name: 'Alpha', updated: '2026-01-05T00:00:00Z' }, P2 = { name: '' }, P3 = { name: 'Alpha' };
+  const projects = [P1, P2, P3, { id: 'empty', name: 'No chats' }];
+  const chats = [{ id: 'x', project: P1, updated: '2026-01-01T00:00:00Z' }, { id: 'y', project: P2, updated: '2026-04-01T00:00:00Z' },
+    { id: 'z', project: P3, updated: '2026-02-01T00:00:00Z' }, { id: 'w', project: P1, updated: '2026-03-01T00:00:00Z' }, { id: 'v', project: null }];
+  const list = projectList(chats, projects);
+  assert.deepStrictEqual(list.map(p => [p.key, p.name, p.updated, p.chats.map(c => c.id).join()]), [
+    ['i1', 'Untitled project', '2026-04-01T00:00:00Z', 'y'],
+    ['p1', 'Alpha', '2026-03-01T00:00:00Z', 'w,x'],
+    ['i2', 'Alpha (2)', '2026-02-01T00:00:00Z', 'z'],
+  ]);
+});
+test('filterByText: every word, folded, across fields', () => {
+  const items = [{ t: 'CAFÉ plans', d: 'Q3' }, { t: 'Other', d: 'café q3' }, { t: 'None', d: '' }];
+  assert.deepStrictEqual(filterByText(items, 'café q3', i => [i.t, i.d]).map(i => i.t), ['CAFÉ plans', 'Other']);
+  assert.strictEqual(filterByText(items, '  ', i => [i.t]).length, 3);
+});
+test('parseListHash: whole hashes only', () => {
+  assert.deepStrictEqual(parseListHash('#projects'), { page: 'projects' });
+  assert.deepStrictEqual(parseListHash('#chats'), { page: 'chats' });
+  assert.deepStrictEqual(parseListHash('#project=p%201'), { page: 'project', key: 'p 1' });
+  for (const h of ['', '#project=', '#projects&x=1', '#chat=abc', '#artifacts', '#chats2']) assert.strictEqual(parseListHash(h), null, h);
 });
