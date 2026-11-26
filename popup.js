@@ -5037,7 +5037,14 @@ async function loadExportRecord(org) {
 function changedSessions(list, recorded) {
   const items = Array.isArray(list) ? list : [];
   if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)) return items;
-  return items.filter((x) => x && recorded[x.id] !== x.last_event_at);
+  return items.filter((x) => x && (!Object.prototype.hasOwnProperty.call(recorded, x.id) || recorded[x.id] !== sessionStamp(x)));
+}
+
+// What the record keeps of a session: its last_event_at, else updated_at, else created_at (strings only), else ''.
+// Never undefined, which storage would drop, so a session without last_event_at is still recorded.
+function sessionStamp(x) {
+  for (const k of ['last_event_at', 'updated_at', 'created_at']) if (x && typeof x[k] === 'string') return x[k];
+  return '';
 }
 
 // CLI sessions (environment_kind 'bridge') are left out unless settings.exportCliSessions is true.
@@ -5132,7 +5139,7 @@ async function saveExportRecord(org, at, exportedChats, exportedArtifacts = [], 
     }
     const hadSessions = mine.sessions && typeof mine.sessions === 'object' && !Array.isArray(mine.sessions);
     const sessions = { ...(hadSessions ? mine.sessions : {}) };
-    for (const x of exportedSessions || []) sessions[x.id] = x.last_event_at;
+    for (const x of exportedSessions || []) sessions[x.id] = sessionStamp(x);
     const withSessions = hadSessions || (exportedSessions && exportedSessions.length);
     const withArtifacts = hadArtifacts || (exportedArtifacts && exportedArtifacts.length);
     const withVersions = hadVersions || (exportedVersions && exportedVersions.length);
@@ -6646,7 +6653,7 @@ async function runSessionStep(root, opts = {}) {
       if (pictures.skipped) out.warnings.push(`Session ${quoted}: ${pictures.skipped} image${pictures.skipped === 1 ? '' : 's'} not saved`);
       out.written++;
       out.rows.push({ id: s.id, title, folder: dir, origin: (s.config && typeof s.config.origin === 'string' && s.config.origin) || s.environment_kind || '', last_event_at: s.last_event_at || null, turns: sessionTurns(events) });
-      if (!problem) out.saved.push({ id: s.id, last_event_at: s.last_event_at, folder: dir });
+      if (!problem) out.saved.push({ id: s.id, last_event_at: sessionStamp(s), folder: dir });
       // On disk each session is written before the next is fetched; its events are let go here.
       if (run && typeof root.flush === 'function') out.writeFailures.push(...await root.flush());
       progress(i + 1, title);

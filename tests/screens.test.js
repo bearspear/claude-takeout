@@ -1662,3 +1662,20 @@ test('runSessionStep keeps a session whose later page fails, warned and not reco
   const readme = Object.entries(written).find(([n]) => n.endsWith('/README.md'))[1];
   assert.match(readme, /\*\*Incomplete:\*\*/);
 });
+
+test('changedSessions takes a session without last_event_at the first time', () => {
+  const { fn } = loadPopup();
+  const f = fn('changedSessions');
+  const x = { id: 'cse_a', updated_at: 'u1' };
+  assert.strictEqual(f([x], { cse_b: 't' }).length, 1, 'not in the record: changed');
+  assert.strictEqual(f([x], { cse_a: 'u1' }).length, 0, 'recorded by its updated_at: unchanged');
+  assert.strictEqual(f([{ id: 'cse_a', created_at: 'c1' }], { cse_a: 'u1' }).length, 1);
+});
+
+test('a session without last_event_at is recorded with its updated_at', async () => {
+  const { list, chats } = oneChat();
+  const s = coworkSession();
+  delete s.last_event_at;
+  const { store } = await bulkRun({ list, chats, sessions: sessionList(s), sessionPages: { [S_COWORK]: onePage() } });
+  assert.deepStrictEqual(store.exportRecord['org-1'].sessions, { [S_COWORK]: s.updated_at });
+});
