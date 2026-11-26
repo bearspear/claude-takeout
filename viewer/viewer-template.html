@@ -75,11 +75,11 @@ svg.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor
 #results mark { background: none; color: var(--ink); font-weight: 600; }
 mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; padding: 0 1px; }
 .pill { font-size: 12px; color: var(--mute); padding: 11px 20px 13px; border-top: 1px solid var(--line); }
-#artifacts-nav, .nav { display: flex; align-items: center; gap: 9px; width: calc(100% - 20px); margin: 0 10px 6px; padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: var(--soft); font-size: 13.5px; text-align: left; cursor: pointer; }
-#artifacts-nav[hidden], .nav[hidden] { display: none; }
-#artifacts-nav:hover, .nav:hover { background: var(--hover); }
-#artifacts-nav[aria-current="true"], .nav[aria-current="true"] { background: var(--active); color: var(--ink); }
-#artifacts-nav .n, .nav .n { margin-left: auto; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
+.nav { display: flex; align-items: center; gap: 9px; width: calc(100% - 20px); margin: 0 10px 6px; padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: var(--soft); font-size: 13.5px; text-align: left; cursor: pointer; }
+.nav[hidden] { display: none; }
+.nav:hover { background: var(--hover); }
+.nav[aria-current="true"] { background: var(--active); color: var(--ink); }
+.nav .n { margin-left: auto; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
 .view-all { display: block; margin: 4px 10px 0; padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: var(--mute); font-size: 13px; text-align: left; cursor: pointer; }
 .view-all:hover { background: var(--hover); color: var(--ink); }
 
@@ -571,7 +571,7 @@ button.chip:hover { border-color: var(--line-strong); }
       <button class="clear" type="button" aria-label="Clear search" title="Clear search (Esc)" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
     </label>
     <label class="find-files" title="Also look in uploads and in files Claude made. Their text loads as you search, so this is slower on a large archive."><input type="checkbox" id="search-files"> Also search inside files</label>
-    <button id="artifacts-nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg><span>Artifacts</span><span class="n"></span></button>
+    <button id="artifacts-nav" class="nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg><span>Artifacts</span><span class="n"></span></button>
     <button id="projects-nav" class="nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z"/></svg><span>Projects</span><span class="n"></span></button>
     <button id="chats-nav" class="nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"/></svg><span>Chats</span><span class="n"></span></button>
     <div id="recents">

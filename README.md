@@ -402,6 +402,12 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.24.2
+
+- **Drag in the viewer** - A press on a zoomed picture or the Design canvas released outside it no longer leaves the drag on: moving back over it with no button pressed doesn't pan any more.
+- **SVG files without a size** - An SVG with no viewBox and no fixed width and height opens as a page again, instead of a cropped 300×150 picture.
+- **Projects pages** - Back or Forward to Projects, a project page or Chats finds it as you left it: the filter, the rows shown with Show more and the scroll (the sidebar's entries still start afresh). Long instructions collapse by their drawn height, so wide text such as Chinese or Japanese gets Show more too. A chat's project section names a second project of the same name "Name (2)", as its page does, and that label no longer moves to the other project when it gets a newer chat. A project whose id looks like the key of a project without one can always be opened.
+
 ### v1.24.1
 
 - **Export selected from the popup runs in the sidebar** - The popup closes when it loses focus, for example when you click the claude.ai tab, and a ZIP export running inside it was lost with no message. Like a folder export, the popup now opens the sidebar with your choices (ZIP included) carried over; click **Export selected** there. If the sidebar can't open, the choices aren't left behind for later.

@@ -2448,6 +2448,19 @@ test('projectList: keyed by id or index, named, sorted by latest activity', () =
     ['i2', 'Alpha (2)', '2026-02-01T00:00:00Z', 'z'],
   ]);
 });
+test('projectList: a real id shaped like an index key never takes another project\'s key', () => {
+  const OLD = { name: 'Old' }, ODD = { id: 'i0', name: 'Odd' };
+  const list = projectList([{ id: 'a', project: OLD, updated: '2026-01-02T00:00:00Z' }, { id: 'b', project: ODD, updated: '2026-01-01T00:00:00Z' }], [OLD, ODD]);
+  const keys = list.map(p => p.key);
+  assert.strictEqual(new Set(keys).size, 2, keys.join());
+  assert.strictEqual(list.find(p => p.name === 'Odd').key, 'i0', 'a real id keeps its key');
+});
+test('projectList: "Name (2)" follows the projects\' order, not which had the newest chat', () => {
+  const A = { id: 'a', name: 'Same' }, B = { id: 'b', name: 'Same' };
+  const older = projectList([{ id: 'x', project: A, updated: '2026-01-02T00:00:00Z' }, { id: 'y', project: B, updated: '2026-01-01T00:00:00Z' }], [A, B]);
+  const newer = projectList([{ id: 'x', project: A, updated: '2026-01-02T00:00:00Z' }, { id: 'y', project: B, updated: '2026-01-03T00:00:00Z' }], [A, B]);
+  for (const list of [older, newer]) assert.deepStrictEqual(Object.fromEntries(list.map(p => [p.key, p.name])), { a: 'Same', b: 'Same (2)' });
+});
 test('filterByText: every word, folded, across fields', () => {
   const items = [{ t: 'CAFÉ plans', d: 'Q3' }, { t: 'Other', d: 'café q3' }, { t: 'None', d: '' }];
   assert.deepStrictEqual(filterByText(items, 'café q3', i => [i.t, i.d]).map(i => i.t), ['CAFÉ plans', 'Other']);

@@ -116,7 +116,7 @@ button { font: inherit; color: inherit; }
 .files li { display: flex; align-items: center; gap: 10px; padding: 8px 12px; font-size: 13px; border-top: 1px solid var(--line); min-width: 0; }
 .files li:first-child { border-top: 0; }
 .files .path { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; min-width: 0; flex: 1; }
-.files .fkind, .files .unchecked { font-size: 11px; color: var(--mute); flex: none; }
+.files .unchecked { font-size: 11px; color: var(--mute); flex: none; }
 .files a.open-file { font-size: 12px; color: var(--acc); text-decoration: none; flex: none; }
 .files a.open-file:hover { text-decoration: underline; }
 .files-head { font-size: 12px; font-weight: 500; color: var(--mute); text-transform: uppercase; letter-spacing: .04em; margin: 24px 0 0; }

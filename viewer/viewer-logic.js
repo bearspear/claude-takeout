@@ -1409,16 +1409,26 @@ function projectList(chats, projects) {
     let updated = hasDate(project) ? project.updated : '';
     for (const c of sorted) if (hasDate(c) && time(c.updated) > time(updated)) updated = c.updated;
     const at = projects.indexOf(project);
-    out.push({ key: project.id || 'i' + (at === -1 ? extra++ : at), name: project.name || 'Untitled project',
+    const order = at === -1 ? extra++ : at;
+    out.push({ key: project.id || 'i' + order, order, name: project.name || 'Untitled project',
       description: typeof project.description === 'string' ? project.description : '', updated, chats: sorted });
   }
-  out.sort((a, b) => (a.updated === '') - (b.updated === '') || time(b.updated) - time(a.updated));
-  const named = new Map();
+  // An index key a real id already has (an odd project.json with id "i0") goes to "i<n>~", so every key opens its page.
+  const taken = new Set(out.filter(p => p.key !== 'i' + p.order).map(p => p.key));
   for (const p of out) {
+    if (p.key !== 'i' + p.order) continue;
+    while (taken.has(p.key)) p.key += '~';
+    taken.add(p.key);
+  }
+  // "Name (2)" in the projects' order, so a project keeps its label when another gets a newer chat.
+  const named = new Map();
+  for (const p of [...out].sort((a, b) => a.order - b.order)) {
     const n = (named.get(p.name) || 0) + 1;
     named.set(p.name, n);
     if (n > 1) p.name = `${p.name} (${n})`;
   }
+  out.sort((a, b) => (a.updated === '') - (b.updated === '') || time(b.updated) - time(a.updated));
+  for (const p of out) delete p.order;
   return out;
 }
 
@@ -1497,7 +1507,7 @@ const DESIGN_SIZE_MAX = 2e4;
 const inPlace = v => v !== null && Math.abs(v) <= DESIGN_COORD_MAX;
 const inSize = v => v !== null && v > 0 && v <= DESIGN_SIZE_MAX;
 
-// The canvas's scale to fit avail pixels: at most 1 (never enlarged), at least 0.1 (a wider canvas scrolls instead).
+// The canvas's scale to fit avail pixels: at most 1 (never enlarged), at least 0.1 (the opening view of a wider canvas; it moves in its window, never scrolls).
 function canvasScale(width, avail) {
   if (!(Number.isFinite(width) && width > 0 && Number.isFinite(avail) && avail > 0)) return 1;
   return Math.min(1, Math.max(0.1, avail / width));
