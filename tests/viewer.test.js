@@ -2399,3 +2399,32 @@ test('preview documents end with the measuring script', () => {
   // The load report can precede the first layout; the root's ResizeObserver reports again after it.
   assert.ok(/new ResizeObserver\(/.test(SIZE_SCRIPT) && /observe\(document\.documentElement\)/.test(SIZE_SCRIPT));
 });
+
+test('buildViewerData keeps the new project fields and merges one id', () => {
+  const mk = (id, updated, project) => ({ id, title: id, updated, messages: [], project });
+  const doc = { name: 'D', text: 't' };
+  const base = { name: 'Alpha', files: [], instructions: '', docs: [] };
+  const chats = [
+    mk('a', '2026-01-01', { ...base, id: 'p-1', description: 'old', updated: '2026-01-01T00:00:00Z' }),
+    mk('b', '2026-02-01', { ...base, id: 'p-1', description: 'new', updated: '2026-03-01T00:00:00Z' }),
+    mk('c', '2026-03-01', { ...base, name: 'Other' })
+  ];
+  const d = buildViewerData(chats, {});
+  assert.strictEqual(d.projects.length, 2);
+  const p1 = d.projects.find(p => p.id === 'p-1');
+  assert.strictEqual(p1.description, 'new');
+  assert.strictEqual(p1.updated, '2026-03-01T00:00:00Z');
+  assert.deepStrictEqual(d.chats.filter(c => c.id !== 'c').map(c => c.project), [d.projects.indexOf(p1), d.projects.indexOf(p1)]);
+  // a tie on updated prefers the copy with more docs and files
+  const tie = buildViewerData([
+    mk('a', '2026-01-01', { ...base, id: 'p-2', description: 'thin' }),
+    mk('b', '2026-02-01', { ...base, id: 'p-2', description: 'full', docs: [doc] })
+  ], {});
+  assert.strictEqual(tie.projects.length, 1);
+  assert.strictEqual(tie.projects[0].description, 'full');
+  // buildViewerChat passes the strings through, and only strings
+  const c = buildViewerChat({ uuid: 'c', name: 'n', chat_messages: [] }, { project: { name: 'N', fileDir: 'f', id: 'p-3', description: 'D', updated: 5 } });
+  assert.strictEqual(c.project.id, 'p-3');
+  assert.strictEqual(c.project.description, 'D');
+  assert.ok(!('updated' in c.project));
+});

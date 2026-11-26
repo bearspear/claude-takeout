@@ -6392,3 +6392,20 @@ test('populateConversationFolder: a run script named only by a shared name is a 
   const mixed = await exportOpaque(make('/home/claude/b/run.sql', 'run.*'));
   assert.deepStrictEqual([mixed.warnings.sort(), helpers(mixed)], [['run.py', 'run.sql'], []]);
 });
+
+test('viewerProject takes id, description and updated from the project record', () => {
+  const { viewerProject } = require('../export-core.js');
+  const data = { project_uuid: 'p-1', project: { uuid: 'p-1', name: 'Alpha' } };
+  const meta = { uuid: 'p-1', description: 'Plans \u00c3\u00a9 notes', updated_at: '2026-05-01T00:00:00Z', created_at: '2026-01-01T00:00:00Z' };
+  const p = viewerProject(data, {}, {}, 'project/files', [], '', 1000, meta);
+  assert.strictEqual(p.id, 'p-1');
+  assert.strictEqual(p.description, 'Plans \u00e9 notes');
+  assert.strictEqual(p.updated, '2026-05-01T00:00:00Z');
+  assert.ok(!('created' in p));
+  const bare = viewerProject(data, {}, {}, 'project/files', [], '', 1000);
+  assert.strictEqual(bare.id, 'p-1');
+  assert.ok(!('description' in bare) && !('updated' in bare));
+  const cut = viewerProject(data, {}, {}, 'project/files', [], '', 5, { description: 'x'.repeat(9) });
+  assert.ok(cut.description.startsWith('xxxxx\n[... truncated') && cut.description.includes('project/project.json'));
+  assert.ok(!('id' in viewerProject({ project_uuid: 'project' }, {}, {}, 'f', [], '', 5)));
+});

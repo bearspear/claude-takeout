@@ -2710,3 +2710,17 @@ test('payloadFromDisk keeps canvas.json right after the start file', () => {
   const { payloads } = lib.artifactViewsFromDisk(lib.readArtifactStore(root));
   assert.deepStrictEqual(payloads[0].texts.map(t => t[0]), ['index.html', 'project/canvas.json', 'project/Main.dc.html']);
 });
+
+test('a project from disk has an id only when project.json or the chat names one', () => {
+  const dir = tmpRoot();
+  put(dir, 'original.json', JSON.stringify({ uuid: 'u', chat_messages: [] }));
+  put(dir, 'project/project.json', JSON.stringify({ name: 'Old Proj' }));
+  const archive = singleOf(dir);
+  const bare = chatFromDisk(archive, archive.chats[0]).viewerChat.project;
+  assert.ok(!('id' in bare) && !('description' in bare));
+  put(dir, 'project/project.json', JSON.stringify({ name: 'Old Proj', uuid: 'p-9', description: 'D', updated_at: '2026-02-02T00:00:00Z' }));
+  const p = chatFromDisk(archive, archive.chats[0]).viewerChat.project;
+  assert.strictEqual(p.id, 'p-9');
+  assert.strictEqual(p.description, 'D');
+  assert.strictEqual(p.updated, '2026-02-02T00:00:00Z');
+});

@@ -57,7 +57,8 @@
 //                a tool block of an image_search gets web: [{ title, page, source, href }], href null when not saved
 //   ctx.uploads: file uuid (or file name when there is none) to { path: 'uploads/<name>', text: string|null }; a file on
 //                Claude's own message is { path: 'artefacts/<name>', text: null }
-//   ctx.project: { name, fileDir, fileNames, docs: [{ name, text }], instructions }, fileDir relative to the chat folder;
+//   ctx.project: { name, fileDir, fileNames, docs: [{ name, text }], instructions, id?, description?, updated? }, fileDir relative to the chat folder;
+//                id (project uuid), description and updated (ISO time) are copied when strings;
 //                instructions: the project's prompt template ('' when none), cut at TEXT_EMBED_LIMIT
 //   ctx.published: the pages the chat published (savePublishedPages in popup.js, chatFromDisk in tools/archive-lib.js),
 //                [{ uuid, title, url, current, dir, versions: [{ label, order, startSaved, same, writtenAs, incomplete,
@@ -617,8 +618,11 @@
   function buildProject(p, folder) {
     if (!p) return null;
     const dir = joinPath(folder, p.fileDir);
+    const extra = {};
+    for (const k of ['id', 'description', 'updated']) if (typeof p[k] === 'string') extra[k] = p[k];
     return {
       name: p.name || '',
+      ...extra,
       files: (Array.isArray(p.fileNames) ? p.fileNames : []).map(name => ({ name, href: relHref(dir, name) })),
       instructions: typeof p.instructions === 'string' ? p.instructions : '',
       docs: (Array.isArray(p.docs) ? p.docs : []).filter(Boolean).map(d => ({ name: d.name || '', text: String(d.text == null ? '' : d.text) }))
@@ -770,7 +774,7 @@
   // listFetched (whether claude.ai's list is in the export); a chat's published-page file gets artifact: <id> when
   // that page is a listed one.
   function buildViewerData(chats, { exported, artifacts } = {}) {
-    const projects = [], byKey = new Map();
+    const projects = [], byKey = new Map(), byId = new Map();
     let sorted = chats.slice().sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
     const views = artifacts && Array.isArray(artifacts.views) ? artifacts.views.filter(v => v && typeof v === 'object') : [];
     const records = artifacts && Array.isArray(artifacts.records) ? artifacts.records.filter(r => r && typeof r === 'object' && typeof r.uuid === 'string') : [];
@@ -824,6 +828,19 @@
     }
     const out = sorted.map(chat => {
       if (!chat.project || typeof chat.project !== 'object') return chat;
+      const pid = typeof chat.project.id === 'string' && chat.project.id ? chat.project.id : '';
+      if (pid) {
+        // One project per id: the newest `updated` wins, then the copy with more docs and files, then the first.
+        let at = byId.get(pid);
+        if (at === undefined) { at = projects.length; projects.push(chat.project); byId.set(pid, at); }
+        else {
+          const a = projects[at], b = chat.project;
+          const au = String(a.updated || ''), bu = String(b.updated || '');
+          const size = (p) => (Array.isArray(p.docs) ? p.docs.length : 0) + (Array.isArray(p.files) ? p.files.length : 0);
+          if (bu > au || (bu === au && size(b) > size(a))) projects[at] = b;
+        }
+        return { ...chat, project: at };
+      }
       const key = projectKey(chat.project);
       const candidates = byKey.get(key) || [];
       let index = candidates.find(i => sameValue(projects[i], chat.project));
