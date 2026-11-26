@@ -138,8 +138,8 @@ function colorsChat() {
   await page.locator('.msg[data-id="h0"] button.chip').first().click();
   await page.locator('.file-code .hljs-keyword').first().waitFor({ timeout: 3000 });
   check('an upload in a popup gets colors', (await page.locator('.file-code').first().textContent()) === PY);
-  check('the popup Copy sits in its header', (await page.locator('.pop-head .copy').getAttribute('aria-label')) === 'Copy pasted.py');
-  await page.click('.pop-head .copy');
+  check('the popup Copy sits in its header', (await page.locator('.pop-head .copy:not(.download)').getAttribute('aria-label')) === 'Copy pasted.py');
+  await page.click('.pop-head .copy:not(.download)');
   check('the popup copies the file', (await page.evaluate(() => navigator.clipboard.readText())) === PY);
   await page.keyboard.press('Escape');
 
