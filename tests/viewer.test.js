@@ -2867,14 +2867,32 @@ test('partText reads a file version from a part: its text, or the start file of 
   assert.strictEqual(partText({ texts: [['index.html', 5]] }, 'index.html'), null);
 });
 
-test("partSiblings finds a payload's files beside its start file, by bare name", () => {
-  const { partSiblings } = require('../viewer/viewer-logic.js');
-  const payload = { texts: [['site/index.html', 'I'], ['site/app.css', 'C'], ['app.js', 'J'], ['__proto__', 'P']], images: [] };
-  const look = partSiblings(payload, 'site/index.html');
-  assert.strictEqual(look('app.css'), 'C');
-  assert.strictEqual(look('app.js'), null);
-  assert.strictEqual(look('index.html'), null);
-  assert.strictEqual(partSiblings(payload, 'index.html')('__proto__'), 'P');
-  assert.strictEqual(partSiblings(payload, 'index.html')('constructor'), null);
-  assert.strictEqual(partSiblings('text', 'index.html'), null);
+test("a session's card holds each version once: a publish naming no version is the current one", () => {
+  // An old url-only publish_files result names no version (the live one, ver2 here) beside an Artifact publish of ver2.
+  const urlOnly = id => [
+    ev(`call-${id}`, 'assistant', [{ type: 'tool_use', id, name: 'mcp__claude-artifacts__publish_files', input: { title: 'Session page', files: [{ path: '/home/user/page.html' }] } }]),
+    ev(`res-${id}`, 'user', [{ type: 'tool_result', tool_use_id: id, content: [{ type: 'text', text: JSON.stringify({ url: `https://claude.ai/artifact/${S_ART_ID}`, title: 'Session page' }) }] }]),
+  ];
+  const prompt = id => ev(id, 'user', [{ type: 'text', text: 'Go' }]);
+  const events = [prompt('p1'), ...sessionPublish('t1', S_ART_ID, 'ver2', 2), prompt('p2'), ...urlOnly('t2'), prompt('p3'), ...sessionPublish('t3', S_ART_ID, 'ver1', 1)];
+  const s = V.buildViewerSession(sessionOf(), events, { folder: 'sessions/x', artifacts: sessionStore() });
+  const page = s.chat.files[s.pages[S_ART]];
+  assert.deepStrictEqual(page.versions.map(v => [v.label, v.ver]), [['v1', 'ver1'], ['v2', 'ver2']]);
+  const cards = s.chat.messages.flatMap(m => m.blocks.filter(b => b.t === 'card').map(b => b.version));
+  assert.deepStrictEqual(cards, [1, 1, 0]);
+});
+
+test("a session's versions not in the store keep their publish order", () => {
+  const events = [ev('p1', 'user', [{ type: 'text', text: 'Go' }]), ...sessionPublish('t1', S_OTHER_ID, 'zz2', 2), ...sessionPublish('t2', S_OTHER_ID, 'aa1', 1), ...sessionPublish('t3', S_OTHER_ID, 'mm3', 3)];
+  const s = V.buildViewerSession(sessionOf(), events, { folder: 'sessions/x', artifacts: sessionStore() });
+  assert.deepStrictEqual(s.chat.files[s.pages[S_OTHER]].versions.map(v => v.label), ['zz2', 'aa1', 'mm3']);
+});
+
+test("a session's page links its artifact only when its record is listed, as a chat's does", () => {
+  const store = sessionStore();
+  delete store.records[0].listed;
+  const s = V.buildViewerSession(sessionOf(), sessionPublishEvents(), { folder: 'sessions/x', artifacts: store });
+  assert.ok(!('artifact' in s.chat.files[s.pages[S_ART]]));
+  const noRec = V.buildViewerSession(sessionOf(), sessionPublishEvents(), { folder: 'sessions/x', artifacts: { views: store.views, records: [] } });
+  assert.strictEqual(noRec.chat.files[noRec.pages[S_ART]].artifact, S_ART_ID, 'a view with no record: listed unless it says not');
 });

@@ -78,9 +78,10 @@ const PUB_RECORD = {
 };
 const PUB_STORE = { views: [PUB_VIEW], records: [PUB_RECORD] };
 const PAGE_V1 = '<!doctype html><p>Version one of the shipped page</p>';
-const PAGE_V2 = '<!doctype html><link rel="stylesheet" href="app.css"><p>Version two of the shipped page</p>';
+const PAGE_V2 = '<!doctype html><link rel="stylesheet" href="app.css"><p>Version two of the shipped page</p><img src="dot.png" alt="dot">';
+const DOT = `data:image/png;base64,${'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=='}`;
 const PAGE_CSS = 'p { color: rebeccapurple }';
-const PART = `window.__archivePart(1, ${JSON.stringify({ a0: { texts: [['index.html', PAGE_V2], ['app.css', PAGE_CSS]], images: [] }, a1: { texts: [['index.html', PAGE_V1]], images: [] } })});`;
+const PART = `window.__archivePart(1, ${JSON.stringify({ a0: { texts: [['index.html', PAGE_V2], ['app.css', PAGE_CSS]], images: [['dot.png', DOT]] }, a1: { texts: [['index.html', PAGE_V1]], images: [] } })});`;
 const FOLDER_P = 'sessions/Ship_it_p1';
 const SESSION_P = buildViewerSession({
   id: 'cse_p1', title: 'Ship it', config: { origin: 'cowork' }, created_at: iso(80), last_event_at: iso(90),
@@ -89,7 +90,7 @@ const SESSION_P = buildViewerSession({
   ev('p-p1', 'user', [{ type: 'text', text: 'Make the page' }]),
   ...publishEvents('pt1', PUB_ID, 'pv1', 1),
   ev('p-r1', 'assistant', [{ type: 'text', text: 'First version is up.' }]),
-  ev('p-p2', 'user', [{ type: 'text', text: 'Make it purple' }]),
+  ev('p-p2', 'user', [{ type: 'text', text: 'Make it purple\n\n' + Array.from({ length: 80 }, (_, i) => `Detail ${i} of the request.`).join('\n\n') }]),
   ...publishEvents('pt2', PUB_ID, 'pv2', 2),
   ...publishEvents('pt3', GONE_ID, 'gv1', 1),
   ev('p-r2', 'assistant', [{ type: 'text', text: 'Done, and a second page.' }]),
@@ -263,6 +264,7 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   await pp.waitForFunction(() => ((document.querySelector('#panel:not([hidden]) iframe.preview') || {}).srcdoc || '').includes('Version two'));
   const doc2 = await pp.locator('#panel iframe.preview').getAttribute('srcdoc');
   check('a card click opens the side panel with the page preview, from its part', doc2.includes('Version two of the shipped page') && doc2.includes('rebeccapurple'), doc2.slice(0, 300));
+  check("the page's picture comes from its preview part, as on the Artifacts screen", doc2.includes(`src="${DOT}"`) && !doc2.includes('src="dot.png"'), doc2.slice(0, 600));
   check('the panel names the page and its versions', /Shipped page/.test(await pp.textContent('#panel-head')) && (await pp.locator('#panel-head .ver').count()) === 2);
   await pp.locator('#panel-head .ver', { hasText: 'v1' }).click();
   await pp.waitForFunction(() => ((document.querySelector('#panel iframe.preview') || {}).srcdoc || '').includes('Version one'));
@@ -294,6 +296,30 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   await pp.locator(`#chat .page-link a.open-artifact[href="#a=${PUB_ID}"]`).first().click();
   await pp.waitForFunction(id => location.hash === '#a=' + id, PUB_ID);
   check('Open artifact goes to the Artifacts screen', await pp.locator('#artifacts-screen').isVisible());
+
+  // Opened from a search hit: msg stays in the hash, and a card click doesn't jump back to the hit.
+  const sh = await open(`file://${pub}`);
+  await sh.waitForSelector('.msg');
+  await sh.locator('.find input').fill('purple');
+  await sh.waitForFunction(() => !document.getElementById('results').hidden && document.querySelector('#results .group'));
+  await sh.click('#results .group .snip');
+  await sh.waitForFunction(() => location.hash === '#session=cse_p1&msg=p-p2');
+  await sh.waitForSelector('#chat mark');
+  await sh.locator('.find input').fill('');
+  const before = await sh.evaluate(() => {
+    const card = document.querySelectorAll('#chat .art')[1];
+    card.scrollIntoView({ block: 'center' });
+    return document.getElementById('scroll').scrollTop;
+  });
+  await sh.evaluate(() => document.querySelectorAll('#chat .art')[1].click());
+  await sh.waitForSelector('#panel:not([hidden]) iframe.preview');
+  await sh.waitForTimeout(300);
+  const after = await sh.evaluate(() => [document.getElementById('scroll').scrollTop, location.hash]);
+  check('after a search hit, a card click opens the panel and the column stays put', Math.abs(after[0] - before) < 2 && /msg=p-p2&file=/.test(after[1]), JSON.stringify([before, after]));
+  await sh.locator('#panel-head .ver', { hasText: 'v1' }).click();
+  await sh.waitForFunction(() => location.hash.endsWith('&version=0'));
+  await sh.waitForTimeout(300);
+  check('a version pick keeps the column too', Math.abs((await sh.evaluate(() => document.getElementById('scroll').scrollTop)) - before) < 2);
 
   check('no network, no page error', errors.length === 0 && requests.length === 0, errors.concat(requests).join(' | '));
   await browser.close();

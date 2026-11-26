@@ -1778,9 +1778,9 @@ function pageNodes(chat, file, version) {
     return [frame];
   }
   // An added page is no part of the chat that happens to be open, so it gets none of that chat's files.
-  // A session's published page: the files beside its start file in its own preview payload first.
-  const chatSibling = file.added ? () => null : siblingLookup(chat);
-  const doc = previewDoc(version.text, version.siblings ? name => { const own = version.siblings(name); return own !== null ? own : chatSibling(name); } : chatSibling);
+  // A session's published page (a version read from an artifact preview payload): as the Artifacts screen previews it.
+  const doc = version.payload ? artifactPreviewDoc(version.text, version.start, version.payload)
+    : previewDoc(version.text, file.added ? () => null : siblingLookup(chat));
   const frame = previewFrame(doc.srcdoc, file.name || '');
   // HTML, a scripted SVG and an SVG the picture refused: the page's own zoom bar.
   const wrapper = el('div', 'page-zoom');
@@ -1886,8 +1886,8 @@ function drawFromPart(chat, open, file, version) {
     const text = partText(value, version.start);
     if (typeof text === 'string') {
       version.text = text;
-      const siblings = partSiblings(value, version.start);
-      if (siblings) Object.defineProperty(version, 'siblings', { value: siblings, configurable: true });
+      // Its preview is then built as the Artifacts screen builds it, from the whole payload (scripts, styles, pictures).
+      if (value && typeof value === 'object') Object.defineProperty(version, 'payload', { value, configurable: true });
       drawPanel(chat, open, file, version);
     } else if (version.href) {
       // Its own copy in artefacts/ is still beside the viewer.
@@ -1969,8 +1969,10 @@ function navigate(state, options = {}) {
   renderChat(chat, leaf, options.anchor);
 }
 
-// A session in the column, read-only, as a chat with one branch: state { session, msg }. msg (one of its messages)
-// stays in the hash and is scrolled to.
+// A session in the column, read-only, as a chat with one branch: state { session, msg, file, version }. msg (one of
+// its messages) stays in the hash and is scrolled to when it changes or the column is drawn again, never on a panel
+// action (a card, a version, closing), which keeps msg in the hash.
+let sessionMsgAt = ''; // the session and msg last scrolled to
 function navigateSession(state, options) {
   const session = sessionsById.get(state.session);
   showArtifacts(false);
@@ -1990,8 +1992,11 @@ function navigateSession(state, options) {
   closeStepper();
   document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
   showPanel(chat, open);
-  if (msg && !(find && find.msg === msg)) find = { msg, terms: [], gen: null };
   const column = `session\n${session.id}`;
+  const at = `${session.id}\n${msg || ''}`;
+  const jump = !!msg && (column !== drawn || at !== sessionMsgAt);
+  sessionMsgAt = at;
+  if (jump && !(find && find.msg === msg)) find = { msg, terms: [], gen: null };
   if (column !== drawn) {
     drawn = column;
     renderChat(chat, chat.leaf, options.anchor);

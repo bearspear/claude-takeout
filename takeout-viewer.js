@@ -24,7 +24,8 @@
 //                                      start (the artifact step's preview payload) for a text start file; a page or
 //                                      version not in the store gets the card with the claude.ai link only. pages:
 //                                      { <uuid>: file id } of those cards, only when there are some; a listed page's
-//                                      file has artifact: <view id>.
+//                                      file has artifact: <view id> (a listed record, or a view with no record, as chats).
+//                                      A card holds one version per resolved id: a publish naming none is the current one.
 //   buildViewerData(chats, {exported, artifacts, sessions}) { exported, chats, projects, sessions? }, newest update first;
 //                                      sessions (newest activity first) only when given. A chat's project is an
 //                                      index into projects, where identical projects are kept once. artifacts:
@@ -792,22 +793,31 @@
       const shortId = (rec && typeof rec.shortId === 'string' && rec.shortId) || group[0].shortId || core('uuidToBase58')(uuid) || '';
       const view = views.find(v => String(v.id) === shortId || String(v.id).toLowerCase() === uuid) || null;
       const known = rec ? recordVersions(rec, new Map()) : [];
-      const versions = group.map(p => {
+      // One version per resolved id: a publish naming no version stands for the record's current one, which an
+      // explicit publish of it may name too. Versions not in the store follow, in publish order, the current one last.
+      const byVer = new Map();
+      group.forEach((p, i) => {
         const ver = p.ver || (rec && typeof rec.current === 'string' ? rec.current : '');
         const rv = ver ? known.find(x => x.ver === ver) || null : null;
-        const publishes = p.publishes.map(x => ({ ...x }));
+        const key = rv ? `v:${rv.ver}` : `p:${p.ver}`;
+        if (byVer.has(key)) { byVer.get(key).publishes.push(...p.publishes); return; }
+        byVer.set(key, { p, rv, publishes: p.publishes.slice(), order: rv ? known.indexOf(rv) : known.length + i + (p.current ? group.length : 0) });
+      });
+      const versions = [...byVer.values()].map(({ p, rv, publishes: list, order }) => {
+        const publishes = list.map(x => ({ ...x }));
         if (!rv || !rv.startSaved) {
-          return { ver: p.ver, folderName: '', label: rv ? rv.label : p.ver || 'current', order: rv ? known.indexOf(rv) : known.length + (p.current ? 1 : 0),
+          return { ver: p.ver, folderName: '', label: rv ? rv.label : p.ver || 'current', order,
             start: null, startSaved: null, same: false, writtenAs: null, incomplete: true, needsRuntime: false, text: null, publishes };
         }
         const own = rv.part != null ? { part: rv.part, key: rv.key } : rv.current && view && Number.isSafeInteger(view.part) && view.part > 0 && typeof view.key === 'string' ? { part: view.part, key: view.key } : null;
         const preview = own && rv.start && previewKind(rv.start) === 'text' ? { ...own, start: rv.start } : {};
-        return { ver: rv.ver, folderName: rv.folder || '', label: rv.label, order: known.indexOf(rv), start: rv.start, startSaved: rv.startSaved, same: false,
+        return { ver: rv.ver, folderName: rv.folder || '', label: rv.label, order, start: rv.start, startSaved: rv.startSaved, same: false,
           writtenAs: null, incomplete: false, needsRuntime: rv.current ? !!rec.needsRuntime : false, text: null, publishes, ...preview };
       });
       entries.push({ uuid, shortId, title: (rec && typeof rec.title === 'string' && rec.title) || String(group[0].title || ''),
         url: shortId ? `https://claude.ai/artifact/${shortId}` : String(group[0].url || ''), current: group.some(p => p.current), dir: up, versions,
-        ...(view && (!rec || rec.listed !== false) ? { view: String(view.id) } : {}) });
+        // As buildViewerData links a chat's card: listed by its record, or by the view when there is no record.
+        ...(view && (rec ? rec.listed === true : view.listed !== false) ? { view: String(view.id) } : {}) });
     }
     return entries;
   }

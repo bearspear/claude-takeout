@@ -2813,6 +2813,22 @@ test('a folder with only an unreadable session is not an archive', () => {
 });
 
 // ---- v1.25.1: a session's published pages get cards from the on-disk artifacts store ----
+test('a session whose build with the artifacts store fails keeps its first build, with a warning', async () => {
+  const { writeViewer } = tool();
+  const CTV = require('../takeout-viewer.js');
+  const root = tmpRoot();
+  LAYOUTS.v18(root);
+  put(root, 'sessions/Fix_bug/session.json', sessionJson('s1'));
+  const real = CTV.buildViewerSession;
+  CTV.buildViewerSession = (session, events, opts) => { if (opts && opts.artifacts) throw new Error('boom'); return real(session, events, opts); };
+  let res;
+  try { res = await writeViewer(single(root), {}); } finally { CTV.buildViewerSession = real; }
+  assert.strictEqual(res.status, 'written', res.reason);
+  assert.strictEqual(res.sessions, 1);
+  assert.deepStrictEqual(viewerData(root).sessions.map(s => s.id), ['s1']);
+  assert.ok(res.warnings.some(w => /sessions\/Fix_bug: boom/.test(w)), JSON.stringify(res.warnings));
+});
+
 test("build_viewer gives a session's published pages cards from the artifacts store, previews in parts", async () => {
   const { writeViewer } = tool();
   const root = tmpRoot();

@@ -319,11 +319,12 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
 
     // Sessions of an Export All (sessions/<name>/session.json), for the viewer's Sessions page. Built again below with
     // the artifacts store, for the cards of the pages they published.
-    const sessionInputs = archive.kind === 'mega' ? lib.readSessions(archive.root, { warnings: report.warnings }) : [];
-    const builtSessions = (artifacts, warn) => sessionInputs.flatMap(x => {
-      try { return [CTViewer.buildViewerSession(x.session, x.events, { folder: x.folder, ...(artifacts ? { artifacts } : {}) })]; } catch (e) { if (warn) report.warnings.push(`${x.folder}: ${e.message}, so the session was skipped`); return []; }
+    // Each input keeps its events only until its last build.
+    let sessionInputs = (archive.kind === 'mega' ? lib.readSessions(archive.root, { warnings: report.warnings }) : []).flatMap(x => {
+      try { return [{ ...x, built: CTViewer.buildViewerSession(x.session, x.events, { folder: x.folder }) }]; } catch (e) { report.warnings.push(`${x.folder}: ${e.message}, so the session was skipped`); return []; }
     });
-    let sessions = builtSessions(null, true);
+    let sessions = sessionInputs.map(x => x.built);
+    if (!withArtifacts) sessionInputs = [];
     report.sessions = sessions.length;
     if (!archive.chats.length && !standalone && !store.records.size && !sessions.length) return finish('skipped', 'no Claude chats in it');
 
@@ -380,10 +381,17 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
         artifactParts = input.partCount;
         artifacts = { views: input.views, records: input.records, listed: store.listed, exported: store.exportedAt, since: store.since, listFetched: store.listFetched };
         // A session's published pages: cards from the store, previews in the parts just written.
-        if (sessions.length) {
-          const kept = new Set(sessions.map(x => x.id));
-          sessions = builtSessions({ views: input.views, records: input.records }, false).filter(x => kept.has(x.id));
+        // One that fails here keeps its first build (no cards from the store), with a warning.
+        if (sessionInputs.length) {
+          const fromStore = { views: input.views, records: input.records };
+          sessions = sessionInputs.map(x => {
+            try { return CTViewer.buildViewerSession(x.session, x.events, { folder: x.folder, artifacts: fromStore }); } catch (e) {
+              report.warnings.push(`${x.folder}: ${e.message}, so its published pages show without the export's copies`);
+              return x.built;
+            }
+          });
         }
+        sessionInputs = [];
       }
 
       // Large upload text goes in parts numbered after those.

@@ -922,17 +922,6 @@ function partText(value, start) {
   return hit && typeof hit[1] === 'string' ? hit[1] : null;
 }
 
-// The files beside that start file in the same payload, for its preview's scripts and stylesheets (inlineSiblings):
-// name -> text or null, by a bare name in the start file's folder; null when the value is no payload.
-function partSiblings(value, start) {
-  const texts = value && typeof value === 'object' && Array.isArray(value.texts) ? value.texts : null;
-  if (!texts || typeof start !== 'string') return null;
-  const at = start.lastIndexOf('/');
-  const base = at >= 0 ? start.slice(0, at + 1) : '';
-  const byPath = new Map(texts.filter(t => Array.isArray(t) && typeof t[0] === 'string' && typeof t[1] === 'string' && t[0] !== start).map(t => [t[0], t[1]]));
-  return name => (byPath.has(base + name) ? byPath.get(base + name) : null);
-}
-
 // views: the tabs this version gets, first one showing. None and not missing: details and maybe a link.
 function fileViews(kind, version) {
   const text = version.text != null;
@@ -2174,5 +2163,5 @@ function pageZoom(wrapper, frame, opts = {}) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { partText, partSiblings, artifactShortId, sessionArtifacts, sessionsMaking, markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgAsPicture, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
+  module.exports = { partText, artifactShortId, sessionArtifacts, sessionsMaking, markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgAsPicture, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
 }
