@@ -2863,3 +2863,20 @@ test("build_viewer gives a session's published pages cards from the artifacts st
   assert.deepStrictEqual(file.versions.map(textOf), [G1, G2]);
   assert.ok(!fs.readFileSync(path.join(root, 'viewer.html'), 'utf8').includes('<p>G1'), 'no page text in viewer.html');
 });
+
+test('build_viewer opens the artifact an empty chat was opened from, from the on-disk store', async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  LAYOUTS.v18(root);
+  put(root, 'Opened_x/original.json', JSON.stringify({ uuid: 'c-open', name: 'Opened', created_at: '2026-11-01T00:00:00Z', updated_at: '2026-11-01T00:00:00Z',
+    settings: { started_with_artifact: { artifact_uuid: G_U } }, chat_messages: [], current_leaf_message_uuid: null }));
+  const res = await writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  const chat = viewerData(root).chats.find(c => c.id === 'c-open');
+  assert.strictEqual(chat.startedWith, G_U);
+  assert.strictEqual(chat.opened.title, 'Guide');
+  const file = chat.files[chat.opened.file];
+  assert.deepStrictEqual(file.versions.map(v => v.href), [`artifacts/${AF}/v1/index.html`, `artifacts/${AF}/v2/index.html`]);
+  assert.strictEqual(chat.opened.version, 1);
+  assert.ok(file.versions.every(v => v.part > 0 && v.text === null));
+});

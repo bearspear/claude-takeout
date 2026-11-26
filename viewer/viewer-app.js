@@ -961,6 +961,28 @@ function renderProject(chat) {
   }
 }
 
+// An empty chat claude.ai made when an artifact was opened: "Opened from the artifact <title>". The title is the
+// store's, else the listed artifact's; it opens the artifact in the side panel when the export has it, else its
+// claude.ai page in a new tab. Every title is text.
+function openedFromLine(chat) {
+  const line = el('p', 'opened-from');
+  const id = artifactShortId(chat.startedWith);
+  const opened = chat.opened && typeof chat.opened === 'object' ? chat.opened : {};
+  const view = allArtifactViews.find(v => v && (String(v.id) === id || String(v.id).toLowerCase() === chat.startedWith)) || null;
+  const title = (typeof opened.title === 'string' && opened.title) || (view && typeof view.title === 'string' && view.title) || '';
+  const link = el('a', '', title || 'an artifact');
+  const file = typeof opened.file === 'string' && Object.prototype.hasOwnProperty.call(chat.files, opened.file) ? opened.file : null;
+  if (file) link.href = formatHash({ chat: chat.id, file, version: opened.version });
+  else {
+    link.href = `https://claude.ai/artifact/${id}`;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.title = 'The artifact on claude.ai. It is not in this export.';
+  }
+  line.append(title ? 'Opened from the artifact ' : 'Opened from ', link);
+  return line;
+}
+
 // A session's fold bar line: "Session · <origin>" and its artifacts, each opening in the side panel when the session
 // published it (its card's file, newest version; the panel links the Artifacts screen), else on the Artifacts screen
 // when the export has it there, else on claude.ai. Every title is text.
@@ -1580,6 +1602,7 @@ function renderChat(chat, leaf = chat.leaf, anchor = null) {
   document.title = `${title} - Claude Takeout`;
   document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
 
+  if (!chat.messages.length && chat.startedWith) box.append(openedFromLine(chat));
   const chain = chainFrom(chat.messages, leaf);
   const counts = siblingCounts(chat.messages);
   const sibsOf = m => {
@@ -1951,7 +1974,11 @@ function navigate(state, options = {}) {
   const ids = new Set(chat.messages.map(m => m.id));
   const chain = chainFrom(chat.messages, ids.has(want.leaf) ? want.leaf : chat.leaf);
   const leaf = chain.length ? chain[chain.length - 1].id : null;
-  const open = resolveFile(chat.files, want.file, want.version, allAdded);
+  let open = resolveFile(chat.files, want.file, want.version, allAdded);
+  // A chat opened from an artifact, with no messages: that artifact in the side panel, when the chat is drawn anew.
+  if (!open && !want.file && !chat.messages.length && chat.opened && chat.opened.file && `${chat.id}\n${leaf}` !== drawn) {
+    open = resolveFile(chat.files, chat.opened.file, chat.opened.version, allAdded);
+  }
   const hash = formatHash({ chat: chat.id, leaf, file: open && open.file, version: open && open.version });
   // replaceState can throw (Safari allows 100 calls in 30 s): the hash then stays as it was.
   const replaceHash = h => { try { history.replaceState(null, '', h); } catch (e) { /* the hash stays */ } };

@@ -2186,6 +2186,20 @@ function generateLinksAndSources(urls, webSources) {
 // In a mega-ZIP, sharedProjects stores each project's files once at the archive
 // root: { root, byUuid: Map, usedDirs: Set }. Without it, files go in this folder.
 // folderName is this folder's path from the ZIP root, for the viewer's links.
+// A chat claude.ai made when an artifact was opened (startedWithArtifact) with no messages (chain: getMessageChain):
+// { title, href } for openedArtifactLine, or null. In Export All (shared), an artifact the step saves gets its store
+// record now (its folder name, ../artifacts/<folder>/, and its listed title); otherwise its claude.ai page.
+function openedArtifactOf(data, chain, shared = null) {
+  const uuid = startedWithArtifact(data);
+  if (!uuid || (Array.isArray(chain) && chain.length)) return null;
+  const listed = shared && shared.listedArtifacts instanceof Map ? shared.listedArtifacts.get(uuid) : null;
+  if (shared && shared.store && shared.includedArtifactIds instanceof Set && shared.includedArtifactIds.has(uuid)) {
+    const rec = publishedStoreRecord(shared, { uuid, title: listed ? listed.title : '' });
+    return { title: rec.title || '', href: `../${shared.store.prefix}${encodePath(rec.dir)}/` };
+  }
+  return { title: listed ? artifactText(listed.title) : '', href: `https://claude.ai/artifact/${uuidToBase58(uuid) || uuid}` };
+}
+
 async function populateConversationFolder(folder, data, onProgress = null, organizationId = null, sharedProjects = null, folderName = '', fetchPublished = null) {
   const title = data.name || 'Claude Conversation';
   const messages = getMessageChain(data);
@@ -3058,8 +3072,11 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     addFileWithBOM(folder, 'links_and_sources.md', linksAndSourcesContent);
   }
 
+  // A chat claude.ai made when an artifact was opened, with no messages: where it came from, linked to the artifact's
+  // folder when this Export All saves it, else to claude.ai.
+  const openedFrom = openedArtifactOf(data, messages, sharedProjects);
   // The Markdown links to what this export really saved.
-  const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames, webImages, toolImages, publishedLinks: pageLinks };
+  const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames, webImages, toolImages, publishedLinks: pageLinks, openedFrom };
   addFileWithBOM(folder, 'full_chat.md', convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking, ...saved }));
   const integratedChatMd = convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking, ...saved });
   addFileWithBOM(folder, 'integrated_chat.md', integratedChatMd);
@@ -3073,6 +3090,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     `**Created:** ${formatTimestamp(data.created_at)}`,
     `**Exported:** ${formatTimestamp(new Date().toISOString())}`,
     `**Link:** [https://claude.ai/chat/${data.uuid}](https://claude.ai/chat/${data.uuid})`,
+    ...(openedFrom ? ['', openedArtifactLine(openedFrom.title, openedFrom.href)] : []),
     '',
     '---',
     '',
@@ -4248,6 +4266,8 @@ function publishedLines(block, links = null, up = '') {
 function convertToMarkdown(data, options = {}) {
   const { embedArtifacts = false, seamlessMd = false, includeThinking = true,
     attachmentFiles = null, uploadNames = null, presentedNames = {}, webImages = {}, toolImages = {}, publishedLinks: pageLinks = null } = options;
+  // A chat opened from an artifact, with no messages: options.openedFrom ({ title, href }), else its claude.ai page.
+  const openedFrom = options.openedFrom !== undefined ? options.openedFrom : openedArtifactOf(data, getMessageChain(data));
   const lines = [];
   const title = data.name || 'Claude Conversation';
 
@@ -4278,6 +4298,7 @@ function convertToMarkdown(data, options = {}) {
     lines.push(`**Link:** [https://claude.ai/chat/${data.uuid}](https://claude.ai/chat/${data.uuid})  `);
   }
   lines.push('');
+  if (openedFrom) lines.push(openedArtifactLine(openedFrom.title, openedFrom.href), '');
 
   // Use message chain to handle branched conversations
   const messages = getMessageChain(data);
@@ -5419,7 +5440,9 @@ async function bulkExportZip(options = {}) {
     // only an included artifact's listed version keeps its preview in memory for the artifact step.
     const store = artifactStore(megaZip, { prefix: 'artifacts/' });
     const listedArtifacts = new Map((artifactList ? artifactList.artifacts : []).map((a) => [String(a.slug).toLowerCase(), a]));
-    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), store, listedArtifacts, previewWanted: publishedPreviewWanted(includedArtifacts) };
+    // includedArtifactIds: the artifacts the step will save, so a chat opened from one can link its folder.
+    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), store, listedArtifacts, previewWanted: publishedPreviewWanted(includedArtifacts),
+      includedArtifactIds: new Set(includedArtifacts.map((a) => String(a.slug).toLowerCase())) };
     // A Claude Docs artifact's uuid -> the chat in this export that rebuilt its text (the latest), for its artifact.json note.
     const docChats = new Map();
     const viewerChats = [];

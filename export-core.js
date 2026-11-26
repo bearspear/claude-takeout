@@ -2798,6 +2798,23 @@ function formatTimestamp(isoString) {
 // Text inside [...] of a Markdown link: brackets escaped, whitespace runs as one space.
 const mdLinkText = (text) => String(text).replace(/[\\[\]]/g, '\\$&').replace(/\s+/g, ' ');
 
+// A chat claude.ai made when an artifact was opened has settings.started_with_artifact.artifact_uuid: that artifact's
+// uuid, lowercased, or '' when the chat has none (or not a uuid). Nothing else from settings is read. A function
+// declaration, so takeout-viewer.js can reach it on window.
+function startedWithArtifact(data) {
+  const s = data && typeof data === 'object' && data.settings && typeof data.settings === 'object' ? data.settings.started_with_artifact : null;
+  const u = s && typeof s === 'object' && typeof s.artifact_uuid === 'string' ? s.artifact_uuid.toLowerCase() : '';
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(u) ? u : '';
+}
+
+// The Markdown line for such a chat with no messages: where it came from, linked (href: the export's artifact folder,
+// else its claude.ai page).
+function openedArtifactLine(title, href) {
+  const t = String(title || '').trim();
+  return t ? `This chat was opened from the artifact [${mdLinkText(t)}](${href}) and has no messages.`
+    : `This chat was opened from [an artifact](${href}) and has no messages.`;
+}
+
 // A '/'-separated path with each segment URL-encoded.
 const encodePath = (p) => String(p).split('/').map(encodeURIComponent).join('/');
 
@@ -3198,7 +3215,7 @@ function sessionReadmeMd(session, events, artifactLinks) {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    escapeHtmlText, formatTimestamp, mdLinkText, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
+    escapeHtmlText, formatTimestamp, mdLinkText, startedWithArtifact, openedArtifactLine, encodePath, artifactCount, storeVersionList, storeNoIdKey, storeVersionSame, artifactRowVersions, storeRecordRow,
     sortArtifactRows, artifactRowNotes, artifactSource, artifactUrl, artifactLocal, artifactVersionLinks, ARTIFACT_THUMB_PERMISSION_STATUS, artifactsChangedLine,
     artifactThumbsLine, ARTIFACTS_UNLISTED_HEADING, ARTIFACTS_NO_LIST, splitListedRows, artifactsIndexMd, artifactsIndexHtml,
     fixMojibake, isTextFile, zipSafeName, viewerUploadKey, claudeDocsAction, isPublishTool, isArtifactTool, isArtifactPublish, artifactPublishReply, publishedReply, base58ToUuid, uuidToBase58, artifactsFromList, publishedPagesOf, artifactLinksOf, publishedSegment, versionAsOf, claudeDocKey, renderClaudeDoc, getMessageChain, failedToolUseIds, bashFailed, isBashTool, heredocPath, heredocBody, heredocMatches, HEREDOC_RE, heredocFiles, normalizeSandboxPath, commandCwds, resolveSandboxPath, resolveTouch, normalizedKeys, stripHeredocTabs, READ_FILE_TOOLS, isUnderFolder, literalCommands, sedSubstitution, applySedSubstitutions, literalSteps, pyStringLiteral, pythonSwapScript, applyPythonReplace, literalSwapCommand, commandTouches, looseCommands, writeFreeTouches, safeFileTitle, claudeDocCreated, docCompanions, docCompanionNote, docWidgetShots, docWidgetCode, docWidgetEmbeds, docDiagramPictures,

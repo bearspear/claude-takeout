@@ -2896,3 +2896,46 @@ test("a session's page links its artifact only when its record is listed, as a c
   const noRec = V.buildViewerSession(sessionOf(), sessionPublishEvents(), { folder: 'sessions/x', artifacts: { views: store.views, records: [] } });
   assert.strictEqual(noRec.chat.files[noRec.pages[S_ART]].artifact, S_ART_ID, 'a view with no record: listed unless it says not');
 });
+
+// ---- v1.25.1: chats claude.ai made when an artifact was opened (settings.started_with_artifact, no messages) ----
+const openedChat = (uuid, extra = {}) => ({
+  uuid: 'oc1', name: 'Takeout page', created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-20T10:00:00Z', current_leaf_message_uuid: null,
+  settings: { started_with_artifact: { artifact_uuid: uuid, other: 'x' }, paprika_mode: 'extended' }, chat_messages: [], ...extra,
+});
+
+test('buildViewerChat carries startedWith only for a valid artifact uuid, lowercased; other chats unchanged', () => {
+  assert.strictEqual(buildViewerChat(openedChat(S_ART.toUpperCase()), {}).startedWith, S_ART);
+  for (const bad of ['nope', '', null, 5, { a: 1 }]) assert.ok(!('startedWith' in buildViewerChat(openedChat(bad), {})), String(bad));
+  assert.ok(!('startedWith' in buildViewerChat({ ...openedChat(S_ART), settings: { started_with_artifact: null } }, {})));
+  const plain = { uuid: 'p', name: 'p', chat_messages: [] };
+  assert.deepStrictEqual(Object.keys(buildViewerChat(plain, {})), ['id', 'title', 'model', 'created', 'updated', 'leaf', 'messages', 'files', 'project']);
+  assert.ok(!JSON.stringify(buildViewerChat(openedChat(S_ART), {})).includes('extended'), 'nothing else from settings');
+});
+
+test("buildViewerData opens an artifact-opened empty chat's artifact from the store, every saved version", () => {
+  const chat = buildViewerChat(openedChat(S_ART), {});
+  const d = buildViewerData([chat], { exported: 'x', artifacts: { ...sessionStore(), listed: 1 } });
+  const c = d.chats[0];
+  assert.strictEqual(c.startedWith, S_ART);
+  assert.ok(c.opened && c.opened.title === 'Session page', JSON.stringify(c.opened));
+  const file = c.files[c.opened.file];
+  assert.ok(file && file.published, JSON.stringify(c.files));
+  assert.strictEqual(file.name, 'Session page');
+  assert.strictEqual(file.artifact, S_ART_ID);
+  assert.deepStrictEqual(file.versions.map(v => [v.label, v.href, v.text, v.part, v.key]), [
+    ['v1', `${S_DIR}/ver1/index.html`, null, 2, 'a1'], ['v2', `${S_DIR}/ver2/index.html`, null, 3, 'a0']]);
+  assert.strictEqual(c.opened.version, 1, 'the current version');
+});
+
+test('an artifact-opened chat the store lacks gets the listed title only; one with messages gets nothing', () => {
+  const view = { id: S_OTHER_ID, title: 'Listed only', kind: 'Page' };
+  const d = buildViewerData([buildViewerChat(openedChat(S_OTHER), {})], { exported: 'x', artifacts: { views: [view], records: [], listed: 1 } });
+  assert.deepStrictEqual(d.chats[0].opened, { title: 'Listed only' });
+  assert.deepStrictEqual(d.chats[0].files, {});
+  const none = buildViewerData([buildViewerChat(openedChat(S_OTHER), {})], { exported: 'x' });
+  assert.ok(!('opened' in none.chats[0]));
+  const withMessages = openedChat(S_ART, { current_leaf_message_uuid: 'm1', chat_messages: [{ uuid: 'm1', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'hi' }] }] });
+  const d2 = buildViewerData([buildViewerChat(withMessages, {})], { exported: 'x', artifacts: { ...sessionStore(), listed: 1 } });
+  assert.ok(!('opened' in d2.chats[0]));
+  assert.deepStrictEqual(d2.chats[0].files, {});
+});

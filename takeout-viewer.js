@@ -40,6 +40,9 @@
 //                                      artifactsSince, listFetched; a published:<uuid> file of a listed artifact gets
 //                                      artifact: <view id>.
 //                                      A chat's links (artifactLinksOf) are a non-enumerable property of buildViewerChat's result.
+//                                      A chat made when an artifact was opened has startedWith: <uuid> (startedWithArtifact);
+//                                      with no messages, buildViewerData gives it opened: { title, file, version } and that
+//                                      file (o1: the store's saved versions, as a session's card), or { title } alone.
 //                                      A GenFile Claude made has madeAt: the message of its last version.
 //   moveUploadText(data, {firstPart, inlineLimit, partLimit})  { data, parts: [{ name, body }] }: upload text over
 //                                      UPLOAD_INLINE_LIMIT bytes moves into viewer-files parts; the upload keeps
@@ -345,6 +348,36 @@
 
   const missingFile = name => ({ name, kind: 'missing', versions: [{ label: '', text: null, href: null }] });
 
+  // A PublishedEntry (ctx.published) as its card's GenFile: { versions (sorted by order), build() -> GenFile }, or null
+  // with no versions. hrefOf(name): a written file's link (a same version's).
+  function publishedFile(entry, folder, hrefOf) {
+    const versions = (Array.isArray(entry.versions) ? entry.versions : []).filter(Boolean)
+      .map((v, i) => ({ v, i })).sort((a, b) => (Number(a.v.order) || 0) - (Number(b.v.order) || 0) || a.i - b.i).map(x => x.v);
+    if (!versions.length) return null;
+    const pageDir = joinPath(folder, entry.dir);
+    const build = () => {
+      const out = versions.map(v => {
+        const text = typeof v.text === 'string' ? v.text : null;
+        let href = null;
+        if (v.same && v.writtenAs) href = hrefOf(v.writtenAs);
+        else if (v.startSaved && pageDir !== null) href = relHref(pageDir, v.folderName, v.startSaved);
+        // A session's version previews from the artifact step's part (sessionPublished); a chat's entries have no part.
+        const part = Number.isSafeInteger(v.part) && v.part > 0 && typeof v.key === 'string' && v.key
+          ? { part: v.part, key: v.key, ...(typeof v.start === 'string' && v.start ? { start: v.start } : {}) } : {};
+        return { label: String(v.label || ''), text, href, same: !!v.same, ...(typeof v.ver === 'string' && v.ver ? { ver: v.ver } : {}), ...part };
+      });
+      const named = versions.map(v => v.startSaved || v.writtenAs).find(Boolean) || '';
+      const hasText = out.some(v => v.text !== null || v.part != null);
+      const kind = out.some(v => v.text !== null || v.href !== null) ? kindFor(String(named), null, hasText) : 'missing';
+      return {
+        name: String(entry.title || 'Published page'), kind,
+        published: { url: String(entry.url || ''), current: !!entry.current, needsRuntime: versions.some(v => !!v.needsRuntime) },
+        versions: out,
+      };
+    };
+    return { versions, build };
+  }
+
   // Cards for the files each message made. Mutates the blocks of `messages` and returns the GenFile map.
   function addCards(source, messages, blockOf, leafId, c) {
     const index = c.artifactIndex || {};
@@ -428,30 +461,9 @@
     const pageOf = new Map(); // toolUseId -> { key, build, version }, version an index in the page's sorted versions
     for (const entry of Array.isArray(c.published) ? c.published : []) {
       if (!entry || typeof entry.uuid !== 'string') continue;
-      const versions = (Array.isArray(entry.versions) ? entry.versions : []).filter(Boolean)
-        .map((v, i) => ({ v, i })).sort((a, b) => (Number(a.v.order) || 0) - (Number(b.v.order) || 0) || a.i - b.i).map(x => x.v);
-      if (!versions.length) continue;
-      const pageDir = joinPath(folder, entry.dir);
-      const build = () => {
-        const out = versions.map(v => {
-          const text = typeof v.text === 'string' ? v.text : null;
-          let href = null;
-          if (v.same && v.writtenAs) href = hrefOf(v.writtenAs);
-          else if (v.startSaved && pageDir !== null) href = relHref(pageDir, v.folderName, v.startSaved);
-          // A session's version previews from the artifact step's part (sessionPublished); a chat's entries have no part.
-          const part = Number.isSafeInteger(v.part) && v.part > 0 && typeof v.key === 'string' && v.key
-            ? { part: v.part, key: v.key, ...(typeof v.start === 'string' && v.start ? { start: v.start } : {}) } : {};
-          return { label: String(v.label || ''), text, href, same: !!v.same, ...(typeof v.ver === 'string' && v.ver ? { ver: v.ver } : {}), ...part };
-        });
-        const named = versions.map(v => v.startSaved || v.writtenAs).find(Boolean) || '';
-        const hasText = out.some(v => v.text !== null || v.part != null);
-        const kind = out.some(v => v.text !== null || v.href !== null) ? kindFor(String(named), null, hasText) : 'missing';
-        return {
-          name: String(entry.title || 'Published page'), kind,
-          published: { url: String(entry.url || ''), current: !!entry.current, needsRuntime: versions.some(v => !!v.needsRuntime) },
-          versions: out,
-        };
-      };
+      const page = publishedFile(entry, folder, hrefOf);
+      if (!page) continue;
+      const { versions, build } = page;
       versions.forEach((v, i) => {
         for (const p of Array.isArray(v.publishes) ? v.publishes : []) {
           if (p && p.toolUseId != null) pageOf.set(p.toolUseId, { key: 'published:' + entry.uuid, build, version: i, same: !!v.same, writtenAs: v.writtenAs ? String(v.writtenAs) : '' });
@@ -719,6 +731,9 @@
       created: data.created_at, updated: data.updated_at, leaf: data.current_leaf_message_uuid || null,
       messages, files, project: buildProject(c.project, c.folder)
     };
+    // A chat claude.ai made when an artifact was opened: that artifact's uuid (buildViewerData opens it).
+    const startedWith = core('startedWithArtifact')(data);
+    if (startedWith) chat.startedWith = startedWith;
     // For buildViewerData, which joins chats and artifacts; not enumerable, so the chat's own data is unchanged.
     let links = [];
     try { links = core('artifactLinksOf')({ chat_messages: source }); } catch (e) { /* odd data links nothing */ }
@@ -820,6 +835,27 @@
         ...(view && (rec ? rec.listed === true : view.listed !== false) ? { view: String(view.id) } : {}) });
     }
     return entries;
+  }
+
+  // The artifact an empty chat was opened from (buildViewerData): { opened: { title, file?, version? }, id?, file? }, or
+  // null when the export knows nothing of it. The file is a published page's GenFile built as a session's card is
+  // (sessionPublished), with each version the record saved; paths from the export root.
+  function openedArtifact(uuid, views, records) {
+    const rec = records.find(r => r.uuid.toLowerCase() === uuid) || null;
+    let short = '';
+    try { short = core('uuidToBase58')(uuid) || ''; } catch (e) { /* the uuid itself may be the id */ }
+    const view = views.find(v => String(v.id) === short || String(v.id).toLowerCase() === uuid) || null;
+    const title = (rec && typeof rec.title === 'string' && rec.title) || (view && typeof view.title === 'string' && view.title) || '';
+    const known = rec ? recordVersions(rec, new Map()).filter(v => v.startSaved) : [];
+    if (!known.length) return title ? { opened: { title } } : null;
+    const pages = known.map(v => ({ uuid, shortId: short, ver: v.ver, current: false, title, url: '', publishes: [] }));
+    const entry = sessionPublished(pages, { views, records: [rec] }, '')[0];
+    const page = entry && publishedFile(entry, '', () => null);
+    if (!page) return title ? { opened: { title } } : null;
+    const file = { ...page.build(), shared: true, ...(entry.view ? { artifact: entry.view } : {}) };
+    const at = page.versions.findIndex(v => v.ver === rec.current);
+    const id = 'o1';
+    return { id, file, opened: { title: title || null, file: id, version: at >= 0 ? at : page.versions.length - 1 } };
   }
 
   function buildViewerSession(session, events, opts = {}) {
@@ -1100,6 +1136,15 @@
       }
       return { ...chat, project: index };
     });
+    // A chat claude.ai made when an artifact was opened, with no messages: that artifact, from the store, as a
+    // published page's file it opens in the side panel (opened: { title, file, version }, every version the store
+    // saved, the current one shown), or only its title when the export has the artifact listed but not saved.
+    for (let i = 0; i < out.length; i++) {
+      const chat = out[i];
+      if (!chat.startedWith || chat.messages.length) continue;
+      const opened = openedArtifact(chat.startedWith, views, records);
+      if (opened) out[i] = opened.file ? { ...chat, files: { ...chat.files, [opened.id]: opened.file }, opened: opened.opened } : { ...chat, opened: opened.opened };
+    }
     const data = { exported, chats: out, projects };
     if (views.length || records.length || !listFetched) {
       // How many artifact folders the export has (listed or not): the Artifacts entry shows for any.

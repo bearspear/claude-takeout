@@ -1809,6 +1809,37 @@ test("Export All gives a session's published artifact a card from the artifacts 
   assert.deepStrictEqual(cards, [{ t: 'card', file: id, version: 0 }]);
 });
 
+test('Export All: a chat opened from an artifact says so, links the artifact folder, and opens it in the viewer (v1.25.1)', async () => {
+  const opened = { uuid: 'c-open', name: 'Takeout page', created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-20T10:00:00Z', current_leaf_message_uuid: null,
+    settings: { started_with_artifact: { artifact_uuid: S_ART.toUpperCase() } }, chat_messages: [] };
+  const gone = { ...opened, uuid: 'c-gone', name: 'Gone page', settings: { started_with_artifact: { artifact_uuid: '99999999-2222-4222-8222-222222222222' } } };
+  const list = [opened, gone].map((c) => ({ uuid: c.uuid, name: c.name, updated_at: c.updated_at }));
+  const frames = [{ slug: S_ART, title: 'Panel', typeSlug: '', typeTitle: '', sourceSurface: 'code', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }];
+  const pages = { [S_ART]: { title: 'Panel', live: P_LIVE, versions: { [P_LIVE]: { files: { 'index.html': '<p>Panel</p>' } } } } };
+  let viewerData = null;
+  const fakeViewer = (sb) => {
+    sb.__viewer = (data) => { viewerData = JSON.parse(JSON.stringify(data)); };
+    vm.runInContext('writeViewer = async (zip, chats, opts) => { __viewer(CTViewer.buildViewerData(chats, { exported: "x", artifacts: opts.artifacts, sessions: opts.sessions })); zip.file("viewer.html", "<html>"); return true; }', sb);
+  };
+  const { result, saved } = await bulkRun({ list, chats: { 'c-open': opened, 'c-gone': gone }, frames, pages, setup: fakeViewer, options: { withArtifacts: true } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  const w = saved.written;
+  const artFolder = Object.keys(w).find((n) => /^artifacts\/[^/]+\/artifact\.json$/.test(n)).split('/')[1];
+  const chatDir = (name) => Object.keys(w).find((n) => n.endsWith('/README.md') && n.startsWith(name)).split('/')[0];
+  const line = `This chat was opened from the artifact [Panel](../artifacts/${encodeURIComponent(artFolder)}/) and has no messages.`;
+  assert.ok(w[`${chatDir('Takeout')}/README.md`].includes(line), w[`${chatDir('Takeout')}/README.md`]);
+  assert.ok(w[`${chatDir('Takeout')}/full_chat.md`].includes(line));
+  assert.ok(w[`${chatDir('Gone')}/README.md`].includes('This chat was opened from [an artifact](https://claude.ai/artifact/'), w[`${chatDir('Gone')}/README.md`]);
+  assert.ok(!result.warningList.some((x) => x.type === 'export_health'), JSON.stringify(result.warningList));
+  const chat = viewerData.chats.find((c) => c.id === 'c-open');
+  assert.strictEqual(chat.startedWith, S_ART);
+  const file = chat.files[chat.opened.file];
+  assert.strictEqual(chat.opened.title, 'Panel');
+  assert.match(file.versions[chat.opened.version].href, new RegExp(`^artifacts/${encodeURIComponent(artFolder)}/[^/]+/index\\.html$`));
+  assert.ok(file.versions[chat.opened.version].part > 0);
+  assert.ok(!('opened' in viewerData.chats.find((c) => c.id === 'c-gone')));
+});
+
 test('runSessionStep builds each session for the viewer, images by relative path', async () => {
   const { sandbox } = exportPopup();
   const written = {};

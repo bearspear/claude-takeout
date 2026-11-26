@@ -6502,3 +6502,24 @@ test('saveToolImages fetches in parallel and keeps the order of files and warnin
   assert.deepStrictEqual(Object.keys(saved), ['aaaaaaaa-1', 'bbbbbbbb-2', 'dddddddd-4', 'eeeeeeee-5']);
   assert.deepStrictEqual(warnings, ['pic2']);
 });
+
+// ---- v1.25.1: chats claude.ai made when an artifact was opened ----
+test('startedWithArtifact reads a valid artifact uuid from settings, lowercased', () => {
+  const { startedWithArtifact } = require('../export-core.js');
+  const u = 'ABCDEF01-2345-4678-89AB-CDEF01234567';
+  assert.strictEqual(startedWithArtifact({ settings: { started_with_artifact: { artifact_uuid: u } } }), u.toLowerCase());
+  for (const d of [{}, null, { settings: {} }, { settings: { started_with_artifact: 'x' } }, { settings: { started_with_artifact: { artifact_uuid: 'nope' } } }]) {
+    assert.strictEqual(startedWithArtifact(d), '');
+  }
+});
+
+test('openedArtifactLine says where an empty artifact chat came from', () => {
+  const { openedArtifactLine } = require('../export-core.js');
+  assert.strictEqual(openedArtifactLine('Takeout [panel]', '../artifacts/Takeout_x/'), 'This chat was opened from the artifact [Takeout \\[panel\\]](../artifacts/Takeout_x/) and has no messages.');
+  assert.strictEqual(openedArtifactLine('', 'https://claude.ai/artifact/AbC'), 'This chat was opened from [an artifact](https://claude.ai/artifact/AbC) and has no messages.');
+});
+
+test('chatHealth: an empty chat opened from an artifact is healthy', () => {
+  const d = { created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-20T10:00:00Z', chat_messages: [], settings: { started_with_artifact: { artifact_uuid: 'abcdef01-2345-4678-89ab-cdef01234567' } } };
+  assert.deepStrictEqual(healthOf(d), []);
+});

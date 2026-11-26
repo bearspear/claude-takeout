@@ -95,6 +95,15 @@ const SESSION_P = buildViewerSession({
   ...publishEvents('pt3', GONE_ID, 'gv1', 1),
   ev('p-r2', 'assistant', [{ type: 'text', text: 'Done, and a second page.' }]),
 ], { folder: FOLDER_P, artifacts: PUB_STORE });
+// Chats claude.ai made when an artifact was opened (settings.started_with_artifact), empty: one in the store, one not;
+// and one with messages, which stays as it is.
+const openedChat = (uuid, name, art, messages = []) => ({ uuid, name, model: 'claude-x', created_at: iso(96), updated_at: iso(96), current_leaf_message_uuid: messages.length ? messages[messages.length - 1].uuid : null,
+  settings: { started_with_artifact: { artifact_uuid: art } }, chat_messages: messages });
+const OPENED = [
+  openedChat('c-open', 'Opened page', PUB_ART.toUpperCase()),
+  openedChat('c-gone', 'Opened gone', GONE),
+  openedChat('c-msgs', 'Opened and used', PUB_ART, [{ uuid: 'cm-0', parent_message_uuid: null, sender: 'human', created_at: iso(96), content: [{ type: 'text', text: 'A real prompt' }], attachments: [], files: [], files_v2: [] }]),
+];
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==';
 
 (async () => {
@@ -115,7 +124,7 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   }
   fs.mkdirSync(path.join(dir, 'viewer-files'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'viewer-files', 'part-0001.js'), PART);
-  fs.writeFileSync(pub, buildHtml(CHATS, iso(95), () => ({}), { sessions: [SESSION_P], artifacts: { views: [PUB_VIEW], records: [PUB_RECORD], listed: 1, exported: iso(95), since: null } }, { fileScripts: true }));
+  fs.writeFileSync(pub, buildHtml([...CHATS, ...OPENED], iso(95), () => ({}), { sessions: [SESSION_P], artifacts: { views: [PUB_VIEW], records: [PUB_RECORD], listed: 1, exported: iso(95), since: null } }, { fileScripts: true }));
   const browser = await chromium.launch({ executablePath: process.env.CHROME_EXE });
   let failed = 0;
   const check = (n, ok, x = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'}  ${n} ${ok ? '' : x}`); };
@@ -298,7 +307,7 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   check('Open artifact goes to the Artifacts screen', await pp.locator('#artifacts-screen').isVisible());
 
   // Opened from a search hit: msg stays in the hash, and a card click doesn't jump back to the hit.
-  const sh = await open(`file://${pub}`);
+  const sh = await open(`file://${pub}#chat=c1`);
   await sh.waitForSelector('.msg');
   await sh.locator('.find input').fill('purple');
   await sh.waitForFunction(() => !document.getElementById('results').hidden && document.querySelector('#results .group'));
@@ -320,6 +329,26 @@ const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwA
   await sh.waitForFunction(() => location.hash.endsWith('&version=0'));
   await sh.waitForTimeout(300);
   check('a version pick keeps the column too', Math.abs((await sh.evaluate(() => document.getElementById('scroll').scrollTop)) - before) < 2);
+
+  // A chat opened from an artifact: the line, and the artifact in the side panel at once.
+  const oc = await open(`file://${pub}#chat=c-open`);
+  await oc.waitForSelector('#chat .opened-from');
+  check('an artifact-opened chat says where it came from', (await oc.textContent('#chat .opened-from')) === 'Opened from the artifact Shipped page', await oc.textContent('#chat .opened-from'));
+  await oc.waitForFunction(() => ((document.querySelector('#panel:not([hidden]) iframe.preview') || {}).srcdoc || '').includes('Version two'));
+  check('it opens the artifact in the side panel, its current version', /^#chat=c-open&file=[^&]+&version=1$/.test(await oc.evaluate(() => location.hash)), await oc.evaluate(() => location.hash));
+  await oc.locator('#panel-head .close').click();
+  await oc.waitForFunction(() => !location.hash.includes('file='));
+  await oc.waitForTimeout(300);
+  check('closing the panel keeps it closed', !(await oc.locator('#panel').isVisible()) && (await oc.locator('#chat .opened-from').count()) === 1);
+  await oc.evaluate(() => { location.hash = '#chat=c-gone'; });
+  await oc.waitForFunction(() => (document.querySelector('#chat .opened-from') || {}).textContent === 'Opened from an artifact');
+  const goneLink = await oc.$eval('#chat .opened-from a', a => [a.getAttribute('href'), a.target, a.rel]);
+  check('one the export lacks links to claude.ai, no panel', goneLink[0] === `https://claude.ai/artifact/${GONE_ID}` && goneLink[1] === '_blank' && /noopener/.test(goneLink[2])
+    && !(await oc.locator('#panel').isVisible()), JSON.stringify(goneLink));
+  await oc.evaluate(() => { location.hash = '#chat=c-msgs'; });
+  await oc.waitForFunction(() => document.getElementById('title').textContent === 'Opened and used');
+  check('a chat with messages is unchanged', (await oc.locator('#chat .opened-from').count()) === 0 && /A real prompt/.test(await oc.textContent('#chat')) && !(await oc.locator('#panel').isVisible()));
+  check('they stay in Recents', (await oc.$$eval('#recents .item', l => l.map(x => x.dataset.id))).includes('c-open'));
 
   check('no network, no page error', errors.length === 0 && requests.length === 0, errors.concat(requests).join(' | '));
   await browser.close();
