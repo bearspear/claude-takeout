@@ -1630,6 +1630,22 @@ test('the sessions step is done after the viewer step starts, also with no sessi
   assert.strictEqual(states.sessions, 'done');
 });
 
+test('runSessionStep builds each session for the viewer, images by relative path', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async () => JSON.parse(JSON.stringify(onePage()[0])) };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  const dir = sessionDir(written);
+  assert.strictEqual(out.viewerSessions.length, 1, out.warnings.join('\n'));
+  const v = out.viewerSessions[0];
+  assert.strictEqual(v.id, S_COWORK);
+  assert.strictEqual(v.folder, dir);
+  assert.deepStrictEqual(v.artifacts, [S_ART]);
+  assert.deepStrictEqual(v.chat.messages[0].blocks[1], { t: 'image', href: `${dir}/images/1.png` });
+  assert.ok(!JSON.stringify(v).includes(PNG_B64), 'no image data for the viewer');
+});
+
 test('runSessionStep skips the sessions past the ZIP budget with one warning', async () => {
   const { sandbox } = exportPopup();
   const written = {};

@@ -10,7 +10,14 @@
 //                                      (state key to { path, filename, versions, messages }). deliveries: file uuid to
 //                                      { filename, path }. heredocs(command): [{ path, text }], the files a Bash command
 //                                      writes with a heredoc; without it Bash blocks yield no cards.
-//   buildViewerData(chats, {exported, artifacts}) { exported, chats, projects }, newest update first. A chat's project is an
+//   buildViewerSession(session, events, {folder})  a Claude Code or Cowork session for ViewerData.sessions:
+//                                      { id, title, origin, created, updated, folder, artifacts: [uuid], chat }. chat is
+//                                      buildViewerChat's shape without project: one flat branch, a reply per prompt,
+//                                      labelled on a compaction or command prompt, tool results cut at 2 KB, images by
+//                                      relative path under folder (sessions/<name>), a subagent's messages in the Agent
+//                                      tool block's children. A top-level image block of any chat is { t: 'image', href }.
+//   buildViewerData(chats, {exported, artifacts, sessions}) { exported, chats, projects, sessions? }, newest update first;
+//                                      sessions (newest activity first) only when given. A chat's project is an
 //                                      index into projects, where identical projects are kept once. artifacts:
 //                                      { views, records, listed, exported, since, listFetched } (Export All; records: each
 //                                      artifact.json written, with dir, its folder from the root); with views, records or
@@ -644,7 +651,12 @@
         if (!b) continue;
         if (b.type === 'text') blocks.push({ t: 'text', text: String(b.text || ''), cites: buildCites(b.citations) });
         else if (b.type === 'thinking') blocks.push({ t: 'thinking', text: String(b.thinking || ''), summaries: thinkingSummaries(b), summary: thinkingSummary(b), seconds: thinkingSeconds(b) });
-        else if (b.type === 'tool_use') {
+        else if (b.type === 'image') {
+          // A picture in the message itself, shown from its saved copy (ctx.toolImages); never inline data.
+          const saved = c.toolImages && typeof c.toolImages === 'object' ? c.toolImages : {};
+          const href = typeof b.file_uuid === 'string' && Object.prototype.hasOwnProperty.call(saved, b.file_uuid) ? relHref(c.folder || '', saved[b.file_uuid]) : null;
+          blocks.push({ t: 'image', href });
+        } else if (b.type === 'tool_use') {
           const input = compactInput(b.input);
           const tool = { t: 'tool', name: b.name || '', label: toolLabel(b.name, b.input), target: toolTarget(b.name, b.input), link: toolLink(b.name, b.input), detail: toolDetail(b.name, b.input), input, result: '', error: false, images: [], missingImages: 0 };
           blocks.push(tool);
@@ -654,6 +666,7 @@
       }
       return {
         id: m.uuid, parent: m.parent_message_uuid || null, sender: m.sender, at: m.created_at,
+        ...(typeof m.labelled === 'string' && m.labelled ? { labelled: m.labelled } : {}),
         blocks, uploads: buildUploads(m, c),
         attachments: (Array.isArray(m.attachments) ? m.attachments : []).filter(Boolean).map(a => ({ name: a.file_name || '', text: fix(a.extracted_content || '') }))
       };
@@ -694,7 +707,137 @@
     let links = [];
     try { links = core('artifactLinksOf')({ chat_messages: source }); } catch (e) { /* odd data links nothing */ }
     Object.defineProperty(chat, 'links', { value: links, enumerable: false });
+    // tool_use id -> its tool block, for buildViewerSession (a subagent's messages go under their Agent step).
+    Object.defineProperty(chat, 'toolBlocks', { value: toolById, enumerable: false });
     return chat;
+  }
+
+  // ---- Claude Code and Cowork sessions ----
+  // A session's kept events (session-core.js, images as files by export-core.js's sessionImages) as the viewer's
+  // compact Chat, drawn by the chat renderer. One flat branch: a prompt (a user event that is not only tool results)
+  // is a human message; the assistant events after it, with the tool results between them, are one reply. A prompt
+  // promptKind labels (compaction, command, command-output) gets labelled on its message. Events with a
+  // parent_tool_use_id (a subagent's) go, as their own messages, into children of that Agent step's tool block.
+  // Tool results are cut at SESSION_RESULT_LIMIT characters; images resolve to files under folder by relative path.
+  const SESSION_RESULT_LIMIT = 2048;
+  const SESSION_RESULT_MORE = '\n[… full output in session.json]';
+  const SESSION_STUB_TEXT = '[event too large to keep]';
+
+  function sessionLabelText(kind, text) {
+    if (kind === 'command') {
+      const tag = name => { const m = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`).exec(text); return m ? m[1].trim() : ''; };
+      const name = tag('command-name');
+      const args = tag('command-args');
+      return `Ran ${name}${args ? ' ' + args : ''}`.trim();
+    }
+    if (kind === 'command-output') return text.replace(/<\/?local-command-stdout>/g, '').trim();
+    return text;
+  }
+
+  function buildViewerSession(session, events, opts = {}) {
+    const s = session && typeof session === 'object' ? session : {};
+    const folder = typeof opts.folder === 'string' ? opts.folder : '';
+    const cfg = s.config && typeof s.config === 'object' ? s.config : {};
+    const title = typeof s.title === 'string' && s.title.trim() ? s.title : 'Untitled session';
+    const toolImages = {};
+    let imageCount = 0;
+    const image = b => {
+      if (typeof b.file !== 'string' || !b.file) return { type: 'image' };
+      const id = `img-${++imageCount}`;
+      toolImages[id] = b.file;
+      return { type: 'image', file_uuid: id };
+    };
+    const resultText = content => {
+      const items = Array.isArray(content) ? content : [content];
+      return items.map(it => (typeof it === 'string' ? it : it && it.type === 'text' ? String(it.text || '') : null)).filter(t => t !== null).join('\n');
+    };
+    const adaptResult = b => {
+      const items = Array.isArray(b.content) ? b.content : [];
+      let text = resultText(b.content);
+      if (text.length > SESSION_RESULT_LIMIT) {
+        let end = SESSION_RESULT_LIMIT;
+        const last = text.charCodeAt(end - 1);
+        if (last >= 0xd800 && last <= 0xdbff) end--;
+        text = text.slice(0, end) + SESSION_RESULT_MORE;
+      }
+      const imgs = items.filter(it => it && it.type === 'image').map(image);
+      return { type: 'tool_result', tool_use_id: b.tool_use_id, is_error: !!b.is_error, content: [...(text ? [{ type: 'text', text }] : []), ...imgs] };
+    };
+    const adaptBlock = b => {
+      if (!b || typeof b !== 'object') return null;
+      if (b.type === 'image') return image(b);
+      if (b.type === 'tool_result') return adaptResult(b);
+      if (b.type === 'text' || b.type === 'thinking' || b.type === 'tool_use') return b;
+      return null;
+    };
+    const promptKind = core('promptKind');
+    // One message list per group: '' is the main conversation, else a subagent's (its Agent call's tool_use id).
+    const groups = new Map();
+    const groupOf = key => { if (!groups.has(key)) groups.set(key, { messages: [], open: null }); return groups.get(key); };
+    const order = []; // every message in event order, for one buildViewerChat pass
+    const start = (g, e, sender, extra = {}) => {
+      const m = { uuid: String(e.uuid || `ev-${order.length}`), parent_message_uuid: null, sender, created_at: e.created_at || null, content: [], ...extra };
+      g.messages.push(m);
+      order.push(m);
+      g.open = sender === 'assistant' ? m : null;
+      return m;
+    };
+    const reply = (g, e) => g.open || start(g, e, 'assistant');
+    for (const e of Array.isArray(events) ? events : []) {
+      if (!e || typeof e !== 'object') continue;
+      const key = typeof e.parent_tool_use_id === 'string' && e.parent_tool_use_id ? e.parent_tool_use_id : '';
+      const g = groupOf(key);
+      if (e.stub) {
+        // A user stub is most likely a large tool result: it joins the open reply when there is one.
+        const m = e.type === 'assistant' || g.open ? reply(g, e) : start(g, e, 'human');
+        m.content.push({ type: 'text', text: SESSION_STUB_TEXT });
+        if (m.sender === 'human') g.open = null;
+        continue;
+      }
+      if ((e.type !== 'user' && e.type !== 'assistant') || !e.message || typeof e.message !== 'object') continue;
+      const raw = Array.isArray(e.message.content) ? e.message.content : typeof e.message.content === 'string' ? [{ type: 'text', text: e.message.content }] : [];
+      const blocks = raw.map(adaptBlock).filter(Boolean);
+      const role = e.message.role === 'assistant' || e.type === 'assistant' ? 'assistant' : 'user';
+      if (role === 'assistant' || (blocks.length && blocks.every(b => b.type === 'tool_result'))) {
+        reply(g, e).content.push(...blocks);
+        continue;
+      }
+      if (!blocks.length) continue;
+      const text = blocks.filter(b => b.type === 'text').map(b => String(b.text || '')).join('\n');
+      const kind = promptKind(text);
+      if (kind !== 'prompt') {
+        start(g, e, 'human', { labelled: kind }).content.push({ type: 'text', text: sessionLabelText(kind, text) }, ...blocks.filter(b => b.type !== 'text'));
+      } else start(g, e, 'human').content.push(...blocks);
+    }
+    // Each message's parent is the one before it in its group, so the main group is the branch the viewer walks.
+    for (const g of groups.values()) g.messages.forEach((m, i) => { m.parent_message_uuid = i ? g.messages[i - 1].uuid : null; });
+    const main = groupOf('').messages;
+    const model = (cfg && typeof cfg.model === 'string' && cfg.model) || '';
+    const chat = buildViewerChat({
+      uuid: s.id, name: title, model, created_at: s.created_at || null, updated_at: s.last_event_at || s.updated_at || null,
+      chat_messages: order, current_leaf_message_uuid: main.length ? main[main.length - 1].uuid : null
+    }, { folder, toolImages });
+    // Subagent messages move under their Agent step, in order; a group whose step isn't in the session stays in place.
+    const byId = new Map(chat.messages.map(m => [m.id, m]));
+    const moved = new Set();
+    for (const [key, g] of groups) {
+      if (!key) continue;
+      const step = chat.toolBlocks.get(key);
+      if (!step) continue;
+      step.children = g.messages.map(m => byId.get(m.uuid)).filter(Boolean);
+      for (const m of g.messages) moved.add(m.uuid);
+    }
+    const out = { ...chat, messages: chat.messages.filter(m => !moved.has(m.id)) };
+    delete out.project;
+    const arts = s.external_metadata && Array.isArray(s.external_metadata.artifacts) ? s.external_metadata.artifacts : [];
+    const uuidRe = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    return {
+      id: s.id, title,
+      origin: (typeof cfg.origin === 'string' && cfg.origin) || (typeof s.environment_kind === 'string' ? s.environment_kind : ''),
+      created: s.created_at || null, updated: s.last_event_at || s.updated_at || null, folder,
+      artifacts: [...new Set(arts.filter(a => a && typeof a.artifact_id === 'string' && uuidRe.test(a.artifact_id)).map(a => a.artifact_id.toLowerCase()))],
+      chat: out
+    };
   }
 
   // The viewer's own model name ("Opus 4.8"); meta.md keeps getModelName's wording. Unknown ids get the fallback.
@@ -773,7 +916,7 @@
   // record's; true without one) and versions (recordVersions)), listed, exportedArtifacts, artifactsSince and
   // listFetched (whether claude.ai's list is in the export); a chat's published-page file gets artifact: <id> when
   // that page is a listed one.
-  function buildViewerData(chats, { exported, artifacts } = {}) {
+  function buildViewerData(chats, { exported, artifacts, sessions } = {}) {
     const projects = [], byKey = new Map(), byId = new Map();
     let sorted = chats.slice().sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
     const views = artifacts && Array.isArray(artifacts.views) ? artifacts.views.filter(v => v && typeof v === 'object') : [];
@@ -864,6 +1007,11 @@
       data.exportedArtifacts = artifacts.exported || null;
       data.artifactsSince = artifacts.since || null;
       data.listFetched = listFetched;
+    }
+    // Sessions (buildViewerSession), newest activity first; apart from chats, so no chat count or project changes.
+    if (Array.isArray(sessions) && sessions.length) {
+      data.sessions = sessions.filter(x => x && typeof x === 'object')
+        .sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
     }
     return data;
   }
@@ -1036,7 +1184,7 @@
     return page.replace(/\/\*(KATEX_CSS|ARTIFACTS_CSS|DATA_JSON|MARKED_JS|KATEX_JS|HIGHLIGHT_JS|LOGIC_JS|ARTIFACTS_APP_JS|APP_JS)\*\//g, (m, k) => values[k]());
   }
 
-  const api = { buildViewerChat, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, ARTIFACTS_VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT, artifactViewParts, ARTIFACT_PARTS_BUDGET, ARTIFACT_HISTORY_RESERVE, recordVersions };
+  const api = { buildViewerChat, buildViewerSession, SESSION_RESULT_LIMIT, modelLabel, kindFor, buildViewerData, relHref, joinPath, escapeJson, assembleViewer, VIEWER_ASSETS, ARTIFACTS_VIEWER_ASSETS, VIEWER_CHECK_FILE, VIEWER_CHECK_BASE64, TOOL_TEXT_LIMIT, TEXT_EMBED_LIMIT, moveUploadText, PART_LIMIT, UPLOAD_INLINE_LIMIT, artifactViewParts, ARTIFACT_PARTS_BUDGET, ARTIFACT_HISTORY_RESERVE, recordVersions };
   root.CTViewer = Object.assign(root.CTViewer || {}, api);
   if (typeof module === 'object' && module.exports) module.exports = api;
 })(globalThis);

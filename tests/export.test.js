@@ -502,6 +502,18 @@ test('writeViewer builds a viewer from artifacts alone, with their listed count 
   assert.strictEqual(await vm.runInContext('writeViewer(__zip, __chats, __opts)', popup.sandbox), false);
 });
 
+test('writeViewer builds a viewer from sessions alone, as ViewerData.sessions', async () => {
+  const popup = exportPopup({ routes: assetRoutes() });
+  const zip = zipStub();
+  popup.sandbox.__zip = zip;
+  popup.sandbox.__chats = [];
+  popup.sandbox.__opts = { sessions: [{ id: 'cse_x', title: 'A session', origin: 'cowork', created: 'c', updated: 'u', folder: 'sessions/A_x', artifacts: [], chat: { id: 'cse_x', title: 'A session', messages: [], files: {} } }] };
+  assert.strictEqual(await vm.runInContext('writeViewer(__zip, __chats, __opts)', popup.sandbox), true);
+  const html = zip.written['viewer.html'];
+  assert.ok(html.includes('"sessions":[{"id":"cse_x"'), 'the sessions are in the data');
+  assert.ok(html.includes('"chats":[]'));
+});
+
 test('writeViewer with no chats, or no CTViewer, returns false and writes nothing', async () => {
   const popup = exportPopup({ routes: assetRoutes() });
   popup.sandbox.__zip = zipStub();

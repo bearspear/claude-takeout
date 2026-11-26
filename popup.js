@@ -513,7 +513,8 @@ async function viewerUploadText(name, content) {
 // false and writes nothing on any failure, because the export must still download.
 // opts (Export All): { artifacts: { views (its artifact step's), records (each artifact.json written, with dir, its
 // folder from the root, and versionOrder, its version keys in order), listFetched (claude.ai's list is in this export), listed, exported, since }, firstPart: the
-// first viewer-files part number the chats may use, after the artifact step's parts }.
+// first viewer-files part number the chats may use, after the artifact step's parts, sessions: CTViewer.buildViewerSession
+// results, ViewerData.sessions }.
 async function writeViewer(zip, chats, opts = {}) {
   try {
     const artifacts = opts && opts.artifacts && typeof opts.artifacts === 'object' ? opts.artifacts : null;
@@ -529,7 +530,7 @@ async function writeViewer(zip, chats, opts = {}) {
     const [template, logic, app, marked, katex, css, highlight, artifactsApp, artifactsCss] = assets;
     // Large upload text goes to viewer-files/, loaded when the upload is opened.
     const firstPart = opts && Number.isInteger(opts.firstPart) && opts.firstPart > 1 ? opts.firstPart : 1;
-    const { data, parts } = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString(), artifacts }), { firstPart });
+    const { data, parts } = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString(), artifacts, sessions }), { firstPart });
     const html = CTViewer.assembleViewer({ template, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data, fileScripts: parts.length > 0 || firstPart > 1 });
     for (const part of parts) zip.file(`viewer-files/${part.name}`, part.body);
     zip.file('viewer.html', html);
@@ -5716,8 +5717,8 @@ async function bulkExportZip(options = {}) {
       : { artifacts: { views: [], listed: artifactList ? artifactList.listed : null, exported: startedAt, since, listFetched: !!artifactList, records: storeRecords } };
     // Chats or artifacts to show: an Export Changes run where only artifacts changed still gets a viewer.
     const viewerWanted = exported > 0 || !!(viewerOpts.artifacts && viewerOpts.artifacts.views.length) || !!(sessionStep && sessionStep.written);
-    // The sessions saved (rows for now; the viewer's session data joins them in opts.sessions).
-    if (sessionStep && sessionStep.rows.length) viewerOpts.sessions = sessionStep.rows;
+    // The sessions saved, as the viewer shows them (built in runSessionStep, while each session's events were at hand).
+    if (sessionStep && sessionStep.viewerSessions.length) viewerOpts.sessions = sessionStep.viewerSessions;
     const viewerWritten = viewerWanted && await writeViewer(megaZip, viewerChats, viewerOpts);
     const viewerBuilt = !viewerWanted || viewerWritten;
     viewerChats.length = 0;  // viewer.html holds them now, and compressing needs the memory
@@ -6568,7 +6569,8 @@ const sessionCellText = (t) => mdLinkText(String(t || '')).replace(/[()|]/g, '\\
 // in it), onProgress(done, total, sub, { written }) }. A session is paged while hasMore, at most SESSION_PAGE_CAP
 // pages and SESSION_BYTES_CAP bytes; a cut or failed one is saved as far as it got, warned and not in saved.
 // Never throws. Returns { saved: [{ id, last_event_at, folder }] (written whole, for the record), rows: [{ id, title,
-// folder, origin, last_event_at, turns }] (every session written), warnings (one line each, codes only), written,
+// folder, origin, last_event_at, turns }] (every session written), viewerSessions (CTViewer.buildViewerSession of each
+// session written, for viewer.html), warnings (one line each, codes only), written,
 // stopped, writeFailures }; folders are from the export root (sessions/<name>).
 async function runSessionStep(root, opts = {}) {
   const { sessions = [], fetchPage, run = false, onProgress = null } = opts;
@@ -6577,7 +6579,7 @@ async function runSessionStep(root, opts = {}) {
   const used = opts.usedFolders instanceof Set ? opts.usedFolders : new Set();
   const signal = opts.signal && typeof opts.signal === 'object' ? opts.signal : null;
   const stopped = () => !!(signal && signal.stopped);
-  const out = { saved: [], rows: [], warnings: [], written: 0, stopped: false, writeFailures: [] };
+  const out = { saved: [], rows: [], viewerSessions: [], warnings: [], written: 0, stopped: false, writeFailures: [] };
   const enc = new TextEncoder();
   const total = sessions.length;
   const progress = (done, sub) => { if (onProgress) { try { onProgress(done, total, sub, { written: out.written }); } catch (e) { /* one update missed */ } } };
@@ -6653,6 +6655,9 @@ async function runSessionStep(root, opts = {}) {
       if (pictures.skipped) out.warnings.push(`Session ${quoted}: ${pictures.skipped} image${pictures.skipped === 1 ? '' : 's'} not saved`);
       out.written++;
       out.rows.push({ id: s.id, title, folder: dir, origin: (s.config && typeof s.config.origin === 'string' && s.config.origin) || s.environment_kind || '', last_event_at: s.last_event_at || null, turns: sessionTurns(events) });
+      // The viewer's copy, built now so the raw events can be let go: text and relative image paths, no image data.
+      try { out.viewerSessions.push(CTViewer.buildViewerSession(s, pictures.events, { folder: dir })); }
+      catch (e) { console.warn('Viewer: could not add a session:', e && e.message); out.warnings.push(`Session ${quoted}: not in viewer.html (it could not be built)`); }
       if (!problem) out.saved.push({ id: s.id, last_event_at: sessionStamp(s), folder: dir });
       // On disk each session is written before the next is fetched; its events are let go here.
       if (run && typeof root.flush === 'function') out.writeFailures.push(...await root.flush());
