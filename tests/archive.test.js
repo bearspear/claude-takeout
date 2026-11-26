@@ -2416,6 +2416,7 @@ async function exportAllToDisk({ chats, frames, pages }) {
     else if (m.action === 'fetchConversation') cb({ data: JSON.parse(JSON.stringify(chats[m.conversationId])) });
     else if (m.action === 'listArtifacts') cb({ frames: JSON.parse(JSON.stringify(frames)) });
     else if (/^publishedPage/.test(m.action)) fetcher.fetch(m).then(cb);
+    else if (m.action === 'listSessions') cb({ sessions: [], incomplete: false, orgId: 'org-1' });
     else cb({});
   };
   sb.JSZip = JSZip;

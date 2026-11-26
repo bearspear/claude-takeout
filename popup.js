@@ -517,8 +517,10 @@ async function viewerUploadText(name, content) {
 async function writeViewer(zip, chats, opts = {}) {
   try {
     const artifacts = opts && opts.artifacts && typeof opts.artifacts === 'object' ? opts.artifacts : null;
-    // No chats and no artifact views: nothing to show. Artifacts alone (an Export Changes run with no chat changes) still get a viewer.
-    if (!chats.length && !(artifacts && Array.isArray(artifacts.views) && artifacts.views.length)) return false;
+    // No chats, no artifact views and no sessions: nothing to show. Artifacts or sessions alone (an Export Changes run
+    // with no chat changes) still get a viewer.
+    const sessions = opts && Array.isArray(opts.sessions) ? opts.sessions : [];
+    if (!chats.length && !(artifacts && Array.isArray(artifacts.views) && artifacts.views.length) && !sessions.length) return false;
     const assets = await Promise.all(CTViewer.VIEWER_ASSETS.map(async (asset) => {
       const response = await fetch(chrome.runtime.getURL(asset));
       if (!response.ok) throw new Error(`${asset}: HTTP ${response.status}`);
@@ -5266,7 +5268,9 @@ async function bulkExportZip(options = {}) {
   const directory = options && options.directory ? options.directory : null;
   const runStartedAt = new Date().toISOString();
   const target = { kind: directory ? 'folder' : 'zip', name: '' };
-  const saved = { chats: 0, artifacts: 0, versions: 0 };
+  const saved = { chats: 0, artifacts: 0, versions: 0 };  // and sessions, once a run has sessions to fetch
+  // Nothing saved: a ZIP that never reached disk.
+  const zeroSaved = () => { for (const k of Object.keys(saved)) saved[k] = 0; };
   const warningList = [];
   const errorFiles = [];
   const notes = [];  // sentences the Done screen adds to its counts (runResult)
@@ -5326,15 +5330,43 @@ async function bulkExportZip(options = {}) {
         listError = 'unexpected error';
       }
     }
+    // Claude Code and Cowork sessions, listed up front so a changes run knows whether any changed. A failed list is
+    // one warning and no sessions; the chats and artifacts export as usual. CLI sessions only with the setting.
+    let sessionList = [];
+    let sessionListError = null;
+    let sessionListIncomplete = false;
+    try {
+      const reply = await sendToTab(tab.id, { action: 'listSessions' });
+      if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.sessions)) {
+        sessionListError = reply && (reply.error || reply.connectionError) ? publishedCode(reply) : 'bad response';
+      } else {
+        sessionList = reply.sessions.filter((x) => x && typeof x.id === 'string' && x.id !== '');
+        sessionListIncomplete = reply.incomplete === true;
+      }
+    } catch (e) {
+      sessionListError = 'unexpected error';
+    }
+    const sessionPicks = sessionsToFetch(since ? changedSessions(sessionList, record.sessions) : sessionList, settings);
+    const includedSessions = sessionPicks.fetch;
+    // The session warnings (one line each), added to warningList after the artifacts'.
+    const sessionWarnings = [];
+    if (sessionListError) sessionWarnings.push(`Session list could not be loaded (${sessionListError})`);
+    if (sessionListIncomplete) sessionWarnings.push('The session list may be incomplete: claude.ai returned its maximum of 100 sessions and offers no way to ask for more');
+    const addSessionWarnings = () => {
+      warningList.push(...sessionWarnings.map((text) => ({ type: 'session', text: runWarningText(text) })));
+      sessionWarnings.length = 0;
+    };
     // The artifact step's warnings go to artifacts/errors.txt.
     const artifactCollector = new ExportErrorCollector(null, null, { label: 'Export Artifacts' });
-    pendingWarnings = () => (listError ? 1 : 0) + artifactCollector.warnings.length + artifactCollector.errors.length;
+    pendingWarnings = () => (listError ? 1 : 0) + artifactCollector.warnings.length + artifactCollector.errors.length + sessionWarnings.length;
     const includedArtifacts = artifactList ? (since ? changedArtifacts(artifactList.artifacts, record.artifacts, record.artifactVersions) : artifactList.artifacts) : [];
-    if (since && !conversations.length && !includedArtifacts.length) {
+    if (since && !conversations.length && !includedArtifacts.length && !includedSessions.length) {
       notes.push(`Nothing changed since the last Export All, ${formatStamp(since)}.`);
       if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
+      addSessionWarnings();
       return result('done');
     }
+    if (includedSessions.length) saved.sessions = 0;
     const total = conversations.length;
 
     const dateStr = exportStamp();
@@ -5360,7 +5392,7 @@ async function bulkExportZip(options = {}) {
     let incomplete = 0;  // chats whose data looks incomplete (export_health)
     // `projects` holds the files chats share, and `artifacts` the pages they published and claude.ai's artifacts, so no
     // chat may take those names; `published` stays reserved, as it was the shared pages' folder before v1.18.
-    const usedFolderNames = new Set(['projects', 'published', 'artifacts']);
+    const usedFolderNames = new Set(['projects', 'published', 'artifacts', 'sessions']);
     // One store for every page the chats publish and every artifact claude.ai lists: artifacts/<Title>_<id>/<ver>/.
     // A listed artifact is named from the list (listedArtifacts) from the first chat that publishes it. previewWanted:
     // only an included artifact's listed version keeps its preview in memory for the artifact step.
@@ -5382,6 +5414,7 @@ async function bulkExportZip(options = {}) {
       if (listError) warningList.push({ type: 'artifact_export', text: runWarningText(`Artifact list could not be loaded (${listError})`) });
       pendingWarnings = () => 0;
       warningList.push(...collectorRunWarnings(artifactCollector));
+      addSessionWarnings();
       if (run) {
         for (const rec of store.records()) {
           if (store.written(rec) || !rec.versions.size) continue;
@@ -5398,7 +5431,7 @@ async function bulkExportZip(options = {}) {
         }
         addWriteFailures(writeFailures);
       } else {
-        Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
+        zeroSaved();
       }
       return result('stopped', 'You stopped it');
     };
@@ -5500,7 +5533,7 @@ async function bulkExportZip(options = {}) {
     if (stopRequested()) return await stoppedRun();
     if (tabGone) {
       const left = conversations.length - exported - errors.length;
-      const text = `${TAB_GONE_REASON}: ${left} chat${left === 1 ? '' : 's'} not exported${includedArtifacts.length ? ', and no artifacts' : ''}`;
+      const text = `${TAB_GONE_REASON}: ${left} chat${left === 1 ? '' : 's'} not exported${includedArtifacts.length ? ', and no artifacts' : ''}${includedSessions.length ? ', and no sessions' : ''}`;
       errors.push(text);
       warningList.push({ type: 'chat', text: runWarningText(text) });
     }
@@ -5530,6 +5563,25 @@ async function bulkExportZip(options = {}) {
       writeFailures.push(...step.writeFailures);
     }
     if (stopRequested()) return await stoppedRun();
+    // The sessions, after the artifacts so a session's README links the artifact folders it made. Skipped, like the
+    // artifact step, when the tab is gone.
+    let sessionStep = null;
+    if (includedSessions.length && !tabGone) {
+      const artifactFolders = new Map(store.records().filter((rec) => store.written(rec) || rec.versions.size).map((rec) => [rec.uuid, rec.dir]));
+      emit('sessions', 0, includedSessions.length, '');
+      sessionStep = await runSessionStep(megaZip, {
+        sessions: includedSessions, artifactFolders, signal, run: !!run, budget: run ? Infinity : SESSION_ZIP_BUDGET, usedFolders: usedFolderNames,
+        fetchPage: (id, after) => sendToTab(tab.id, { action: 'fetchSessionEvents', id, after }),
+        onProgress: (done, n, sub, info = {}) => {
+          // On disk, each session is written as it is done: the run result counts it now.
+          if (run && Number.isFinite(info.written)) saved.sessions = info.written;
+          emit('sessions', done, n, sub);
+        },
+      });
+      sessionWarnings.push(...sessionStep.warnings);
+      writeFailures.push(...sessionStep.writeFailures);
+      if (sessionStep.stopped || stopRequested()) return await stoppedRun();
+    }
     emit('viewer', 0, 1, 'Viewer and index');
     // artifact.json of every other page the chats saved something of (the step wrote its own), and their index rows.
     const chatRows = [];
@@ -5614,12 +5666,35 @@ async function bulkExportZip(options = {}) {
       indexLines.push('- Index: [artifacts/index.md](artifacts/index.md)');
     }
 
+    // Claude Code and Cowork sessions: what was listed, saved and left out, the issues, and a row per session saved.
+    const sessionRows = sessionStep ? sessionStep.rows : [];
+    if (sessionListError || sessionList.length) {
+      indexLines.push('', '## Sessions', '');
+      if (sessionListError) {
+        indexLines.push(`Sessions: not exported (${sessionListError})`);
+      } else {
+        indexLines.push(`- Listed by claude.ai: ${sessionList.length}${sessionListIncomplete ? ' (may be incomplete)' : ''}`);
+        if (since) indexLines.push(`- New or changed since that export: ${includedSessions.length + sessionPicks.leftOut}`);
+        indexLines.push(`- Saved: ${sessionRows.length}`);
+        if (sessionPicks.leftOut) indexLines.push(`- CLI sessions not exported: ${sessionPicks.leftOut} ${SESSIONS_LEFT_OUT_HINT}`);
+      }
+      if (sessionWarnings.length) indexLines.push('', '**Session issues:**', '', ...sessionWarnings.map((w) => `- ${runWarningText(w)}`));
+      if (sessionRows.length) {
+        indexLines.push('', '| # | Session | Origin | Last activity | Turns |', '|---|---------|--------|---------------|-------|');
+        sessionRows.forEach((r, i) => {
+          indexLines.push(`| ${i + 1} | [${sessionCellText(r.title)}](${encodePath(r.folder)}/README.md) | ${sessionCellText(r.origin) || '-'} | ${r.last_event_at ? formatTimestamp(r.last_event_at) : '-'} | ${r.turns} |`);
+        });
+      }
+    }
+
     addFileWithBOM(megaZip, 'index.md', indexLines.join('\n'));
     // What this archive holds, readable without the browser that made it.
     megaZip.file('export-manifest.json', JSON.stringify({
       format: 1, exported_at: startedAt, kind, since, listed: listedCount,
       chats: exportedChats.map(({ uuid, name, updated_at, folder }) => ({ uuid, name, updated_at, folder })),
       ...(step ? { artifacts: { listed: artifactList.listed, thumbs: step.thumbs, items: step.entries } } : {}),
+      ...(!sessionListError && sessionList.length ? { sessions: { listed: sessionList.length, leftOut: sessionPicks.leftOut,
+        items: sessionRows.map(({ id, title, folder, last_event_at }) => ({ id, title, folder, last_event_at })) } } : {}),
     }, null, 2));
 
     // The combined viewer also needs each artifact's current version (to tell it from older ones chats published)
@@ -5633,7 +5708,9 @@ async function bulkExportZip(options = {}) {
       ? { artifacts: { views: combinedViews, listed: artifactList.listed, exported: startedAt, since, listFetched: true, records: storeRecords }, firstPart: (parts ? Number(parts.count) || 0 : 0) + 1 }
       : { artifacts: { views: [], listed: artifactList ? artifactList.listed : null, exported: startedAt, since, listFetched: !!artifactList, records: storeRecords } };
     // Chats or artifacts to show: an Export Changes run where only artifacts changed still gets a viewer.
-    const viewerWanted = exported > 0 || !!(viewerOpts.artifacts && viewerOpts.artifacts.views.length);
+    const viewerWanted = exported > 0 || !!(viewerOpts.artifacts && viewerOpts.artifacts.views.length) || !!(sessionStep && sessionStep.written);
+    // The sessions saved (rows for now; the viewer's session data joins them in opts.sessions).
+    if (sessionStep && sessionStep.rows.length) viewerOpts.sessions = sessionStep.rows;
     const viewerWritten = viewerWanted && await writeViewer(megaZip, viewerChats, viewerOpts);
     const viewerBuilt = !viewerWanted || viewerWritten;
     viewerChats.length = 0;  // viewer.html holds them now, and compressing needs the memory
@@ -5646,6 +5723,8 @@ async function bulkExportZip(options = {}) {
       warningList.push(...collectorRunWarnings(step.collector));
       if (step.collector.hasErrors() || step.collector.hasWarnings()) errorFiles.push('artifacts/errors.txt');
     }
+    addSessionWarnings();
+    if (sessionStep) saved.sessions = sessionStep.written;
     if (!viewerBuilt) warningList.push({ type: 'viewer', text: 'viewer.html could not be built.' });
     pendingWarnings = () => 0;
 
@@ -5667,8 +5746,8 @@ async function bulkExportZip(options = {}) {
         await megaZip.flush();
       }
       addWriteFailures(writeFailures);
-      const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions);
-      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions, warningList.length);
+      const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions, sessionStep ? sessionStep.saved : []);
+      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length || recordable.sessions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions, warningList.length, recordable.sessions);
       return result('done');
     }
 
@@ -5685,12 +5764,12 @@ async function bulkExportZip(options = {}) {
       download(zipBlob, target.name, 'application/zip');
       addWriteFailures(writeFailures);
       // Only chats and artifacts really in the archive are recorded, so one that failed is tried again next time.
-      const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions);
-      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions, warningList.length);
+      const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions, sessionStep ? sessionStep.saved : []);
+      if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length || recordable.sessions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions, warningList.length, recordable.sessions);
       if (errors.length) console.error('Export errors:', errors);
     } catch (e) {
       // Nothing reached disk: a ZIP is written only when the export finishes.
-      Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
+      zeroSaved();
       return result('failed', runWarningText(`Zip generation failed: ${e && e.message}`));
     }
     return result('done');
@@ -5698,7 +5777,7 @@ async function bulkExportZip(options = {}) {
   } catch (e) {
     console.error('Export All failed:', e);
     // A ZIP reaches disk only at the end; a folder keeps what was written (saved counts it as it goes).
-    if (!directory) Object.assign(saved, { chats: 0, artifacts: 0, versions: 0 });
+    if (!directory) zeroSaved();
     return result('failed', runWarningText(`Export All failed: ${e && e.message ? e.message : e}`));
   }
 }
@@ -6448,6 +6527,141 @@ async function runArtifactStep(root, opts = {}) {
   return { views, rows, entries, whole, versionsSaved, versionCount, thumbs, collector, writeFailures, partCount, signedOut: state.publishedSignedOut === true, stopped: wasStopped };
 }
 
+// ============================================================================
+// Export All's sessions: Claude Code and Cowork sessions, one folder each in sessions/
+// ============================================================================
+// Events come from content.js already kept, stripped of system reminders and masked (session-core.js).
+const SESSION_PAGE_CAP = 100;                     // pages of 200 events per session
+const SESSION_BYTES_CAP = 64 * 1024 * 1024;       // kept events per session, JSON in UTF-8
+const SESSION_ZIP_BUDGET = 256 * 1024 * 1024;     // kept events of all sessions in one ZIP
+const SESSIONS_LEFT_OUT_HINT = '(Settings, Include Claude Code CLI sessions)';
+
+// A prompt the owner typed (not a tool result, a compaction summary or a command), for the turn count.
+function sessionTurns(events) {
+  let turns = 0;
+  for (const e of events || []) {
+    if (!e || e.stub || e.type !== 'user' || !e.message || !Array.isArray(e.message.content)) continue;
+    const blocks = e.message.content;
+    if (blocks.every((b) => b && b.type === 'tool_result')) continue;
+    const text = blocks.filter((b) => b && b.type === 'text').map((b) => b.text || '').join('\n');
+    if (promptKind(text) === 'prompt') turns++;
+  }
+  return turns;
+}
+
+// Text for a cell or link text in index.md: brackets, parentheses, pipes and < escaped.
+const sessionCellText = (t) => mdLinkText(String(t || '')).replace(/[()|]/g, '\\$&').replace(/</g, '&lt;');
+
+// Saves each session into root: sessions/<Title>_<shortId>/ with session.json ({ format: 1, session, events }, images
+// as references), transcript.md and README.md (BOM) and images/<n>.<ext>. opts: { sessions (kept, to fetch),
+// artifactFolders (Map: artifact uuid, lowercase -> its folder in artifacts/), fetchPage(id, after) -> content.js's
+// fetchSessionEvents reply, signal ({ stopped }: checked before each session and between its pages; the session in
+// hand is dropped), run (on disk: flush after each session), budget (bytes of kept events for all sessions; past it
+// the rest are skipped with one warning), usedFolders (lowercase names to claim against; folder names are claimed
+// in it), onProgress(done, total, sub, { written }) }. A session is paged while hasMore, at most SESSION_PAGE_CAP
+// pages and SESSION_BYTES_CAP bytes; a cut or failed one is saved as far as it got, warned and not in saved.
+// Never throws. Returns { saved: [{ id, last_event_at, folder }] (written whole, for the record), rows: [{ id, title,
+// folder, origin, last_event_at, turns }] (every session written), warnings (one line each, codes only), written,
+// stopped, writeFailures }; folders are from the export root (sessions/<name>).
+async function runSessionStep(root, opts = {}) {
+  const { sessions = [], fetchPage, run = false, onProgress = null } = opts;
+  const artifactFolders = opts.artifactFolders instanceof Map ? opts.artifactFolders : new Map();
+  const budget = Number.isFinite(opts.budget) ? opts.budget : Infinity;
+  const used = opts.usedFolders instanceof Set ? opts.usedFolders : new Set();
+  const signal = opts.signal && typeof opts.signal === 'object' ? opts.signal : null;
+  const stopped = () => !!(signal && signal.stopped);
+  const out = { saved: [], rows: [], warnings: [], written: 0, stopped: false, writeFailures: [] };
+  const enc = new TextEncoder();
+  const total = sessions.length;
+  const progress = (done, sub) => { if (onProgress) { try { onProgress(done, total, sub, { written: out.written }); } catch (e) { /* one update missed */ } } };
+  let spent = 0;
+  try {
+    for (let i = 0; i < total; i++) {
+      const s = sessions[i];
+      if (stopped()) { out.stopped = true; break; }
+      const title = typeof s.title === 'string' && s.title.trim() ? s.title : 'Untitled session';
+      const quoted = `"${title.slice(0, 80)}"`;
+      progress(i, title);
+      const events = [];
+      let bytes = 0;
+      let after = null;
+      let pages = 0;
+      let problem = '';  // why the session is incomplete; it is then not recorded
+      let gone = false;
+      let overBudget = false;
+      for (;;) {
+        if (stopped()) { out.stopped = true; break; }
+        if (pages >= SESSION_PAGE_CAP) { problem = `cut at ${SESSION_PAGE_CAP} pages of events`; break; }
+        let reply;
+        try { reply = await fetchPage(s.id, after); } catch (e) { reply = { error: 'unexpected error' }; }
+        pages++;
+        if (!reply || reply.error || reply.connectionError || !Array.isArray(reply.events)) {
+          gone = !!(reply && reply.connectionError);
+          problem = `events could not be loaded (${reply && (reply.error || reply.connectionError) ? publishedCode(reply) : 'bad response'})`;
+          break;
+        }
+        let pageBytes = 0;
+        for (const e of reply.events) pageBytes += enc.encode(JSON.stringify(e)).length;
+        if (spent + bytes + pageBytes > budget) { overBudget = true; break; }
+        if (bytes + pageBytes > SESSION_BYTES_CAP) { problem = `cut at ${SESSION_BYTES_CAP / 1048576} MB of events`; break; }
+        bytes += pageBytes;
+        for (const e of reply.events) events.push(e);
+        if (!reply.hasMore) break;
+        // A page that doesn't move on would be asked for again and again.
+        if (typeof reply.lastId !== 'string' || !reply.lastId || reply.lastId === after) { problem = 'cut: the event pages did not move on'; break; }
+        after = reply.lastId;
+      }
+      if (out.stopped) break;
+      if (overBudget) {
+        out.warnings.push(`The ZIP's session limit of ${SESSION_ZIP_BUDGET / 1048576} MB was reached: ${total - i} session${total - i === 1 ? '' : 's'} not exported (a folder export has no limit)`);
+        break;
+      }
+      if (gone && !events.length) {
+        out.warnings.push(`The claude.ai tab stopped answering: ${total - i} session${total - i === 1 ? '' : 's'} not exported`);
+        break;
+      }
+      if (!events.length && problem) {
+        out.warnings.push(`Session ${quoted}: ${problem}; not exported`);
+        progress(i + 1, title);
+        continue;
+      }
+      spent += bytes;
+      const name = claimArtifactFolder(`${capUtf8(safeFileTitle(typeof s.title === 'string' ? s.title : ''), 200) || 'session'}_${sessionShortId(s.id)}`, used);
+      const dir = `sessions/${name}`;
+      const pictures = sessionImages(events);
+      root.file(`${dir}/session.json`, JSON.stringify({ format: 1, session: s, events: pictures.events }, null, 2));
+      for (const img of pictures.images) root.file(`${dir}/images/${img.name}`, img.base64, { base64: true });
+      addFileWithBOM(root, `${dir}/transcript.md`, sessionTranscriptMd(s, pictures.events));
+      const arts = s.external_metadata && Array.isArray(s.external_metadata.artifacts) ? s.external_metadata.artifacts : [];
+      const links = arts
+        .filter((a) => a && typeof a.artifact_id === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(a.artifact_id))
+        .map((a) => {
+          const folder = artifactFolders.get(a.artifact_id.toLowerCase());
+          return { uuid: a.artifact_id.toLowerCase(), title: typeof a.title === 'string' ? a.title : '', href: folder ? `../../artifacts/${encodePath(folder)}/` : null };
+        });
+      let readme = sessionReadmeMd(s, pictures.events, links);
+      if (problem) readme += `\n**Incomplete:** ${problem}. Export All tries it again next time.\n`;
+      addFileWithBOM(root, `${dir}/README.md`, readme);
+      if (problem) out.warnings.push(`Session ${quoted}: ${problem}; saved as far as it got`);
+      if (pictures.skipped) out.warnings.push(`Session ${quoted}: ${pictures.skipped} image${pictures.skipped === 1 ? '' : 's'} not saved`);
+      out.written++;
+      out.rows.push({ id: s.id, title, folder: dir, origin: (s.config && typeof s.config.origin === 'string' && s.config.origin) || s.environment_kind || '', last_event_at: s.last_event_at || null, turns: sessionTurns(events) });
+      if (!problem) out.saved.push({ id: s.id, last_event_at: s.last_event_at, folder: dir });
+      // On disk each session is written before the next is fetched; its events are let go here.
+      if (run && typeof root.flush === 'function') out.writeFailures.push(...await root.flush());
+      progress(i + 1, title);
+      if (gone) {
+        if (total - i - 1 > 0) out.warnings.push(`The claude.ai tab stopped answering: ${total - i - 1} more session${total - i - 1 === 1 ? '' : 's'} not exported`);
+        break;
+      }
+    }
+  } catch (e) {
+    console.error('Session step stopped early:', e);
+    out.warnings.push('Session step stopped early: unexpected error. Sessions after this one were not exported.');
+  }
+  return out;
+}
+
 // Export Artifacts. options.directory: a folder from showDirectoryPicker; the export goes into a new folder
 // inside it instead of a ZIP download. The list is fetched first: nothing is made when it fails or is empty.
 // options.onProgress and options.signal as for bulkExportZip. Resolves to a run result (runResult); never throws.
@@ -7162,7 +7376,7 @@ function setStep(name, state) {
 function beginRunScreen(plan, directory) {
   const $ = (id) => document.getElementById(id);
   activeRun = { plan, steps: runSteps(plan), totals: {}, signal: { stopped: false }, zip: !directory };
-  for (const name of ['chats', 'artifacts', 'viewer']) {
+  for (const name of ['chats', 'artifacts', 'sessions', 'viewer']) {
     $(`step-${name}`).hidden = !activeRun.steps.includes(name);
     setStep(name, 'pending');
     $(`step-${name}-count`).textContent = '';

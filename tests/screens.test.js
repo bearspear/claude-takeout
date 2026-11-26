@@ -46,7 +46,9 @@ function fakeZip(written = {}, prefix = '') {
   };
 }
 
-async function bulkRun({ list, chats, failing = [], options = {}, listReply = null, stored = {}, frames = null, pages = {}, setup = null }) {
+// sessions: the listSessions reply (default: none); sessionPages: { <id>: [page, ...] | (msg) => reply }, a page
+// being { events, lastId, hasMore }, picked by the previous page's lastId. asks: every fetchSessionEvents message.
+async function bulkRun({ list, chats, failing = [], options = {}, listReply = null, stored = {}, frames = null, pages = {}, setup = null, sessions = null, sessionPages = {} }) {
   const popup = exportPopup({ failing });
   const sb = popup.sandbox;
   const store = JSON.parse(JSON.stringify(stored));
@@ -62,8 +64,18 @@ async function bulkRun({ list, chats, failing = [], options = {}, listReply = nu
     else if (msg.action === 'fetchConversation') cb({ data: chats[msg.conversationId] });
     else if (msg.action === 'listArtifacts' && frames) cb({ frames: JSON.parse(JSON.stringify(frames)) });
     else if (frames && /^publishedPage/.test(msg.action)) fetcher.fetch(msg).then(cb);
+    else if (msg.action === 'listSessions') cb(JSON.parse(JSON.stringify(sessions || { sessions: [], incomplete: false, orgId: 'org-1' })));
+    else if (msg.action === 'fetchSessionEvents') {
+      asks.push(JSON.parse(JSON.stringify(msg)));
+      const got = sessionPages[msg.id];
+      if (typeof got === 'function') return void Promise.resolve(got(msg)).then((r) => cb(JSON.parse(JSON.stringify(r))));
+      const all = got || [];
+      const i = msg.after == null ? 0 : all.findIndex((pg, k) => k > 0 && all[k - 1].lastId === msg.after);
+      cb(i >= 0 && all[i] ? JSON.parse(JSON.stringify(all[i])) : { error: 'HTTP 404' });
+    }
     else cb({ error: 'no' });
   };
+  const asks = [];
   const zip = fakeZip();
   sb.JSZip = function () { return zip; };
   let saved = null;
@@ -73,7 +85,7 @@ async function bulkRun({ list, chats, failing = [], options = {}, listReply = nu
   if (setup) setup(sb);
   sb.__opts = { withArtifacts: false, ...options };
   const result = await vm.runInContext('bulkExportZip(__opts)', sb);
-  return { result: result && JSON.parse(JSON.stringify(result)), saved, store, sets, zip, status: sb.document.getElementById('status') };
+  return { result: result && JSON.parse(JSON.stringify(result)), saved, store, sets, zip, asks, sb, status: sb.document.getElementById('status') };
 }
 
 test('bulkExportZip resolves a done RunResult with counts and warnings', async () => {
@@ -1376,4 +1388,277 @@ test('the Settings switch for CLI sessions saves and loads', async () => {
   await sleep(20);
   assert.strictEqual(p.fn('settings.exportCliSessions'), true);
   assert.strictEqual(p.store.exporterSettings.exportCliSessions, true);
+});
+
+// ---- Sessions: Export All writes and records them (runSessionStep) ----
+const PNG_B64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 73, 72, 68, 82]).toString('base64');
+const S_COWORK = 'cse_01AbCdEfGhIjKlMnOpQr';
+const S_CLI = 'cse_01ZyXwVuTsRqPoNmLkJi';
+const S_ART = 'a1a1a1a1-2222-4222-8222-222222222222';
+const coworkSession = (over = {}) => ({
+  id: S_COWORK, title: 'Panel refresh', status_bucket: 'idle', environment_kind: 'anthropic_cloud',
+  config: { origin: 'desktop_app', model: 'claude-test' }, created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-20T11:00:00Z',
+  last_event_at: '2026-11-20T11:00:00Z', external_metadata: { artifacts: [{ artifact_id: S_ART, title: 'Panel', updated_at: '2026-11-20T11:00:00Z' }] }, ...over,
+});
+const cliSession = (over = {}) => ({ ...coworkSession(), id: S_CLI, title: 'Notebook', environment_kind: 'bridge', config: { origin: 'claude_code_cli' }, external_metadata: { artifacts: [] }, ...over });
+const sessionEventsFixture = () => [
+  { type: 'user', uuid: 'e1', created_at: '2026-11-20T10:00:01Z', message: { role: 'user', content: [{ type: 'text', text: 'Refresh the panel' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_B64 } }] } },
+  { type: 'assistant', uuid: 'e2', created_at: '2026-11-20T10:00:02Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Looking at it.' }, { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }] } },
+  { type: 'user', uuid: 'e3', created_at: '2026-11-20T10:00:03Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu1', content: [{ type: 'text', text: 'a.txt' }] }] } },
+  { type: 'assistant', uuid: 'e4', created_at: '2026-11-20T10:00:04Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] } },
+];
+const onePage = (events = sessionEventsFixture()) => [{ events, lastId: events[events.length - 1].uuid, hasMore: false }];
+const oneChat = () => {
+  const fx = Object.assign(loadFixture(), { uuid: 'c-fx' });
+  return { list: [{ uuid: 'c-fx', name: fx.name, updated_at: '2026-01-02T00:00:00Z' }], chats: { 'c-fx': fx } };
+};
+const sessionList = (...sessions) => ({ sessions, incomplete: false, orgId: 'org-1' });
+const sessionDir = (written, id = S_COWORK) => {
+  const short = id.replace(/^cse_/, '').slice(-12);
+  const hit = Object.keys(written).find((n) => n.startsWith('sessions/') && n.split('/')[1].endsWith(`_${short}`));
+  return hit ? hit.split('/').slice(0, 2).join('/') : null;
+};
+
+test('Export All writes a Cowork session folder', async () => {
+  const { list, chats } = oneChat();
+  const frames = [{ slug: S_ART, title: 'Panel', typeSlug: '', typeTitle: '', sourceSurface: 'code', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }];
+  const pages = { [S_ART]: { title: 'Panel', live: P_LIVE, versions: { [P_LIVE]: { files: { 'index.html': '<p>Panel</p>' } } } } };
+  const { result, saved, store } = await bulkRun({ list, chats, frames, pages, options: { withArtifacts: true }, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(result.saved.sessions, 1);
+  const w = saved.written;
+  const dir = sessionDir(w);
+  assert.strictEqual(dir, 'sessions/Panel_refresh_GhIjKlMnOpQr', Object.keys(w).join());
+  const json = w[`${dir}/session.json`];
+  assert.ok(json && !json.includes(PNG_B64), 'no base64 in session.json');
+  const parsed = JSON.parse(json);
+  assert.strictEqual(parsed.format, 1);
+  assert.strictEqual(parsed.session.id, S_COWORK);
+  assert.strictEqual(parsed.events.length, 4);
+  assert.ok(w[`${dir}/transcript.md`].startsWith('﻿'), 'transcript.md has a BOM');
+  assert.match(w[`${dir}/transcript.md`], /Refresh the panel/);
+  assert.ok(w[`${dir}/README.md`].startsWith('﻿'));
+  const artFolder = Object.keys(w).find((n) => /^artifacts\/[^/]+\/artifact\.json$/.test(n)).split('/')[1];
+  assert.ok(w[`${dir}/README.md`].includes(`](../../artifacts/${encodeURIComponent(artFolder)}/)`), w[`${dir}/README.md`]);
+  assert.strictEqual(w[`${dir}/images/1.png`], PNG_B64);
+  assert.match(w['index.md'], /## Sessions/);
+  assert.ok(w['index.md'].includes(`](${dir}/README.md)`), w['index.md']);
+  const manifest = JSON.parse(w['export-manifest.json']);
+  assert.deepStrictEqual(manifest.sessions, { listed: 1, leftOut: 0, items: [{ id: S_COWORK, title: 'Panel refresh', folder: dir, last_event_at: '2026-11-20T11:00:00Z' }] });
+  assert.deepStrictEqual(store.exportRecord['org-1'].sessions, { [S_COWORK]: '2026-11-20T11:00:00Z' });
+  assert.ok(!result.warningList.some((x) => x.type === 'session'), JSON.stringify(result.warningList));
+});
+
+test('a CLI session is left out unless the setting is on', async () => {
+  const { list, chats } = oneChat();
+  const sessions = sessionList(coworkSession(), cliSession());
+  const sessionPages = { [S_COWORK]: onePage(), [S_CLI]: onePage() };
+  const off = await bulkRun({ list, chats, sessions, sessionPages });
+  assert.deepStrictEqual(off.asks.map((m) => m.id), [S_COWORK], 'no events request for the CLI session');
+  assert.match(off.saved.written['index.md'], /CLI sessions not exported: 1 \(Settings, Include Claude Code CLI sessions\)/);
+  assert.strictEqual(off.result.saved.sessions, 1);
+  assert.strictEqual(sessionDir(off.saved.written, S_CLI), null);
+  assert.strictEqual(JSON.parse(off.saved.written['export-manifest.json']).sessions.leftOut, 1);
+  const on = await bulkRun({ list, chats, sessions, sessionPages, setup: (sb) => vm.runInContext('settings.exportCliSessions = true', sb) });
+  assert.deepStrictEqual(on.asks.map((m) => m.id).sort(), [S_COWORK, S_CLI].sort());
+  assert.ok(sessionDir(on.saved.written, S_CLI));
+  assert.doesNotMatch(on.saved.written['index.md'], /CLI sessions not exported/);
+  assert.strictEqual(on.result.saved.sessions, 2);
+});
+
+test('Changes only exports a session-only change', async () => {
+  const { list, chats } = oneChat();
+  const stored = { exportRecord: { 'org-1': { at: '2026-11-01T00:00:00Z', chats: { 'c-fx': list[0].updated_at }, sessions: { [S_COWORK]: '2026-11-10T00:00:00Z', [S_CLI]: '2026-11-20T11:00:00Z' } } } };
+  // The harness has no viewer assets: writeViewer is stood in for, and says what it was given.
+  const viewerCalls = [];
+  const fakeViewer = (sb) => {
+    sb.__viewer = (chats, opts) => { viewerCalls.push({ chats: chats.length, sessions: (opts.sessions || []).length }); };
+    vm.runInContext('writeViewer = async (zip, chats, opts) => { __viewer(chats, opts); zip.file("viewer.html", "<html>"); return true; }', sb);
+  };
+  const { result, saved, store, asks } = await bulkRun({ list, chats, stored, setup: fakeViewer, options: { changesOnly: true }, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.deepStrictEqual(viewerCalls, [{ chats: 0, sessions: 1 }]);
+  assert.ok(!result.warningList.some((w) => w.type === 'viewer'), JSON.stringify(result.warningList));
+  assert.ok(saved, 'a ZIP was made');
+  assert.strictEqual(result.saved.chats, 0);
+  assert.strictEqual(result.saved.sessions, 1);
+  assert.strictEqual(asks.length, 1);
+  assert.ok(sessionDir(saved.written));
+  assert.ok(saved.written['viewer.html'], Object.keys(saved.written).join());
+  assert.strictEqual(store.exportRecord['org-1'].sessions[S_COWORK], '2026-11-20T11:00:00Z');
+  assert.strictEqual(store.exportRecord['org-1'].chats['c-fx'], list[0].updated_at, 'the chats stay recorded');
+
+  const same = await bulkRun({ list, chats, stored: store, options: { changesOnly: true }, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.strictEqual(same.saved, null, 'nothing changed: no ZIP');
+  assert.strictEqual(same.asks.length, 0);
+  assert.ok(same.result.notes.some((n) => /^Nothing changed since/.test(n)));
+});
+
+test('a failed session list is one warning and the chats export', async () => {
+  const { list, chats } = oneChat();
+  const { result, saved, asks } = await bulkRun({ list, chats, sessions: { error: 'HTTP 403' } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(result.saved.chats, 1);
+  const mine = result.warningList.filter((w) => w.type === 'session');
+  assert.strictEqual(mine.length, 1, JSON.stringify(result.warningList));
+  assert.match(mine[0].text, /HTTP 403/);
+  assert.strictEqual(asks.length, 0);
+  assert.match(saved.written['index.md'], /Sessions: not exported \(HTTP 403\)/);
+  assert.ok(!Object.keys(saved.written).some((n) => n.startsWith('sessions/')));
+});
+
+test('a session list that may be incomplete is warned', async () => {
+  const { list, chats } = oneChat();
+  const { result, saved } = await bulkRun({ list, chats, sessions: { ...sessionList(coworkSession()), incomplete: true }, sessionPages: { [S_COWORK]: onePage() } });
+  const mine = result.warningList.filter((w) => w.type === 'session');
+  assert.strictEqual(mine.length, 1, JSON.stringify(result.warningList));
+  assert.match(mine[0].text, /session list may be incomplete/i);
+  assert.ok(sessionDir(saved.written));
+  assert.strictEqual(result.saved.sessions, 1);
+});
+
+test('a session over 100 pages is warned and not recorded', async () => {
+  const { list, chats } = oneChat();
+  const endless = (msg) => {
+    const n = msg.after ? Number(msg.after.slice(1)) + 1 : 1;
+    return { events: [{ type: 'assistant', uuid: `p${n}`, created_at: '2026-11-20T10:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text: `page ${n}` }] } }], lastId: `p${n}`, hasMore: true };
+  };
+  const { result, saved, store, asks } = await bulkRun({ list, chats, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: endless } });
+  assert.strictEqual(asks.length, 100);
+  const mine = result.warningList.filter((w) => w.type === 'session');
+  assert.strictEqual(mine.length, 1, JSON.stringify(result.warningList));
+  assert.match(mine[0].text, /100 pages/);
+  const dir = sessionDir(saved.written);
+  assert.ok(dir, 'saved as far as it got');
+  assert.strictEqual(JSON.parse(saved.written[`${dir}/session.json`]).events.length, 100);
+  assert.ok(!(store.exportRecord['org-1'].sessions || {})[S_COWORK], 'not recorded');
+});
+
+test('session pages that do not advance stop with a warning', async () => {
+  const { list, chats } = oneChat();
+  for (const lastId of [null, 'same']) {
+    const stuck = (msg) => ({ events: [{ type: 'assistant', uuid: 'x', created_at: '2026-11-20T10:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }], lastId: lastId === 'same' ? 'x' : null, hasMore: true });
+    const { result, store, asks } = await bulkRun({ list, chats, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: stuck } });
+    assert.ok(asks.length <= 2, `${lastId}: ${asks.length} requests`);
+    assert.strictEqual(result.warningList.filter((w) => w.type === 'session').length, 1, JSON.stringify(result.warningList));
+    assert.ok(!(store.exportRecord['org-1'].sessions || {})[S_COWORK]);
+  }
+});
+
+test('Stop during sessions records none', async () => {
+  const { list, chats } = oneChat();
+  const two = sessionList(coworkSession(), coworkSession({ id: 'cse_01SecondSessionXyz', title: 'Second' }));
+  const picked = new FakeDir();
+  const signal = { stopped: false };
+  const onProgress = (e) => { if (e.phase === 'sessions' && e.done === 1) signal.stopped = true; };
+  const { result, sets, asks } = await bulkRun({ list, chats, sessions: two, sessionPages: { [S_COWORK]: onePage(), cse_01SecondSessionXyz: onePage() }, options: { directory: picked, signal, onProgress } });
+  assert.strictEqual(result.outcome, 'stopped');
+  assert.strictEqual(result.saved.sessions, 1);
+  assert.strictEqual(asks.length, 1, 'the second session is not asked for');
+  const files = runFiles(picked);
+  assert.ok(sessionDir(files), Object.keys(files).join());
+  for (const n of ['viewer.html', 'index.md', 'export-manifest.json']) assert.ok(!(n in files), n);
+  assert.ok(!sets.some((keys) => keys.includes('exportRecord')), JSON.stringify(sets));
+
+  const zipSignal = { stopped: false };
+  const zipped = await bulkRun({ list, chats, sessions: two, sessionPages: { [S_COWORK]: onePage(), cse_01SecondSessionXyz: onePage() },
+    options: { signal: zipSignal, onProgress: (e) => { if (e.phase === 'sessions' && e.done === 1) zipSignal.stopped = true; } } });
+  assert.strictEqual(zipped.result.outcome, 'stopped');
+  assert.strictEqual(zipped.result.saved.sessions, 0);
+  assert.strictEqual(zipped.saved, null);
+});
+
+test('a gone tab skips sessions', async () => {
+  const { list, chats } = threeTabChats();
+  const { result, asks } = await bulkRun({ list, chats, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() }, setup: lostTab({ reinjects: false, from: 1 }) });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(asks.length, 0);
+  const mine = result.warningList.filter((w) => /claude\.ai tab closed or stopped answering/.test(w.text));
+  assert.strictEqual(mine.length, 1);
+  assert.match(mine[0].text, /, and no sessions$/);
+});
+
+test('a chat titled "sessions" gets sessions_2', async () => {
+  const fx = Object.assign(loadFixture(), { uuid: 'c-s', name: 'sessions' });
+  const list = [{ uuid: 'c-s', name: 'sessions', updated_at: '2026-01-02T00:00:00Z' }];
+  const { saved } = await bulkRun({ list, chats: { 'c-s': fx }, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.ok(saved.written['sessions_2/README.md'], Object.keys(saved.written).join());
+  assert.ok(sessionDir(saved.written));
+});
+
+test('session folders are claimed apart without case', async () => {
+  const { list, chats } = oneChat();
+  const a = coworkSession({ title: 'Same' });
+  const b = coworkSession({ id: 'cse_99AbCdEfGhIjKlMnOpQr', title: 'SAME' });  // the same short id, other case of title
+  const { saved } = await bulkRun({ list, chats, sessions: sessionList(a, b), sessionPages: { [a.id]: onePage(), [b.id]: onePage() } });
+  const dirs = [...new Set(Object.keys(saved.written).filter((n) => n.startsWith('sessions/')).map((n) => n.split('/')[1]))];
+  assert.deepStrictEqual(dirs.sort(), ['SAME_GhIjKlMnOpQr_2', 'Same_GhIjKlMnOpQr'].sort());
+});
+
+test('session folders are flushed one by one in folder mode', async () => {
+  const { list, chats } = oneChat();
+  const second = 'cse_01SecondSessionXyz';
+  const picked = new FakeDir();
+  let seenFirst = null;
+  const sessionPages = {
+    [S_COWORK]: onePage(),
+    [second]: () => { seenFirst = Object.keys(runFiles(picked)).some((n) => /^sessions\/Panel_refresh_[^/]+\/transcript\.md$/.test(n)); return onePage()[0]; },
+  };
+  let flushes = 0;
+  const { result } = await bulkRun({ list, chats, sessions: sessionList(coworkSession(), coworkSession({ id: second, title: 'Second' })), sessionPages,
+    options: { directory: picked }, setup: (sb) => {
+      sb.__flushed = () => { flushes++; };
+      vm.runInContext(`createDiskFolder = ((orig) => (h) => { const v = orig(h); const f = v.flush; v.flush = async () => { __flushed(); return f(); }; return v; })(createDiskFolder)`, sb);
+    } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(seenFirst, true, 'the first session is on disk before the second is asked for');
+  assert.ok(flushes >= 2, `${flushes} flushes`);
+  assert.strictEqual(result.saved.sessions, 2);
+});
+
+test('the sessions step is done after the viewer step starts, also with no sessions', () => {
+  const p = panelOn('https://claude.ai/new');
+  const states = {};
+  p.sandbox.__state = (name, state) => { states[name] = state; };
+  vm.runInContext('setStep = (name, state) => __state(name, state)', p.sandbox);
+  p.el('step-sessions').hidden = true;
+  p.fn('beginRunScreen')({ run: 'bulk', withArtifacts: false, changesOnly: false }, null);
+  assert.strictEqual(p.el('step-sessions').hidden, false);
+  assert.strictEqual(states.sessions, 'pending');
+  p.fn('runProgress')({ phase: 'chats', done: 1, total: 1, sub: 'A', warnings: 0 });
+  p.fn('runProgress')({ phase: 'viewer', done: 0, total: 1, sub: '', warnings: 0 });
+  assert.strictEqual(states.sessions, 'done');
+});
+
+test('runSessionStep skips the sessions past the ZIP budget with one warning', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const root = fakeZip(written);
+  const a = coworkSession({ title: 'First' });
+  const b = coworkSession({ id: 'cse_01SecondSessionXyz', title: 'Second' });
+  const c = coworkSession({ id: 'cse_01ThirdSessionXyzA', title: 'Third' });
+  const page = onePage()[0];
+  const size = page.events.reduce((n, e) => n + Buffer.byteLength(JSON.stringify(e)), 0);
+  sandbox.__args = { sessions: [a, b, c], budget: size + 10, fetchPage: async () => JSON.parse(JSON.stringify(page)) };
+  sandbox.__root = root;
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.strictEqual(out.written, 1);
+  assert.deepStrictEqual(out.saved.map((x) => x.id), [a.id]);
+  assert.strictEqual(out.warnings.length, 1, out.warnings.join('\n'));
+  assert.match(out.warnings[0], /256 MB was reached: 2 sessions not exported/);
+  assert.ok(!Object.keys(written).some((n) => n.includes('Second')));
+});
+
+test('runSessionStep keeps a session whose later page fails, warned and not recorded', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const first = { ...onePage()[0], hasMore: true, lastId: 'e4' };
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async (id, after) => (after ? { error: 'HTTP 500' } : JSON.parse(JSON.stringify(first))) };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.strictEqual(out.written, 1);
+  assert.deepStrictEqual(out.saved, []);
+  assert.match(out.warnings.join('\n'), /events could not be loaded \(HTTP 500\); saved as far as it got/);
+  const readme = Object.entries(written).find(([n]) => n.endsWith('/README.md'))[1];
+  assert.match(readme, /\*\*Incomplete:\*\*/);
 });

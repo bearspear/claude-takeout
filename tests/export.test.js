@@ -1618,6 +1618,7 @@ async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null
     if (msg.action === 'fetchAllConversations') cb({ data: list, orgId: 'org-1', accountName: msg.withAccountName ? accountName : undefined });
     else if (msg.action === 'fetchConversation') cb({ data: chats[msg.conversationId] });
     else if (msg.action === 'listArtifacts') cb({ frames: [] });  // no artifacts unless a test lists some
+    else if (msg.action === 'listSessions') cb({ sessions: [], incomplete: false, orgId: 'org-1' });  // no sessions
     else cb({});
   };
   sb.JSZip = JSZip;

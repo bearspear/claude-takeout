@@ -3032,12 +3032,14 @@ function promptKind(text) {
 
 // Image type by the first decoded bytes, or '' when it is none of PNG, JPEG, GIF, WebP.
 function sessionImageType(base64) {
-  let bytes;
-  try { bytes = Buffer.from(String(base64 || '').slice(0, 64), 'base64'); } catch (e) { return ''; }
-  if (bytes.length >= 4 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'png';
-  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'jpg';
-  if (bytes.length >= 4 && bytes.toString('latin1', 0, 4) === 'GIF8') return 'gif';
-  if (bytes.length >= 12 && bytes.toString('latin1', 0, 4) === 'RIFF' && bytes.toString('latin1', 8, 12) === 'WEBP') return 'webp';
+  // atob, not Buffer: this runs in the panel too, where Buffer doesn't exist. 64 characters decode to 48 bytes.
+  let bin;
+  try { bin = atob(String(base64 || '').replace(/\s+/g, '').slice(0, 64)); } catch (e) { return ''; }
+  const at = (i) => bin.charCodeAt(i);
+  if (bin.length >= 4 && at(0) === 0x89 && at(1) === 0x50 && at(2) === 0x4e && at(3) === 0x47) return 'png';
+  if (bin.length >= 3 && at(0) === 0xff && at(1) === 0xd8 && at(2) === 0xff) return 'jpg';
+  if (bin.length >= 4 && bin.slice(0, 4) === 'GIF8') return 'gif';
+  if (bin.length >= 12 && bin.slice(0, 4) === 'RIFF' && bin.slice(8, 12) === 'WEBP') return 'webp';
   return '';
 }
 

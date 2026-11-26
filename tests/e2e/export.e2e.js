@@ -36,6 +36,7 @@ let projectDownloads=0;
    if(u.includes('/wiggle/download-file'))return r.fulfill({status:200,contentType:'application/pdf',body:bin});
    if(m=u.match(/chat_conversations\/([0-9a-f-]{36})/))return r.fulfill(server[m[1]]?{json:server[m[1]]}:{status:404,json:{}});
    if(/\/chat_conversations(\?|$)/.test(u))return r.fulfill({json:Object.values(server).map(c=>({uuid:c.uuid,name:c.name,updated_at:c.updated_at}))});
+   if(/\/v1\/code\/sessions(\?|$)/.test(u))return r.fulfill({json:{data:[]}});  // no sessions (yet)
    if(u.includes('/api/'))return r.fulfill({status:404,json:{}});
    return r.fulfill({contentType:'text/html',body:'<!doctype html><title>m</title>mock'})});
   const claude=await ctx.newPage();await claude.goto(`https://claude.ai/chat/${A}`);await claude.waitForTimeout(800);
