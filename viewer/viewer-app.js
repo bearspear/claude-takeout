@@ -1658,8 +1658,9 @@ function fileDetails(file, version) {
 function previewNodes(chat, file, version) {
   if (file.kind === 'md') return [renderText({ text: version.text, cites: [] }, [])];
   if (file.kind === 'image') return [panelPictureZoom(() => zoomPaper(version.href, file.name || '')).frame];
-  // An SVG shows as a picture, which runs nothing; one with scripts may need them, so it stays a page.
-  if (file.kind === 'svg' && typeof version.text === 'string' && !svgHasScripts(version.text)) {
+  // An SVG shows as a picture, which runs nothing; one with scripts may need them, and one of unknown size would be
+  // cropped, so those stay a page (svgAsPicture).
+  if (file.kind === 'svg' && svgAsPicture(version.text)) {
     let shown = null;
     // The strict XML parser refused it (no xmlns, an HTML entity, a bare &): the forgiving frame shows it.
     const fallback = zoom => {

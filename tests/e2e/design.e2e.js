@@ -357,6 +357,16 @@ async function writeOut(zip) {
     const mb = await boxOf('Home A');
     const mdrag = await dragFrom({ x: mb.x + mb.width / 2, y: mb.y + mb.height / 2 });
     check(`${label}: canvas: Move: a drag starting over a board moves the canvas`, mdrag.join() === '-100,-80', JSON.stringify(mdrag));
+    // A press released outside the window (no pointerup reaches it): moving back with no button doesn't move the canvas.
+    const sp0 = await panOf();
+    const stuck = await page.locator('.design-view').evaluate(v => {
+      const r = v.getBoundingClientRect();
+      const o = { bubbles: true, cancelable: true, pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: r.left + 300, clientY: r.top + 3 };
+      v.dispatchEvent(new PointerEvent('pointerdown', o));
+      for (const dy of [100, 300]) v.dispatchEvent(new PointerEvent('pointermove', { ...o, button: -1, buttons: 0, clientY: r.top + dy }));
+      return v.classList.contains('dragging');
+    });
+    check(`${label}: canvas: a drag released outside ends; moving back with no button doesn't move it`, !stuck && (await panOf()).join() === sp0.join(), JSON.stringify([stuck, sp0, await panOf()]));
     // In Move too: a drag ending on Open alone opens nothing; a click opens it, and Back keeps Move.
     await bring('Templated');
     const mopen = page.locator('.design-board', { hasText: 'Templated' }).locator('button.board-open');

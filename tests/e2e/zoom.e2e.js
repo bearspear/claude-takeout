@@ -56,6 +56,7 @@ const CHART2 = '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="600"
 const BARE = '<svg width="400" height="300"><rect width="400" height="300" fill="#9c6"/></svg>';
 const NBSP = '<svg xmlns="http://www.w3.org/2000/svg" width="400" height="300"><text x="10" y="40">a&nbsp;b</text></svg>';
 const HUGE = '<svg xmlns="http://www.w3.org/2000/svg" width="100000" height="100"><rect width="100000" height="100" fill="#999"/></svg>';
+const NOSIZE = '<svg xmlns="http://www.w3.org/2000/svg" width="100%" height="100%"><rect width="600" height="400" fill="#6c9"/></svg>';
 const PCT = '<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 900 600"><rect width="900" height="600" fill="#c96"/></svg>';
 const PHOTO = png(1200, 800);
 const panelChat = {
@@ -65,7 +66,7 @@ const panelChat = {
     msg('pa1', 'ph1', 'assistant', 5, [
       { type: 'text', text: 'Drawn.' },
       cf('c1', out('chart.svg'), CHART1), cf('c2', out('bare.svg'), BARE), cf('c3', out('nbsp.svg'), NBSP),
-      cf('c4', out('huge.svg'), HUGE), cf('c5', out('pct.svg'), PCT), use('c7', 'present_files', { filepaths: [out('pic.png')] }),
+      cf('c4', out('huge.svg'), HUGE), cf('c5', out('pct.svg'), PCT), cf('c8', out('nosize.svg'), NOSIZE), use('c7', 'present_files', { filepaths: [out('pic.png')] }),
     ]),
     { ...msg('ph2', 'pa1', 'human', 6, [{ type: 'text', text: 'smaller, and here is a photo' }]), files_v2: [{ file_uuid: 'u-png', file_name: 'photo.png', success: true }] },
     msg('pa2', 'ph2', 'assistant', 7, [{ type: 'text', text: 'Smaller.' }, cf('c6', out('chart.svg'), CHART2)]),
@@ -193,6 +194,16 @@ const pageChat = {
   await settle();
   const moved = await scroll();
   check('gallery: drag pans and doesn\'t close', Math.abs(moved.left - before.left) > 30 && await page.locator('.veil.gallery').count() === 1, `${before.left} -> ${moved.left}`);
+
+  // A press released outside (no pointerup reaches the stage): moving back with no button pressed doesn't pan.
+  const stuck = await page.locator('.gallery-stage').evaluate(s => {
+    const o = { bubbles: true, cancelable: true, pointerId: 9, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 500, clientY: 400 };
+    s.dispatchEvent(new PointerEvent('pointerdown', o));
+    const at = [s.scrollLeft, s.scrollTop];
+    for (const [x, y] of [[440, 350], [380, 300]]) s.dispatchEvent(new PointerEvent('pointermove', { ...o, button: -1, buttons: 0, clientX: x, clientY: y }));
+    return { moved: s.scrollLeft !== at[0] || s.scrollTop !== at[1], dragging: s.classList.contains('dragging') };
+  });
+  check('gallery: a drag released outside ends; moving back with no button doesn\'t pan', !stuck.moved && !stuck.dragging, JSON.stringify(stuck));
 
   const cancelled = await page.locator('.gallery-stage').evaluate(s => {
     const o = { bubbles: true, cancelable: true, pointerId: 7, pointerType: 'mouse', isPrimary: true, button: 0, buttons: 1, clientX: 500, clientY: 400 };
@@ -385,6 +396,9 @@ const pageChat = {
   const pctW = await pimg.evaluate(i => i.getBoundingClientRect().width).catch(() => -1);
   check('panel: another file resets to Fit', pctStart === `${Math.round(pctFit * 100)}%`, `${pctStart} fit ${pctFit}`);
   check('panel svg: width="100%" uses the viewBox', Math.abs(pctW - 900) < 1 && (await plevel()) === '100%', `${pctW}`);
+  await openCard('nosize.svg');
+  await page.waitForSelector('#panel-body iframe', { timeout: 3000 }).catch(() => {});
+  check('panel svg: no viewBox and no fixed size stays a page, not a cropped picture', await page.locator('#panel-body iframe').count() === 1 && await pimg.count() === 0, `frames ${await page.locator('#panel-body iframe').count()} imgs ${await pimg.count()}`);
   await openCard('chart.svg', 1);
   await loaded();
   const backFit = await panelFit(800, 600);

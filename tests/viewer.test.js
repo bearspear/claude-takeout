@@ -2,7 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert');
 const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, artifactTabs, relativeTime, parseArtifactHash, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash } = require('../viewer/viewer-logic.js');
-const { ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT } = require('../viewer/viewer-logic.js');
+const { ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, svgAsPicture, pageFit, SIZE_SCRIPT } = require('../viewer/viewer-logic.js');
 
 const msgs = [
   { id: 'r', parent: null, sender: 'human', at: '2026-01-01T00:00:00Z' },
@@ -2505,4 +2505,17 @@ test('buildViewerData: merging by id compares dates as times', () => {
   const newer = { name: 'New', id: 'p', updated: '2026-01-01T06:00:00Z', files: [], docs: [] };
   assert.strictEqual(buildViewerData([mk('a', older), mk('b', newer)], { exported: 'x' }).projects[0].name, 'New');
   assert.strictEqual(buildViewerData([mk('a', newer), mk('b', older)], { exported: 'x' }).projects[0].name, 'New');
+});
+
+// An SVG file shows as a picture only when its size is known: one with no viewBox and no fixed size would be drawn at
+// the browser's default 300x150, cropped, so it stays a page; one with scripts stays a page too.
+test('svgAsPicture: a known size and no scripts', () => {
+  const ns = 'xmlns="http://www.w3.org/2000/svg"';
+  assert.strictEqual(svgAsPicture(`<svg ${ns} width="640" height="480"><rect/></svg>`), true);
+  assert.strictEqual(svgAsPicture(`<svg ${ns} width="100%" viewBox="0 0 1200 900"><rect/></svg>`), true);
+  assert.strictEqual(svgAsPicture(`<svg ${ns} width="100%" height="100%"><rect/></svg>`), false);
+  assert.strictEqual(svgAsPicture(`<svg ${ns}><rect/></svg>`), false);
+  assert.strictEqual(svgAsPicture(`<svg ${ns} width="600"><rect/></svg>`), false);
+  assert.strictEqual(svgAsPicture(`<svg ${ns} width="640" height="480"><script>go()</script></svg>`), false);
+  assert.strictEqual(svgAsPicture(null), false);
 });

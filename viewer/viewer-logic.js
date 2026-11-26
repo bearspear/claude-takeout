@@ -1685,6 +1685,12 @@ function svgNaturalSize(text) {
   return null;
 }
 
+// An SVG file shows as a picture when it runs nothing and its size is known (svgNaturalSize). With no viewBox and no
+// fixed width and height, the browser draws it at its default 300x150 and crops it: then it stays a page.
+function svgAsPicture(text) {
+  return typeof text === 'string' && !svgHasScripts(text) && svgNaturalSize(text) !== null;
+}
+
 function svgHasScripts(text) {
   const t = String(text);
   return /<script\b/i.test(t) || /<[^>]*\son[a-z]+\s*=/i.test(t);
@@ -1880,6 +1886,8 @@ function pictureZoom(box, img, opts = {}) {
   });
   on(box, 'pointermove', e => {
     if (!pointers.has(e.pointerId)) return;
+    // A mouse released outside the box sent it no pointerup (capture starts only past 4 px): no button, no drag.
+    if (e.pointerType === 'mouse' && e.buttons === 0) { lift(e); return; }
     pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
     if (pinch && pointers.size === 2) {
       const s = spread();
@@ -2036,5 +2044,5 @@ function pageZoom(wrapper, frame, opts = {}) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgAsPicture, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
 }
