@@ -1,6 +1,6 @@
 # Claude Code and Cowork sessions in Export All (v1.25.0)
 
-Status: draft for the owner's approval. Written 2026-11-26. The owner skipped the questions; every choice marked "My call" is mine and open to change. A builder check and a critical review are done and folded in. One decision is the owner's: **Open question** below.
+Status: draft for the owner's approval. Written 2026-11-26. The owner skipped the questions; every choice marked "My call" is mine and open to change. A builder check and a critical review are done and folded in. The owner chose how CLI sessions are handled (below).
 
 Depends on v1.24.3 (PR #80: the chat fetch retry and the Export All prefetch); build on main after it merges.
 
@@ -22,13 +22,13 @@ All three endpoints are on `claude.ai`, same origin as the chat API, so `content
 
 ## Goals
 
-1. Export All (Chats ticked) also saves each session (see the open question for which): its kept events, a readable transcript, a README.
+1. Export All (Chats ticked) also saves each Cowork session, and each CLI session when the Settings switch is on: its kept events, a readable transcript, a README.
 2. The viewer lists sessions and shows a session's transcript: prompts, replies, thinking (folded), tool steps (folded, as chat steps are), images.
 3. An artifact made in a session links to it, and the session lists its artifacts, both ways, in the files and in the viewer.
 4. Changes only takes a session again only when it changed, also when nothing else changed.
 5. The session's settings and machinery never leave claude.ai: connector settings and headers, environment logs, startup details and control messages are never written. What the conversation itself holds (prompts, replies, tool output) is written as a chat's is, with the protections in "What a transcript holds"; USAGE says plainly that a session's tool output can include text from the machine it ran on.
 
-## Open question (the owner's)
+## CLI sessions (the owner's decision)
 
 A **CLI session** (`environment_kind: bridge`) runs on the owner's own computer: its tool results can hold whatever Claude read or ran there (a `.env`, `env` or `gh auth status` output, files under `~/.ssh`), and its user messages carry `<system-reminder>` text (CLAUDE.md, memory, working folder, git status). A chat on claude.ai and a **Cowork session** (`anthropic_cloud`) run in a sandbox instead. Options:
 
@@ -36,7 +36,7 @@ A **CLI session** (`environment_kind: bridge`) runs on the owner's own computer:
 - **B. Both, with protections** (below: system reminders stripped, known token patterns masked, a USAGE warning). Complete, but masking is best effort.
 - **C. Both, CLI ones only with a setting** in Settings, off by default.
 
-*My recommendation: C.* The default matches A; turning it on gives B.
+**Owner's choice: C.** Cowork sessions are always exported. CLI sessions only with the Settings switch **Include Claude Code CLI sessions** (`settings.exportCliSessions`, default `false`), with the protections in "What a transcript holds". With the switch off, CLI sessions are not fetched at all (no events request); the export's README and `index.md` say how many were left out and how to include them. The switch's hint says their tool output can contain text from your computer.
 
 ## Non-goals
 
@@ -62,7 +62,7 @@ A **CLI session** (`environment_kind: bridge`) runs on the owner's own computer:
 
 ### The panel
 
-Count doesn't count sessions (it would cost the list request on every Count). The Exporting screen gets a phase `sessions` ("Session N of M"): a `#step-sessions` row in `popup.html` and `sidepanel.html` (kept identical), `runSteps`, `runTitleText`, `savedText` and `saved.sessions`. The Done and Export stopped sentences count saved sessions beside chats and artifacts ("29 chats, 3 sessions and 20 artifacts"), in the pure view-model functions `tests/screens.test.js` pins. Changes only's summary on the main screen stays about chats and artifacts. *(My calls.)*
+The setting joins `defaultSettings`, `loadSettings`, `applySettings` and the Settings screen of `popup.html` (copied to `sidepanel.html`). Count doesn't count sessions (it would cost the list request on every Count). The Exporting screen gets a phase `sessions` ("Session N of M"): a `#step-sessions` row in `popup.html` and `sidepanel.html` (kept identical), `runSteps`, `runTitleText`, `savedText` and `saved.sessions`. The Done and Export stopped sentences count saved sessions beside chats and artifacts ("29 chats, 3 sessions and 20 artifacts"), in the pure view-model functions `tests/screens.test.js` pins. Changes only's summary on the main screen stays about chats and artifacts. *(My calls.)*
 
 ### Fetching (content.js)
 
@@ -139,7 +139,7 @@ An artifact made in a session shows "Made in session <title>" linking to `#sessi
 
 ## Testing
 
-- Unit: the field filter (each event type in, only kept fields out; `session_context`, headers, `env_manager_log` and `init` never out), system-reminder stripping, each masked token shape, labelled prompts, paging (`last_id` from the raw page) and caps, the 2 MB stub, `buildViewerSession` on fixture events (including a top-level image and a subagent event), `transcript.md`, the README's artifact links, the record and Changes only (a sessions-only change is exported, a capped session isn't recorded), the early return and `viewerWanted` with sessions, Stop and tab-gone, the reserved names, `KNOWN_DIRS`, merge, the warning type and hint, the panel sentences.
+- Unit: the CLI switch (off: no events request for a `bridge` session, the README and `index.md` count it as left out; on: exported); the field filter (each event type in, only kept fields out; `session_context`, headers, `env_manager_log` and `init` never out), system-reminder stripping, each masked token shape, labelled prompts, paging (`last_id` from the raw page) and caps, the 2 MB stub, `buildViewerSession` on fixture events (including a top-level image and a subagent event), `transcript.md`, the README's artifact links, the record and Changes only (a sessions-only change is exported, a capped session isn't recorded), the early return and `viewerWanted` with sessions, Stop and tab-gone, the reserved names, `KNOWN_DIRS`, merge, the warning type and hint, the panel sentences.
 - Fixtures are synthetic, shaped from the study; never real session data in the repo.
 - e2e: a viewer with two sessions: the entry and count, `#sessions`, a transcript (text, folded thinking, a tool step cut at 2 KB, an image from its file), the artifact link both ways, search finding a session prompt but not a stripped reminder, no network.
 - `export.e2e.js`'s mock claude.ai gains a session list and paged events.
