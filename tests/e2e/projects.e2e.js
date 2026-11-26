@@ -23,7 +23,9 @@ function chat(i) {
 const CHATS = Array.from({ length: COUNT }, (_, i) => chat(i));
 const INSTRUCTIONS = Array.from({ length: 12 }, (_, i) => `Rule ${i + 1}: be brief.`).join('\n');
 const ALPHA = { id: 'p-a', name: 'Alpha', description: 'The alpha project', instructions: INSTRUCTIONS, fileDir: 'project/files', fileNames: ['spec.pdf'], docs: [{ name: 'notes.md', text: 'Alpha notes' }] };
-const BETA = { id: 'p-b', name: 'Beta <img src=x onerror="console.log(\'NAME RAN\')">', fileDir: 'project/files', fileNames: [], docs: [] };
+// Beta's instructions: 6 lines of 45 characters, more than 8 by the 40-a-line estimate but short enough to show whole on a phone.
+const BETA_INSTRUCTIONS = Array.from({ length: 6 }, (_, i) => `Line ${i + 1}: ` + 'x'.repeat(37)).join('\n');
+const BETA = { id: 'p-b', name: 'Beta <img src=x onerror="console.log(\'NAME RAN\')">', instructions: BETA_INSTRUCTIONS, fileDir: 'project/files', fileNames: [], docs: [] };
 const GAMMA = { name: 'Gamma', fileDir: 'project/files', fileNames: [], docs: [] }; // an older archive's project: no id
 function projectOf(c) {
   const i = Number(c.uuid.slice(1));
@@ -276,6 +278,8 @@ function projectOf(c) {
   check('all chats: the filter searches every chat', found.join() === 'Chat 215', found.join());
   await cFilter.fill('');
   check('all chats: an empty filter shows 200 again', (await pages.locator('#lists-screen a.chat-row').count()) === 200);
+  await pages.click('#lists-screen button.show-more');
+  check('all chats: Show more after clearing the filter shows all 230', (await pages.locator('#lists-screen a.chat-row').count()) === 230);
   await cFilter.fill('Chat 12');
   await pages.locator('#lists-screen .chat-line:has(a.chat-row:text-is("Chat 12")) a.chat-project').click();
   await pages.waitForFunction(() => location.hash === '#project=p-b');
@@ -297,11 +301,28 @@ function projectOf(c) {
   check('phone: the cards are one column', lefts.length === 3 && new Set(lefts).size === 1, lefts.join());
   const sw = await ph.evaluate(() => document.getElementById('lists-screen').scrollWidth <= document.getElementById('lists-screen').clientWidth);
   check('phone: no sideways scroll', sw);
+  await ph.click('#lists-screen a.project-card:has-text("Alpha")');
+  await ph.waitForFunction(() => location.hash === '#project=p-a');
+  const order = await ph.evaluate(() => {
+    const panel = document.querySelector('#lists-screen .project-panel').getBoundingClientRect();
+    const chats = document.querySelector('#lists-screen .project-chats').getBoundingClientRect();
+    return panel.top < chats.top;
+  });
+  check('phone: the panel comes before the chats', order);
+  await ph.goto('file://' + file + '#project=p-b');
+  await ph.waitForSelector('#lists-screen .project-instructions');
+  await ph.waitForTimeout(100);
+  const shortOk = await ph.evaluate(() => {
+    const t = document.querySelector('#lists-screen .project-instructions');
+    return !t.classList.contains('collapsed') && !document.querySelector('#lists-screen .more-toggle') && t.scrollHeight <= t.clientHeight + 1;
+  });
+  check('phone: instructions that fit get no Show more', shortOk);
   await phone.close();
 
   // Dark mode: the cards' text is readable.
   const dark = await browser.newContext({ viewport: { width: 1300, height: 900 }, colorScheme: 'dark' });
   const dk = await dark.newPage();
+  dk.on('pageerror', e => errors.push(e.message));
   await dk.route('**/*', r => { const u = r.request().url(); if (u.startsWith('file:')) r.continue(); else { requests.push(u); r.abort(); } });
   await dk.goto('file://' + file + '#projects');
   await dk.waitForSelector('#lists-screen a.project-card');

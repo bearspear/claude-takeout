@@ -875,7 +875,7 @@ function renderProject(chat) {
   const project = chat.project;
   const added = addedForChat(allAdded, chat.id);
   const items = projectItems(project);
-  const instructions = project && typeof project.instructions === 'string' ? project.instructions : '';
+  const instructions = projectInstructions(project);
   // In a viewer with more than one chat, a project chat links its project page.
   const entry = project && allChats.length > 1 ? listProjects.find(p => p.chats.includes(chat)) : null;
   box.hidden = !items.length && !instructions && !added.length && !entry;
@@ -2062,18 +2062,29 @@ function chatRows(chats, now, withProject) {
   return box;
 }
 
-function chatsPage(page, heading, now) {
-  const all = recentChats(allChats, allChats.length);
-  let rows = chatRows(all, now, true);
+// Chat rows and a filter box that redraws them from every chat in `chats`, not only the rows shown.
+function filteredChatRows(chats, now, withProject) {
+  let rows = chatRows(chats, now, withProject);
   const filter = listFilter('Filter chats', query => {
-    const next = chatRows(filterByText(all, query, c => [c.title]), now, true);
+    const next = chatRows(filterByText(chats, query, c => [c.title]), now, withProject);
     rows.replaceWith(next);
     rows = next;
   });
+  return { rows, filter };
+}
+
+function chatsPage(page, heading, now) {
+  const all = recentChats(allChats, allChats.length);
+  const { rows, filter } = filteredChatRows(all, now, true);
   page.append(heading, el('p', 'list-count', chatCount(all.length)), filter, rows);
 }
 
 // A project's files and documents, as the chat's fold bar and the project page show them.
+// A project's instructions text, or '' when it has none.
+function projectInstructions(project) {
+  return project && typeof project.instructions === 'string' ? project.instructions : '';
+}
+
 function projectItems(project) {
   return project ? [
     ...(project.files || []).map(f => ({ name: f.name, href: f.href, text: null })),
@@ -2104,18 +2115,12 @@ function projectPage(page, heading, entry, now) {
   const cols = el('div', 'project-cols');
   const chats = el('section', 'project-chats');
   chats.append(el('h3', '', `Chats · ${entry.chats.length}`));
-  let rows = chatRows(entry.chats, now, false);
-  if (entry.chats.length > 10) {
-    chats.append(listFilter('Filter chats', query => {
-      const next = chatRows(filterByText(entry.chats, query, c => [c.title]), now, false);
-      rows.replaceWith(next);
-      rows = next;
-    }));
-  }
+  const { rows, filter } = filteredChatRows(entry.chats, now, false);
+  if (entry.chats.length > 10) chats.append(filter);
   chats.append(rows);
   const panel = el('aside', 'project-panel');
   panel.setAttribute('aria-label', 'Instructions and knowledge');
-  const instructions = project && typeof project.instructions === 'string' ? project.instructions : '';
+  const instructions = projectInstructions(project);
   const instr = el('section', 'panel-part');
   instr.append(el('h3', '', 'Instructions'));
   if (instructions.trim()) {
@@ -2132,6 +2137,13 @@ function projectPage(page, heading, entry, now) {
         toggle.setAttribute('aria-expanded', String(open));
       });
       instr.append(toggle);
+      // The line count is a guess; once drawn, text that fits whole loses the cut and the toggle.
+      requestAnimationFrame(() => {
+        if (text.isConnected && text.scrollHeight <= text.clientHeight + 1) {
+          text.classList.remove('collapsed');
+          toggle.remove();
+        }
+      });
     }
   } else instr.append(el('p', 'list-empty', 'No instructions'));
   const know = el('section', 'panel-part');

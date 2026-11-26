@@ -1387,7 +1387,7 @@ const hasDate = c => typeof c.updated === 'string' && !Number.isNaN(Date.parse(c
 
 // The n newest chats by `updated`; chats without a parseable date come last, ties keep their order. Doesn't mutate.
 function recentChats(chats, n) {
-  const dated = chats.filter(hasDate).sort((a, b) => (a.updated < b.updated ? 1 : a.updated > b.updated ? -1 : 0));
+  const dated = chats.filter(hasDate).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
   return dated.concat(chats.filter(c => !hasDate(c))).slice(0, n);
 }
 
@@ -1401,16 +1401,18 @@ function projectList(chats, projects) {
     if (!byProject.has(chat.project)) byProject.set(chat.project, []);
     byProject.get(chat.project).push(chat);
   }
-  const newer = (a, b) => (a < b ? 1 : a > b ? -1 : 0);
+  const time = iso => (iso ? Date.parse(iso) : -Infinity);
   const out = [];
+  let extra = projects.length; // a project not in the list (an older viewer's inline copy) gets a key past its end
   for (const [project, list] of byProject) {
     const sorted = recentChats(list, list.length);
-    let updated = typeof project.updated === 'string' ? project.updated : '';
-    for (const c of sorted) if (hasDate(c) && c.updated > updated) updated = c.updated;
-    out.push({ key: project.id || 'i' + projects.indexOf(project), name: project.name || 'Untitled project',
+    let updated = hasDate(project) ? project.updated : '';
+    for (const c of sorted) if (hasDate(c) && time(c.updated) > time(updated)) updated = c.updated;
+    const at = projects.indexOf(project);
+    out.push({ key: project.id || 'i' + (at === -1 ? extra++ : at), name: project.name || 'Untitled project',
       description: typeof project.description === 'string' ? project.description : '', updated, chats: sorted });
   }
-  out.sort((a, b) => (a.updated === '') - (b.updated === '') || newer(a.updated, b.updated));
+  out.sort((a, b) => (a.updated === '') - (b.updated === '') || time(b.updated) - time(a.updated));
   const named = new Map();
   for (const p of out) {
     const n = (named.get(p.name) || 0) + 1;
@@ -1423,7 +1425,7 @@ function projectList(chats, projects) {
 // The items where every word of query is in at least one of fields(item), case folded. An empty query keeps all.
 function filterByText(items, query, fields) {
   const words = String(query).trim().split(/\s+/).filter(Boolean).map(w => foldCase(w).lower);
-  if (!words.length) return items;
+  if (!words.length) return items.slice();
   return items.filter(item => {
     const texts = fields(item).map(t => foldCase(t == null ? '' : t).lower);
     return words.every(w => texts.some(t => t.includes(w)));

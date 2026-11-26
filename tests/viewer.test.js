@@ -2459,3 +2459,50 @@ test('parseListHash: whole hashes only', () => {
   assert.deepStrictEqual(parseListHash('#project=p%201'), { page: 'project', key: 'p 1' });
   for (const h of ['', '#project=', '#projects&x=1', '#chat=abc', '#artifacts', '#chats2']) assert.strictEqual(parseListHash(h), null, h);
 });
+
+test('recentChats and projectList compare dates as times, not strings', () => {
+  // 10:00+05:00 is 05:00Z, older than 06:00Z, though it sorts later as a string.
+  const a = { id: 'a', updated: '2026-01-01T10:00:00+05:00' }, b = { id: 'b', updated: '2026-01-01T06:00:00Z' };
+  assert.deepStrictEqual(recentChats([a, b], 2).map(c => c.id), ['b', 'a']);
+  const P = { id: 'p', name: 'P', updated: '2026-01-01T10:00:00+05:00' };
+  assert.strictEqual(projectList([{ id: 'c', project: P, updated: '2026-01-01T06:00:00Z' }], [P])[0].updated, '2026-01-01T06:00:00Z');
+});
+test('projectList: a project date that does not parse is ignored', () => {
+  const Bad = { name: 'Bad', updated: 'not a date' }, Good = { name: 'Good' };
+  const list = projectList([{ id: 'x', project: Bad, updated: '2026-01-01T00:00:00Z' }, { id: 'y', project: Good, updated: '2026-02-01T00:00:00Z' }], [Bad, Good]);
+  assert.deepStrictEqual(list.map(p => [p.name, p.updated]), [['Good', '2026-02-01T00:00:00Z'], ['Bad', '2026-01-01T00:00:00Z']]);
+});
+test('projectList: an undated chat comes last in its project and leaves the date alone', () => {
+  const P = { name: 'P' };
+  const [p] = projectList([{ id: 'u', project: P }, { id: 'd', project: P, updated: '2026-01-01T00:00:00Z' }], [P]);
+  assert.deepStrictEqual(p.chats.map(c => c.id), ['d', 'u']);
+  assert.strictEqual(p.updated, '2026-01-01T00:00:00Z');
+});
+test('projectList: projects not in the list still get distinct keys', () => {
+  const A = { name: 'A' }, B = { name: 'B' };
+  const keys = projectList([{ id: 'x', project: A, updated: '2026-02-01T00:00:00Z' }, { id: 'y', project: B, updated: '2026-01-01T00:00:00Z' }], []).map(p => p.key);
+  assert.strictEqual(new Set(keys).size, 2);
+  assert.ok(keys.every(k => /^i\d+$/.test(k)), keys.join());
+});
+test('filterByText: a blank query gives a copy', () => {
+  const items = [1, 2];
+  const got = filterByText(items, '', String);
+  assert.deepStrictEqual(got, items);
+  assert.notStrictEqual(got, items);
+});
+test('parseListHash: bad percent-encoding is no list hash', () => {
+  assert.strictEqual(parseListHash('#project=%E0'), null);
+});
+test('buildViewerData: an id project and an id-less one of the same name stay apart', () => {
+  const mk = (id, project) => ({ id, title: id, updated: '2026-01-01', messages: [], files: {}, project });
+  const d = buildViewerData([mk('a', { name: 'Same', id: 'p1', files: [], docs: [] }), mk('b', { name: 'Same', files: [], docs: [] })], { exported: 'x' });
+  assert.strictEqual(d.projects.length, 2);
+  assert.notStrictEqual(d.chats[0].project, d.chats[1].project);
+});
+test('buildViewerData: merging by id compares dates as times', () => {
+  const mk = (id, project) => ({ id, title: id, updated: '2026-01-01', messages: [], files: {}, project });
+  const older = { name: 'Old', id: 'p', updated: '2026-01-01T10:00:00+05:00', files: [], docs: [] };
+  const newer = { name: 'New', id: 'p', updated: '2026-01-01T06:00:00Z', files: [], docs: [] };
+  assert.strictEqual(buildViewerData([mk('a', older), mk('b', newer)], { exported: 'x' }).projects[0].name, 'New');
+  assert.strictEqual(buildViewerData([mk('a', newer), mk('b', older)], { exported: 'x' }).projects[0].name, 'New');
+});

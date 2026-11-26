@@ -835,7 +835,8 @@
         if (at === undefined) { at = projects.length; projects.push(chat.project); byId.set(pid, at); }
         else {
           const a = projects[at], b = chat.project;
-          const au = String(a.updated || ''), bu = String(b.updated || '');
+          const time = (p) => { const t = typeof p.updated === 'string' ? Date.parse(p.updated) : NaN; return Number.isNaN(t) ? -Infinity : t; };
+          const au = time(a), bu = time(b);
           const size = (p) => (Array.isArray(p.docs) ? p.docs.length : 0) + (Array.isArray(p.files) ? p.files.length : 0);
           if (bu > au || (bu === au && size(b) > size(a))) projects[at] = b;
         }
