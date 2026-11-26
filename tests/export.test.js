@@ -502,6 +502,18 @@ test('writeViewer builds a viewer from artifacts alone, with their listed count 
   assert.strictEqual(await vm.runInContext('writeViewer(__zip, __chats, __opts)', popup.sandbox), false);
 });
 
+test('writeViewer builds a viewer from sessions alone, as ViewerData.sessions', async () => {
+  const popup = exportPopup({ routes: assetRoutes() });
+  const zip = zipStub();
+  popup.sandbox.__zip = zip;
+  popup.sandbox.__chats = [];
+  popup.sandbox.__opts = { sessions: [{ id: 'cse_x', title: 'A session', origin: 'cowork', created: 'c', updated: 'u', folder: 'sessions/A_x', artifacts: [], chat: { id: 'cse_x', title: 'A session', messages: [], files: {} } }] };
+  assert.strictEqual(await vm.runInContext('writeViewer(__zip, __chats, __opts)', popup.sandbox), true);
+  const html = zip.written['viewer.html'];
+  assert.ok(html.includes('"sessions":[{"id":"cse_x"'), 'the sessions are in the data');
+  assert.ok(html.includes('"chats":[]'));
+});
+
 test('writeViewer with no chats, or no CTViewer, returns false and writes nothing', async () => {
   const popup = exportPopup({ routes: assetRoutes() });
   popup.sandbox.__zip = zipStub();
@@ -1618,6 +1630,7 @@ async function runBulkZip({ list, chats, stored = {}, options = {}, setup = null
     if (msg.action === 'fetchAllConversations') cb({ data: list, orgId: 'org-1', accountName: msg.withAccountName ? accountName : undefined });
     else if (msg.action === 'fetchConversation') cb({ data: chats[msg.conversationId] });
     else if (msg.action === 'listArtifacts') cb({ frames: [] });  // no artifacts unless a test lists some
+    else if (msg.action === 'listSessions') cb({ sessions: [], incomplete: false, orgId: 'org-1' });  // no sessions
     else cb({});
   };
   sb.JSZip = JSZip;
@@ -3374,7 +3387,7 @@ test('an artifact folder\'s title part is at most 200 UTF-8 bytes', async () => 
 test('a throw mid-export ends the run failed, shows Export stopped and re-enables the buttons', async () => {
   const frames = [art(U(1), 'One')];
   const pages = { [U(1)]: livePage('One', { 'index.html': 'a' }) };
-  const setup = (sb) => vm.runInContext("settings.megaFormat = 'zip'; settings.exportAllChats = false; artifactsIndexMd = () => { throw new Error('boom'); }", sb);
+  const setup = (sb) => vm.runInContext("settings.megaFormat = 'zip'; settings.exportAllChats = false; settings.exportAllSessions = false; artifactsIndexMd = () => { throw new Error('boom'); }", sb);
   const { result, popup, saved } = await runArtifacts({ frames, pages, setup });
   const sb = popup.sandbox;
   assert.strictEqual(saved, null);
@@ -3618,7 +3631,7 @@ test('Export Artifacts asks for the permission in a ZIP export\'s click, only wh
     });
     const sb = popup.sandbox;
     await tick();
-    vm.runInContext(`settings.megaFormat = '${format}'; settings.exportAllChats = false`, sb);
+    vm.runInContext(`settings.megaFormat = '${format}'; settings.exportAllChats = false; settings.exportAllSessions = false`, sb);
     let ran = null;
     vm.runInContext('exportArtifacts = async (o) => { globalThis.__ran = o; }', sb);
     sb.window.showDirectoryPicker = async () => { order.push(['picker']); return new FakeDir(); };
@@ -4343,8 +4356,8 @@ test('Export All never asks for the web permission', async () => {
   }
 });
 
-test('exportAllChats and exportAllArtifacts default to true and round-trip through the main screen\'s boxes', async () => {
-  for (const [key, id] of [['exportAllChats', 'pickChats'], ['exportAllArtifacts', 'pickArtifacts']]) {
+test('exportAllChats, exportAllArtifacts and exportAllSessions default to true and round-trip through the main screen\'s boxes', async () => {
+  for (const [key, id] of [['exportAllChats', 'pickChats'], ['exportAllArtifacts', 'pickArtifacts'], ['exportAllSessions', 'pickSessions']]) {
     const sb = exportPopup().sandbox;
     assert.strictEqual(vm.runInContext(`defaultSettings.${key}`, sb), true);
     const box = sb.document.getElementById(id);
@@ -4420,6 +4433,14 @@ test('recordableExport leaves out chats and artifacts whose files could not be w
   assert.deepStrictEqual(out.artifacts.map((a) => a.uuid), ['u2']);
   const none = plain(fn(chats, artifacts, []));
   assert.deepStrictEqual([none.chats.length, none.artifacts.length], [2, 2]);
+});
+
+test('recordableExport drops a session with a write failure', () => {
+  const fn = vm.runInContext('recordableExport', exportPopup().sandbox);
+  const sessions = [{ id: 'cse_a', last_event_at: 't1', folder: 'sessions/A_a' }, { id: 'cse_b', last_event_at: 't2', folder: 'sessions/B_b' }];
+  const out = plain(fn([], [], [{ path: 'sessions/A_a/events.json', error: 'x' }], [], sessions));
+  assert.deepStrictEqual(out.sessions.map((s) => s.id), ['cse_b']);
+  assert.deepStrictEqual(plain(fn([], [], [], [])).sessions, []);
 });
 
 test('Export All after a sign-out mid-way: later chats say their pages were skipped, and none of them is recorded', async () => {

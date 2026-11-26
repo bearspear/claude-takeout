@@ -285,7 +285,7 @@ function install(root, tmp, old, report) {
 
 // Never rejects: a bad archive is a report, and the run goes on.
 async function writeViewer(archive, { force = false, dryRun = false } = {}) {
-  const report = { root: archive.root, kind: archive.kind, status: 'failed', reason: '', chats: 0, artifacts: 0, failedChats: [], skippedChats: [], missing: [], added: 0, notices: [], warnings: [], dryRun };
+  const report = { root: archive.root, kind: archive.kind, status: 'failed', reason: '', chats: 0, artifacts: 0, sessions: 0, failedChats: [], skippedChats: [], missing: [], added: 0, notices: [], warnings: [], dryRun };
   const finish = (status, reason = '') => Object.assign(report, { status, reason });
   const temps = [];
   try {
@@ -316,7 +316,15 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
     const withArtifacts = standalone || (archive.kind === 'mega' && store.layout !== 'none');
     if (withArtifacts) report.artifacts = store.records.size;
     if (standalone && !store.records.size) return finish('skipped', 'no artifacts in it');
-    if (!archive.chats.length && !standalone && !store.records.size) return finish('skipped', 'no Claude chats in it');
+
+    // Sessions of an Export All (sessions/<name>/session.json), for the viewer's Sessions page.
+    const sessions = archive.kind === 'mega'
+      ? lib.readSessions(archive.root, { warnings: report.warnings }).flatMap(x => {
+        try { return [CTViewer.buildViewerSession(x.session, x.events, { folder: x.folder })]; } catch (e) { report.warnings.push(`${x.folder}: ${e.message}, so the session was skipped`); return []; }
+      })
+      : [];
+    report.sessions = sessions.length;
+    if (!archive.chats.length && !standalone && !store.records.size && !sessions.length) return finish('skipped', 'no Claude chats in it');
 
     const { chats, idByDir, chatFolders } = await collectChats(archive, report, store);
     report.chats = chats.length;
@@ -374,7 +382,7 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
 
       // Large upload text goes in parts numbered after those.
       const firstPart = built.partCount + artifactParts + 1;
-      const moved = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString(), ...(artifacts ? { artifacts } : {}) }), { firstPart });
+      const moved = CTViewer.moveUploadText(CTViewer.buildViewerData(chats, { exported: new Date().toISOString(), ...(artifacts ? { artifacts } : {}), ...(sessions.length ? { sessions } : {}) }), { firstPart });
       moved.parts.forEach(writePart);
       const data = moved.data;
       if (built.entries.length) data.added = built.entries;
@@ -515,6 +523,7 @@ function archiveLine(a) {
   const facts = [];
   if (a.chats) facts.push(plural(a.chats, 'chat'));
   if (a.artifacts) facts.push(plural(a.artifacts, 'artifact'));
+  if (a.sessions) facts.push(plural(a.sessions, 'session'));
   if (a.failedChats.length) facts.push(`${a.failedChats.length} failed`);
   if (a.added) facts.push(`${a.added} added`);
   if (a.missing.length) facts.push(`${a.missing.length} missing`);

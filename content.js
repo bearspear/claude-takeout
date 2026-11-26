@@ -4,6 +4,14 @@
 (function() {
   'use strict';
 
+  // Loaded once per tab: sendToTab injects this file again only into a tab whose script stopped answering, and a
+  // second copy must not add a second message listener. A copy left behind by a reloaded extension (its runtime id
+  // gone) doesn't count, so a fresh one still loads after a reload.
+  const previous = globalThis.__claudeTakeoutContent;
+  if (previous && typeof previous.alive === 'function' && previous.alive()) return;
+  const runtime = chrome.runtime;
+  globalThis.__claudeTakeoutContent = { alive: () => { try { return !!(runtime && runtime.id); } catch (e) { return false; } } };
+
   // Inject the fetch interceptor into the page
   const script = document.createElement('script');
   script.src = chrome.runtime.getURL('injected.js');
@@ -33,27 +41,87 @@
     return match ? match[1] : null;
   }
 
-  // Fetch a single conversation
   // A 429 (claude.ai asking to slow down) or a 5xx is tried again, up to CHAT_RETRY_WAITS.length times: after its
-  // Retry-After (seconds, up to 30) when it gives one, else after the next of these waits. Anything else fails at once.
+  // Retry-After (seconds, up to 30) when it gives one, else after the next of these waits. Anything else is returned
+  // at once, and so is the last reply once the retries are used up. Shared by chats and sessions.
   const CHAT_RETRY_WAITS = [2000, 5000, 10000];
-  async function fetchConversation(orgId, conversationId) {
-    const url = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${conversationId}?tree=True&rendering_mode=messages&render_all_tools=true`;
-
+  async function fetchWithRetry(url, init) {
     for (let attempt = 0; ; attempt++) {
-      const response = await fetch(url, {
-        credentials: 'include',
-        headers: { 'Accept': 'application/json' }
-      });
-      if (response.ok) return await response.json();
+      const response = await fetch(url, init);
       const s = response.status;
-      if ((s === 429 || s >= 500) && attempt < CHAT_RETRY_WAITS.length) {
+      if (!response.ok && (s === 429 || s >= 500) && attempt < CHAT_RETRY_WAITS.length) {
         const after = parseFloat(response.headers && response.headers.get ? response.headers.get('Retry-After') : '');
         await publishedDelay(Number.isFinite(after) && after >= 0 && after <= 30 ? after * 1000 : CHAT_RETRY_WAITS[attempt]);
         continue;
       }
-      throw new Error(`Failed to fetch conversation: ${s}`);
+      return response;
     }
+  }
+
+  // Fetch a single conversation
+  async function fetchConversation(orgId, conversationId) {
+    const url = `https://claude.ai/api/organizations/${orgId}/chat_conversations/${conversationId}?tree=True&rendering_mode=messages&render_all_tools=true`;
+    const response = await fetchWithRetry(url, {
+      credentials: 'include',
+      headers: { 'Accept': 'application/json' }
+    });
+    if (response.ok) return await response.json();
+    throw new Error(`Failed to fetch conversation: ${response.status}`);
+  }
+
+  // Code and Cowork sessions (undocumented). Answers carry codes only, never a URL.
+  async function sessionRequest(orgId, path) {
+    let response;
+    try {
+      response = await fetchWithRetry('https://claude.ai' + path, {
+        credentials: 'include',
+        headers: {
+          'Accept': 'application/json',
+          'anthropic-version': '2023-06-01',
+          'anthropic-beta': 'ccr-byoc-2025-07-29',
+          'x-organization-uuid': orgId
+        }
+      });
+    } catch (e) {
+      return { error: 'network' };
+    }
+    if (!response.ok) return { error: 'HTTP ' + response.status };
+    try {
+      return { raw: await response.json() };
+    } catch (e) {
+      return { error: 'bad response' };
+    }
+  }
+
+  // One list reply: the endpoint takes no more than 100 and has no working next page, so a full 100 may be cut.
+  async function listSessions(orgId) {
+    const r = await sessionRequest(orgId, '/v1/code/sessions?exclude_tags=-&limit=100');
+    if (r.error) return r;
+    if (!r.raw || !Array.isArray(r.raw.data)) return { error: 'bad response' };
+    const sessions = [];
+    for (const item of r.raw.data) {
+      const k = globalThis.CTSession.keepSession(item);
+      if (k) sessions.push(k);
+    }
+    return { sessions, incomplete: r.raw.data.length >= 100, orgId };
+  }
+
+  // A kept page above this many bytes of JSON is not sent: Chrome's messages stop near 64 MiB. The panel asks again
+  // with a smaller limit.
+  const SESSION_MESSAGE_CAP = 32 * 1024 * 1024;
+
+  // One page of a session's events, kept and masked. limit: an integer from 1 to 200, else SESSION_PAGE_LIMIT.
+  async function fetchSessionEvents(orgId, id, after, limit) {
+    const CT = globalThis.CTSession;
+    const n = Number.isInteger(limit) && limit >= 1 && limit <= CT.SESSION_PAGE_LIMIT ? limit : CT.SESSION_PAGE_LIMIT;
+    let path = `/v1/sessions/${id}/events?limit=${n}`;
+    if (typeof after === 'string' && after) path += '&after_id=' + encodeURIComponent(after);
+    const r = await sessionRequest(orgId, path);
+    if (r.error) return r;
+    if (!r.raw || !Array.isArray(r.raw.data)) return { error: 'bad response' };
+    const page = CT.sessionPage(r.raw);
+    if (new TextEncoder().encode(JSON.stringify(page)).length > SESSION_MESSAGE_CAP) return { error: 'too large' };
+    return page;
   }
 
   // Fetch all conversations list
@@ -481,7 +549,8 @@
           return;
         }
         try {
-          const conversations = await fetchAllConversations(id);
+          // withoutChats: an Export All with Chats unticked needs only the org and the account name.
+          const conversations = request.withoutChats ? [] : await fetchAllConversations(id);
           const accountName = request.withAccountName ? await fetchAccountName() : null;
           sendResponse({ data: conversations, orgId: id, accountName });
         } catch (e) {
@@ -503,6 +572,26 @@
           sendResponse({ data: data });
         } catch (e) {
           sendResponse({ error: e.message });
+        }
+      });
+      return true;
+    }
+
+    if (request.action === 'listSessions' || request.action === 'fetchSessionEvents') {
+      if (request.action === 'fetchSessionEvents' && !(typeof request.id === 'string' && /^cse_[A-Za-z0-9]+$/.test(request.id))) {
+        sendResponse({ error: 'bad id' });
+        return true;
+      }
+      chrome.storage.local.get(['orgId'], async (result) => {
+        const id = getActiveOrgId() || orgId || result.orgId || request.orgId;
+        if (!id) {
+          sendResponse({ error: 'No org ID available.' });
+          return;
+        }
+        try {
+          sendResponse(request.action === 'listSessions' ? await listSessions(id) : await fetchSessionEvents(id, request.id, request.after, request.limit));
+        } catch (e) {
+          sendResponse({ error: 'bad response' });
         }
       });
       return true;

@@ -94,10 +94,16 @@ function safeDecode(s) {
 function parseHash(hash) {
   const out = { chat: null, leaf: null, file: null, version: null };
   const text = String(hash || '').replace(/^#/, '');
+  let session = null, msg = null;
   text.split('&').forEach(part => {
     const eq = part.indexOf('=');
     if (eq < 0) return;
     const key = part.slice(0, eq);
+    if (key === 'session' || key === 'msg') {
+      const v = safeDecode(part.slice(eq + 1));
+      if (v !== null && v !== '') { if (key === 'session') session = v; else msg = v; }
+      return;
+    }
     if (!Object.prototype.hasOwnProperty.call(out, key)) return;
     const value = safeDecode(part.slice(eq + 1));
     if (value === null || value === '') return;
@@ -108,11 +114,17 @@ function parseHash(hash) {
       out[key] = value;
     }
   });
+  if (session !== null) return msg !== null ? { session, msg } : { session };
   return out;
 }
 
 function formatHash(state) {
   const parts = [];
+  if (state && state.session) {
+    parts.push('session=' + encodeURIComponent(state.session));
+    if (state.msg) parts.push('msg=' + encodeURIComponent(state.msg));
+    return '#' + parts.join('&');
+  }
   ['chat', 'leaf', 'file', 'version'].forEach(key => {
     const v = state && state[key];
     if (v !== null && v !== undefined && v !== '') parts.push(key + '=' + encodeURIComponent(v));
@@ -815,6 +827,41 @@ function artifactLinkGroups(view, chats) {
   return groups;
 }
 
+// ---- Sessions and their artifacts ----
+// An artifact's short id (claude.ai's base58 of its uuid, as export-core.js's uuidToBase58), or '' for anything else.
+const SHORT_ID_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function artifactShortId(uuid) {
+  const u = String(uuid || '');
+  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(u)) return '';
+  let n = BigInt('0x' + u.replace(/-/g, ''));
+  let out = '';
+  for (; n > 0n; n /= 58n) out = SHORT_ID_ALPHABET[Number(n % 58n)] + out;
+  return out;
+}
+
+// A session's artifacts (its uuids), each { id: the short id, title, view }: view is the Artifacts screen's view of
+// it (data.artifacts, by short id or uuid) or null when the export has none, then titled by its short id.
+function sessionArtifacts(session, views) {
+  const list = Array.isArray(views) ? views.filter(v => v && typeof v === 'object') : [];
+  const out = [];
+  const seen = new Set();
+  for (const uuid of session && Array.isArray(session.artifacts) ? session.artifacts : []) {
+    const id = artifactShortId(uuid);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const view = list.find(v => String(v.id) === id || String(v.id).toLowerCase() === String(uuid).toLowerCase()) || null;
+    out.push({ id, title: view && view.title ? String(view.title) : id, view });
+  }
+  return out;
+}
+
+// The sessions that made an artifact view, as sessionArtifacts joins them: [{ id, title }].
+function sessionsMaking(view, sessions) {
+  if (!view || typeof view !== 'object') return [];
+  return (Array.isArray(sessions) ? sessions : []).filter(s => s && typeof s === 'object' && typeof s.id === 'string'
+    && sessionArtifacts(s, [view]).some(a => a.view === view)).map(s => ({ id: s.id, title: String(s.title || 'Untitled session') }));
+}
+
 // The chat viewer's Artifacts entry: shown when the data has the Artifacts screen (an Export All's) and the export has
 // an artifact folder (storeCount, listed or not; a listed artifact not saved has a view only), or a file Claude made
 // in a chat (In chats). count: the listed artifacts, else the In chats files, else the artifact folders. A page not in
@@ -1024,7 +1071,7 @@ function messageSearchText(m) {
 // Search over every message on every branch, plus titles. One entry per message (and per title, msg null):
 // { chat, msg, lower } plus the title or the message (src), whose text is rebuilt for a snippet, so a big archive
 // holds only the lowercase copy.
-function buildSearchIndex(chats) {
+function buildSearchIndex(chats, sessions = []) {
   const index = [];
   for (const chat of chats) {
     const title = chat.title || '';
@@ -1033,6 +1080,16 @@ function buildSearchIndex(chats) {
       const text = messageSearchText(m);
       if (!text) continue;
       index.push({ chat: chat.id, msg: m.id, src: m, lower: text.toLowerCase() });
+    }
+  }
+  for (const session of sessions || []) {
+    const chat = session.chat || {};
+    const title = session.title || chat.title || '';
+    index.push({ chat: null, session: session.id, msg: null, title, lower: title.toLowerCase() });
+    for (const m of chat.messages || []) {
+      const text = messageSearchText(m);
+      if (!text) continue;
+      index.push({ chat: null, session: session.id, msg: m.id, src: m, lower: text.toLowerCase() });
     }
   }
   return index;
@@ -1106,7 +1163,7 @@ function searchChats(index, query, limit = 50) {
     }
     let snippet;
     hits.push({
-      chat: e.chat, msg: e.msg, terms,
+      chat: e.chat, ...(e.session ? { session: e.session } : {}), msg: e.msg, terms,
       get snippet() { if (snippet === undefined) snippet = snippetAt(entryText(e), e.lower, at, len); return snippet; },
     });
   }
@@ -1213,8 +1270,13 @@ function findPlan(chat, query) {
 function groupHits(hits, perChat = 3) {
   const groups = new Map();
   hits.forEach((h, i) => {
-    if (!groups.has(h.chat)) groups.set(h.chat, { chat: h.chat, title: false, count: 0, snippets: [], order: i, terms: [] });
-    const g = groups.get(h.chat);
+    const key = h.session || h.chat;
+    if (!groups.has(key)) {
+      const created = { chat: h.chat, title: false, count: 0, snippets: [], order: i, terms: [] };
+      if (h.session) { created.session = true; created.id = h.session; }
+      groups.set(key, created);
+    }
+    const g = groups.get(key);
     for (const t of h.terms || []) if (!g.terms.includes(t)) g.terms.push(t);
     if (h.msg === null) { g.title = true; return; }
     g.count++;
@@ -1476,6 +1538,7 @@ function filterByText(items, query, fields, cache = null) {
 function parseListHash(hash) {
   if (hash === '#projects') return { page: 'projects' };
   if (hash === '#chats') return { page: 'chats' };
+  if (hash === '#sessions') return { page: 'sessions' };
   const m = /^#project=(.+)$/.exec(hash);
   if (!m) return null;
   try { return { page: 'project', key: decodeURIComponent(m[1]) }; } catch (e) { return null; }
@@ -2084,5 +2147,5 @@ function pageZoom(wrapper, frame, opts = {}) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgAsPicture, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
+  module.exports = { artifactShortId, sessionArtifacts, sessionsMaking, markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgAsPicture, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
 }

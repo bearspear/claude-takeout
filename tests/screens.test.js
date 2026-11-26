@@ -46,7 +46,9 @@ function fakeZip(written = {}, prefix = '') {
   };
 }
 
-async function bulkRun({ list, chats, failing = [], options = {}, listReply = null, stored = {}, frames = null, pages = {}, setup = null }) {
+// sessions: the listSessions reply (default: none); sessionPages: { <id>: [page, ...] | (msg) => reply }, a page
+// being { events, lastId, hasMore }, picked by the previous page's lastId. asks: every fetchSessionEvents message.
+async function bulkRun({ list, chats, failing = [], options = {}, listReply = null, stored = {}, frames = null, pages = {}, setup = null, sessions = null, sessionPages = {} }) {
   const popup = exportPopup({ failing });
   const sb = popup.sandbox;
   const store = JSON.parse(JSON.stringify(stored));
@@ -57,13 +59,25 @@ async function bulkRun({ list, chats, failing = [], options = {}, listReply = nu
   const plainSet = sb.chrome.storage.local.set;
   sb.chrome.storage.local.set = async (o) => { sets.push(Object.keys(o)); return plainSet(o); };
   const fetcher = publishedFetcher(pages);
+  const msgs = [];
   sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+    msgs.push(JSON.parse(JSON.stringify(msg)));
     if (msg.action === 'fetchAllConversations') cb(listReply || { data: list, orgId: 'org-1' });
     else if (msg.action === 'fetchConversation') cb({ data: chats[msg.conversationId] });
     else if (msg.action === 'listArtifacts' && frames) cb({ frames: JSON.parse(JSON.stringify(frames)) });
     else if (frames && /^publishedPage/.test(msg.action)) fetcher.fetch(msg).then(cb);
+    else if (msg.action === 'listSessions') cb(JSON.parse(JSON.stringify(sessions || { sessions: [], incomplete: false, orgId: 'org-1' })));
+    else if (msg.action === 'fetchSessionEvents') {
+      asks.push(JSON.parse(JSON.stringify(msg)));
+      const got = sessionPages[msg.id];
+      if (typeof got === 'function') return void Promise.resolve(got(msg)).then((r) => cb(JSON.parse(JSON.stringify(r))));
+      const all = got || [];
+      const i = msg.after == null ? 0 : all.findIndex((pg, k) => k > 0 && all[k - 1].lastId === msg.after);
+      cb(i >= 0 && all[i] ? JSON.parse(JSON.stringify(all[i])) : { error: 'HTTP 404' });
+    }
     else cb({ error: 'no' });
   };
+  const asks = [];
   const zip = fakeZip();
   sb.JSZip = function () { return zip; };
   let saved = null;
@@ -73,7 +87,7 @@ async function bulkRun({ list, chats, failing = [], options = {}, listReply = nu
   if (setup) setup(sb);
   sb.__opts = { withArtifacts: false, ...options };
   const result = await vm.runInContext('bulkExportZip(__opts)', sb);
-  return { result: result && JSON.parse(JSON.stringify(result)), saved, store, sets, zip, status: sb.document.getElementById('status') };
+  return { result: result && JSON.parse(JSON.stringify(result)), saved, store, sets, zip, asks, msgs, sb, status: sb.document.getElementById('status') };
 }
 
 test('bulkExportZip resolves a done RunResult with counts and warnings', async () => {
@@ -296,11 +310,12 @@ test('exportPlan maps the checkboxes to a run', () => {
   const { fn } = loadPopup();
   const plan = fn('exportPlan');
   const j = (o) => JSON.parse(JSON.stringify(o));
-  assert.deepStrictEqual(j(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true })), { run: 'bulk', changesOnly: true, withArtifacts: true, changesAllowed: true });
-  assert.deepStrictEqual(j(plan({ chats: true, artifacts: false, scope: 'all', hasRecord: true })), { run: 'bulk', changesOnly: false, withArtifacts: false, changesAllowed: true });
-  assert.deepStrictEqual(j(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: false })), { run: 'bulk', changesOnly: false, withArtifacts: true, changesAllowed: false });
-  assert.deepStrictEqual(j(plan({ chats: false, artifacts: true, scope: 'changes', hasRecord: true })), { run: 'artifacts', changesOnly: false, withArtifacts: true, changesAllowed: false });
-  assert.deepStrictEqual(j(plan({ chats: false, artifacts: false, scope: 'all', hasRecord: true })), { run: null, changesOnly: false, withArtifacts: false, changesAllowed: false });
+  const out = (run, changesOnly, chats, artifacts, sessions, changesAllowed) => ({ run, changesOnly, withChats: chats, withArtifacts: artifacts, withSessions: sessions, changesAllowed });
+  assert.deepStrictEqual(j(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true })), out('bulk', true, true, true, false, true));
+  assert.deepStrictEqual(j(plan({ chats: true, artifacts: false, scope: 'all', hasRecord: true })), out('bulk', false, true, false, false, true));
+  assert.deepStrictEqual(j(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: false })), out('bulk', false, true, true, false, false));
+  assert.deepStrictEqual(j(plan({ chats: false, artifacts: true, scope: 'changes', hasRecord: true })), out('artifacts', false, false, true, false, false));
+  assert.deepStrictEqual(j(plan({ chats: false, artifacts: false, scope: 'all', hasRecord: true })), out(null, false, false, false, false, false));
 });
 
 test('everythingSummary builds the sentences', () => {
@@ -326,20 +341,20 @@ test('everythingSummary builds the sentences', () => {
   assert.ok(!sum({ ...base, plan: all, counts: zero, format: 'zip' }).includes('Nothing changed'));
   // Artifacts only.
   const art = plan({ chats: false, artifacts: true, scope: 'changes', hasRecord: true });
-  assert.ok(sum({ ...base, plan: art, counts, format: 'zip' }).includes('Changes only needs Chats ticked.'));
+  assert.ok(sum({ ...base, plan: art, counts, format: 'zip' }).includes('Changes only needs Chats or Sessions ticked.'));
   const artNoRec = plan({ chats: false, artifacts: true, scope: 'all', hasRecord: false });
   assert.ok(!sum({ ...base, since: '', plan: artNoRec, counts, format: 'zip' }).includes('Changes only needs'));
   assert.ok(sum({ ...base, plan: art, counts, format: 'zip' }).startsWith('19 artifacts.'));
   // Nothing ticked.
   const none = plan({ chats: false, artifacts: false, scope: 'all', hasRecord: true });
-  assert.strictEqual(sum({ ...base, plan: none, counts, format: 'zip' }), 'Tick Chats or Artifacts.');
+  assert.strictEqual(sum({ ...base, plan: none, counts, format: 'zip' }), 'Tick Chats, Artifacts or Sessions.');
 });
 
 test('exportDisabledReason', () => {
   const { fn } = loadPopup();
   const plan = fn('exportPlan'), why = fn('exportDisabledReason');
   const zero = { chats: 5, artifacts: 5, changedChats: 0, changedArtifacts: 0, at: 'x' };
-  assert.strictEqual(why(plan({ chats: false, artifacts: false, scope: 'all', hasRecord: true }), null), 'Tick Chats or Artifacts.');
+  assert.strictEqual(why(plan({ chats: false, artifacts: false, scope: 'all', hasRecord: true }), null), 'Tick Chats, Artifacts or Sessions.');
   assert.strictEqual(why(plan({ chats: true, artifacts: true, scope: 'all', hasRecord: true }), zero), '');
   assert.strictEqual(why(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true }), null), '');
   assert.strictEqual(why(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true }), { ...zero, changedChats: 1 }), '');
@@ -370,10 +385,13 @@ test('done screen text and run steps', () => {
   assert.deepStrictEqual(j(head({ warnings: 3 })), { tone: 'warn', text: 'Done, with 3 warnings' });
   assert.strictEqual(target({ target: { kind: 'folder', name: 'x' } }), 'inside the folder you picked. Open viewer.html in it to browse.');
   assert.strictEqual(target({ target: { kind: 'zip', name: 'a.zip' } }), 'Saved to Downloads as a.zip.');
-  const p = (chats, artifacts) => plan({ chats, artifacts, scope: 'all', hasRecord: false });
-  assert.deepStrictEqual(j(steps(p(true, true))), ['chats', 'artifacts', 'viewer']);
-  assert.deepStrictEqual(j(steps(p(true, false))), ['chats', 'viewer']);
+  const p = (chats, artifacts, sessions = chats) => plan({ chats, artifacts, sessions, scope: 'all', hasRecord: false });
+  assert.deepStrictEqual(j(steps(p(true, true))), ['chats', 'artifacts', 'sessions', 'viewer']);
+  assert.deepStrictEqual(j(steps(p(true, false))), ['chats', 'sessions', 'viewer']);
   assert.deepStrictEqual(j(steps(p(false, true))), ['artifacts', 'viewer']);
+  assert.deepStrictEqual(j(steps(p(true, true, false))), ['chats', 'artifacts', 'viewer']);
+  assert.deepStrictEqual(j(steps(p(false, true, true))), ['artifacts', 'sessions', 'viewer']);
+  assert.deepStrictEqual(j(steps(p(false, false, true))), ['sessions', 'viewer']);
 });
 
 // Count on demand (Task 5)
@@ -483,8 +501,8 @@ function panelOn(url, { chat = null, stored = {}, location = '/sidepanel.html' }
 }
 
 const NEW_IDS = ['exportZip', 'exportMd', 'exportMdEmbed', 'exportJson', 'refresh', 'status', 'progress', 'progressFill', 'progressText',
-  'filenameStyle', 'includeThinking', 'webImages', 'showShortcuts', 'useSidePanel', 'helpLink',
-  'chatCard', 'chatTitle', 'chatMeta', 'countBtn', 'scopeAll', 'scopeChanges', 'pickChats', 'pickArtifacts', 'chatsSub', 'chatCount',
+  'filenameStyle', 'includeThinking', 'exportCliSessions', 'webImages', 'showShortcuts', 'useSidePanel', 'helpLink',
+  'chatCard', 'chatTitle', 'chatMeta', 'countBtn', 'scopeAll', 'scopeChanges', 'pickChats', 'pickArtifacts', 'pickSessions', 'chatsSub', 'chatCount',
   'artifactCount', 'formatFolder', 'formatZip', 'exportSelected', 'summary', 'lastExport', 'settingsOpen', 'settingsBack', 'runTitle',
   'runTarget', 'runSteps', 'runWarnings', 'stopBtn', 'runStarted', 'doneCard', 'doneSummary', 'doneTarget', 'doneWarnings',
   'doneErrorFiles', 'doneBack', 'doneTook', 'stoppedReason', 'stoppedSaved', 'stoppedFix', 'tryAgain', 'stoppedBack', 'handoffNote', 'handoffDismiss'];
@@ -615,6 +633,9 @@ test('with a record, Changes only shows, and is disabled with only Artifacts tic
   assert.strictEqual(p.el('lastExport').textContent, 'Last export 2026-11-23 09:51 · 2 warnings');
   p.el('pickChats').checked = false;
   p.el('pickChats').handlers.change({ target: p.el('pickChats') });
+  assert.strictEqual(p.el('scopeChanges').disabled, false, 'Sessions alone allows Changes only');
+  p.el('pickSessions').checked = false;
+  p.el('pickSessions').handlers.change({ target: p.el('pickSessions') });
   assert.strictEqual(p.el('scopeChanges').disabled, true);
   assert.strictEqual(p.fn('settings.exportAllChats'), false);
   p.el('pickChats').checked = true;
@@ -625,15 +646,15 @@ test('with a record, Changes only shows, and is disabled with only Artifacts tic
   assert.strictEqual(p.el('chatsSub').textContent, 'Pages they published still go in artifacts/');
 });
 
-test('the summary follows the choices and Tick Chats or Artifacts disables Export selected', async () => {
+test('the summary follows the choices and Tick Chats, Artifacts or Sessions disables Export selected', async () => {
   const p = panelOn('https://claude.ai/new');
   await sleep(50);
   assert.strictEqual(p.el('summary').textContent, 'Everything, whatever was exported before. Into a new folder inside one you pick, written as it goes.');
   p.el('formatZip').handlers.click();
   assert.strictEqual(p.fn('settings.megaFormat'), 'zip');
   assert.strictEqual(p.el('summary').textContent, 'Everything, whatever was exported before. One ZIP download when it finishes.');
-  for (const id of ['pickChats', 'pickArtifacts']) { p.el(id).checked = false; p.el(id).handlers.change({ target: p.el(id) }); }
-  assert.strictEqual(p.el('summary').textContent, 'Tick Chats or Artifacts.');
+  for (const id of ['pickChats', 'pickArtifacts', 'pickSessions']) { p.el(id).checked = false; p.el(id).handlers.change({ target: p.el(id) }); }
+  assert.strictEqual(p.el('summary').textContent, 'Tick Chats, Artifacts or Sessions.');
   assert.strictEqual(p.el('exportSelected').disabled, true);
 });
 
@@ -657,7 +678,7 @@ test('Count shows Counting… while it runs, then the counts and Counted HH:MM',
   assert.strictEqual(p.el('countBtn').disabled, false);
   assert.strictEqual(p.el('chatCount').textContent, '2');
   assert.strictEqual(p.el('artifactCount').textContent, '0');
-  assert.match(p.el('summary').textContent, /^2 chats and 0 artifacts\. /);
+  assert.match(p.el('summary').textContent, /^2 chats and 0 artifacts\. Plus Claude Code and Cowork sessions\. /);
 });
 
 test('a failed count shows its code in the summary', async () => {
@@ -805,14 +826,14 @@ test('popup folder export stores the choices and opens the side panel', async ()
   assert.ok(closed);
   assert.ok(noteAtOpen, 'stored before the side panel opens');
   assert.ok(Number.isFinite(noteAtOpen.at));
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(noteAtOpen.choices)), { scope: 'changes', chats: true, artifacts: false, format: 'folder' });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(noteAtOpen.choices)), { scope: 'changes', chats: true, artifacts: false, sessions: true, format: 'folder' });
   assert.ok(!('button' in noteAtOpen) && !('label' in noteAtOpen));
   const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'popup.js'), 'utf8');
   assert.ok(!/FOLDER_BUTTON_LABELS|FOLDER_LABEL_RE/.test(src));
 });
 
 test('side panel applies stored choices and runs exportArtifacts for artifacts only', async () => {
-  const session = { folderExportNote: { at: Date.now(), choices: { scope: 'all', chats: false, artifacts: true, format: 'folder' } } };
+  const session = { folderExportNote: { at: Date.now(), choices: { scope: 'all', chats: false, artifacts: true, sessions: false, format: 'folder' } } };
   const panelPage = loadPopup({ location: '/sidepanel.html', session, before: NOTE_QUERY });
   const sb = panelPage.sandbox;
   await sleep(20);
@@ -840,7 +861,7 @@ test('Dismiss ends the handoff; chats and artifacts and Changes only read in the
   const p = loadPopup({ location: '/sidepanel.html', session, before: NOTE_QUERY });
   await sleep(20);
   const doc = p.sandbox.document;
-  assert.match(doc.getElementById('handoffText').textContent, /came along: Changes only, chats and artifacts, Folder\. Click/);
+  assert.match(doc.getElementById('handoffText').textContent, /came along: Changes only, chats, artifacts and sessions, Folder\. Click/);
   doc.getElementById('handoffDismiss').handlers.click();
   assert.ok(!doc.body.classList.contains('handoff'));
   assert.strictEqual(doc.getElementById('handoffNote').hidden, true);
@@ -850,7 +871,8 @@ test('a malformed note is ignored', async () => {
   const bad = [
     { at: Date.now(), button: 'exportSelected', label: 'Export selected' },
     { at: Date.now(), choices: { scope: 'x', chats: true, artifacts: true, format: 'folder' } },
-    { at: Date.now(), choices: { scope: 'all', chats: false, artifacts: false, format: 'folder' } },
+    { at: Date.now(), choices: { scope: 'all', chats: false, artifacts: false, sessions: false, format: 'folder' } },
+    { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: true, sessions: 'yes', format: 'folder' } },
     { at: Date.now(), choices: { scope: 'all', chats: 'yes', artifacts: true, format: 'folder' } },
     { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: true, format: 'pdf' } },
     { at: Date.now() - 61000, choices: { scope: 'all', chats: true, artifacts: true, format: 'folder' } },
@@ -922,7 +944,7 @@ test('counts older than 10 minutes do not disable Export selected', async () => 
   const stored = { exportRecord: { 'org-1': { at: '2026-11-23T09:51:00', chats: { a: '1' } } } };
   const p = panelOn('https://claude.ai/new', { stored });
   await sleep(50);
-  p.fn("settings.megaZipScope = 'changes'");
+  p.fn("settings.megaZipScope = 'changes'; settings.exportAllSessions = false");
   p.fn("panel.counts = { chats: 2, artifacts: 0, changedChats: 0, changedArtifacts: 0, at: new Date().toISOString() }");
   p.fn('renderEverything')();
   assert.strictEqual(p.el('exportSelected').disabled, true, 'fresh counts say nothing changed');
@@ -977,7 +999,7 @@ test('after a run the Everything controls follow choices changed meanwhile', asy
   await sleep(50);
   p.fn("settings.megaFormat = 'zip'");
   p.sandbox.bulkExportZip = async () => {
-    for (const id of ['pickChats', 'pickArtifacts']) { p.el(id).checked = false; p.el(id).handlers.change({ target: p.el(id) }); }
+    for (const id of ['pickChats', 'pickArtifacts', 'pickSessions']) { p.el(id).checked = false; p.el(id).handlers.change({ target: p.el(id) }); }
     return doneRun();
   };
   await p.el('exportSelected').handlers.click();
@@ -1003,6 +1025,8 @@ test('warningGroups uses plain words for the common types', () => {
   assert.strictEqual(line('doc_diagram', 2), '2 diagrams not included (x)');
   assert.strictEqual(line('claude_doc_unreplayed'), '1 Claude Docs edit not rebuilt (x)');
   assert.strictEqual(line('artifact_basename_collision'), '1 file renamed (x)');
+  assert.strictEqual(line('session'), '1 session problem (x)');
+  assert.strictEqual(line('session', 2), '2 session problems (x)');
 });
 
 test('the web_image hint names the cause, and Settings only for the no-permission warning', () => {
@@ -1222,11 +1246,11 @@ test('popup ZIP export hands off to the side panel too, with ZIP in the note', a
   await sleep(5);
   assert.deepStrictEqual(ran, [], 'nothing runs in the popup, which closes when it loses focus');
   assert.deepStrictEqual(JSON.parse(JSON.stringify(opened)), { tabId: 7 });
-  assert.deepStrictEqual(JSON.parse(JSON.stringify(noteAtOpen.choices)), { scope: 'all', chats: true, artifacts: true, format: 'zip' });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(noteAtOpen.choices)), { scope: 'all', chats: true, artifacts: true, sessions: true, format: 'zip' });
 });
 
 test('side panel takes a ZIP note and says so', async () => {
-  const session = { folderExportNote: { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: false, format: 'zip' } } };
+  const session = { folderExportNote: { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: false, sessions: false, format: 'zip' } } };
   const p = loadPopup({ location: '/sidepanel.html', session, before: NOTE_QUERY });
   await sleep(20);
   const doc = p.sandbox.document;
@@ -1318,4 +1342,675 @@ test('the This chat card counts files once per chat version', async () => {
   const changed = Object.assign(JSON.parse(JSON.stringify(chat)), { updated_at: '2099-01-01T00:00:00Z' });
   vm.runInContext('updateUI(JSON.parse(__chat), "org-1")', Object.assign(p.sandbox, { __chat: JSON.stringify(changed) }));
   assert.strictEqual(p.sandbox.__replays, 1, 'a changed chat is counted again');
+});
+
+// ---- Sessions: record, plan and setting helpers ----
+test('changedSessions takes new and changed sessions', () => {
+  const { fn } = loadPopup();
+  const j = (o) => JSON.parse(JSON.stringify(o));
+  const f = fn('changedSessions');
+  const a1 = { id: 'cse_a', last_event_at: 't1' }, b1 = { id: 'cse_b', last_event_at: 't1' }, a2 = { id: 'cse_a', last_event_at: 't2' };
+  assert.deepStrictEqual(j(f([a1, b1], { cse_a: 't1' })), [b1]);
+  assert.deepStrictEqual(j(f([a2], { cse_a: 't1' })), [a2]);
+  assert.deepStrictEqual(j(f([a1, b1], undefined)), [a1, b1]);
+});
+
+test('sessionsToFetch leaves CLI sessions out unless the setting is on', () => {
+  const { fn } = loadPopup();
+  const f = fn('sessionsToFetch');
+  const list = [{ id: 'cse_a', environment_kind: 'bridge' }, { id: 'cse_b', environment_kind: 'anthropic_cloud' }];
+  let r = f(list, { exportCliSessions: false });
+  assert.deepStrictEqual([r.fetch.length, r.leftOut], [1, 1]);
+  r = f(list, { exportCliSessions: true });
+  assert.deepStrictEqual([r.fetch.length, r.leftOut], [2, 0]);
+});
+
+test('sessionsToFetch takes only cloud sessions with the switch off: an unknown or missing kind is left out', () => {
+  const { fn } = loadPopup();
+  const f = fn('sessionsToFetch');
+  const list = [{ id: 'cse_a', environment_kind: 'anthropic_cloud' }, { id: 'cse_b', environment_kind: 'byoc' }, { id: 'cse_c' }, { id: 'cse_d', environment_kind: null }];
+  let r = f(list, { exportCliSessions: false });
+  assert.deepStrictEqual([r.fetch.map((x) => x.id), r.leftOut], [['cse_a'], 3]);
+  r = f(list, {});
+  assert.deepStrictEqual([r.fetch.map((x) => x.id), r.leftOut], [['cse_a'], 3]);
+  r = f(list, { exportCliSessions: true });
+  assert.deepStrictEqual([r.fetch.length, r.leftOut], [4, 0]);
+});
+
+test('saveExportRecord keeps sessions and joins them', async () => {
+  const { sandbox, fn } = loadPopup();
+  const store = { exportRecord: { 'org-1': { at: 'x', chats: {}, sessions: { cse_a: 't1' } } } };
+  sandbox.chrome.storage.local.get = async () => JSON.parse(JSON.stringify(store));
+  sandbox.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+  await fn('saveExportRecord')('org-1', 'y', [], [], [], 0, [{ id: 'cse_b', last_event_at: 't2' }]);
+  assert.deepStrictEqual(store.exportRecord['org-1'].sessions, { cse_a: 't1', cse_b: 't2' });
+  store.exportRecord = { 'org-2': { at: 'x', chats: {} } };
+  await fn('saveExportRecord')('org-2', 'y', [{ uuid: 'c', updated_at: '1' }], [], [], 0);
+  assert.ok(!('sessions' in store.exportRecord['org-2']));
+});
+
+test('savedText and runTitleText name sessions', () => {
+  const { fn } = loadPopup();
+  const saved = fn('savedText'), title = fn('runTitleText');
+  const plan = { run: 'bulk', withArtifacts: true };
+  assert.strictEqual(saved({ saved: { chats: 29, sessions: 3, artifacts: 20, versions: 40 } }, plan), '29 chats, 3 sessions and 20 artifacts (40 versions)');
+  assert.strictEqual(saved({ saved: { chats: 29, sessions: 0, artifacts: 20, versions: 40 } }, plan), '29 chats and 20 artifacts (40 versions)');
+  assert.strictEqual(saved({ saved: { chats: 29, artifacts: 20, versions: 40 } }, plan), '29 chats and 20 artifacts (40 versions)');
+  assert.strictEqual(title(plan, { chats: 27, sessions: 1, artifacts: 19 }), 'Exporting 27 chats, 1 session and 19 artifacts');
+  assert.strictEqual(title(plan, { chats: 27, artifacts: 19 }), 'Exporting 27 chats and 19 artifacts');
+});
+
+test('the CLI sub-option is under Sessions, disabled when Sessions is unticked, and saved', async () => {
+  const html = fs.readFileSync(path.join(REPO_DIR, 'popup.html'), 'utf8');
+  const main = html.slice(html.indexOf('id="pickArtifacts"'), html.indexOf('id="saveAsLabel"'));
+  assert.match(main, /<input type="checkbox" id="pickSessions" checked>\s*<span class="check-text"><span>Sessions<\/span><span class="sub">Claude Code and Cowork<\/span>/);
+  assert.ok(main.indexOf('id="pickSessions"') < main.indexOf('id="exportCliSessions"'), 'the CLI box comes under Sessions');
+  assert.match(main, /Include CLI sessions \(run on your computer\)/);
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  assert.strictEqual(p.fn('settings.exportAllSessions'), true);
+  assert.strictEqual(p.fn('settings.exportCliSessions'), false);
+  assert.strictEqual(p.el('pickSessions').checked, true);
+  assert.strictEqual(p.el('exportCliSessions').checked, false);
+  assert.strictEqual(p.el('exportCliSessions').disabled, false);
+  p.el('exportCliSessions').checked = true;
+  p.el('exportCliSessions').handlers.change({ target: p.el('exportCliSessions') });
+  await sleep(20);
+  assert.strictEqual(p.fn('settings.exportCliSessions'), true);
+  assert.strictEqual(p.store.exporterSettings.exportCliSessions, true);
+  p.el('pickSessions').checked = false;
+  p.el('pickSessions').handlers.change({ target: p.el('pickSessions') });
+  await sleep(20);
+  assert.strictEqual(p.store.exporterSettings.exportAllSessions, false);
+  assert.strictEqual(p.el('exportCliSessions').disabled, true);
+  assert.strictEqual(p.el('exportCliSessions').checked, true, 'its value is kept');
+  assert.strictEqual(p.store.exporterSettings.exportCliSessions, true);
+  p.el('pickSessions').checked = true;
+  p.el('pickSessions').handlers.change({ target: p.el('pickSessions') });
+  assert.strictEqual(p.el('exportCliSessions').disabled, false);
+  // Off claude.ai both are disabled.
+  const off = panelOn('https://example.com/');
+  await sleep(50);
+  assert.strictEqual(off.el('pickSessions').disabled, true);
+  assert.strictEqual(off.el('exportCliSessions').disabled, true);
+});
+
+test('the Settings screen no longer has the CLI switch', () => {
+  const html = fs.readFileSync(path.join(REPO_DIR, 'popup.html'), 'utf8');
+  const settingsScreen = html.slice(html.indexOf('data-screen="settings"'));
+  assert.doesNotMatch(settingsScreen, /exportCliSessions|CLI sessions/);
+  assert.match(settingsScreen, /chats, artifacts and sessions/);
+});
+
+test('exportPlan maps Sessions', () => {
+  const { fn } = loadPopup();
+  const plan = fn('exportPlan');
+  const j = (o) => JSON.parse(JSON.stringify(o));
+  assert.deepStrictEqual(j(plan({ chats: false, artifacts: false, sessions: true, scope: 'changes', hasRecord: true })),
+    { run: 'bulk', changesOnly: true, withChats: false, withArtifacts: false, withSessions: true, changesAllowed: true });
+  assert.deepStrictEqual(j(plan({ chats: false, artifacts: true, sessions: true, scope: 'all', hasRecord: false })),
+    { run: 'bulk', changesOnly: false, withChats: false, withArtifacts: true, withSessions: true, changesAllowed: false });
+  assert.deepStrictEqual(j(plan({ chats: true, artifacts: true, sessions: true, scope: 'all', hasRecord: true })),
+    { run: 'bulk', changesOnly: false, withChats: true, withArtifacts: true, withSessions: true, changesAllowed: true });
+  assert.strictEqual(plan({ chats: false, artifacts: false, sessions: false, scope: 'all', hasRecord: true }).run, null);
+  const { fn: f2 } = loadPopup();
+  assert.strictEqual(f2('exportDisabledReason')(plan({ chats: false, artifacts: false, sessions: false, scope: 'all' }), null), 'Tick Chats, Artifacts or Sessions.');
+  // Count doesn't count sessions, so with Sessions ticked the counts can't say nothing changed.
+  const zero = { chats: 5, artifacts: 5, changedChats: 0, changedArtifacts: 0, at: 'x' };
+  assert.strictEqual(f2('exportDisabledReason')(plan({ chats: true, artifacts: true, sessions: true, scope: 'changes', hasRecord: true }), zero, 'then'), '');
+  assert.strictEqual(f2('exportDisabledReason')(plan({ chats: true, artifacts: true, sessions: false, scope: 'changes', hasRecord: true }), zero, 'then'), 'Nothing changed since then.');
+});
+
+test('the summary names sessions', () => {
+  const { fn } = loadPopup();
+  const plan = fn('exportPlan'), sum = fn('everythingSummary');
+  const counts = { chats: 27, artifacts: 19, changedChats: 3, changedArtifacts: 2, at: 'x' };
+  const base = { since: '2026-11-23 09:51', isPopup: false, format: 'zip' };
+  assert.strictEqual(sum({ ...base, counts, plan: plan({ chats: true, artifacts: true, sessions: true, scope: 'all', hasRecord: true }) }),
+    '27 chats and 19 artifacts. Plus Claude Code and Cowork sessions. Everything, whatever was exported before. One ZIP download when it finishes.');
+  assert.strictEqual(sum({ ...base, counts, plan: plan({ chats: false, artifacts: false, sessions: true, scope: 'all', hasRecord: true }) }),
+    'Claude Code and Cowork sessions. Everything, whatever was exported before. One ZIP download when it finishes.');
+  assert.strictEqual(sum({ ...base, counts: null, plan: plan({ chats: false, artifacts: false, sessions: true, scope: 'changes', hasRecord: true }) }),
+    'Claude Code and Cowork sessions. Only what changed since the last Export All, 2026-11-23 09:51. One ZIP download when it finishes.');
+  assert.doesNotMatch(sum({ ...base, counts, plan: plan({ chats: true, artifacts: true, sessions: false, scope: 'all', hasRecord: true }) }), /session/i);
+  const title = fn('runTitleText'), saved = fn('savedText');
+  const only = plan({ chats: false, artifacts: false, sessions: true, scope: 'all', hasRecord: false });
+  assert.strictEqual(title(only, {}), 'Exporting sessions');
+  assert.strictEqual(title(only, { sessions: 3 }), 'Exporting 3 sessions');
+  assert.strictEqual(saved({ saved: { chats: 0, sessions: 2, artifacts: 0, versions: 0 } }, only), '2 sessions');
+  assert.strictEqual(saved({ saved: { chats: 0, sessions: 0, artifacts: 0, versions: 0 } }, only), '0 sessions');
+  const withArt = plan({ chats: false, artifacts: true, sessions: true, scope: 'all', hasRecord: false });
+  assert.strictEqual(title(withArt, { artifacts: 4 }), 'Exporting sessions and 4 artifacts');
+  assert.strictEqual(fn('stoppedSavedText')({ target: { kind: 'folder', name: 'run' }, saved: { sessions: 2 } }, only), '2 sessions were saved into run. They are not recorded, so the next Changes only export takes them again.');
+});
+
+test('a handoff note carries sessions (missing means true)', async () => {
+  const f = loadPopup().fn('handoffFrom');
+  const j = (o) => JSON.parse(JSON.stringify(o));
+  const at = Date.now();
+  assert.deepStrictEqual(j(f({ at, choices: { scope: 'all', chats: false, artifacts: false, sessions: true, format: 'zip' } })), { scope: 'all', chats: false, artifacts: false, sessions: true, format: 'zip' });
+  assert.deepStrictEqual(j(f({ at, choices: { scope: 'all', chats: true, artifacts: false, format: 'zip' } })), { scope: 'all', chats: true, artifacts: false, sessions: true, format: 'zip' });
+  assert.strictEqual(f({ at, choices: { scope: 'all', chats: false, artifacts: false, sessions: false, format: 'zip' } }), null);
+  const session = { folderExportNote: { at, choices: { scope: 'all', chats: false, artifacts: false, sessions: true, format: 'folder' } } };
+  const p = loadPopup({ location: '/sidepanel.html', session, before: NOTE_QUERY });
+  await sleep(20);
+  const doc = p.sandbox.document;
+  assert.match(doc.getElementById('handoffText').textContent, /came along: All, sessions, Folder\. Click/);
+  assert.strictEqual(doc.getElementById('pickSessions').checked, true);
+  assert.strictEqual(doc.getElementById('pickChats').checked, false);
+  assert.strictEqual(vm.runInContext('settings.exportAllSessions', p.sandbox), true);
+  // The popup writes it from the boxes.
+  const session2 = {};
+  const popup = loadPopup({ location: '/popup.html', session: session2 });
+  const sb = popup.sandbox;
+  sb.window.close = () => {};
+  sb.chrome.sidePanel.open = async () => {};
+  vm.runInContext("currentTabId = 7; panel.onClaude = true; settings.megaFormat = 'zip'; settings.exportAllChats = false; settings.exportAllArtifacts = false; settings.exportAllSessions = true", sb);
+  await sb.document.getElementById('exportSelected').handlers.click();
+  await sleep(5);
+  assert.deepStrictEqual(j(session2.folderExportNote.choices), { scope: 'all', chats: false, artifacts: false, sessions: true, format: 'zip' });
+});
+
+test('Export selected passes withChats and withSessions to bulkExportZip', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.fn("settings.megaFormat = 'zip'; settings.exportAllChats = false; settings.exportAllArtifacts = false; settings.exportAllSessions = true");
+  const calls = [];
+  let rows = null;
+  p.sandbox.bulkExportZip = async (o) => {
+    calls.push({ withChats: o.withChats, withArtifacts: o.withArtifacts, withSessions: o.withSessions });
+    rows = { chats: p.el('step-chats').hidden, artifacts: p.el('step-artifacts').hidden, title: p.el('runTitle').textContent };
+    return doneRun({ saved: { chats: 0, artifacts: 0, versions: 0, sessions: 2 } });
+  };
+  await p.el('exportSelected').handlers.click();
+  assert.deepStrictEqual(calls, [{ withChats: false, withArtifacts: false, withSessions: true }]);
+  assert.deepStrictEqual(rows, { chats: true, artifacts: true, title: 'Exporting sessions' });
+  assert.strictEqual(p.el('doneSummary').textContent, '2 sessions saved.');
+});
+
+// ---- Sessions: Export All writes and records them (runSessionStep) ----
+const PNG_B64 = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 73, 72, 68, 82]).toString('base64');
+const S_COWORK = 'cse_01AbCdEfGhIjKlMnOpQr';
+const S_CLI = 'cse_01ZyXwVuTsRqPoNmLkJi';
+const S_ART = 'a1a1a1a1-2222-4222-8222-222222222222';
+const coworkSession = (over = {}) => ({
+  id: S_COWORK, title: 'Panel refresh', status_bucket: 'idle', environment_kind: 'anthropic_cloud',
+  config: { origin: 'desktop_app', model: 'claude-test' }, created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-20T11:00:00Z',
+  last_event_at: '2026-11-20T11:00:00Z', external_metadata: { artifacts: [{ artifact_id: S_ART, title: 'Panel', updated_at: '2026-11-20T11:00:00Z' }] }, ...over,
+});
+const cliSession = (over = {}) => ({ ...coworkSession(), id: S_CLI, title: 'Notebook', environment_kind: 'bridge', config: { origin: 'claude_code_cli' }, external_metadata: { artifacts: [] }, ...over });
+const sessionEventsFixture = () => [
+  { type: 'user', uuid: 'e1', created_at: '2026-11-20T10:00:01Z', message: { role: 'user', content: [{ type: 'text', text: 'Refresh the panel' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: PNG_B64 } }] } },
+  { type: 'assistant', uuid: 'e2', created_at: '2026-11-20T10:00:02Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Looking at it.' }, { type: 'tool_use', id: 'tu1', name: 'Bash', input: { command: 'ls' } }] } },
+  { type: 'user', uuid: 'e3', created_at: '2026-11-20T10:00:03Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu1', content: [{ type: 'text', text: 'a.txt' }] }] } },
+  { type: 'assistant', uuid: 'e4', created_at: '2026-11-20T10:00:04Z', message: { role: 'assistant', content: [{ type: 'text', text: 'Done.' }] } },
+];
+const onePage = (events = sessionEventsFixture()) => [{ events, lastId: events[events.length - 1].uuid, hasMore: false }];
+const oneChat = () => {
+  const fx = Object.assign(loadFixture(), { uuid: 'c-fx' });
+  return { list: [{ uuid: 'c-fx', name: fx.name, updated_at: '2026-01-02T00:00:00Z' }], chats: { 'c-fx': fx } };
+};
+const sessionList = (...sessions) => ({ sessions, incomplete: false, orgId: 'org-1' });
+const sessionDir = (written, id = S_COWORK) => {
+  const short = id.replace(/^cse_/, '').slice(-12);
+  const hit = Object.keys(written).find((n) => n.startsWith('sessions/') && n.split('/')[1].endsWith(`_${short}`));
+  return hit ? hit.split('/').slice(0, 2).join('/') : null;
+};
+
+test('Export All writes a Cowork session folder', async () => {
+  const { list, chats } = oneChat();
+  const frames = [{ slug: S_ART, title: 'Panel', typeSlug: '', typeTitle: '', sourceSurface: 'code', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }];
+  const pages = { [S_ART]: { title: 'Panel', live: P_LIVE, versions: { [P_LIVE]: { files: { 'index.html': '<p>Panel</p>' } } } } };
+  const { result, saved, store } = await bulkRun({ list, chats, frames, pages, options: { withArtifacts: true }, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(result.saved.sessions, 1);
+  const w = saved.written;
+  const dir = sessionDir(w);
+  assert.strictEqual(dir, 'sessions/Panel_refresh_GhIjKlMnOpQr', Object.keys(w).join());
+  const json = w[`${dir}/session.json`];
+  assert.ok(json && !json.includes(PNG_B64), 'no base64 in session.json');
+  const parsed = JSON.parse(json);
+  assert.strictEqual(parsed.format, 1);
+  assert.strictEqual(parsed.session.id, S_COWORK);
+  assert.strictEqual(parsed.events.length, 4);
+  assert.ok(w[`${dir}/transcript.md`].startsWith('﻿'), 'transcript.md has a BOM');
+  assert.match(w[`${dir}/transcript.md`], /Refresh the panel/);
+  assert.ok(w[`${dir}/README.md`].startsWith('﻿'));
+  const artFolder = Object.keys(w).find((n) => /^artifacts\/[^/]+\/artifact\.json$/.test(n)).split('/')[1];
+  assert.ok(w[`${dir}/README.md`].includes(`](../../artifacts/${encodeURIComponent(artFolder)}/)`), w[`${dir}/README.md`]);
+  assert.strictEqual(w[`${dir}/images/1.png`], PNG_B64);
+  assert.match(w['index.md'], /## Sessions/);
+  assert.ok(w['index.md'].includes(`](${dir}/README.md)`), w['index.md']);
+  const manifest = JSON.parse(w['export-manifest.json']);
+  assert.deepStrictEqual(manifest.sessions, { listed: 1, leftOut: 0, items: [{ id: S_COWORK, title: 'Panel refresh', folder: dir, last_event_at: '2026-11-20T11:00:00Z' }] });
+  assert.deepStrictEqual(store.exportRecord['org-1'].sessions, { [S_COWORK]: '2026-11-20T11:00:00Z' });
+  assert.ok(!result.warningList.some((x) => x.type === 'session'), JSON.stringify(result.warningList));
+});
+
+test('a CLI session is left out unless the setting is on', async () => {
+  const { list, chats } = oneChat();
+  const sessions = sessionList(coworkSession(), cliSession());
+  const sessionPages = { [S_COWORK]: onePage(), [S_CLI]: onePage() };
+  const off = await bulkRun({ list, chats, sessions, sessionPages });
+  assert.deepStrictEqual(off.asks.map((m) => m.id), [S_COWORK], 'no events request for the CLI session');
+  assert.match(off.saved.written['index.md'], /Sessions not exported \(Claude Code CLI or other\): 1 \(tick Include CLI sessions under Sessions\)/);
+  assert.strictEqual(off.result.saved.sessions, 1);
+  assert.strictEqual(sessionDir(off.saved.written, S_CLI), null);
+  assert.strictEqual(JSON.parse(off.saved.written['export-manifest.json']).sessions.leftOut, 1);
+  const on = await bulkRun({ list, chats, sessions, sessionPages, setup: (sb) => vm.runInContext('settings.exportCliSessions = true', sb) });
+  assert.deepStrictEqual(on.asks.map((m) => m.id).sort(), [S_COWORK, S_CLI].sort());
+  assert.ok(sessionDir(on.saved.written, S_CLI));
+  assert.doesNotMatch(on.saved.written['index.md'], /Sessions not exported/);
+  assert.strictEqual(on.result.saved.sessions, 2);
+});
+
+test('Changes only exports a session-only change', async () => {
+  const { list, chats } = oneChat();
+  const stored = { exportRecord: { 'org-1': { at: '2026-11-01T00:00:00Z', chats: { 'c-fx': list[0].updated_at }, sessions: { [S_COWORK]: '2026-11-10T00:00:00Z', [S_CLI]: '2026-11-20T11:00:00Z' } } } };
+  // The harness has no viewer assets: writeViewer is stood in for, and says what it was given.
+  const viewerCalls = [];
+  const fakeViewer = (sb) => {
+    sb.__viewer = (chats, opts) => { viewerCalls.push({ chats: chats.length, sessions: (opts.sessions || []).length }); };
+    vm.runInContext('writeViewer = async (zip, chats, opts) => { __viewer(chats, opts); zip.file("viewer.html", "<html>"); return true; }', sb);
+  };
+  const { result, saved, store, asks } = await bulkRun({ list, chats, stored, setup: fakeViewer, options: { changesOnly: true }, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.deepStrictEqual(viewerCalls, [{ chats: 0, sessions: 1 }]);
+  assert.ok(!result.warningList.some((w) => w.type === 'viewer'), JSON.stringify(result.warningList));
+  assert.ok(saved, 'a ZIP was made');
+  assert.strictEqual(result.saved.chats, 0);
+  assert.strictEqual(result.saved.sessions, 1);
+  assert.strictEqual(asks.length, 1);
+  assert.ok(sessionDir(saved.written));
+  assert.ok(saved.written['viewer.html'], Object.keys(saved.written).join());
+  assert.strictEqual(store.exportRecord['org-1'].sessions[S_COWORK], '2026-11-20T11:00:00Z');
+  assert.strictEqual(store.exportRecord['org-1'].chats['c-fx'], list[0].updated_at, 'the chats stay recorded');
+
+  const same = await bulkRun({ list, chats, stored: store, options: { changesOnly: true }, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.strictEqual(same.saved, null, 'nothing changed: no ZIP');
+  assert.strictEqual(same.asks.length, 0);
+  assert.ok(same.result.notes.some((n) => /^Nothing changed since/.test(n)));
+});
+
+test('a failed session list is one warning and the chats export', async () => {
+  const { list, chats } = oneChat();
+  const { result, saved, asks } = await bulkRun({ list, chats, sessions: { error: 'HTTP 401' } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(result.saved.chats, 1);
+  const mine = result.warningList.filter((w) => w.type === 'session');
+  assert.strictEqual(mine.length, 1, JSON.stringify(result.warningList));
+  assert.match(mine[0].text, /HTTP 401/);
+  assert.strictEqual(asks.length, 0);
+  assert.match(saved.written['index.md'], /Sessions: not exported \(HTTP 401\)/);
+  assert.ok(!Object.keys(saved.written).some((n) => n.startsWith('sessions/')));
+});
+
+test('a session list that may be incomplete is warned', async () => {
+  const { list, chats } = oneChat();
+  const { result, saved } = await bulkRun({ list, chats, sessions: { ...sessionList(coworkSession()), incomplete: true }, sessionPages: { [S_COWORK]: onePage() } });
+  const mine = result.warningList.filter((w) => w.type === 'session');
+  assert.strictEqual(mine.length, 1, JSON.stringify(result.warningList));
+  assert.match(mine[0].text, /session list may be incomplete/i);
+  assert.ok(sessionDir(saved.written));
+  assert.strictEqual(result.saved.sessions, 1);
+});
+
+test('a session over 100 pages is warned and not recorded', async () => {
+  const { list, chats } = oneChat();
+  const endless = (msg) => {
+    const n = msg.after ? Number(msg.after.slice(1)) + 1 : 1;
+    return { events: [{ type: 'assistant', uuid: `p${n}`, created_at: '2026-11-20T10:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text: `page ${n}` }] } }], lastId: `p${n}`, hasMore: true };
+  };
+  const { result, saved, store, asks } = await bulkRun({ list, chats, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: endless } });
+  assert.strictEqual(asks.length, 100);
+  const mine = result.warningList.filter((w) => w.type === 'session');
+  assert.strictEqual(mine.length, 1, JSON.stringify(result.warningList));
+  assert.match(mine[0].text, /100 pages/);
+  const dir = sessionDir(saved.written);
+  assert.ok(dir, 'saved as far as it got');
+  assert.strictEqual(JSON.parse(saved.written[`${dir}/session.json`]).events.length, 100);
+  assert.ok(!(store.exportRecord['org-1'].sessions || {})[S_COWORK], 'not recorded');
+});
+
+test('session pages that do not advance stop with a warning', async () => {
+  const { list, chats } = oneChat();
+  for (const lastId of [null, 'same']) {
+    const stuck = (msg) => ({ events: [{ type: 'assistant', uuid: 'x', created_at: '2026-11-20T10:00:00Z', message: { role: 'assistant', content: [{ type: 'text', text: 'hi' }] } }], lastId: lastId === 'same' ? 'x' : null, hasMore: true });
+    const { result, store, asks } = await bulkRun({ list, chats, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: stuck } });
+    assert.ok(asks.length <= 2, `${lastId}: ${asks.length} requests`);
+    assert.strictEqual(result.warningList.filter((w) => w.type === 'session').length, 1, JSON.stringify(result.warningList));
+    assert.ok(!(store.exportRecord['org-1'].sessions || {})[S_COWORK]);
+  }
+});
+
+test('Stop during sessions records none', async () => {
+  const { list, chats } = oneChat();
+  const two = sessionList(coworkSession(), coworkSession({ id: 'cse_01SecondSessionXyz', title: 'Second' }));
+  const picked = new FakeDir();
+  const signal = { stopped: false };
+  const onProgress = (e) => { if (e.phase === 'sessions' && e.done === 1) signal.stopped = true; };
+  const { result, sets, asks } = await bulkRun({ list, chats, sessions: two, sessionPages: { [S_COWORK]: onePage(), cse_01SecondSessionXyz: onePage() }, options: { directory: picked, signal, onProgress } });
+  assert.strictEqual(result.outcome, 'stopped');
+  assert.strictEqual(result.saved.sessions, 1);
+  assert.strictEqual(asks.length, 1, 'the second session is not asked for');
+  const files = runFiles(picked);
+  assert.ok(sessionDir(files), Object.keys(files).join());
+  for (const n of ['viewer.html', 'index.md', 'export-manifest.json']) assert.ok(!(n in files), n);
+  assert.ok(!sets.some((keys) => keys.includes('exportRecord')), JSON.stringify(sets));
+
+  const zipSignal = { stopped: false };
+  const zipped = await bulkRun({ list, chats, sessions: two, sessionPages: { [S_COWORK]: onePage(), cse_01SecondSessionXyz: onePage() },
+    options: { signal: zipSignal, onProgress: (e) => { if (e.phase === 'sessions' && e.done === 1) zipSignal.stopped = true; } } });
+  assert.strictEqual(zipped.result.outcome, 'stopped');
+  assert.strictEqual(zipped.result.saved.sessions, 0);
+  assert.strictEqual(zipped.saved, null);
+});
+
+test('a gone tab skips sessions', async () => {
+  const { list, chats } = threeTabChats();
+  const { result, asks } = await bulkRun({ list, chats, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() }, setup: lostTab({ reinjects: false, from: 1 }) });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(asks.length, 0);
+  const mine = result.warningList.filter((w) => /claude\.ai tab closed or stopped answering/.test(w.text));
+  assert.strictEqual(mine.length, 1);
+  assert.match(mine[0].text, /, and no sessions$/);
+});
+
+test('a chat titled "sessions" gets sessions_2', async () => {
+  const fx = Object.assign(loadFixture(), { uuid: 'c-s', name: 'sessions' });
+  const list = [{ uuid: 'c-s', name: 'sessions', updated_at: '2026-01-02T00:00:00Z' }];
+  const { saved } = await bulkRun({ list, chats: { 'c-s': fx }, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.ok(saved.written['sessions_2/README.md'], Object.keys(saved.written).join());
+  assert.ok(sessionDir(saved.written));
+});
+
+test('session folders are claimed apart without case', async () => {
+  const { list, chats } = oneChat();
+  const a = coworkSession({ title: 'Same' });
+  const b = coworkSession({ id: 'cse_99AbCdEfGhIjKlMnOpQr', title: 'SAME' });  // the same short id, other case of title
+  const { saved } = await bulkRun({ list, chats, sessions: sessionList(a, b), sessionPages: { [a.id]: onePage(), [b.id]: onePage() } });
+  const dirs = [...new Set(Object.keys(saved.written).filter((n) => n.startsWith('sessions/')).map((n) => n.split('/')[1]))];
+  assert.deepStrictEqual(dirs.sort(), ['SAME_GhIjKlMnOpQr_2', 'Same_GhIjKlMnOpQr'].sort());
+});
+
+test('session folders are flushed one by one in folder mode', async () => {
+  const { list, chats } = oneChat();
+  const second = 'cse_01SecondSessionXyz';
+  const picked = new FakeDir();
+  let seenFirst = null;
+  const sessionPages = {
+    [S_COWORK]: onePage(),
+    [second]: () => { seenFirst = Object.keys(runFiles(picked)).some((n) => /^sessions\/Panel_refresh_[^/]+\/transcript\.md$/.test(n)); return onePage()[0]; },
+  };
+  let flushes = 0;
+  const { result } = await bulkRun({ list, chats, sessions: sessionList(coworkSession(), coworkSession({ id: second, title: 'Second' })), sessionPages,
+    options: { directory: picked }, setup: (sb) => {
+      sb.__flushed = () => { flushes++; };
+      vm.runInContext(`createDiskFolder = ((orig) => (h) => { const v = orig(h); const f = v.flush; v.flush = async () => { __flushed(); return f(); }; return v; })(createDiskFolder)`, sb);
+    } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(seenFirst, true, 'the first session is on disk before the second is asked for');
+  assert.ok(flushes >= 2, `${flushes} flushes`);
+  assert.strictEqual(result.saved.sessions, 2);
+});
+
+test('the sessions step is done after the viewer step starts, also with no sessions', () => {
+  const p = panelOn('https://claude.ai/new');
+  const states = {};
+  p.sandbox.__state = (name, state) => { states[name] = state; };
+  vm.runInContext('setStep = (name, state) => __state(name, state)', p.sandbox);
+  p.el('step-sessions').hidden = false;
+  p.fn('beginRunScreen')({ run: 'bulk', withArtifacts: false, changesOnly: false }, null);
+  assert.strictEqual(p.el('step-sessions').hidden, true, 'hidden until a sessions event');
+  assert.strictEqual(states.sessions, 'pending');
+  p.fn('runProgress')({ phase: 'chats', done: 1, total: 1, sub: 'A', warnings: 0 });
+  assert.strictEqual(p.el('step-sessions').hidden, true);
+  p.fn('runProgress')({ phase: 'sessions', done: 0, total: 1, sub: '', warnings: 0 });
+  assert.strictEqual(p.el('step-sessions').hidden, false, 'shown on the first sessions event');
+  p.fn('runProgress')({ phase: 'viewer', done: 0, total: 1, sub: '', warnings: 0 });
+  assert.strictEqual(states.sessions, 'done');
+});
+
+test('runSessionStep builds each session for the viewer, images by relative path', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async () => JSON.parse(JSON.stringify(onePage()[0])) };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  const dir = sessionDir(written);
+  assert.strictEqual(out.viewerSessions.length, 1, out.warnings.join('\n'));
+  const v = out.viewerSessions[0];
+  assert.strictEqual(v.id, S_COWORK);
+  assert.strictEqual(v.folder, dir);
+  assert.deepStrictEqual(v.artifacts, [S_ART]);
+  assert.deepStrictEqual(v.chat.messages[0].blocks[1], { t: 'image', href: `${dir}/images/1.png` });
+  assert.ok(!JSON.stringify(v).includes(PNG_B64), 'no image data for the viewer');
+});
+
+test('runSessionStep skips the sessions past the ZIP budget with one warning', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const root = fakeZip(written);
+  const a = coworkSession({ title: 'First' });
+  const b = coworkSession({ id: 'cse_01SecondSessionXyz', title: 'Second' });
+  const c = coworkSession({ id: 'cse_01ThirdSessionXyzA', title: 'Third' });
+  const page = onePage()[0];
+  const size = page.events.reduce((n, e) => n + Buffer.byteLength(JSON.stringify(e)), 0);
+  sandbox.__args = { sessions: [a, b, c], budget: size + 10, fetchPage: async () => JSON.parse(JSON.stringify(page)) };
+  sandbox.__root = root;
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.strictEqual(out.written, 1);
+  assert.deepStrictEqual(out.saved.map((x) => x.id), [a.id]);
+  assert.strictEqual(out.warnings.length, 1, out.warnings.join('\n'));
+  assert.match(out.warnings[0], /256 MB was reached: 2 sessions not exported/);
+  assert.ok(!Object.keys(written).some((n) => n.includes('Second')));
+});
+
+test('runSessionStep keeps a session whose later page fails, warned and not recorded', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const first = { ...onePage()[0], hasMore: true, lastId: 'e4' };
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async (id, after) => (after ? { error: 'HTTP 500' } : JSON.parse(JSON.stringify(first))) };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.strictEqual(out.written, 1);
+  assert.deepStrictEqual(out.saved, []);
+  assert.match(out.warnings.join('\n'), /events could not be loaded \(HTTP 500\); saved as far as it got/);
+  const readme = Object.entries(written).find(([n]) => n.endsWith('/README.md'))[1];
+  assert.match(readme, /\*\*Incomplete:\*\*/);
+});
+
+test('runSessionStep asks again with a smaller page when a page is too large', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const asks = [];
+  const page = onePage()[0];
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async (id, after, limit) => {
+    asks.push([after, limit]);
+    return limit > 10 ? { error: 'too large' } : JSON.parse(JSON.stringify(page));
+  } };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.deepStrictEqual(asks, [[null, 200], [null, 50], [null, 10]]);
+  assert.strictEqual(out.written, 1);
+  assert.deepStrictEqual(out.saved.map((x) => x.id), [S_COWORK]);
+  assert.deepStrictEqual(out.warnings, []);
+});
+
+test('runSessionStep keeps the smaller page for the rest of the session', async () => {
+  const { sandbox } = exportPopup();
+  const asks = [];
+  const evs = sessionEventsFixture();
+  const first = { events: evs.slice(0, 2), lastId: 'e2', hasMore: true };
+  const second = { events: evs.slice(2), lastId: 'e4', hasMore: false };
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async (id, after, limit) => {
+    asks.push([after, limit]);
+    if (limit > 50) return { error: 'too large' };
+    return JSON.parse(JSON.stringify(after ? second : first));
+  } };
+  sandbox.__root = fakeZip({});
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.deepStrictEqual(asks, [[null, 200], [null, 50], ['e2', 50]]);
+  assert.deepStrictEqual(out.saved.map((x) => x.id), [S_COWORK]);
+});
+
+test('runSessionStep warns when even one event is too large, never treats it as a gone tab', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const asks = [];
+  const b = coworkSession({ id: 'cse_01SecondSessionXyz', title: 'Second' });
+  const page = onePage()[0];
+  sandbox.__args = { sessions: [coworkSession(), b], fetchPage: async (id, after, limit) => {
+    asks.push([id, limit]);
+    return id === S_COWORK ? { error: 'too large' } : JSON.parse(JSON.stringify(page));
+  } };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.deepStrictEqual(asks, [[S_COWORK, 200], [S_COWORK, 50], [S_COWORK, 10], [S_COWORK, 1], [b.id, 200]]);
+  assert.deepStrictEqual(out.saved.map((x) => x.id), [b.id], 'the too-large session is not recorded; the next one is fetched');
+  assert.strictEqual(out.warnings.length, 1, out.warnings.join('\n'));
+  assert.match(out.warnings[0], /Session "Panel refresh": events could not be loaded \(too large\); not exported/);
+  assert.doesNotMatch(out.warnings.join('\n'), /stopped answering/);
+});
+
+test('runSessionStep: a too-large later page keeps what came before, warned and not recorded', async () => {
+  const { sandbox } = exportPopup();
+  const written = {};
+  const first = { ...onePage()[0], hasMore: true, lastId: 'e4' };
+  sandbox.__args = { sessions: [coworkSession()], fetchPage: async (id, after) => (after ? { error: 'too large' } : JSON.parse(JSON.stringify(first))) };
+  sandbox.__root = fakeZip(written);
+  const out = JSON.parse(JSON.stringify(await vm.runInContext('runSessionStep(__root, __args)', sandbox)));
+  assert.strictEqual(out.written, 1);
+  assert.deepStrictEqual(out.saved, []);
+  assert.match(out.warnings.join('\n'), /events could not be loaded \(too large\); saved as far as it got/);
+});
+
+test('Export All passes the page size to content.js', async () => {
+  const { list, chats } = oneChat();
+  const { asks } = await bulkRun({ list, chats, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.deepStrictEqual(asks.map((m) => m.limit), [200]);
+});
+
+for (const status of [403, 404]) {
+  test(`a session list answered HTTP ${status} means no sessions for this account: a note, no warning`, async () => {
+    const { list, chats } = oneChat();
+    const { result, saved } = await bulkRun({ list, chats, sessions: { error: `HTTP ${status}` } });
+    assert.strictEqual(result.outcome, 'done', result.reason);
+    assert.ok(!result.warningList.some((x) => x.type === 'session'), JSON.stringify(result.warningList));
+    assert.strictEqual(result.warnings, result.warningList.length);
+    assert.ok(result.notes.includes('Code and Cowork sessions: not available for this account'), JSON.stringify(result.notes));
+    assert.match(saved.written['index.md'], /## Sessions\n\nSessions: not available for this account/);
+    assert.doesNotMatch(saved.written['index.md'], /Session list could not be loaded/);
+    assert.ok(!('sessions' in JSON.parse(saved.written['export-manifest.json'])));
+  });
+}
+
+test('a session list answered HTTP 500 is one session warning', async () => {
+  const { list, chats } = oneChat();
+  const { result, saved } = await bulkRun({ list, chats, sessions: { error: 'HTTP 500' } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.deepStrictEqual(result.warningList.filter((x) => x.type === 'session').map((x) => x.text), ['Session list could not be loaded (HTTP 500)']);
+  assert.ok(!result.notes.some((n) => /not available/.test(n)));
+  assert.match(saved.written['index.md'], /Sessions: not exported \(HTTP 500\)/);
+});
+
+test('changedSessions takes a session without last_event_at the first time', () => {
+  const { fn } = loadPopup();
+  const f = fn('changedSessions');
+  const x = { id: 'cse_a', updated_at: 'u1' };
+  assert.strictEqual(f([x], { cse_b: 't' }).length, 1, 'not in the record: changed');
+  assert.strictEqual(f([x], { cse_a: 'u1' }).length, 0, 'recorded by its updated_at: unchanged');
+  assert.strictEqual(f([{ id: 'cse_a', created_at: 'c1' }], { cse_a: 'u1' }).length, 1);
+});
+
+test('a session without last_event_at is recorded with its updated_at', async () => {
+  const { list, chats } = oneChat();
+  const s = coworkSession();
+  delete s.last_event_at;
+  const { store } = await bulkRun({ list, chats, sessions: sessionList(s), sessionPages: { [S_COWORK]: onePage() } });
+  assert.deepStrictEqual(store.exportRecord['org-1'].sessions, { [S_COWORK]: s.updated_at });
+});
+
+test('Sessions unticked: no listSessions request and no Sessions row', async () => {
+  const { list, chats } = oneChat();
+  const { result, saved, msgs } = await bulkRun({ list, chats, options: { withSessions: false }, sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.ok(!msgs.some((m) => m.action === 'listSessions' || m.action === 'fetchSessionEvents'), msgs.map((m) => m.action).join());
+  assert.strictEqual(result.saved.sessions, undefined);
+  assert.doesNotMatch(saved.written['index.md'], /## Sessions/);
+  assert.ok(!Object.keys(saved.written).some((n) => n.startsWith('sessions/')));
+  assert.ok(!('sessions' in JSON.parse(saved.written['export-manifest.json'])));
+  // The Exporting screen has no Sessions row, even when a sessions event arrives.
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.fn("settings.megaFormat = 'zip'; settings.exportAllSessions = false");
+  let row = null;
+  p.sandbox.bulkExportZip = async (o) => {
+    o.onProgress({ phase: 'sessions', done: 0, total: 1, sub: '', warnings: 0 });
+    row = p.el('step-sessions').hidden;
+    return doneRun();
+  };
+  await p.el('exportSelected').handlers.click();
+  assert.strictEqual(row, true);
+});
+
+test('Sessions alone exports sessions without asking for chats', async () => {
+  const { list, chats } = oneChat();
+  // The harness has no viewer assets: writeViewer is stood in for.
+  const fakeViewer = (sb) => { vm.runInContext('writeViewer = async (zip, chats, opts) => { zip.file("viewer.html", `${chats.length} chats, ${(opts.sessions || []).length} sessions`); return true; }', sb); };
+  const { result, saved, msgs, store } = await bulkRun({ list, chats, setup: fakeViewer, options: { withChats: false, withSessions: true },
+    sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage() } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  const listAsk = msgs.find((m) => m.action === 'fetchAllConversations');
+  assert.ok(listAsk && listAsk.withoutChats === true, 'the org and account name only, no chat list');
+  assert.ok(!msgs.some((m) => m.action === 'fetchConversation'));
+  assert.strictEqual(result.saved.chats, 0);
+  assert.strictEqual(result.saved.sessions, 1);
+  const w = saved.written;
+  assert.ok(sessionDir(w), Object.keys(w).join());
+  assert.ok(!Object.keys(w).some((n) => n.endsWith('/original.json')), 'no chat folder');
+  assert.match(w['index.md'], /Chats: not exported \(not ticked\)/);
+  assert.doesNotMatch(w['index.md'], /## Conversations/);
+  assert.match(w['index.md'], /## Sessions/);
+  assert.strictEqual(w['viewer.html'], '0 chats, 1 sessions', 'a viewer for the sessions');
+  assert.deepStrictEqual(JSON.parse(w['export-manifest.json']).chats, []);
+  assert.deepStrictEqual(store.exportRecord['org-1'].chats, {});
+  assert.deepStrictEqual(store.exportRecord['org-1'].sessions, { [S_COWORK]: '2026-11-20T11:00:00Z' });
+});
+
+test('an upgrade keeps an Artifacts-only setup: no stored exportAllSessions with Chats off means Sessions off', async () => {
+  const run = async (exporterSettings) => {
+    const store = { exporterSettings };
+    const { sandbox, fn } = loadPopup({ before: (sb) => {
+      sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
+      sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+    } });
+    await fn('loadSettings')();
+    await sleep(5);
+    return { plan: JSON.parse(JSON.stringify(fn('currentPlan')())), box: sandbox.document.getElementById('pickSessions').checked, store };
+  };
+  const old = await run({ exportAllChats: false, exportAllArtifacts: true });
+  assert.strictEqual(old.plan.run, 'artifacts');
+  assert.strictEqual(old.plan.withSessions, false);
+  assert.strictEqual(old.box, false);
+  assert.strictEqual(old.store.exporterSettings.exportAllSessions, false, 'saved');
+  const chatsOn = await run({ exportAllChats: true });
+  assert.strictEqual(chatsOn.plan.withSessions, true);
+  assert.strictEqual(chatsOn.box, true);
+  const explicit = await run({ exportAllChats: false, exportAllArtifacts: true, exportAllSessions: true });
+  assert.strictEqual(explicit.plan.withSessions, true);
+  assert.strictEqual(explicit.plan.run, 'bulk');
+  assert.strictEqual(explicit.box, true);
+});
+
+test('the upgrade save keeps the top-level useSidePanel that background.js reads', async () => {
+  const store = { exporterSettings: { exportAllChats: false, useSidePanel: false }, useSidePanel: true };
+  const { fn } = loadPopup({ before: (sb) => {
+    sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
+    sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+  } });
+  await fn('loadSettings')();
+  await sleep(5);
+  assert.strictEqual(store.useSidePanel, true);
+  assert.strictEqual(store.exporterSettings.exportAllSessions, false);
 });

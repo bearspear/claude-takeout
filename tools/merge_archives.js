@@ -515,6 +515,35 @@ function readSource(source, order, report) {
   return { archives: found.archives, copies };
 }
 
+// Every mega source's sessions (lib.readSessions), the newest copy of each id by last_event_at, then the later export,
+// then the later source. Each: { id, title, last, session, dir, exportedAt, order }.
+function pickSessions(sources, archivesOf, report) {
+  const counts = { skipped: 0 };
+  const best = new Map();
+  const lastOf = s => time(s.last_event_at) > -Infinity ? s.last_event_at : s.updated_at || s.created_at || null;
+  for (const src of sources) {
+    for (const archive of archivesOf.get(src.order) || []) {
+      if (archive.kind !== 'mega') continue;
+      const manifest = readJson(path.join(archive.root, 'export-manifest.json'));
+      const exportedAt = manifest && typeof manifest.exported_at === 'string' ? manifest.exported_at : null;
+      const warnings = [];
+      for (const x of lib.readSessions(archive.root, { warnings, counts })) {
+        const id = typeof x.session.id === 'string' && x.session.id ? x.session.id : null;
+        if (!id) { counts.skipped++; warnings.push(`${x.folder}/session.json has no id, so the session was skipped`); continue; }
+        const c = { id, title: typeof x.session.title === 'string' ? x.session.title : '', last: lastOf(x.session), session: x.session, dir: x.dir, base: path.posix.basename(x.folder), exportedAt, order: src.order };
+        const o = best.get(id);
+        const tc = time(c.last);
+        const to = o ? time(o.last) : -Infinity;
+        if (!o || tc > to || (tc === to && (time(c.exportedAt) > time(o.exportedAt) || (time(c.exportedAt) === time(o.exportedAt) && c.order > o.order)))) best.set(id, c);
+      }
+      for (const w of warnings) report.warnings.push(`${src.label}: ${w}`);
+    }
+  }
+  const list = [...best.values()].sort((a, b) => time(b.last) - time(a.last) || a.id.localeCompare(b.id));
+  list.skipped = counts.skipped;
+  return list;
+}
+
 // True when a is a newer copy of the same chat than b.
 function newer(a, b) {
   const ta = time(a.updatedAt);
@@ -545,7 +574,8 @@ function pickNewest(copies) {
 
 const cell = s => String(s == null ? '' : s).replace(/\|/g, '\\|').replace(/[\r\n]+/g, ' ');
 
-function indexMd(chats, sources, at, artifacts = 0) {
+// sessions: the sessions copied (pickSessions, with .out set), listed in a Sessions table when there are any.
+function indexMd(chats, sources, at, artifacts = 0, sessions = []) {
   const lines = [
     '# Claude Takeout - Merged archive',
     '',
@@ -560,6 +590,17 @@ function indexMd(chats, sources, at, artifacts = 0) {
     '|---|--------------|---------|------|',
     ...chats.map((c, i) => `| ${i + 1} | [${cell(c.name || 'Untitled')}](${encodeURI(c.out)}/README.md) | ${cell(c.updatedAt || '')} | ${cell(c.source)} |`),
   ];
+  if (sessions.length) {
+    const origin = s => (s && s.config && typeof s.config.origin === 'string' && s.config.origin) || (s && typeof s.environment_kind === 'string' && s.environment_kind) || '';
+    lines.push(
+      '',
+      '## Sessions',
+      '',
+      '| # | Session | Origin | Last activity | Folder |',
+      '|---|---------|--------|---------------|--------|',
+      ...sessions.map((x, i) => `| ${i + 1} | ${cell(x.title || 'Untitled session')} | ${cell(origin(x.session)) || '-'} | ${cell(x.last || '') || '-'} | [${cell(`sessions/${x.out}`).replace(/[[\]]/g, '\\$&')}](${encodeURI(`sessions/${x.out}`)}/README.md) |`),
+    );
+  }
   return '\uFEFF' + lines.join('\n') + '\n';
 }
 
@@ -627,14 +668,16 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       archivesOf.set(s.order, got.archives);
       all.push(...got.copies);
     }
+    const sessionsChosen = pickSessions(sources, archivesOf, report);
     const stores = readStores(sources, archivesOf, all, report);
     const merged = mergeRecords(stores);
     report.artifacts = merged.length;
-    if (!all.length && !merged.length) throw new Error('no Claude chats or artifacts were found in the sources');
+    if (!all.length && !merged.length && !sessionsChosen.length) throw new Error('no Claude chats or artifacts were found in the sources');
     const { chosen, replaced } = pickNewest(all);
     chosen.sort((a, b) => time(b.updatedAt) - time(a.updatedAt) || a.folder.localeCompare(b.folder));
     report.replaced = replaced;
     report.chats = chosen.length;
+    report.sessions = sessionsChosen.length;
     for (const s of sources) s.chats = chosen.filter(c => c.order === s.order).length;
     report.sources = sources.map(s => ({ path: s.input, chats: s.chats }));
 
@@ -647,7 +690,7 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
 
     // Built under a hidden name, then renamed: a merged archive is there complete or not at all.
     fs.mkdirSync(building);
-    const used = new Set(['projects', 'published', 'artifacts', 'index.md', 'export-manifest.json', 'viewer.html', 'viewer-check.gif', 'viewer-files'].map(n => n.toLowerCase()));
+    const used = new Set(['projects', 'published', 'artifacts', 'sessions', 'index.md', 'export-manifest.json', 'viewer.html', 'viewer-check.gif', 'viewer-files'].map(n => n.toLowerCase()));
     const storeOf = new Map(stores.map(st => [st.archive, st]));
     for (const c of chosen) {
       c.out = freeName(c.folder, used);
@@ -662,6 +705,17 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       const st = storeOf.get(c.archive);
       if (own) keepUnreadPublished(own, new Set(st ? st.store.published.map(page => page.abs) : []), path.join(building, c.out, 'published'), `${c.out}/published`, report);
     }
+    // Sessions: each id once, from the source with its newest activity; the folder is copied as it is.
+    const usedSessions = new Set();
+    if (sessionsChosen.length) fs.mkdirSync(path.join(building, 'sessions'));
+    for (const x of sessionsChosen) {
+      x.out = freeName(x.base, usedSessions);
+      const copied = copyTree(x.dir, path.join(building, 'sessions', x.out));
+      report.files += copied.files;
+      report.bytes += copied.bytes;
+      for (const l of copied.skipped) report.warnings.push(`${x.dir}: ${l} is a link, so it was not copied`);
+    }
+    report.sessions = sessionsChosen.length;
     // Shared project folders of mega archives, newest source first; the first copy of a name wins.
     const takenProjects = new Set();
     for (const s of [...sources].sort((a, b) => b.order - a.order)) {
@@ -707,13 +761,16 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       if (reports.length) fs.writeFileSync(path.join(building, 'artifacts', 'errors.txt'), `# Artifact warnings from the merged archives\n\n${reports.join('\n')}`, { flag: 'wx' });
     }
     rewriteLinks(chosen, stores, written ? written.places : new Map(), building, report);
-    fs.writeFileSync(path.join(building, 'index.md'), indexMd(chosen, sources, at, merged.length), { flag: 'wx' });
+    fs.writeFileSync(path.join(building, 'index.md'), indexMd(chosen, sources, at, merged.length, sessionsChosen), { flag: 'wx' });
     fs.writeFileSync(path.join(building, 'export-manifest.json'), JSON.stringify({
       format: 1, exported_at: at, kind: 'merged', since: null, listed: null,
       sources: sources.map(s => s.label),
       chats: chosen.map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updatedAt, folder: c.out, from: c.source })),
       // readArtifactStore reads this key for listFetched.
       // decided_at and listed_at: when claude.ai's lists were asked, so a later merge ranks this one by them.
+      // skipped: session.json files that could not be read (an export's leftOut counts sessions it chose not to fetch).
+      ...(sessionsChosen.length ? { sessions: { listed: sessionsChosen.length, skipped: sessionsChosen.skipped,
+        items: sessionsChosen.map(x => ({ id: x.id, title: x.title, folder: `sessions/${x.out}`, last_event_at: x.last })) } } : {}),
       ...(written && hadList ? { artifacts: { listed: written.listed, thumbs: written.thumbs, decided_at: merged.decidedAt,
         listed_at: Object.fromEntries(merged.filter(m => m.listed && m.listedAt).map(m => [m.uuid, m.listedAt])) } } : {}),
     }, null, 2), { flag: 'wx' });
@@ -746,6 +803,7 @@ function formatReport(r) {
   if (r.status !== 'failed' && r.ok === false && r.reason) lines.push(`not complete: ${r.reason}`);
   if (r.chats) lines.push(`${r.chats} chats${r.replaced ? `; ${r.replaced} older ${r.replaced === 1 ? 'copy' : 'copies'} left out` : ''}`);
   for (const s of r.sources) lines.push(`  ${s.chats} from ${s.path}`);
+  if (r.sessions) lines.push(`${r.sessions} session${r.sessions === 1 ? '' : 's'} in sessions/`);
   if (r.artifacts) lines.push(`${r.artifacts} artifact${r.artifacts === 1 ? '' : 's'} in artifacts/${r.rewrittenFiles ? `; links rewritten in ${r.rewrittenFiles} chat file${r.rewrittenFiles === 1 ? '' : 's'}` : ''}`);
   if (r.keptPublished && r.keptPublished.length) lines.push(`${r.keptPublished.length} published/ ${r.keptPublished.length === 1 ? 'entry' : 'entries'} with no published.json kept as they were`);
   if (r.unmappedLinks && r.unmappedLinks.length) {

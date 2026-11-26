@@ -2565,3 +2565,212 @@ test('filterByText with a cache folds each item once across queries', () => {
   assert.deepStrictEqual(filterByText(items, 'plans café', fields, cache).map(i => i.t), ['CAFÉ plans']);
   assert.strictEqual(calls, 3, 'one fields() call per item');
 });
+
+// ---- Sessions (Claude Code and Cowork): buildViewerSession and ViewerData.sessions ----
+const sessionOf = (over = {}) => ({
+  id: 'cse_abc', title: 'Fix the build', environment_kind: 'anthropic_cloud', config: { origin: 'cowork', model: 'claude-opus-4-8' },
+  created_at: '2026-11-01T10:00:00Z', updated_at: '2026-11-02T10:00:00Z', last_event_at: '2026-11-02T09:00:00Z',
+  external_metadata: { artifacts: [{ artifact_id: 'AAAAAAAA-1111-2222-3333-444444444444', title: 'Page' }, { artifact_id: 'not a uuid' }] }, ...over });
+const ev = (uuid, type, content, extra = {}) => ({ type, uuid, created_at: '2026-11-01T10:00:00Z', parent_tool_use_id: null,
+  message: { role: type === 'user' ? 'user' : 'assistant', model: type === 'assistant' ? 'claude-opus-4-8' : undefined, content }, ...extra });
+
+test('buildViewerSession makes a single-branch chat', () => {
+  const events = [
+    ev('e1', 'user', [{ type: 'text', text: 'Please run ls' }]),
+    ev('e2', 'assistant', [{ type: 'thinking', thinking: 'ok' }]),
+    ev('e3', 'assistant', [{ type: 'tool_use', id: 't1', name: 'Bash', input: { command: 'ls' } }]),
+    ev('e4', 'user', [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'text', text: 'a b' }] }]),
+    { type: 'result', uuid: 'r1', created_at: 'x', is_error: false },
+    { type: 'system', subtype: 'compact_boundary', uuid: 's1', created_at: 'x' },
+    ev('e5', 'assistant', [{ type: 'text', text: 'Done.' }]),
+    { type: 'assistant', uuid: 'e6', created_at: 'x', stub: 'too large (3 MB)' },
+    ev('e7', 'user', [{ type: 'text', text: 'Thanks' }]),
+  ];
+  const before = JSON.stringify(events);
+  const s = V.buildViewerSession(sessionOf(), events, { folder: 'sessions/Fix_the_build_abc' });
+  assert.strictEqual(JSON.stringify(events), before);
+  assert.deepStrictEqual({ ...s, chat: undefined }, { id: 'cse_abc', title: 'Fix the build', origin: 'cowork', created: '2026-11-01T10:00:00Z',
+    updated: '2026-11-02T09:00:00Z', folder: 'sessions/Fix_the_build_abc', artifacts: ['aaaaaaaa-1111-2222-3333-444444444444'], chat: undefined });
+  const { chat } = s;
+  assert.ok(!('project' in chat));
+  assert.strictEqual(chat.id, 'cse_abc');
+  assert.strictEqual(chat.title, 'Fix the build');
+  // A prompt, one reply turn (assistant events and tool results together), a prompt.
+  assert.deepStrictEqual(chat.messages.map(m => [m.id, m.sender, m.parent]), [['e1', 'human', null], ['e2', 'assistant', 'e1'], ['e7', 'human', 'e2']]);
+  assert.strictEqual(chat.leaf, 'e7');
+  const reply = chat.messages[1].blocks;
+  assert.deepStrictEqual(reply.map(b => b.t), ['thinking', 'tool', 'text', 'text']);
+  assert.strictEqual(reply[1].result, 'a b');
+  assert.strictEqual(reply[2].text, 'Done.');
+  assert.strictEqual(reply[3].text, '[event too large to keep]');
+});
+
+test('buildViewerSession cuts tool results at 2 KB', () => {
+  const long = 'y'.repeat(5000);
+  const s = V.buildViewerSession(sessionOf(), [
+    ev('e1', 'assistant', [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/a' } }, { type: 'tool_use', id: 't2', name: 'Read', input: { file_path: '/b' } }]),
+    ev('e2', 'user', [{ type: 'tool_result', tool_use_id: 't1', content: long }, { type: 'tool_result', tool_use_id: 't2', content: [{ type: 'text', text: 'short' }] }]),
+  ], { folder: 'sessions/x' });
+  const [a, b] = s.chat.messages[0].blocks;
+  assert.strictEqual(a.result, 'y'.repeat(2048) + '\n[… full output in session.json]');
+  assert.strictEqual(b.result, 'short');
+});
+
+test('buildViewerSession shows images from their files, never data URIs', () => {
+  const s = V.buildViewerSession(sessionOf(), [
+    ev('e1', 'user', [{ type: 'text', text: 'Look' }, { type: 'image', file: 'images/1.png' }, { type: 'image', missing: 'not saved (over 5 MB)' }]),
+    ev('e2', 'assistant', [{ type: 'tool_use', id: 't1', name: 'Read', input: { file_path: '/p.png' } }]),
+    ev('e3', 'user', [{ type: 'tool_result', tool_use_id: 't1', content: [{ type: 'image', file: 'images/2.jpg' }, { type: 'image', missing: 'not saved' },
+      { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } }] }]),
+  ], { folder: 'sessions/My session_abc' });
+  const json = JSON.stringify(s);
+  assert.ok(!json.includes('data:'), json);
+  const [prompt, reply] = s.chat.messages;
+  assert.deepStrictEqual(prompt.blocks, [{ t: 'text', text: 'Look', cites: [] }, { t: 'image', href: 'sessions/My%20session_abc/images/1.png' }, { t: 'image', href: null }]);
+  assert.deepStrictEqual(reply.blocks[0].images, ['sessions/My%20session_abc/images/2.jpg']);
+  assert.strictEqual(reply.blocks[0].missingImages, 2);
+});
+
+test('buildViewerSession labels a compaction and a command', () => {
+  const s = V.buildViewerSession(sessionOf(), [
+    ev('e1', 'user', [{ type: 'text', text: 'This session is being continued from a previous conversation that ran out of context. Summary: ...' }]),
+    ev('e2', 'user', [{ type: 'text', text: '<command-name>/review</command-name>\n<command-message>review</command-message>\n<command-args>main</command-args>' }]),
+    ev('e3', 'user', [{ type: 'text', text: '<local-command-stdout>Done: 3 files</local-command-stdout>' }]),
+    ev('e4', 'user', [{ type: 'text', text: 'A real prompt' }]),
+  ], { folder: 'sessions/x' });
+  const m = s.chat.messages;
+  assert.deepStrictEqual(m.map(x => x.labelled), ['compaction', 'command', 'command-output', undefined]);
+  assert.match(m[0].blocks[0].text, /^This session is being continued/);
+  assert.strictEqual(m[1].blocks[0].text, 'Ran /review main');
+  assert.strictEqual(m[2].blocks[0].text, 'Done: 3 files');
+  assert.strictEqual(m[3].blocks[0].text, 'A real prompt');
+  assert.ok(m.every(x => x.sender === 'human'));
+});
+
+test('buildViewerSession puts subagent messages under their Agent step', () => {
+  const sub = { parent_tool_use_id: 'ag1' };
+  const s = V.buildViewerSession(sessionOf(), [
+    ev('e1', 'user', [{ type: 'text', text: 'Research it' }]),
+    ev('e2', 'assistant', [{ type: 'tool_use', id: 'ag1', name: 'Agent', input: { description: 'Look around', prompt: 'Find X' } }]),
+    ev('c1', 'user', [{ type: 'text', text: 'Find X' }], sub),
+    ev('c2', 'assistant', [{ type: 'tool_use', id: 'g1', name: 'Grep', input: { pattern: 'X' } }], sub),
+    ev('c3', 'user', [{ type: 'tool_result', tool_use_id: 'g1', content: 'x.js' }], sub),
+    ev('c4', 'assistant', [{ type: 'text', text: 'X is in x.js' }], sub),
+    ev('e3', 'user', [{ type: 'tool_result', tool_use_id: 'ag1', content: [{ type: 'text', text: 'X is in x.js' }] }]),
+    ev('e4', 'assistant', [{ type: 'text', text: 'Found it.' }]),
+  ], { folder: 'sessions/x' });
+  const m = s.chat.messages;
+  assert.deepStrictEqual(m.map(x => [x.id, x.parent]), [['e1', null], ['e2', 'e1']]);
+  const agent = m[1].blocks[0];
+  assert.strictEqual(agent.name, 'Agent');
+  assert.strictEqual(agent.result, 'X is in x.js');
+  assert.deepStrictEqual(agent.children.map(x => [x.id, x.sender, x.parent]), [['c1', 'human', null], ['c2', 'assistant', 'c1']]);
+  assert.strictEqual(agent.children[1].blocks[0].result, 'x.js');
+  assert.strictEqual(agent.children[1].blocks[1].text, 'X is in x.js');
+  assert.strictEqual(m[1].blocks[1].text, 'Found it.');
+});
+
+test('buildViewerData keeps sessions apart from chats', () => {
+  const chats = [buildViewerChat(fixture, { folder: '' })];
+  const older = V.buildViewerSession(sessionOf({ id: 'cse_old', last_event_at: '2026-10-01T00:00:00Z' }), [ev('e1', 'user', [{ type: 'text', text: 'hi' }])], { folder: 'sessions/a' });
+  const newer = V.buildViewerSession(sessionOf({ id: 'cse_new', last_event_at: '2026-11-20T00:00:00Z' }), [ev('e1', 'user', [{ type: 'text', text: 'hi' }])], { folder: 'sessions/b' });
+  const d = buildViewerData(chats, { exported: 'x', sessions: [older, newer] });
+  assert.strictEqual(d.chats.length, 1);
+  assert.strictEqual(d.sessions.length, 2);
+  assert.deepStrictEqual(d.sessions.map(x => x.id), ['cse_new', 'cse_old']);
+  assert.ok(d.sessions.every(x => !('project' in x.chat)));
+  assert.ok(!('sessions' in buildViewerData(chats, { exported: 'x' })));
+});
+
+test("a chat's top-level image block shows from its saved file only in a session; a chat's blocks are unchanged", () => {
+  const data = { uuid: 'c', name: 'n', current_leaf_message_uuid: 'a', chat_messages: [
+    { uuid: 'a', parent_message_uuid: null, sender: 'human', content: [{ type: 'text', text: 'see' }, { type: 'image', file_uuid: 'f-9' }, { type: 'image', file_uuid: 'f-unknown' }] }] };
+  const ctx = { folder: 'Chat one', toolImages: { 'f-9': 'images/f9_pic.png' } };
+  assert.deepStrictEqual(buildViewerChat(data, ctx).messages[0].blocks, [{ t: 'text', text: 'see', cites: [] }]);
+  assert.deepStrictEqual(buildViewerChat(data, { ...ctx, sessionImages: true }).messages[0].blocks.slice(1), [{ t: 'image', href: 'Chat%20one/images/f9_pic.png' }, { t: 'image', href: null }]);
+});
+
+test('buildViewerSession joins a subagent group with no Agent step to the main branch: one root', () => {
+  const sub = { parent_tool_use_id: 'ag1' };
+  const s = V.buildViewerSession(sessionOf(), [
+    ev('e1', 'user', [{ type: 'text', text: 'Research it' }]),
+    { type: 'assistant', uuid: 'e2', created_at: 'x', stub: 'too large (3 MB)' },
+    ev('c1', 'user', [{ type: 'text', text: 'Find X' }], sub),
+    ev('c2', 'assistant', [{ type: 'text', text: 'X is in x.js' }], sub),
+    ev('e4', 'assistant', [{ type: 'text', text: 'Found it.' }]),
+    ev('e5', 'user', [{ type: 'text', text: 'Thanks' }]),
+  ], { folder: 'sessions/x' });
+  const m = s.chat.messages;
+  assert.strictEqual(m.filter(x => x.parent === null).length, 1, JSON.stringify(m.map(x => [x.id, x.parent])));
+  const ids = new Set(m.map(x => x.id));
+  assert.ok(m.every(x => x.parent === null || ids.has(x.parent)));
+  assert.strictEqual(m.find(x => x.id === 'c1').parent, 'e2');
+  const parents = m.map(x => x.parent).filter(Boolean);
+  assert.strictEqual(new Set(parents).size, parents.length, 'no message has two children: no made-up branch');
+  assert.strictEqual(s.chat.leaf, 'e5');
+});
+
+test('buildViewerSession cuts every tool input string at 2 KB; chats keep theirs', () => {
+  const big = 'w'.repeat(30000);
+  const mid = 'n'.repeat(10000);
+  const s = V.buildViewerSession(sessionOf(), [
+    ev('e1', 'assistant', [{ type: 'tool_use', id: 't1', name: 'Write', input: { file_path: '/a.txt', content: big } },
+      { type: 'tool_use', id: 't2', name: 'MultiEdit', input: { file_path: '/b.txt', edits: [{ old_string: 'o', new_string: mid }] } }]),
+  ], { folder: 'sessions/x' });
+  const [w, e] = s.chat.messages[0].blocks;
+  const marker = '\n[… full input in session.json]';
+  assert.strictEqual(w.input.content, 'w'.repeat(2048) + marker);
+  assert.strictEqual(e.input.edits[0].new_string, 'n'.repeat(2048) + marker);
+  assert.strictEqual(e.input.edits[0].old_string, 'o');
+  assert.strictEqual(w.input.file_path, '/a.txt');
+  assert.ok(!JSON.stringify(s).includes('w'.repeat(2049)));
+  const chat = buildViewerChat({ uuid: 'c', name: 'n', current_leaf_message_uuid: 'a', chat_messages: [{ uuid: 'a', parent_message_uuid: null, sender: 'assistant',
+    content: [{ type: 'tool_use', id: 'u', name: 'create_file', input: { path: '/a', file_text: mid } }] }] }, {});
+  assert.strictEqual(chat.messages[0].blocks[0].input.file_text, mid);
+});
+
+test('session hashes round-trip', () => {
+  assert.deepStrictEqual(parseHash('#session=cse_ab&msg=u1'), { session: 'cse_ab', msg: 'u1' });
+  assert.strictEqual(formatHash({ session: 'cse_ab', msg: 'u1', chat: 'x' }), '#session=cse_ab&msg=u1');
+  assert.deepStrictEqual(parseHash(formatHash({ session: 'cse_ab' })), { session: 'cse_ab' });
+});
+
+test('parseListHash reads #sessions', () => {
+  assert.deepStrictEqual(parseListHash('#sessions'), { page: 'sessions' });
+});
+
+const sessionFixture = [{ id: 'cse_1', title: 'Fix parser', chat: { id: 'cse_1', title: 'Fix parser', messages: [
+  { id: 'u1', parent: null, sender: 'human', blocks: [{ t: 'text', text: 'please refactor the zebra module' }] },
+  { id: 'u2', parent: 'u1', sender: 'assistant', blocks: [{ t: 'tool_result', text: 'secretword output' }, { t: 'text', text: 'done' }] },
+] } }];
+
+test('search finds a session prompt and groups it as a session', () => {
+  const hits = searchChats(buildSearchIndex([], sessionFixture), 'zebra');
+  assert.strictEqual(hits.length, 1);
+  assert.strictEqual(hits[0].session, 'cse_1');
+  assert.strictEqual(hits[0].msg, 'u1');
+  assert.ok(hits[0].snippet.includes('zebra'));
+  const g = groupHits(hits);
+  assert.strictEqual(g.length, 1);
+  assert.strictEqual(g[0].session, true);
+  assert.strictEqual(g[0].id, 'cse_1');
+  assert.strictEqual(searchChats(buildSearchIndex([], sessionFixture), 'parser')[0].msg, null);
+});
+
+test('search never finds tool output in a session', () => {
+  assert.deepStrictEqual(searchChats(buildSearchIndex([], sessionFixture), 'secretword'), []);
+});
+
+test('a session\'s artifacts join the Artifacts screen\'s views both ways, by short id', () => {
+  const { artifactShortId, sessionArtifacts, sessionsMaking } = require('../viewer/viewer-logic.js');
+  const { uuidToBase58 } = require('../export-core.js');
+  const u = 'abcdef01-2345-4678-89ab-cdef01234567', other = '00000000-1111-4111-8111-111111111111';
+  assert.strictEqual(artifactShortId(u), uuidToBase58(u));
+  assert.strictEqual(artifactShortId(u.toUpperCase()), uuidToBase58(u));
+  assert.strictEqual(artifactShortId('not a uuid'), '');
+  const view = { id: uuidToBase58(u), title: 'Page' };
+  const s = { id: 'cse_1', title: '<b>T</b>', artifacts: [u, u, other, 'junk'] };
+  assert.deepStrictEqual(sessionArtifacts(s, [view]), [{ id: uuidToBase58(u), title: 'Page', view }, { id: uuidToBase58(other), title: uuidToBase58(other), view: null }]);
+  assert.deepStrictEqual(sessionsMaking(view, [s, { id: 'cse_2', artifacts: [other] }, null]), [{ id: 'cse_1', title: '<b>T</b>' }]);
+  assert.deepStrictEqual(sessionsMaking(view, undefined), []);
+});

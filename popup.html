@@ -102,6 +102,10 @@
     .check { display: flex; align-items: center; gap: 10px; min-height: 40px; cursor: pointer; }
     .check input { width: 18px; height: 18px; margin: 0; accent-color: #7c3aed; flex: none; }
     .check-text { flex: 1; display: flex; flex-direction: column; }
+    .sub-check { min-height: 32px; padding-left: 28px; font-size: 12px; }
+    .sub-check input { width: 16px; height: 16px; }
+    .check input:disabled + .check-text { color: #4b5563; }
+    .sub-check:has(input:disabled) { cursor: default; }
     .sub { font-size: 12px; color: #4b5563; }
     .count { color: #4b5563; }
     .save-as { display: flex; align-items: center; gap: 8px; font-size: 13px; }
@@ -238,6 +242,14 @@
           <span class="check-text"><span>Artifacts</span><span class="sub">Every version claude.ai keeps</span></span>
           <span id="artifactCount" class="count">–</span>
         </label>
+        <label class="check">
+          <input type="checkbox" id="pickSessions" checked>
+          <span class="check-text"><span>Sessions</span><span class="sub">Claude Code and Cowork</span></span>
+        </label>
+        <label class="check sub-check" title="Their tool output can contain text from your computer.">
+          <input type="checkbox" id="exportCliSessions">
+          <span class="check-text"><span>Include CLI sessions (run on your computer)</span></span>
+        </label>
       </div>
       <div class="save-as">
         <span id="saveAsLabel">Save as</span>
@@ -283,6 +295,16 @@
           </div>
           <div class="step-bar" id="step-artifacts-bar" role="progressbar" aria-label="Artifacts" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="step-artifacts-fill"></div></div>
           <div class="step-sub" id="step-artifacts-sub" aria-live="polite"></div>
+        </li>
+        <li id="step-sessions" class="step" data-state="pending" hidden>
+          <div class="step-row">
+            <svg class="s-done" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1b5e20" stroke-width="3"><path d="M5 12l5 5L20 7"></path></svg>
+            <svg class="s-current" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="3"><circle cx="12" cy="12" r="8"></circle></svg>
+            <svg class="s-pending" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="8"></circle></svg>
+            <span class="label">Sessions</span><span class="n" id="step-sessions-count"></span>
+          </div>
+          <div class="step-bar" id="step-sessions-bar" role="progressbar" aria-label="Sessions" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="step-sessions-fill"></div></div>
+          <div class="step-sub" id="step-sessions-sub" aria-live="polite"></div>
         </li>
         <li id="step-viewer" class="step" data-state="pending" hidden>
           <div class="step-row">
@@ -380,7 +402,7 @@
         <input type="checkbox" id="showShortcuts" checked>
       </label>
     </div>
-    <div class="note-box">All or changes only, chats and artifacts, and folder or ZIP are chosen on the main screen, next to Export selected.</div>
+    <div class="note-box">All or changes only, chats, artifacts and sessions, and folder or ZIP are chosen on the main screen, next to Export selected.</div>
     <footer class="foot">
       <span id="versionText"></span>
       <a href="https://github.com/bearspear/claude-takeout#changelog" id="whatsNew" target="_blank" rel="noopener">What's new</a>
@@ -388,6 +410,7 @@
   </section>
 
   <script src="jszip.min.js"></script>
+  <script src="session-core.js"></script>
   <script src="export-core.js"></script>
   <script src="viewer/marked.min.js"></script>
   <script src="takeout-viewer.js"></script>
