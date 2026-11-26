@@ -1378,6 +1378,69 @@ function groupChats(chats) {
   return { recents, projects: [...groups.values()].sort((a, b) => a.name.localeCompare(b.name)) };
 }
 
+// ---- Lists: the sidebar's recent chats, the Projects page and the All chats page ----
+
+const RECENT_LIMIT = 30;
+const LIST_PAGE = 200;
+
+const hasDate = c => typeof c.updated === 'string' && !Number.isNaN(Date.parse(c.updated));
+
+// The n newest chats by `updated`; chats without a parseable date come last, ties keep their order. Doesn't mutate.
+function recentChats(chats, n) {
+  const dated = chats.filter(hasDate).sort((a, b) => Date.parse(b.updated) - Date.parse(a.updated));
+  return dated.concat(chats.filter(c => !hasDate(c))).slice(0, n);
+}
+
+// Projects that have chats: { key, name, description, updated, chats }. key is the project's id, else 'i' + its index in
+// `projects`. Chats are newest first; updated is the newest of the project's and its chats'; the list is newest first,
+// no date last. A second project of one name is "Name (2)" (by order in the list).
+function projectList(chats, projects) {
+  const byProject = new Map();
+  for (const chat of chats) {
+    if (!chat.project) continue;
+    if (!byProject.has(chat.project)) byProject.set(chat.project, []);
+    byProject.get(chat.project).push(chat);
+  }
+  const time = iso => (iso ? Date.parse(iso) : -Infinity);
+  const out = [];
+  let extra = projects.length; // a project not in the list (an older viewer's inline copy) gets a key past its end
+  for (const [project, list] of byProject) {
+    const sorted = recentChats(list, list.length);
+    let updated = hasDate(project) ? project.updated : '';
+    for (const c of sorted) if (hasDate(c) && time(c.updated) > time(updated)) updated = c.updated;
+    const at = projects.indexOf(project);
+    out.push({ key: project.id || 'i' + (at === -1 ? extra++ : at), name: project.name || 'Untitled project',
+      description: typeof project.description === 'string' ? project.description : '', updated, chats: sorted });
+  }
+  out.sort((a, b) => (a.updated === '') - (b.updated === '') || time(b.updated) - time(a.updated));
+  const named = new Map();
+  for (const p of out) {
+    const n = (named.get(p.name) || 0) + 1;
+    named.set(p.name, n);
+    if (n > 1) p.name = `${p.name} (${n})`;
+  }
+  return out;
+}
+
+// The items where every word of query is in at least one of fields(item), case folded. An empty query keeps all.
+function filterByText(items, query, fields) {
+  const words = String(query).trim().split(/\s+/).filter(Boolean).map(w => foldCase(w).lower);
+  if (!words.length) return items.slice();
+  return items.filter(item => {
+    const texts = fields(item).map(t => foldCase(t == null ? '' : t).lower);
+    return words.every(w => texts.some(t => t.includes(w)));
+  });
+}
+
+// #projects, #chats or #project=<key>, whole hashes only; anything else is null.
+function parseListHash(hash) {
+  if (hash === '#projects') return { page: 'projects' };
+  if (hash === '#chats') return { page: 'chats' };
+  const m = /^#project=(.+)$/.exec(hash);
+  if (!m) return null;
+  try { return { page: 'project', key: decodeURIComponent(m[1]) }; } catch (e) { return null; }
+}
+
 // ---- Download: a file the viewer holds, saved through a blob: link (Chrome ignores download on a file: link and
 // opens the file instead, so the viewer never links a file on disk for this) ----
 
@@ -1973,5 +2036,5 @@ function pageZoom(wrapper, frame, opts = {}) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
+  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
 }

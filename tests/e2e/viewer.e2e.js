@@ -1113,10 +1113,11 @@ async function unzipMegaZip(out) {
     fs.writeFileSync(sfile, buildHtml(searchSet, '2026-11-05T12:00:00Z', c => projectOf[c.uuid] ? { project: { name: projectOf[c.uuid], fileDir: 'project/files', fileNames: [], docs: [] } } : {}));
     const find = await open({}, 'file://' + sfile);
     const labels = await find.page.$$eval('#recents .lab', l => l.map(x => x.textContent));
-    check('groups: Recents then projects by name', labels.join('|') === 'Recents|Alpha|Zeta', labels.join('|'));
-    const under = async name => find.page.$$eval('#recents .lab', (labs, n) => { const lab = labs.find(l => l.textContent === n); return [...lab.nextElementSibling.querySelectorAll('.item')].map(i => i.textContent); }, name);
-    check('groups: project chats sit under their project', (await under('Alpha')).join() === 'Alpha notes,Alpha two' && (await under('Zeta')).join() === 'Zeta roadmap');
-    check('groups: project chats are not in Recents', !(await under('Recents')).some(t => /Alpha|Zeta/.test(t)) && (await under('Recents')).includes('Loose chat'));
+    check('groups: only Recents, no project headings', labels.join('|') === 'Recents', labels.join('|'));
+    const recentTitles = await find.page.$$eval('#recents .item', l => l.map(x => x.textContent));
+    check('groups: Recents holds every chat, newest first', recentTitles.join() === 'Branchy chat,Far chat,Spans chat,Zeta roadmap,Alpha notes,Alpha two,Loose chat,Many hits', recentTitles.join());
+    check('groups: Projects counts Alpha and Zeta', await find.page.locator('#projects-nav').isVisible() && (await find.page.textContent('#projects-nav .n')) === '2');
+    check('groups: no View all with 30 chats or fewer', (await find.page.locator('#recents .view-all').count()) === 0);
     check('groups: footer still counts every chat', (await find.page.textContent('#archive')) === 'Archive · 8 chats · read-only');
     const box8 = find.page.locator('.find input');
     await box8.fill('magenta'); await find.page.waitForTimeout(250);

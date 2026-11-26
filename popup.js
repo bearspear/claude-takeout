@@ -3234,7 +3234,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       widgetKey,
       published,
       flags: viewerFlags(errorCollector.warnings, errorCollector.notes),
-      project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions, CTViewer.TEXT_EMBED_LIMIT)
+      project: viewerProject(data, projectFiles, projectFileMapping, projectFilesPath, projectUploads, projectInstructions, CTViewer.TEXT_EMBED_LIMIT, projectMetadataJson)
     });
   } catch (err) {
     console.error('Could not build the viewer chat:', err);

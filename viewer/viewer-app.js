@@ -874,15 +874,20 @@ function renderProject(chat) {
   const box = document.getElementById('project');
   const project = chat.project;
   const added = addedForChat(allAdded, chat.id);
-  const items = project ? [
-    ...(project.files || []).map(f => ({ name: f.name, href: f.href, text: null })),
-    ...(project.docs || []).map(d => ({ name: d.name, href: null, text: d.text })),
-  ] : [];
-  const instructions = project && typeof project.instructions === 'string' ? project.instructions : '';
-  box.hidden = !items.length && !instructions && !added.length;
+  const items = projectItems(project);
+  const instructions = projectInstructions(project);
+  // In a viewer with more than one chat, a project chat links its project page.
+  const entry = project && allChats.length > 1 ? listProjects.find(p => p.chats.includes(chat)) : null;
+  box.hidden = !items.length && !instructions && !added.length && !entry;
   box.replaceChildren();
   if (box.hidden) return;
   const name = (project && project.name) || 'Untitled';
+  if (entry) {
+    const link = el('a', 'open-project', 'Open project');
+    link.href = projectHash(entry.key);
+    box.append(link);
+    if (!items.length && !instructions) box.append(el('div', 'project-line', `Project · ${name}`));
+  }
   // Folds, closed by default, because a project's prompt can be long.
   const fold = (kind, label) => {
     const details = el('details', kind);
@@ -1846,8 +1851,10 @@ let drawn = ''; // the chat and leaf in the column, which a change of file leave
 // The only way to change chat, leaf or file. Writes the hash, then renders. options.replace edits the
 // current history entry; options.anchor keeps a message in place; options.fromHash means the hash is already set.
 function navigate(state, options = {}) {
-  const fromArtifacts = artifactsOn;
+  const fromScreen = artifactsOn || listsOn;
   showArtifacts(false);
+  showLists(false);
+  restoreTitles();
   const known = chatsById.get(state.chat);
   const chat = known || allChats[0];
   if (!chat) return;
@@ -1863,7 +1870,7 @@ function navigate(state, options = {}) {
     else location.hash = hash;
   } else if (options.fromHash && hash !== location.hash) history.replaceState(null, '', hash);
   shown = hash;
-  if (fromArtifacts) document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
+  if (fromScreen) document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
   if (stepper && stepper.chat !== chat.id) closeStepper();
   showPanel(chat, open);
   const column = `${chat.id}\n${leaf}`;
@@ -1874,7 +1881,8 @@ function navigate(state, options = {}) {
 
 function onHashChange() {
   if (routeArtifacts(location.hash)) return;
-  if (location.hash === shown && !artifactsOn) return;
+  if (routeLists(location.hash)) return;
+  if (location.hash === shown && !artifactsOn && !listsOn) return;
   // An archive with artifacts and no chats has nothing else to show.
   if (!allChats.length && artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); return; }
   navigate(parseHash(location.hash), { fromHash: true });
@@ -1884,7 +1892,19 @@ function onHashChange() {
 // #artifacts is its grid, #a=<id> an artifact and #ac=<chat>.<file> an In chats file; every other hash is the chat viewer's.
 let artifactsApp = null; // the mounted app, only when the data has artifacts
 let artifactsOn = false;
-let titlesBefore = null; // the chat's page and top bar titles, put back when the screen closes
+// The chat's page and top bar titles, taken when leaving the chat for either screen (Artifacts or the lists screen) and
+// put back only on returning to a chat, so going Projects -> Artifacts -> a chat still ends on the chat's titles.
+let titlesBefore = null;
+
+// The titles to keep when a screen opens: the chat's, or null when a screen already shows (they were kept then).
+function chatTitles() {
+  return artifactsOn || listsOn ? null : { page: document.title, top: document.getElementById('title').textContent };
+}
+
+function restoreTitles() {
+  if (titlesBefore) { document.title = titlesBefore.page; document.getElementById('title').textContent = titlesBefore.top; }
+  titlesBefore = null;
+}
 
 // The entry shows when the screen has something (artifactsEntry): a listed artifact or a file made in a chat.
 function setupArtifacts(data) {
@@ -1906,7 +1926,7 @@ function setupArtifacts(data) {
 function routeArtifacts(hash) {
   if (!artifactsApp) return false;
   // Taken before the app sets the page's title to the artifact's.
-  const titles = artifactsOn ? null : { page: document.title, top: document.getElementById('title').textContent };
+  const titles = chatTitles();
   if (!artifactsApp.route(hash)) return false;
   shown = hash;
   const wasOn = artifactsOn;
@@ -1916,10 +1936,11 @@ function routeArtifacts(hash) {
   return true;
 }
 
-// titles: what to put back when the screen closes (opening only).
+// titles: what to put back on returning to a chat (opening from the chat only). Closing leaves the titles to navigate.
 function showArtifacts(on, titles = null) {
   if (on === artifactsOn) return;
   if (!on && artifactsApp) artifactsApp.route(''); // lets go of an open artifact, whose page would keep running
+  if (on) showLists(false);
   artifactsOn = on;
   document.body.classList.toggle('artifacts-on', on);
   document.getElementById('artifacts-screen').hidden = !on;
@@ -1928,13 +1949,266 @@ function showArtifacts(on, titles = null) {
   if (on) {
     closeStepper();
     closeFilesMenu(false);
-    titlesBefore = titles;
+    if (titles) titlesBefore = titles;
     title.textContent = 'Artifacts';
     document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
-  } else {
-    if (titlesBefore) { document.title = titlesBefore.page; title.textContent = titlesBefore.top; }
-    titlesBefore = null;
   }
+}
+
+// ---- The lists screen: Projects (#projects), a project (#project=<key>) and All chats (#chats), in #lists-screen in
+// place of the chat. Only in a viewer with more than one chat. ----
+let listsOn = false;
+let listProjects = []; // projectList over the chats, built once at start
+let listState = null; // { page: 'projects' | 'project' | 'chats', project }: what the screen shows
+
+function listPageTitle(state) {
+  if (state.page === 'project') return state.project.name;
+  return state.page === 'chats' ? 'Chats' : 'Projects';
+}
+
+// The page itself. state: { page, project } (project: an entry of listProjects, on a project page only). Every name,
+// description and instruction is text: el/textContent only.
+function renderListPage(state) {
+  const screen = document.getElementById('lists-screen');
+  const heading = el('h2', 'list-title', listPageTitle(state));
+  heading.tabIndex = -1;
+  const page = el('div', `list-page ${state.page}-page`);
+  const now = Date.now();
+  if (state.page === 'projects') projectsPage(page, heading, now);
+  else if (state.page === 'project') projectPage(page, heading, state.project, now);
+  else chatsPage(page, heading, now);
+  screen.replaceChildren(page);
+  screen.scrollTop = 0;
+}
+
+const projectHash = key => `#project=${encodeURIComponent(key)}`;
+const chatCount = n => `${n} chat${n === 1 ? '' : 's'}`;
+
+// A filter box that calls onInput with its text.
+function listFilter(label, onInput) {
+  const input = el('input', 'list-filter');
+  input.type = 'search';
+  input.placeholder = label;
+  input.setAttribute('aria-label', label);
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.addEventListener('input', () => onInput(input.value));
+  return input;
+}
+
+function projectsPage(page, heading, now) {
+  const grid = el('div', 'project-grid');
+  const draw = query => {
+    const matches = filterByText(listProjects, query, p => [p.name, p.description]);
+    grid.replaceChildren(...matches.map(p => projectCard(p, now)));
+    if (!matches.length) grid.append(el('p', 'list-empty', 'No projects match.'));
+  };
+  page.append(heading, listFilter('Filter projects', draw), grid);
+  draw('');
+}
+
+function projectCard(p, now) {
+  const card = el('a', 'project-card');
+  card.href = projectHash(p.key);
+  card.append(el('span', 'name', p.name));
+  if (p.description) card.append(el('span', 'desc', p.description));
+  const when = relativeTime(p.updated, now);
+  card.append(el('span', 'meta', [chatCount(p.chats.length), when && `Updated ${when}`].filter(Boolean).join(' · ')));
+  return card;
+}
+
+// Chat rows, LIST_PAGE at a time with Show more. withProject: name each chat's project, linked to its page.
+function chatRows(chats, now, withProject) {
+  const box = el('div', 'chat-rows');
+  const projectOf = new Map();
+  if (withProject) for (const p of listProjects) for (const c of p.chats) projectOf.set(c, p);
+  const row = chat => {
+    const line = el('div', 'chat-line');
+    const link = el('a', 'chat-row', chat.title || 'Untitled');
+    link.href = formatHash({ chat: chat.id });
+    line.append(link);
+    const sub = el('div', 'chat-sub');
+    const p = projectOf.get(chat);
+    if (p) {
+      const a = el('a', 'chat-project', p.name);
+      a.href = projectHash(p.key);
+      sub.append(a);
+    }
+    const when = relativeTime(chat.updated, now);
+    if (when) sub.append(el('span', 'chat-when', `Updated ${when}`));
+    if (sub.childElementCount) line.append(sub);
+    return line;
+  };
+  if (!chats.length) { box.append(el('p', 'list-empty', 'No chats match.')); return box; }
+  const list = el('div', 'chat-list-rows');
+  const more = el('button', 'show-more', 'Show more');
+  more.type = 'button';
+  let count = 0;
+  const step = () => {
+    const next = chats.slice(count, count + LIST_PAGE);
+    count += next.length;
+    list.append(...next.map(row));
+    if (count >= chats.length) more.remove();
+  };
+  // The first new row takes focus, so a keyboard reader goes on where the list grew.
+  more.addEventListener('click', () => {
+    const at = count;
+    step();
+    const first = list.children[at];
+    if (first) first.querySelector('a.chat-row').focus({ preventScroll: true });
+  });
+  box.append(list, more);
+  step();
+  return box;
+}
+
+// Chat rows and a filter box that redraws them from every chat in `chats`, not only the rows shown.
+function filteredChatRows(chats, now, withProject) {
+  let rows = chatRows(chats, now, withProject);
+  const filter = listFilter('Filter chats', query => {
+    const next = chatRows(filterByText(chats, query, c => [c.title]), now, withProject);
+    rows.replaceWith(next);
+    rows = next;
+  });
+  return { rows, filter };
+}
+
+function chatsPage(page, heading, now) {
+  const all = recentChats(allChats, allChats.length);
+  const { rows, filter } = filteredChatRows(all, now, true);
+  page.append(heading, el('p', 'list-count', chatCount(all.length)), filter, rows);
+}
+
+// A project's files and documents, as the chat's fold bar and the project page show them.
+// A project's instructions text, or '' when it has none.
+function projectInstructions(project) {
+  return project && typeof project.instructions === 'string' ? project.instructions : '';
+}
+
+function projectItems(project) {
+  return project ? [
+    ...(project.files || []).map(f => ({ name: f.name, href: f.href, text: null })),
+    ...(project.docs || []).map(d => ({ name: d.name, href: null, text: d.text })),
+  ] : [];
+}
+
+// About 8 lines of instructions, counting a long line as the lines it wraps to in the panel.
+const INSTRUCTION_LINES = 8;
+const INSTRUCTION_LINE_CHARS = 40;
+function longInstructions(text) {
+  let lines = 0;
+  for (const line of String(text).split('\n')) {
+    lines += Math.max(1, Math.ceil(line.length / INSTRUCTION_LINE_CHARS));
+    if (lines > INSTRUCTION_LINES) return true;
+  }
+  return false;
+}
+
+// entry: a listProjects entry. Its chats share one project object (linkProjects), which holds instructions and knowledge.
+function projectPage(page, heading, entry, now) {
+  const project = entry.chats.length ? entry.chats[0].project : null;
+  const back = el('a', 'back');
+  back.href = '#projects';
+  back.append(icon('chevron'), el('span', '', 'All projects'));
+  page.append(back, heading);
+  if (entry.description) page.append(el('p', 'project-desc', entry.description));
+  const cols = el('div', 'project-cols');
+  const chats = el('section', 'project-chats');
+  chats.append(el('h3', '', `Chats · ${entry.chats.length}`));
+  const { rows, filter } = filteredChatRows(entry.chats, now, false);
+  if (entry.chats.length > 10) chats.append(filter);
+  chats.append(rows);
+  const panel = el('aside', 'project-panel');
+  panel.setAttribute('aria-label', 'Instructions and knowledge');
+  const instructions = projectInstructions(project);
+  const instr = el('section', 'panel-part');
+  instr.append(el('h3', '', 'Instructions'));
+  if (instructions.trim()) {
+    const text = el('div', 'project-instructions', instructions);
+    instr.append(text);
+    if (longInstructions(instructions)) {
+      text.classList.add('collapsed');
+      const toggle = el('button', 'more-toggle', 'Show more');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.addEventListener('click', () => {
+        const open = !text.classList.toggle('collapsed');
+        toggle.textContent = open ? 'Show less' : 'Show more';
+        toggle.setAttribute('aria-expanded', String(open));
+      });
+      instr.append(toggle);
+      // The line count is a guess; once drawn, text that fits whole loses the cut and the toggle.
+      requestAnimationFrame(() => {
+        if (text.isConnected && text.scrollHeight <= text.clientHeight + 1) {
+          text.classList.remove('collapsed');
+          toggle.remove();
+        }
+      });
+    }
+  } else instr.append(el('p', 'list-empty', 'No instructions'));
+  const know = el('section', 'panel-part');
+  const items = projectItems(project);
+  know.append(el('h3', '', items.length ? `Knowledge · ${items.length}` : 'Knowledge'));
+  if (items.length) {
+    const row = el('div', 'chips');
+    row.append(...items.map(item => fileChip(item, fileNote(item.name, item.text))));
+    know.append(row);
+  } else know.append(el('p', 'list-empty', 'No knowledge'));
+  panel.append(instr, know);
+  cols.append(chats, panel);
+  page.append(cols);
+}
+
+// Opens a lists screen hash, routing it directly when it is already the hash (no hashchange would fire then).
+function openList(hash) {
+  if (location.hash !== hash) location.hash = hash;
+  else routeLists(hash);
+}
+
+// Shows the screen when hash is one of its own; returns whether it was. An unknown project key shows Projects.
+function routeLists(hash) {
+  if (allChats.length <= 1) return false;
+  const want = parseListHash(hash);
+  if (!want) return false;
+  const titles = chatTitles();
+  const project = want.page === 'project' ? listProjects.find(p => p.key === want.key) || null : null;
+  listState = project ? { page: 'project', project } : { page: want.page === 'project' ? 'projects' : want.page, project: null };
+  shown = hash;
+  showLists(true, titles);
+  return true;
+}
+
+// titles: what to put back on returning to a chat (opening from the chat only). Opening draws listState's page.
+function showLists(on, titles = null) {
+  if (!on && !listsOn) return;
+  const screen = document.getElementById('lists-screen');
+  const projectsNav = document.getElementById('projects-nav');
+  const chatsNav = document.getElementById('chats-nav');
+  if (!on) {
+    listsOn = false;
+    document.body.classList.remove('lists-on');
+    screen.hidden = true;
+    screen.replaceChildren();
+    projectsNav.setAttribute('aria-current', 'false');
+    chatsNav.setAttribute('aria-current', 'false');
+    return;
+  }
+  showArtifacts(false);
+  if (!listsOn && titles) titlesBefore = titles;
+  listsOn = true;
+  document.body.classList.add('lists-on');
+  screen.hidden = false;
+  closeStepper();
+  closeFilesMenu(false);
+  document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
+  projectsNav.setAttribute('aria-current', String(listState.page !== 'chats'));
+  chatsNav.setAttribute('aria-current', String(listState.page === 'chats'));
+  const name = listPageTitle(listState);
+  document.getElementById('title').textContent = name;
+  document.title = `${name} - Claude Takeout`;
+  renderListPage(listState);
+  const heading = screen.querySelector('h2.list-title');
+  if (heading) heading.focus({ preventScroll: true });
 }
 
 // The artifacts app's way into a chat: chat is an index into the data's chats; the message, when it's there, is
@@ -1980,10 +2254,33 @@ function chatItem(chat) {
   return item;
 }
 
+// A sidebar entry for the lists screen: closes the phone drawer, then opens hash.
+function setupListEntry(id, count, hash) {
+  const nav = document.getElementById(id);
+  nav.querySelector('.n').textContent = String(count);
+  nav.setAttribute('aria-label', `${nav.querySelector('span').textContent}, ${count}`);
+  nav.hidden = false;
+  nav.addEventListener('click', () => { setDrawer(false); openList(hash); });
+}
+
 function renderSidebar(chats) {
-  const { recents, projects } = groupChats(chats);
   const holder = document.getElementById('recents');
   const list = document.getElementById('chat-list');
+  document.getElementById('archive').textContent = `Archive · ${chats.length} chat${chats.length === 1 ? '' : 's'} · read-only`;
+  if (chats.length > 1) {
+    // Projects live on their own pages: Recents is the newest chats, project chats included.
+    list.append(...recentChats(chats, RECENT_LIMIT).map(chatItem));
+    if (chats.length > RECENT_LIMIT) {
+      const all = el('button', 'view-all', 'View all');
+      all.type = 'button';
+      all.addEventListener('click', () => { setDrawer(false); openList('#chats'); });
+      holder.append(all);
+    }
+    if (listProjects.length) setupListEntry('projects-nav', listProjects.length, '#projects');
+    setupListEntry('chats-nav', chats.length, '#chats');
+    return;
+  }
+  const { recents, projects } = groupChats(chats);
   list.append(...recents.map(chatItem));
   if (!recents.length) holder.firstElementChild.remove();
   for (const project of projects) {
@@ -1992,7 +2289,6 @@ function renderSidebar(chats) {
     holder.append(el('div', 'lab', project.name), group);
   }
   if (!recents.length) list.remove();
-  document.getElementById('archive').textContent = `Archive · ${chats.length} chat${chats.length === 1 ? '' : 's'} · read-only`;
 }
 
 // ---- Search ----
@@ -2412,6 +2708,9 @@ function setupSearch() {
     const t = e.target;
     if (t && (t.closest('input, textarea, select, [contenteditable]') || popup)) return;
     e.preventDefault();
+    // A page of the lists screen with a filter box takes the cursor there instead.
+    const filter = listsOn && document.querySelector('#lists-screen input.list-filter');
+    if (filter) { filter.focus(); filter.select(); return; }
     setDrawer(true);
     input.focus();
     input.select();
@@ -2444,6 +2743,7 @@ function start() {
   setupStepper();
   allChats = linkProjects(data);
   allChats.forEach(chat => chatsById.set(chat.id, chat));
+  if (allChats.length > 1) listProjects = projectList(allChats, Array.isArray(data.projects) ? data.projects : []);
   renderSidebar(data.chats);
   setupSearch();
   try { setWrap(localStorage.getItem(WRAP_KEY) === '1', false); } catch (e) { /* no storage: off */ }
@@ -2464,6 +2764,7 @@ function start() {
   window.addEventListener('hashchange', onHashChange);
   if (!data.chats.length) document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
   if (routeArtifacts(location.hash)) return;
+  if (routeLists(location.hash)) return;
   if (data.chats.length) navigate(parseHash(location.hash), { replace: true });
   else if (artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); }
 }

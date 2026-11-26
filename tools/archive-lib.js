@@ -1245,7 +1245,7 @@ function chatFromDisk(archive, chat, store = null) {
     // The export patches the name into original.json; an older one may only have it in project.json.
     const named = { ...data, project_uuid: data.project_uuid || (data.project && data.project.uuid) || 'project',
       project: { ...(data.project || {}), name: (data.project && data.project.name) || (meta && meta.name) || '' } };
-    project = core.viewerProject(named, docs, mapping, fileDir, fileNames(path.resolve(chat.dir, fileDir)), instructions, CTViewer.TEXT_EMBED_LIMIT);
+    project = core.viewerProject(named, docs, mapping, fileDir, fileNames(path.resolve(chat.dir, fileDir)), instructions, CTViewer.TEXT_EMBED_LIMIT, meta);
   }
 
   const viewerChat = CTViewer.buildViewerChat(data, {

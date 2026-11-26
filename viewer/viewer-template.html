@@ -75,16 +75,66 @@ svg.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor
 #results mark { background: none; color: var(--ink); font-weight: 600; }
 mark { background: rgba(201, 100, 66, .28); color: inherit; border-radius: 3px; padding: 0 1px; }
 .pill { font-size: 12px; color: var(--mute); padding: 11px 20px 13px; border-top: 1px solid var(--line); }
-#artifacts-nav { display: flex; align-items: center; gap: 9px; width: calc(100% - 20px); margin: 0 10px 6px; padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: var(--soft); font-size: 13.5px; text-align: left; cursor: pointer; }
-#artifacts-nav[hidden] { display: none; }
-#artifacts-nav:hover { background: var(--hover); }
-#artifacts-nav[aria-current="true"] { background: var(--active); color: var(--ink); }
-#artifacts-nav .n { margin-left: auto; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
+#artifacts-nav, .nav { display: flex; align-items: center; gap: 9px; width: calc(100% - 20px); margin: 0 10px 6px; padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: var(--soft); font-size: 13.5px; text-align: left; cursor: pointer; }
+#artifacts-nav[hidden], .nav[hidden] { display: none; }
+#artifacts-nav:hover, .nav:hover { background: var(--hover); }
+#artifacts-nav[aria-current="true"], .nav[aria-current="true"] { background: var(--active); color: var(--ink); }
+#artifacts-nav .n, .nav .n { margin-left: auto; font-size: 12px; color: var(--mute); font-variant-numeric: tabular-nums; }
+.view-all { display: block; margin: 4px 10px 0; padding: 7px 10px; border: 0; border-radius: 8px; background: none; color: var(--mute); font-size: 13px; text-align: left; cursor: pointer; }
+.view-all:hover { background: var(--hover); color: var(--ink); }
 
 /* The Artifacts screen takes the chat's place: the artifacts app, in its own shadow root and styles */
 #artifacts-screen { flex: 1; min-height: 0; overflow: auto; }
 #artifacts-screen[hidden] { display: none; }
 body.artifacts-on #top, body.artifacts-on #project, body.artifacts-on #findbar, body.artifacts-on #scroll, body.artifacts-on #panel { display: none; }
+
+/* The lists screen (Projects, a project, All chats) also takes the chat's place; the top bar shows its title */
+#lists-screen { flex: 1; min-height: 0; overflow: auto; padding: 8px 20px 40px; }
+#lists-screen[hidden] { display: none; }
+#lists-screen .list-page { max-width: 1040px; margin: 0 auto; }
+#lists-screen .list-title { margin: 12px 0 16px; font: 500 24px/1.25 var(--serif); color: var(--ink); overflow-wrap: anywhere; }
+#lists-screen .list-title:focus { outline: none; }
+#lists-screen h3 { margin: 0 0 10px; font-size: 13px; font-weight: 500; color: var(--mute); }
+#lists-screen .list-filter { display: block; width: 100%; max-width: 420px; margin: 0 0 16px; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--card); color: var(--ink); font: 14px var(--sans); }
+#lists-screen .list-filter::placeholder { color: var(--faint); }
+#lists-screen .list-count { margin: -8px 0 12px; color: var(--mute); font-size: 13px; }
+#lists-screen .list-empty { margin: 6px 0; color: var(--mute); font-size: 13.5px; }
+.project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.project-card { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 14px 16px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; color: var(--ink); text-decoration: none; }
+.project-card:hover { border-color: var(--line-strong); }
+.project-card .name { font-size: 15px; font-weight: 500; line-height: 1.35; color: var(--ink); overflow-wrap: anywhere; }
+.project-card .desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; color: var(--soft); font-size: 13.5px; overflow-wrap: anywhere; }
+.project-card .meta { margin-top: auto; color: var(--mute); font-size: 12.5px; }
+.list-page .back { display: inline-flex; align-items: center; gap: 4px; margin-top: 12px; color: var(--mute); font-size: 13px; text-decoration: none; }
+.list-page .back:hover { color: var(--ink); }
+.list-page .back .ic { width: 14px; height: 14px; transform: rotate(180deg); }
+.project-page .list-title { margin-top: 6px; }
+.project-desc { margin: -6px 0 20px; color: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; }
+.project-cols { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 28px; align-items: start; }
+.chat-line { position: relative; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.chat-line:hover { background: var(--hover); }
+.chat-row { display: block; color: var(--ink); font-weight: 500; text-decoration: none; overflow-wrap: anywhere; }
+.chat-row::after { content: ''; position: absolute; inset: 0; } /* the whole line opens the chat */
+.chat-sub { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 2px; color: var(--mute); font-size: 12.5px; }
+.chat-project { position: relative; z-index: 1; color: var(--soft); text-decoration: none; overflow-wrap: anywhere; }
+.chat-project:hover { color: var(--ink); text-decoration: underline; }
+.show-more { margin: 14px 0; padding: 7px 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--card); color: var(--ink); font-size: 13px; cursor: pointer; }
+.show-more:hover { background: var(--hover); }
+.project-panel { display: flex; flex-direction: column; gap: 14px; }
+.panel-part { padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.project-instructions { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.5; color: var(--ink); }
+.project-instructions.collapsed { max-height: 12em; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent); mask-image: linear-gradient(to bottom, #000 70%, transparent); }
+.project-panel .chips { justify-content: flex-start; }
+.project-panel .chip { max-width: 100%; }
+#project .open-project { float: right; margin: 7px 0 0 12px; color: var(--soft); font-size: 13px; text-decoration: none; }
+#project .open-project:hover { color: var(--ink); text-decoration: underline; }
+#project .project-line { padding: 7px 0; color: var(--mute); font-size: 13px; }
+@media (max-width: 760px) {
+  #lists-screen { padding: 8px 16px 40px; }
+  .project-cols { grid-template-columns: minmax(0, 1fr); }
+  .project-panel { order: -1; }
+}
+body.lists-on #project, body.lists-on #findbar, body.lists-on #scroll, body.lists-on #panel, body.lists-on #meta, body.lists-on #files-button, body.lists-on #files-menu { display: none; }
 
 /* Top bar */
 #main { flex: 1; min-width: 0; display: flex; flex-direction: column; position: relative; }
@@ -522,6 +572,8 @@ button.chip:hover { border-color: var(--line-strong); }
     </label>
     <label class="find-files" title="Also look in uploads and in files Claude made. Their text loads as you search, so this is slower on a large archive."><input type="checkbox" id="search-files"> Also search inside files</label>
     <button id="artifacts-nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg><span>Artifacts</span><span class="n"></span></button>
+    <button id="projects-nav" class="nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z"/></svg><span>Projects</span><span class="n"></span></button>
+    <button id="chats-nav" class="nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"/></svg><span>Chats</span><span class="n"></span></button>
     <div id="recents">
       <div class="lab">Recents</div>
       <div id="chat-list"></div>
@@ -550,6 +602,7 @@ button.chip:hover { border-color: var(--line-strong); }
     </div>
     <div id="scroll"><div id="chat"></div></div>
     <div id="artifacts-screen" role="region" aria-label="Artifacts" hidden></div>
+    <div id="lists-screen" role="region" aria-label="Projects and chats" hidden></div>
   </main>
   <aside id="panel" aria-label="File" hidden>
     <div id="panel-head"></div>

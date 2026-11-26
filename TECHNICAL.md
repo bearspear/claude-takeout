@@ -1,6 +1,6 @@
 # Claude Takeout - Technical Documentation
 
-How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Kept current; last checked at v1.23.0.
+How Claude Takeout gets a conversation from claude.ai, what the conversation JSON looks like, and how each part of an export is built from it. Kept current; last checked at v1.23.0, its viewer section updated for v1.24.0.
 
 This document describes behavior and names the functions that implement it, rather than copying their code. Search for a function name to find it. `CLAUDE.md` is the shorter developer primer, with the file map and conventions. `README.md` has the user-facing changelog.
 
@@ -462,13 +462,15 @@ Every export includes `viewer.html`, a single page that shows the chats as they 
 **Building it.** `takeout-viewer.js` (`CTViewer`) holds the data contract:
 
 - `buildViewerChat` turns one payload into the viewer's shape: every branch, rendered tool calls, file versions, uploads, the project. A file named in `ctx.flags` (`viewerFlags` over the export's warnings and notes; the old-archive tool gets warnings from `errors.txt` with `warningsFromReport`, which reads the Warnings section only, so a rebuilt viewer has no draft or helper badges) gets `flag`, and the viewer shows a "May not match" badge on its cards, a note in the Files list and an explanation in the file panel; a `draft` or `helper` flag shows a softer **Draft** or **Helper script** badge.
-- `buildViewerData` gathers the chats and stores each distinct project once in `data.projects`; a chat's `project` is an index into it. Projects are grouped by a cheap key, then compared in full only within a group.
+- `buildViewerData` gathers the chats and stores each distinct project once in `data.projects`; a chat's `project` is an index into it. `viewerProject(meta)` (export-core.js) gives each project `id`, `description` and `updated` from `project.json`'s `uuid`, `description` and `updated_at`, never the old-archive tool's placeholder id `project`; `popup.js` and `chatFromDisk` pass that metadata. `buildViewerData` merges projects by `id`: the newest `updated` wins, then the one with more docs plus files, else the first. A project without an id is grouped by a cheap key and compared in full only within a group, as before.
 - `moveUploadText` moves upload text, and generated-file version text other than stylesheets and scripts, over `UPLOAD_INLINE_LIMIT` (64 KB of UTF-8) into parts of at most `PART_LIMIT` (4 MB). Each part is `viewer-files/part-NNNN.js`, which calls `window.__archivePart(n, { u0: text, f0: text, ... })`. When a part can't load, an upload or a file version falls back to its own copy in `uploads/` or `artefacts/`, when there is one.
 - `assembleViewer` inlines the template, the data (`<script id="data">`), the app, `marked`, KaTeX and highlight.js into one HTML string. `writeViewer` in `popup.js` adds it to the ZIP.
 
 A chat that fails to build gets a `viewer` warning. A viewer that fails as a whole is reported in the status line. Neither stops the export.
 
 **Running it.** `viewer/viewer-app.js` renders the page, and `viewer/viewer-logic.js` holds its pure functions (tested in Node):
+
+- Projects and All chats (only when the viewer has more than one chat). The sidebar's Recents are `recentChats(chats, RECENT_LIMIT)` (30, newest first, undated last); `projectList` orders projects by `updated` (the newest of the project's own date and its chats' dates, undated last), names a repeated name "Name (2)", and gives each a key (its id, else `i<n>`); `filterByText` is a case-insensitive substring match (`foldCase` only lowercases, like sidebar search); `parseListHash` reads `#projects`, `#project=<key>` and `#chats` (`LIST_PAGE` = 200 rows at a time). `routeLists` sets `listState` and `showLists` shows `#lists-screen`, hiding the chat area and Artifacts (`body.lists-on`); `renderListPage` draws `projectsPage`, `projectPage` or `chatsPage` with `chatRows`. Titles are saved and restored by `chatTitles`/`restoreTitles`. `/` focuses the page's filter box; filter text is not kept across visits. `renderProject` adds `a.open-project` (and a "Project · name" line when there is nothing to fold) in such a viewer. Every name is set as text.
 
 - Chat text goes through escaped HTML, text placeholders and `sanitizeHtml`.
 - Math renders with KaTeX.

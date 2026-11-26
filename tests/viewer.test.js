@@ -1,7 +1,7 @@
 // Viewer page logic: message tree and hash state.
 const { test } = require('node:test');
 const assert = require('node:assert');
-const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, artifactTabs, relativeTime, parseArtifactHash } = require('../viewer/viewer-logic.js');
+const { chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, protectMath, placeholderMark, splitPlaceholders, addCitations, beforeCitation, toolInputText, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, findPlan, groupChats, linkProjects, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, artifactTabs, relativeTime, parseArtifactHash, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash } = require('../viewer/viewer-logic.js');
 const { ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgDataUrl, pageFit, SIZE_SCRIPT } = require('../viewer/viewer-logic.js');
 
 const msgs = [
@@ -2398,4 +2398,111 @@ test('preview documents end with the measuring script', () => {
   assert.ok(/postMessage/.test(SIZE_SCRIPT) && /ct-size/.test(SIZE_SCRIPT) && /top/.test(SIZE_SCRIPT));
   // The load report can precede the first layout; the root's ResizeObserver reports again after it.
   assert.ok(/new ResizeObserver\(/.test(SIZE_SCRIPT) && /observe\(document\.documentElement\)/.test(SIZE_SCRIPT));
+});
+
+test('buildViewerData keeps the new project fields and merges one id', () => {
+  const mk = (id, updated, project) => ({ id, title: id, updated, messages: [], project });
+  const doc = { name: 'D', text: 't' };
+  const base = { name: 'Alpha', files: [], instructions: '', docs: [] };
+  const chats = [
+    mk('a', '2026-01-01', { ...base, id: 'p-1', description: 'old', updated: '2026-01-01T00:00:00Z' }),
+    mk('b', '2026-02-01', { ...base, id: 'p-1', description: 'new', updated: '2026-03-01T00:00:00Z' }),
+    mk('c', '2026-03-01', { ...base, name: 'Other' })
+  ];
+  const d = buildViewerData(chats, {});
+  assert.strictEqual(d.projects.length, 2);
+  const p1 = d.projects.find(p => p.id === 'p-1');
+  assert.strictEqual(p1.description, 'new');
+  assert.strictEqual(p1.updated, '2026-03-01T00:00:00Z');
+  assert.deepStrictEqual(d.chats.filter(c => c.id !== 'c').map(c => c.project), [d.projects.indexOf(p1), d.projects.indexOf(p1)]);
+  // a tie on updated prefers the copy with more docs and files
+  const tie = buildViewerData([
+    mk('a', '2026-01-01', { ...base, id: 'p-2', description: 'thin' }),
+    mk('b', '2026-02-01', { ...base, id: 'p-2', description: 'full', docs: [doc] })
+  ], {});
+  assert.strictEqual(tie.projects.length, 1);
+  assert.strictEqual(tie.projects[0].description, 'full');
+  // buildViewerChat passes the strings through, and only strings
+  const c = buildViewerChat({ uuid: 'c', name: 'n', chat_messages: [] }, { project: { name: 'N', fileDir: 'f', id: 'p-3', description: 'D', updated: 5 } });
+  assert.strictEqual(c.project.id, 'p-3');
+  assert.strictEqual(c.project.description, 'D');
+  assert.ok(!('updated' in c.project));
+});
+
+test('recentChats: newest first, undated last, n at most', () => {
+  const c = (id, updated) => ({ id, updated });
+  const got = recentChats([c('a', '2026-01-01T00:00:00Z'), c('b'), c('c', '2026-03-01T00:00:00Z'), c('d', '2026-02-01T00:00:00Z')], 3);
+  assert.deepStrictEqual(got.map(x => x.id), ['c', 'd', 'a']);
+  assert.deepStrictEqual(recentChats([c('b'), c('a', '2026-01-01T00:00:00Z')], 30).map(x => x.id), ['a', 'b']);
+  assert.strictEqual(RECENT_LIMIT, 30); assert.strictEqual(LIST_PAGE, 200);
+});
+test('projectList: keyed by id or index, named, sorted by latest activity', () => {
+  const P1 = { id: 'p1', name: 'Alpha', updated: '2026-01-05T00:00:00Z' }, P2 = { name: '' }, P3 = { name: 'Alpha' };
+  const projects = [P1, P2, P3, { id: 'empty', name: 'No chats' }];
+  const chats = [{ id: 'x', project: P1, updated: '2026-01-01T00:00:00Z' }, { id: 'y', project: P2, updated: '2026-04-01T00:00:00Z' },
+    { id: 'z', project: P3, updated: '2026-02-01T00:00:00Z' }, { id: 'w', project: P1, updated: '2026-03-01T00:00:00Z' }, { id: 'v', project: null }];
+  const list = projectList(chats, projects);
+  assert.deepStrictEqual(list.map(p => [p.key, p.name, p.updated, p.chats.map(c => c.id).join()]), [
+    ['i1', 'Untitled project', '2026-04-01T00:00:00Z', 'y'],
+    ['p1', 'Alpha', '2026-03-01T00:00:00Z', 'w,x'],
+    ['i2', 'Alpha (2)', '2026-02-01T00:00:00Z', 'z'],
+  ]);
+});
+test('filterByText: every word, folded, across fields', () => {
+  const items = [{ t: 'CAFÉ plans', d: 'Q3' }, { t: 'Other', d: 'café q3' }, { t: 'None', d: '' }];
+  assert.deepStrictEqual(filterByText(items, 'café q3', i => [i.t, i.d]).map(i => i.t), ['CAFÉ plans', 'Other']);
+  assert.strictEqual(filterByText(items, '  ', i => [i.t]).length, 3);
+});
+test('parseListHash: whole hashes only', () => {
+  assert.deepStrictEqual(parseListHash('#projects'), { page: 'projects' });
+  assert.deepStrictEqual(parseListHash('#chats'), { page: 'chats' });
+  assert.deepStrictEqual(parseListHash('#project=p%201'), { page: 'project', key: 'p 1' });
+  for (const h of ['', '#project=', '#projects&x=1', '#chat=abc', '#artifacts', '#chats2']) assert.strictEqual(parseListHash(h), null, h);
+});
+
+test('recentChats and projectList compare dates as times, not strings', () => {
+  // 10:00+05:00 is 05:00Z, older than 06:00Z, though it sorts later as a string.
+  const a = { id: 'a', updated: '2026-01-01T10:00:00+05:00' }, b = { id: 'b', updated: '2026-01-01T06:00:00Z' };
+  assert.deepStrictEqual(recentChats([a, b], 2).map(c => c.id), ['b', 'a']);
+  const P = { id: 'p', name: 'P', updated: '2026-01-01T10:00:00+05:00' };
+  assert.strictEqual(projectList([{ id: 'c', project: P, updated: '2026-01-01T06:00:00Z' }], [P])[0].updated, '2026-01-01T06:00:00Z');
+});
+test('projectList: a project date that does not parse is ignored', () => {
+  const Bad = { name: 'Bad', updated: 'not a date' }, Good = { name: 'Good' };
+  const list = projectList([{ id: 'x', project: Bad, updated: '2026-01-01T00:00:00Z' }, { id: 'y', project: Good, updated: '2026-02-01T00:00:00Z' }], [Bad, Good]);
+  assert.deepStrictEqual(list.map(p => [p.name, p.updated]), [['Good', '2026-02-01T00:00:00Z'], ['Bad', '2026-01-01T00:00:00Z']]);
+});
+test('projectList: an undated chat comes last in its project and leaves the date alone', () => {
+  const P = { name: 'P' };
+  const [p] = projectList([{ id: 'u', project: P }, { id: 'd', project: P, updated: '2026-01-01T00:00:00Z' }], [P]);
+  assert.deepStrictEqual(p.chats.map(c => c.id), ['d', 'u']);
+  assert.strictEqual(p.updated, '2026-01-01T00:00:00Z');
+});
+test('projectList: projects not in the list still get distinct keys', () => {
+  const A = { name: 'A' }, B = { name: 'B' };
+  const keys = projectList([{ id: 'x', project: A, updated: '2026-02-01T00:00:00Z' }, { id: 'y', project: B, updated: '2026-01-01T00:00:00Z' }], []).map(p => p.key);
+  assert.strictEqual(new Set(keys).size, 2);
+  assert.ok(keys.every(k => /^i\d+$/.test(k)), keys.join());
+});
+test('filterByText: a blank query gives a copy', () => {
+  const items = [1, 2];
+  const got = filterByText(items, '', String);
+  assert.deepStrictEqual(got, items);
+  assert.notStrictEqual(got, items);
+});
+test('parseListHash: bad percent-encoding is no list hash', () => {
+  assert.strictEqual(parseListHash('#project=%E0'), null);
+});
+test('buildViewerData: an id project and an id-less one of the same name stay apart', () => {
+  const mk = (id, project) => ({ id, title: id, updated: '2026-01-01', messages: [], files: {}, project });
+  const d = buildViewerData([mk('a', { name: 'Same', id: 'p1', files: [], docs: [] }), mk('b', { name: 'Same', files: [], docs: [] })], { exported: 'x' });
+  assert.strictEqual(d.projects.length, 2);
+  assert.notStrictEqual(d.chats[0].project, d.chats[1].project);
+});
+test('buildViewerData: merging by id compares dates as times', () => {
+  const mk = (id, project) => ({ id, title: id, updated: '2026-01-01', messages: [], files: {}, project });
+  const older = { name: 'Old', id: 'p', updated: '2026-01-01T10:00:00+05:00', files: [], docs: [] };
+  const newer = { name: 'New', id: 'p', updated: '2026-01-01T06:00:00Z', files: [], docs: [] };
+  assert.strictEqual(buildViewerData([mk('a', older), mk('b', newer)], { exported: 'x' }).projects[0].name, 'New');
+  assert.strictEqual(buildViewerData([mk('a', newer), mk('b', older)], { exported: 'x' }).projects[0].name, 'New');
 });

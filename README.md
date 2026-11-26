@@ -13,7 +13,7 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
 - **Artifact Extraction** - Extracts and embeds created files
 - **Thinking Blocks** - Preserves Claude's reasoning with proper summaries
 - **Tool Use Display** - Formatted display of web search, bash, file operations
-- **Offline Viewer** - Every ZIP includes `viewer.html`, a page for reading the exported chats in a browser without the extension
+- **Offline Viewer** - Every ZIP includes `viewer.html`, a page for reading the exported chats in a browser without the extension, with Projects and All chats pages when there are several chats
 - **Two sections** - **This chat** and **Everything on claude.ai**, each with its own buttons; a Settings screen holds the few preferences
 - **Sidebar Mode** - Keep the exporter open while browsing conversations
 - **No Configuration Required** - Auto-detects your organization ID
@@ -402,6 +402,9 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.24.0
+
+- **Projects and All chats in the viewer** - In a viewer with more than one chat, the sidebar now has **Projects** and **Chats** entries above a shorter Recents list of the 30 newest chats, with **View all** below it. **Projects** is a grid of cards (name, description, chat count, last update) with a filter box; a card opens the project's page: its chats, newest first, beside its instructions and knowledge files. **Chats** lists every chat, 200 at a time with **Show more**, each with a link to its project. A chat's project section has **Open project**, and shows "Project · <name>" when the project has no instructions or knowledge. The sidebar shows Projects only when some chat belongs to a project. Filter boxes are on Projects, on Chats, and on a project page only when it has more than 10 chats; press `/` on a page to jump to its filter. The filter ignores case, not accents, and clears when you leave the page. Projects in the viewer now carry their id, description and last update, and the same project in several chats is shown once, from its newest copy.
 ### v1.23.3
 
 - **Tiles when far out on the Design canvas** - Below 20%, as at Fit for a big design, each board is a plain tile with its title and its page doesn't run, so seeing the whole of a design with many boards stays quick. Zoom in to 20% or more and the boards near the view come back to life.

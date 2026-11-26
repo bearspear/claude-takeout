@@ -2633,7 +2633,7 @@ function buildViewerDeliveries(deliveredFiles) {
 // One chat's project for the viewer, or null outside a project. A document too
 // long to embed (or instructions too long) is cut here and stays whole on disk.
 // limit: CTViewer.TEXT_EMBED_LIMIT.
-function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileNames, instructions = '', limit = 2 * 1024 * 1024) {
+function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileNames, instructions = '', limit = 2 * 1024 * 1024, meta = null) {
   if (!data.project_uuid && !data.project?.uuid) return null;
   const docs = Object.entries(projectFiles).map(([filename, content]) => {
     const name = projectFileMapping[filename];
@@ -2642,7 +2642,16 @@ function viewerProject(data, projectFiles, projectFileMapping, fileDir, fileName
   });
   const text = String(instructions == null ? '' : instructions);
   const cut = text.length > limit ? `${text.slice(0, limit)}\n[... truncated: the whole text is in project/prompt_template.md]` : text;
-  return { name: data.project?.name || '', fileDir, fileNames, docs, instructions: cut };
+  const project = { name: data.project?.name || '', fileDir, fileNames, docs, instructions: cut };
+  // id: the record's, else the chat's real project uuid (tools/archive-lib.js stands 'project' in when it has none).
+  const id = [meta && meta.uuid, data.project_uuid, data.project?.uuid].find((v) => typeof v === 'string' && v && v !== 'project');
+  if (id) project.id = id;
+  if (meta && typeof meta.description === 'string' && meta.description) {
+    const d = fixMojibake(meta.description);
+    project.description = d.length > limit ? `${d.slice(0, limit)}\n[... truncated: the whole text is in project/project.json]` : d;
+  }
+  if (meta && typeof meta.updated_at === 'string') project.updated = meta.updated_at;
+  return project;
 }
 
 // The file types a link may open from disk: documents, images, audio, video, archives and plain data. A copy of
