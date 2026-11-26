@@ -224,6 +224,24 @@
 - [ ] **Step 4: Run** `sh tests/run.sh` (the version test checks README against the manifest) and `export.e2e.js`, `panel.e2e.js` — Expected: PASS.
 - [ ] **Step 5: Commit** — "v1.25.0: Code and Cowork sessions in Export All".
 
+### Task 11: A Sessions checkbox (owner's change)
+
+**Files:**
+- Modify: `popup.html` + `sidepanel.html` (main screen: `#pickSessions` checkbox after `#pickArtifacts`, title "Sessions", sub "Claude Code and Cowork", and under it `#exportCliSessions` "Include CLI sessions (run on your computer)" moved from the Settings screen), `popup.js` (`defaultSettings.exportAllSessions = true`; `exportPlan`, `currentPlan`, `exportDisabledReason`, `everythingSummary`, `renderEverything`, `handoffChoices`/`handoffFrom`/`takeHandoff` carry `sessions`; `runSelected` passes `withSessions`; `bulkExportZip` honours `options.withChats` and `options.withSessions`), docs (README v1.25.0 entry, USAGE, TECHNICAL, CLAUDE.md §9)
+- Test: `tests/screens.test.js`, `tests/e2e/panel.e2e.js` if it pins the main screen
+
+**Interfaces:**
+- `exportPlan(choices)`: `run: 'bulk'` when Chats or Sessions is ticked; plan gains `withChats: boolean`, `withSessions: boolean`. Nothing ticked → disabled as today ("Tick Chats, Artifacts or Sessions").
+- `bulkExportZip({ withChats, withArtifacts, withSessions, ... })`: `withChats === false` → no chat list request and no chat folders (index.md says chats were not chosen); `withSessions === false` → no `listSessions` request, no session step, no Sessions row, no record change for sessions. Defaults: `true` (existing callers unchanged).
+- The CLI sub-checkbox is disabled while Sessions is unticked; its value persists in `settings.exportCliSessions`.
+- The handoff note's choices gain `sessions: boolean` (an older note without it means `true`).
+
+- [ ] **Step 1: Write the failing tests:** `exportPlan maps Sessions`; `Sessions unticked: no listSessions request and no Sessions row`; `Sessions alone exports sessions without asking for chats`; `the CLI sub-option is under Sessions, disabled when Sessions is unticked, and saved`; `the Settings screen no longer has the CLI switch`; `the summary names sessions`; `a handoff note carries sessions (missing means true)`; pages stay identical.
+- [ ] **Step 2: Run** `node --test tests/screens.test.js` — Expected: FAIL.
+- [ ] **Step 3: Implement.**
+- [ ] **Step 4: Run** `sh tests/run.sh`, and export, panel, sessions e2e (env inline) — Expected: PASS.
+- [ ] **Step 5: Commit** — "Sessions: their own checkbox on the main screen".
+
 ### Before Task 1 (controller, read-only)
 
 Re-check the endpoints on the owner's account from the browser, structure only: the list and events still answer as in the spec, and whether the list continues with `resume_token` (a query parameter name). If the list continues, add that loop to Task 2's `listSessions` (≤ 20 pages) in place of the `incomplete` flag, and ledger it as a ruling.

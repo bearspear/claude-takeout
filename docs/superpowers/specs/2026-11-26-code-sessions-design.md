@@ -52,6 +52,10 @@ A **CLI session** (`environment_kind: bridge`) runs on the owner's own computer:
 - A failure of the session endpoints never fails or slows the chats: it is one warning, and the export goes on.
 - No change to the chat export, the viewer's CSP, sandboxing or `sanitizeHtml`.
 
+## Owner's change (2026-11-26, after the build): a Sessions checkbox
+
+Sessions get their own choice on the main screen, replacing "sessions come with the Chats box": a third checkbox **Sessions** ("Claude Code and Cowork") under Artifacts, on by default (`settings.exportAllSessions`, default `true`), with the CLI switch moved under it as a sub-option "Include CLI sessions (run on your computer)" (`settings.exportCliSessions`, default `false`, disabled while Sessions is unticked; removed from the Settings screen). Sessions can be exported alone. Where the sections below say "with the Chats box ticked", read "with the Sessions box ticked".
+
 ## The export
 
 ### Order in `bulkExportZip`
