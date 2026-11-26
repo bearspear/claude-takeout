@@ -874,15 +874,20 @@ function renderProject(chat) {
   const box = document.getElementById('project');
   const project = chat.project;
   const added = addedForChat(allAdded, chat.id);
-  const items = project ? [
-    ...(project.files || []).map(f => ({ name: f.name, href: f.href, text: null })),
-    ...(project.docs || []).map(d => ({ name: d.name, href: null, text: d.text })),
-  ] : [];
+  const items = projectItems(project);
   const instructions = project && typeof project.instructions === 'string' ? project.instructions : '';
-  box.hidden = !items.length && !instructions && !added.length;
+  // In a viewer with more than one chat, a project chat links its project page.
+  const entry = project && allChats.length > 1 ? listProjects.find(p => p.chats.includes(chat)) : null;
+  box.hidden = !items.length && !instructions && !added.length && !entry;
   box.replaceChildren();
   if (box.hidden) return;
   const name = (project && project.name) || 'Untitled';
+  if (entry) {
+    const link = el('a', 'open-project', 'Open project');
+    link.href = projectHash(entry.key);
+    box.append(link);
+    if (!items.length && !instructions) box.append(el('div', 'project-line', `Project · ${name}`));
+  }
   // Folds, closed by default, because a project's prompt can be long.
   const fold = (kind, label) => {
     const details = el('details', kind);
@@ -1961,13 +1966,191 @@ function listPageTitle(state) {
   return state.page === 'chats' ? 'Chats' : 'Projects';
 }
 
-// The page itself. state: { page, project } (project: an entry of listProjects, on a project page only).
+// The page itself. state: { page, project } (project: an entry of listProjects, on a project page only). Every name,
+// description and instruction is text: el/textContent only.
 function renderListPage(state) {
   const screen = document.getElementById('lists-screen');
   const heading = el('h2', 'list-title', listPageTitle(state));
   heading.tabIndex = -1;
-  screen.replaceChildren(heading);
+  const page = el('div', `list-page ${state.page}-page`);
+  const now = Date.now();
+  if (state.page === 'projects') projectsPage(page, heading, now);
+  else if (state.page === 'project') projectPage(page, heading, state.project, now);
+  else chatsPage(page, heading, now);
+  screen.replaceChildren(page);
   screen.scrollTop = 0;
+}
+
+const projectHash = key => `#project=${encodeURIComponent(key)}`;
+const chatCount = n => `${n} chat${n === 1 ? '' : 's'}`;
+
+// A filter box that calls onInput with its text.
+function listFilter(label, onInput) {
+  const input = el('input', 'list-filter');
+  input.type = 'search';
+  input.placeholder = label;
+  input.setAttribute('aria-label', label);
+  input.autocomplete = 'off';
+  input.spellcheck = false;
+  input.addEventListener('input', () => onInput(input.value));
+  return input;
+}
+
+function projectsPage(page, heading, now) {
+  const grid = el('div', 'project-grid');
+  const draw = query => {
+    const matches = filterByText(listProjects, query, p => [p.name, p.description]);
+    grid.replaceChildren(...matches.map(p => projectCard(p, now)));
+    if (!matches.length) grid.append(el('p', 'list-empty', 'No projects match.'));
+  };
+  page.append(heading, listFilter('Filter projects', draw), grid);
+  draw('');
+}
+
+function projectCard(p, now) {
+  const card = el('a', 'project-card');
+  card.href = projectHash(p.key);
+  card.append(el('span', 'name', p.name));
+  if (p.description) card.append(el('span', 'desc', p.description));
+  const when = relativeTime(p.updated, now);
+  card.append(el('span', 'meta', [chatCount(p.chats.length), when && `Updated ${when}`].filter(Boolean).join(' · ')));
+  return card;
+}
+
+// Chat rows, LIST_PAGE at a time with Show more. withProject: name each chat's project, linked to its page.
+function chatRows(chats, now, withProject) {
+  const box = el('div', 'chat-rows');
+  const projectOf = new Map();
+  if (withProject) for (const p of listProjects) for (const c of p.chats) projectOf.set(c, p);
+  const row = chat => {
+    const line = el('div', 'chat-line');
+    const link = el('a', 'chat-row', chat.title || 'Untitled');
+    link.href = formatHash({ chat: chat.id });
+    line.append(link);
+    const sub = el('div', 'chat-sub');
+    const p = projectOf.get(chat);
+    if (p) {
+      const a = el('a', 'chat-project', p.name);
+      a.href = projectHash(p.key);
+      sub.append(a);
+    }
+    const when = relativeTime(chat.updated, now);
+    if (when) sub.append(el('span', 'chat-when', `Updated ${when}`));
+    if (sub.childElementCount) line.append(sub);
+    return line;
+  };
+  if (!chats.length) { box.append(el('p', 'list-empty', 'No chats match.')); return box; }
+  const list = el('div', 'chat-list-rows');
+  const more = el('button', 'show-more', 'Show more');
+  more.type = 'button';
+  let count = 0;
+  const step = () => {
+    const next = chats.slice(count, count + LIST_PAGE);
+    count += next.length;
+    list.append(...next.map(row));
+    if (count >= chats.length) more.remove();
+  };
+  // The first new row takes focus, so a keyboard reader goes on where the list grew.
+  more.addEventListener('click', () => {
+    const at = count;
+    step();
+    const first = list.children[at];
+    if (first) first.querySelector('a.chat-row').focus({ preventScroll: true });
+  });
+  box.append(list, more);
+  step();
+  return box;
+}
+
+function chatsPage(page, heading, now) {
+  const all = recentChats(allChats, allChats.length);
+  let rows = chatRows(all, now, true);
+  const filter = listFilter('Filter chats', query => {
+    const next = chatRows(filterByText(all, query, c => [c.title]), now, true);
+    rows.replaceWith(next);
+    rows = next;
+  });
+  page.append(heading, el('p', 'list-count', chatCount(all.length)), filter, rows);
+}
+
+// A project's files and documents, as the chat's fold bar and the project page show them.
+function projectItems(project) {
+  return project ? [
+    ...(project.files || []).map(f => ({ name: f.name, href: f.href, text: null })),
+    ...(project.docs || []).map(d => ({ name: d.name, href: null, text: d.text })),
+  ] : [];
+}
+
+// About 8 lines of instructions, counting a long line as the lines it wraps to in the panel.
+const INSTRUCTION_LINES = 8;
+const INSTRUCTION_LINE_CHARS = 40;
+function longInstructions(text) {
+  let lines = 0;
+  for (const line of String(text).split('\n')) {
+    lines += Math.max(1, Math.ceil(line.length / INSTRUCTION_LINE_CHARS));
+    if (lines > INSTRUCTION_LINES) return true;
+  }
+  return false;
+}
+
+// entry: a listProjects entry. Its chats share one project object (linkProjects), which holds instructions and knowledge.
+function projectPage(page, heading, entry, now) {
+  const project = entry.chats.length ? entry.chats[0].project : null;
+  const back = el('a', 'back');
+  back.href = '#projects';
+  back.append(icon('chevron'), el('span', '', 'All projects'));
+  page.append(back, heading);
+  if (entry.description) page.append(el('p', 'project-desc', entry.description));
+  const cols = el('div', 'project-cols');
+  const chats = el('section', 'project-chats');
+  chats.append(el('h3', '', `Chats · ${entry.chats.length}`));
+  let rows = chatRows(entry.chats, now, false);
+  if (entry.chats.length > 10) {
+    chats.append(listFilter('Filter chats', query => {
+      const next = chatRows(filterByText(entry.chats, query, c => [c.title]), now, false);
+      rows.replaceWith(next);
+      rows = next;
+    }));
+  }
+  chats.append(rows);
+  const panel = el('aside', 'project-panel');
+  panel.setAttribute('aria-label', 'Instructions and knowledge');
+  const instructions = project && typeof project.instructions === 'string' ? project.instructions : '';
+  const instr = el('section', 'panel-part');
+  instr.append(el('h3', '', 'Instructions'));
+  if (instructions.trim()) {
+    const text = el('div', 'project-instructions', instructions);
+    instr.append(text);
+    if (longInstructions(instructions)) {
+      text.classList.add('collapsed');
+      const toggle = el('button', 'more-toggle', 'Show more');
+      toggle.type = 'button';
+      toggle.setAttribute('aria-expanded', 'false');
+      toggle.addEventListener('click', () => {
+        const open = !text.classList.toggle('collapsed');
+        toggle.textContent = open ? 'Show less' : 'Show more';
+        toggle.setAttribute('aria-expanded', String(open));
+      });
+      instr.append(toggle);
+    }
+  } else instr.append(el('p', 'list-empty', 'No instructions'));
+  const know = el('section', 'panel-part');
+  const items = projectItems(project);
+  know.append(el('h3', '', items.length ? `Knowledge · ${items.length}` : 'Knowledge'));
+  if (items.length) {
+    const row = el('div', 'chips');
+    row.append(...items.map(item => fileChip(item, fileNote(item.name, item.text))));
+    know.append(row);
+  } else know.append(el('p', 'list-empty', 'No knowledge'));
+  panel.append(instr, know);
+  cols.append(chats, panel);
+  page.append(cols);
+}
+
+// Opens a lists screen hash, routing it directly when it is already the hash (no hashchange would fire then).
+function openList(hash) {
+  if (location.hash !== hash) location.hash = hash;
+  else routeLists(hash);
 }
 
 // Shows the screen when hash is one of its own; returns whether it was. An unknown project key shows Projects.
@@ -2065,11 +2248,7 @@ function setupListEntry(id, count, hash) {
   nav.querySelector('.n').textContent = String(count);
   nav.setAttribute('aria-label', `${nav.querySelector('span').textContent}, ${count}`);
   nav.hidden = false;
-  nav.addEventListener('click', () => {
-    setDrawer(false);
-    if (location.hash !== hash) location.hash = hash;
-    else routeLists(hash);
-  });
+  nav.addEventListener('click', () => { setDrawer(false); openList(hash); });
 }
 
 function renderSidebar(chats) {
@@ -2082,7 +2261,7 @@ function renderSidebar(chats) {
     if (chats.length > RECENT_LIMIT) {
       const all = el('button', 'view-all', 'View all');
       all.type = 'button';
-      all.addEventListener('click', () => { setDrawer(false); location.hash = '#chats'; });
+      all.addEventListener('click', () => { setDrawer(false); openList('#chats'); });
       holder.append(all);
     }
     if (listProjects.length) setupListEntry('projects-nav', listProjects.length, '#projects');
@@ -2517,6 +2696,9 @@ function setupSearch() {
     const t = e.target;
     if (t && (t.closest('input, textarea, select, [contenteditable]') || popup)) return;
     e.preventDefault();
+    // A page of the lists screen with a filter box takes the cursor there instead.
+    const filter = listsOn && document.querySelector('#lists-screen input.list-filter');
+    if (filter) { filter.focus(); filter.select(); return; }
     setDrawer(true);
     input.focus();
     input.select();

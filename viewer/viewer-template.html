@@ -91,8 +91,49 @@ body.artifacts-on #top, body.artifacts-on #project, body.artifacts-on #findbar, 
 /* The lists screen (Projects, a project, All chats) also takes the chat's place; the top bar shows its title */
 #lists-screen { flex: 1; min-height: 0; overflow: auto; padding: 8px 20px 40px; }
 #lists-screen[hidden] { display: none; }
-#lists-screen .list-title { margin: 12px auto 16px; max-width: 760px; font: 500 24px/1.25 var(--serif); color: var(--ink); overflow-wrap: anywhere; }
+#lists-screen .list-page { max-width: 1040px; margin: 0 auto; }
+#lists-screen .list-title { margin: 12px 0 16px; font: 500 24px/1.25 var(--serif); color: var(--ink); overflow-wrap: anywhere; }
 #lists-screen .list-title:focus { outline: none; }
+#lists-screen h3 { margin: 0 0 10px; font-size: 13px; font-weight: 500; color: var(--mute); }
+#lists-screen .list-filter { display: block; width: 100%; max-width: 420px; margin: 0 0 16px; padding: 8px 12px; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--card); color: var(--ink); font: 14px var(--sans); }
+#lists-screen .list-filter::placeholder { color: var(--faint); }
+#lists-screen .list-count { margin: -8px 0 12px; color: var(--mute); font-size: 13px; }
+#lists-screen .list-empty { margin: 6px 0; color: var(--mute); font-size: 13.5px; }
+.project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+.project-card { display: flex; flex-direction: column; gap: 6px; min-width: 0; padding: 14px 16px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; color: var(--ink); text-decoration: none; }
+.project-card:hover { border-color: var(--line-strong); }
+.project-card .name { font-size: 15px; font-weight: 500; line-height: 1.35; color: var(--ink); overflow-wrap: anywhere; }
+.project-card .desc { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; overflow: hidden; color: var(--soft); font-size: 13.5px; overflow-wrap: anywhere; }
+.project-card .meta { margin-top: auto; color: var(--mute); font-size: 12.5px; }
+.list-page .back { display: inline-flex; align-items: center; gap: 4px; margin-top: 12px; color: var(--mute); font-size: 13px; text-decoration: none; }
+.list-page .back:hover { color: var(--ink); }
+.list-page .back .ic { width: 14px; height: 14px; transform: rotate(180deg); }
+.project-page .list-title { margin-top: 6px; }
+.project-desc { margin: -6px 0 20px; color: var(--soft); white-space: pre-wrap; overflow-wrap: anywhere; }
+.project-cols { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 28px; align-items: start; }
+.chat-line { position: relative; padding: 10px 12px; border-bottom: 1px solid var(--line); }
+.chat-line:hover { background: var(--hover); }
+.chat-row { display: block; color: var(--ink); font-weight: 500; text-decoration: none; overflow-wrap: anywhere; }
+.chat-row::after { content: ''; position: absolute; inset: 0; } /* the whole line opens the chat */
+.chat-sub { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: 2px; color: var(--mute); font-size: 12.5px; }
+.chat-project { position: relative; z-index: 1; color: var(--soft); text-decoration: none; overflow-wrap: anywhere; }
+.chat-project:hover { color: var(--ink); text-decoration: underline; }
+.show-more { margin: 14px 0; padding: 7px 14px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--card); color: var(--ink); font-size: 13px; cursor: pointer; }
+.show-more:hover { background: var(--hover); }
+.project-panel { display: flex; flex-direction: column; gap: 14px; }
+.panel-part { padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--card); }
+.project-instructions { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13.5px; line-height: 1.5; color: var(--ink); }
+.project-instructions.collapsed { max-height: 12em; overflow: hidden; -webkit-mask-image: linear-gradient(to bottom, #000 70%, transparent); mask-image: linear-gradient(to bottom, #000 70%, transparent); }
+.project-panel .chips { justify-content: flex-start; }
+.project-panel .chip { max-width: 100%; }
+#project .open-project { float: right; margin: 7px 0 0 12px; color: var(--soft); font-size: 13px; text-decoration: none; }
+#project .open-project:hover { color: var(--ink); text-decoration: underline; }
+#project .project-line { padding: 7px 0; color: var(--mute); font-size: 13px; }
+@media (max-width: 760px) {
+  #lists-screen { padding: 8px 16px 40px; }
+  .project-cols { grid-template-columns: minmax(0, 1fr); }
+  .project-panel { order: -1; }
+}
 body.lists-on #project, body.lists-on #findbar, body.lists-on #scroll, body.lists-on #panel, body.lists-on #meta, body.lists-on #files-button, body.lists-on #files-menu { display: none; }
 
 /* Top bar */
