@@ -6,7 +6,7 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
 
 - **Multiple Export Formats** - Markdown, Markdown + files, ZIP Archive, JSON
 - **ZIP Archive Export** - Full archive with responses, artifacts, metadata, code snippets
-- **Bulk Export** - Export all your Claude conversations, or only what changed, and your claude.ai artifacts, into a folder or one ZIP, with progress and a Stop button
+- **Bulk Export** - Export all your Claude conversations, or only what changed, and your claude.ai artifacts, into a folder or one ZIP, with progress and a Stop button; your Cowork and Claude Code sessions come with the chats
 - **Project Support** - Exports project files, system prompts, and prefixes filenames with project name
 - **Keyboard Shortcuts** - Quick export with Alt+key combinations
 - **Branched Conversation Handling** - Correctly follows conversation tree
@@ -401,6 +401,13 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.25.0
+
+- **Cowork and Claude Code sessions in Export All** - claude.ai lists Cowork sessions (from the desktop app) and Claude Code sessions (run from the command line with remote control) apart from your chats, so Export All never saved them. With **Chats** ticked it now saves each Cowork session in a `sessions/` folder: `transcript.md` (your prompts, Claude's replies, thinking and one line per tool step), `README.md` (dates, counts and the artifacts it made, linked), `session.json` and its `images/`. `index.md` lists them in a Sessions table. **Changes only** takes a session again when it has new activity, also when no chat changed.
+- **Claude Code command-line sessions are off by default** - Their tool output can hold text from your own computer (a `.env` file, a command's output). Turn on **Include Claude Code CLI sessions** in Settings to save them; with it off they are not fetched, and `index.md` says how many were left out. Before anything is written, `<system-reminder>` text is removed and common key shapes (Anthropic, GitHub, AWS and Slack keys, bearer tokens, private keys) are replaced by `[masked]`. That is best effort: read a session before you share it.
+- **Sessions in the viewer** - A **Sessions** entry (only when the export has sessions) opens a list, and a session opens as a read-only transcript with its steps folded and its pictures. Search finds session prompts and replies. An artifact made in a session says "Made in session" and links to it, and the session links its artifacts. The old-archive tools (`build_viewer.js`, `merge_archives.js`) keep and merge sessions, and recognize an archive that holds only sessions.
+- **Limits** - claude.ai's session list returns at most 100 sessions and can't be paged; a list of exactly 100 warns that it may be incomplete. Not saved: the files a session wrote (the artifacts it published are saved), sessions claude.ai doesn't list, and a session's `claude.ai/chat/...` address.
 
 ### v1.24.3
 

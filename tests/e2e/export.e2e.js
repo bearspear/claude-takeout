@@ -20,7 +20,13 @@ const server={
   {type:'tool_use',id:'s1',name:'SendUserFile',input:{files:['/tmp/out/Minutes.odt']}},{type:'tool_result',tool_use_id:'s1',name:'SendUserFile',content:[{type:'text',text:'ok'}],file_deliveries:[{file_uuid:DEL1,path:'/tmp/out/Minutes.odt'}]},
   {type:'tool_use',id:'s2',name:'SendUserFile',input:{files:['/tmp/out/Minutes.odt']}},{type:'tool_result',tool_use_id:'s2',name:'SendUserFile',content:[{type:'text',text:'ok'}],file_deliveries:[{file_uuid:DEL2,path:'/tmp/out/Minutes.odt'}]}]}),
  [B]:Object.assign(conv(B,LONG+'1'),{project_uuid:PROJ}),[C]:Object.assign(conv(C,LONG+'2'),{project_uuid:PROJ})};
-let projectDownloads=0;
+let projectDownloads=0,cliEventRequests=0;
+// Sessions: one Cowork session (two pages of events) and one CLI session (left out by default).
+const SC='cse_cowork0001',SB='cse_bridge0001';
+const sess=(id,kind,title)=>({id,title,status_bucket:'idle',environment_kind:kind,config:{origin:kind==='bridge'?'claude_code_cli':'desktop_app'},created_at:'2026-11-05T09:00:00Z',updated_at:'2026-11-05T09:30:00Z',last_event_at:'2026-11-05T09:30:00Z',tags:['x'],external_metadata:{artifacts:[]}});
+const ev=(n,type,content)=>({uuid:'ev-'+n,created_at:'2026-11-05T09:0'+n+':00Z',type,message:{role:type,content}});
+const sessionPages=[{data:[ev(1,'user','Plan the trip'),ev(2,'assistant',[{type:'text',text:'Here is a plan'}])],first_id:'ev-1',has_more:true,last_id:'ev-2'},
+ {data:[ev(3,'user','Thanks'),ev(4,'assistant',[{type:'text',text:'You are welcome'}])],first_id:'ev-3',has_more:false,last_id:'ev-4'}];
 (async()=>{
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'takeout-e2e-'));
  const ctx=await chromium.launchPersistentContext(dir,{headless:false,executablePath:process.env.CHROME_EXE,acceptDownloads:true,args:['--headless=new',`--disable-extensions-except=${EXT}`,`--load-extension=${EXT}`]});
@@ -36,7 +42,8 @@ let projectDownloads=0;
    if(u.includes('/wiggle/download-file'))return r.fulfill({status:200,contentType:'application/pdf',body:bin});
    if(m=u.match(/chat_conversations\/([0-9a-f-]{36})/))return r.fulfill(server[m[1]]?{json:server[m[1]]}:{status:404,json:{}});
    if(/\/chat_conversations(\?|$)/.test(u))return r.fulfill({json:Object.values(server).map(c=>({uuid:c.uuid,name:c.name,updated_at:c.updated_at}))});
-   if(/\/v1\/code\/sessions(\?|$)/.test(u))return r.fulfill({json:{data:[]}});  // no sessions (yet)
+   if(/\/v1\/code\/sessions(\?|$)/.test(u))return r.fulfill({json:{data:[sess(SC,'anthropic_cloud','Cowork trip'),sess(SB,'bridge','CLI work')],resume_token:null}});
+   if(m=u.match(/\/v1\/sessions\/(cse_[A-Za-z0-9]+)\/events/)){if(m[1]===SB){cliEventRequests++;return r.fulfill({json:{data:[],has_more:false}})}return r.fulfill({json:sessionPages[u.includes('after_id=')?1:0]})}
    if(u.includes('/api/'))return r.fulfill({status:404,json:{}});
    return r.fulfill({contentType:'text/html',body:'<!doctype html><title>m</title>mock'})});
   const claude=await ctx.newPage();await claude.goto(`https://claude.ai/chat/${A}`);await claude.waitForTimeout(800);
@@ -70,10 +77,14 @@ let projectDownloads=0;
   await panel.click('#formatZip');
   [dl]=await Promise.all([panel.waitForEvent('download',{timeout:30000}),panel.click('#exportSelected')]);
   await panel.waitForSelector('#doneCard',{state:'visible',timeout:15000});
-  const g=await zipFiles(await dl.path());const dirs=new Set(Object.keys(g).filter(k=>k.includes('/')).map(k=>k.split('/')[0]).filter(k=>k!=='projects'));
+  const g=await zipFiles(await dl.path());const dirs=new Set(Object.keys(g).filter(k=>k.includes('/')).map(k=>k.split('/')[0]).filter(k=>k!=='projects'&&k!=='sessions'));
   const shared=Object.keys(g).filter(k=>k.endsWith('Paper.pdf'));
   check('project file stored once with intact bytes',shared.length===1&&shared[0]==='projects/Shared_Project/files/Paper.pdf'&&g[shared[0]].split('|')[2]===sha(bin),shared.join());
   check('project file downloaded once',projectDownloads===1,String(projectDownloads));
+  const sk=Object.keys(g).filter(k=>k.startsWith('sessions/'));
+  const idx=await panel.evaluate(async b64=>{const z=await JSZip.loadAsync(Uint8Array.from(atob(b64),c=>c.charCodeAt(0)));return z.file('index.md').async('string')},fs.readFileSync(await dl.path()).toString('base64'));
+  check('Export All saves the Cowork session and leaves the CLI one out',sk.some(k=>/^sessions\/Cowork_trip_[^/]+\/session\.json$/.test(k))&&sk.some(k=>k.endsWith('/transcript.md'))&&!sk.some(k=>/CLI_work/.test(k))&&/CLI sessions not exported: 1/.test(idx)&&cliEventRequests===0,sk.join()+' | '+cliEventRequests);
+  check('session: both pages of events kept',await panel.evaluate(async b64=>{const z=await JSZip.loadAsync(Uint8Array.from(atob(b64),c=>c.charCodeAt(0)));const n=Object.keys(z.files).find(k=>/session\.json$/.test(k));return n&&JSON.parse(await z.file(n).async('string')).events.length===4},fs.readFileSync(await dl.path()).toString('base64')));
   check('no errors.txt for project chats',!Object.keys(g).some(k=>k.endsWith('errors.txt')));
   const mv=await viewerOf(await dl.path());
   check('mega-ZIP: one viewer at the root',Object.keys(g).filter(k=>k.endsWith('viewer.html')).join()==='viewer.html'&&Object.keys(g).filter(k=>k.endsWith('viewer-check.gif')).join()==='viewer-check.gif');
