@@ -217,3 +217,26 @@ test('sessionReadmeMd escapes titles', () => {
   assert.ok(!md.includes('<img'));
   assert.ok(md.includes('\\[x\\]'));
 });
+
+test('sessionTranscriptMd never cuts a result inside a surrogate pair', () => {
+  const text = 'a' + '😀'.repeat(1100);
+  const md = C.sessionTranscriptMd({ title: 'T' }, [
+    ev('assistant', { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: 'Bash', input: {} }] }),
+    user([{ type: 'tool_result', tool_use_id: 't1', content: text }]),
+  ]);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(md));
+  const kept = (md.match(/😀/g) || []).length;
+  assert.strictEqual(kept, 1023);
+  const m = /\[… (\d+) more characters/.exec(md);
+  assert.strictEqual(Number(m[1]), text.length - (1 + 1023 * 2));
+});
+
+test('sessionTranscriptMd escapes a hostile tool name', () => {
+  const md = C.sessionTranscriptMd({ title: 'T' }, [
+    ev('assistant', { role: 'assistant', content: [{ type: 'tool_use', id: 't1', name: '**x`[a](http://x)', input: {} }] }),
+  ]);
+  const line = md.split('\n').find((l) => l.startsWith('**Tool:'));
+  assert.ok(!line.includes('](http'));
+  assert.ok(line.endsWith('**') || / `/.test(line));
+  assert.strictEqual((line.replace(/\\\*/g, '').match(/\*\*/g) || []).length, 2);
+});

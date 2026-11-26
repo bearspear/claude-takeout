@@ -3011,6 +3011,7 @@ const SESSION_STUB_LINE = '[event too large to keep]';
 
 const sessionShortId = (id) => String(id || '').replace(/^cse_/, '').slice(-12);
 
+// Mirrors popup.js getCodeFence; keep the two in sync.
 function sessionFence(content) {
   const runs = String(content || '').match(/`+/g) || [];
   return '`'.repeat(Math.max(3, runs.reduce((n, r) => Math.max(n, r.length), 0) + 1));
@@ -3094,7 +3095,7 @@ function sessionToolLine(use) {
   const input = use.input || {};
   const hint = input.command || input.file_path || input.path || input.pattern || input.url || input.query || input.description || '';
   const first = String(hint).split('\n')[0].slice(0, 120);
-  return `**Tool: ${use.name || 'unknown'}**${first ? ` \`${first.replace(/`/g, "'")}\`` : ''}`;
+  return `**Tool: ${safeHeading(String(use.name || 'unknown')).replace(/[*`_]/g, '\\$&')}**${first ? ` \`${first.replace(/`/g, "'")}\`` : ''}`;
 }
 
 function sessionTranscriptMd(session, events) {
@@ -3144,8 +3145,10 @@ function sessionTranscriptMd(session, events) {
             used.add(b.id);
             const text = sessionResultText(r);
             const cut = text.length > SESSION_RESULT_CUT;
-            lines.push(r.is_error ? 'Result (error):' : 'Result:', '', sessionFenced(cut ? text.slice(0, SESSION_RESULT_CUT) : text, 'text'));
-            if (cut) lines.push(`[… ${text.length - SESSION_RESULT_CUT} more characters in session.json]`);
+            let end = SESSION_RESULT_CUT;
+            if (cut) { const last = text.charCodeAt(end - 1); if (last >= 0xd800 && last <= 0xdbff) end--; }
+            lines.push(r.is_error ? 'Result (error):' : 'Result:', '', sessionFenced(cut ? text.slice(0, end) : text, 'text'));
+            if (cut) lines.push(`[… ${text.length - end} more characters in session.json]`);
             lines.push('');
             for (const item of Array.isArray(r.content) ? r.content : []) if (item && item.type === 'image') lines.push(sessionImageLine(item), '');
           }
