@@ -4422,6 +4422,14 @@ test('recordableExport leaves out chats and artifacts whose files could not be w
   assert.deepStrictEqual([none.chats.length, none.artifacts.length], [2, 2]);
 });
 
+test('recordableExport drops a session with a write failure', () => {
+  const fn = vm.runInContext('recordableExport', exportPopup().sandbox);
+  const sessions = [{ id: 'cse_a', last_event_at: 't1', folder: 'sessions/A_a' }, { id: 'cse_b', last_event_at: 't2', folder: 'sessions/B_b' }];
+  const out = plain(fn([], [], [{ path: 'sessions/A_a/events.json', error: 'x' }], [], sessions));
+  assert.deepStrictEqual(out.sessions.map((s) => s.id), ['cse_b']);
+  assert.deepStrictEqual(plain(fn([], [], [], [])).sessions, []);
+});
+
 test('Export All after a sign-out mid-way: later chats say their pages were skipped, and none of them is recorded', async () => {
   const chatA = Object.assign(pubChat([pubMsg('m1', null, publish('p1', PUB_U, 'v1', guideAs))]), { uuid: 'a', name: 'Chat a' });
   const chatB = Object.assign(pubChat([pubMsg('n1', null, publish('q1', PUB_U2, 'v1', guideAs, 'Two2', 'Two'))]), { uuid: 'b', name: 'Chat b' });

@@ -371,8 +371,8 @@ test('done screen text and run steps', () => {
   assert.strictEqual(target({ target: { kind: 'folder', name: 'x' } }), 'inside the folder you picked. Open viewer.html in it to browse.');
   assert.strictEqual(target({ target: { kind: 'zip', name: 'a.zip' } }), 'Saved to Downloads as a.zip.');
   const p = (chats, artifacts) => plan({ chats, artifacts, scope: 'all', hasRecord: false });
-  assert.deepStrictEqual(j(steps(p(true, true))), ['chats', 'artifacts', 'viewer']);
-  assert.deepStrictEqual(j(steps(p(true, false))), ['chats', 'viewer']);
+  assert.deepStrictEqual(j(steps(p(true, true))), ['chats', 'artifacts', 'sessions', 'viewer']);
+  assert.deepStrictEqual(j(steps(p(true, false))), ['chats', 'sessions', 'viewer']);
   assert.deepStrictEqual(j(steps(p(false, true))), ['artifacts', 'viewer']);
 });
 
@@ -483,7 +483,7 @@ function panelOn(url, { chat = null, stored = {}, location = '/sidepanel.html' }
 }
 
 const NEW_IDS = ['exportZip', 'exportMd', 'exportMdEmbed', 'exportJson', 'refresh', 'status', 'progress', 'progressFill', 'progressText',
-  'filenameStyle', 'includeThinking', 'webImages', 'showShortcuts', 'useSidePanel', 'helpLink',
+  'filenameStyle', 'includeThinking', 'exportCliSessions', 'webImages', 'showShortcuts', 'useSidePanel', 'helpLink',
   'chatCard', 'chatTitle', 'chatMeta', 'countBtn', 'scopeAll', 'scopeChanges', 'pickChats', 'pickArtifacts', 'chatsSub', 'chatCount',
   'artifactCount', 'formatFolder', 'formatZip', 'exportSelected', 'summary', 'lastExport', 'settingsOpen', 'settingsBack', 'runTitle',
   'runTarget', 'runSteps', 'runWarnings', 'stopBtn', 'runStarted', 'doneCard', 'doneSummary', 'doneTarget', 'doneWarnings',
@@ -1003,6 +1003,8 @@ test('warningGroups uses plain words for the common types', () => {
   assert.strictEqual(line('doc_diagram', 2), '2 diagrams not included (x)');
   assert.strictEqual(line('claude_doc_unreplayed'), '1 Claude Docs edit not rebuilt (x)');
   assert.strictEqual(line('artifact_basename_collision'), '1 file renamed (x)');
+  assert.strictEqual(line('session'), '1 session problem (x)');
+  assert.strictEqual(line('session', 2), '2 session problems (x)');
 });
 
 test('the web_image hint names the cause, and Settings only for the no-permission warning', () => {
@@ -1318,4 +1320,60 @@ test('the This chat card counts files once per chat version', async () => {
   const changed = Object.assign(JSON.parse(JSON.stringify(chat)), { updated_at: '2099-01-01T00:00:00Z' });
   vm.runInContext('updateUI(JSON.parse(__chat), "org-1")', Object.assign(p.sandbox, { __chat: JSON.stringify(changed) }));
   assert.strictEqual(p.sandbox.__replays, 1, 'a changed chat is counted again');
+});
+
+// ---- Sessions: record, plan and setting helpers ----
+test('changedSessions takes new and changed sessions', () => {
+  const { fn } = loadPopup();
+  const j = (o) => JSON.parse(JSON.stringify(o));
+  const f = fn('changedSessions');
+  const a1 = { id: 'cse_a', last_event_at: 't1' }, b1 = { id: 'cse_b', last_event_at: 't1' }, a2 = { id: 'cse_a', last_event_at: 't2' };
+  assert.deepStrictEqual(j(f([a1, b1], { cse_a: 't1' })), [b1]);
+  assert.deepStrictEqual(j(f([a2], { cse_a: 't1' })), [a2]);
+  assert.deepStrictEqual(j(f([a1, b1], undefined)), [a1, b1]);
+});
+
+test('sessionsToFetch leaves CLI sessions out unless the setting is on', () => {
+  const { fn } = loadPopup();
+  const f = fn('sessionsToFetch');
+  const list = [{ id: 'cse_a', environment_kind: 'bridge' }, { id: 'cse_b', environment_kind: 'anthropic_cloud' }];
+  let r = f(list, { exportCliSessions: false });
+  assert.deepStrictEqual([r.fetch.length, r.leftOut], [1, 1]);
+  r = f(list, { exportCliSessions: true });
+  assert.deepStrictEqual([r.fetch.length, r.leftOut], [2, 0]);
+});
+
+test('saveExportRecord keeps sessions and joins them', async () => {
+  const { sandbox, fn } = loadPopup();
+  const store = { exportRecord: { 'org-1': { at: 'x', chats: {}, sessions: { cse_a: 't1' } } } };
+  sandbox.chrome.storage.local.get = async () => JSON.parse(JSON.stringify(store));
+  sandbox.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+  await fn('saveExportRecord')('org-1', 'y', [], [], [], 0, [{ id: 'cse_b', last_event_at: 't2' }]);
+  assert.deepStrictEqual(store.exportRecord['org-1'].sessions, { cse_a: 't1', cse_b: 't2' });
+  store.exportRecord = { 'org-2': { at: 'x', chats: {} } };
+  await fn('saveExportRecord')('org-2', 'y', [{ uuid: 'c', updated_at: '1' }], [], [], 0);
+  assert.ok(!('sessions' in store.exportRecord['org-2']));
+});
+
+test('savedText and runTitleText name sessions', () => {
+  const { fn } = loadPopup();
+  const saved = fn('savedText'), title = fn('runTitleText');
+  const plan = { run: 'bulk', withArtifacts: true };
+  assert.strictEqual(saved({ saved: { chats: 29, sessions: 3, artifacts: 20, versions: 40 } }, plan), '29 chats, 3 sessions and 20 artifacts (40 versions)');
+  assert.strictEqual(saved({ saved: { chats: 29, sessions: 0, artifacts: 20, versions: 40 } }, plan), '29 chats and 20 artifacts (40 versions)');
+  assert.strictEqual(saved({ saved: { chats: 29, artifacts: 20, versions: 40 } }, plan), '29 chats and 20 artifacts (40 versions)');
+  assert.strictEqual(title(plan, { chats: 27, sessions: 1, artifacts: 19 }), 'Exporting 27 chats, 1 session and 19 artifacts');
+  assert.strictEqual(title(plan, { chats: 27, artifacts: 19 }), 'Exporting 27 chats and 19 artifacts');
+});
+
+test('the Settings switch for CLI sessions saves and loads', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  assert.strictEqual(p.fn('settings.exportCliSessions'), false);
+  assert.match(fs.readFileSync(path.join(REPO_DIR, 'popup.html'), 'utf8'), /Their tool output can contain text from your computer\./);
+  p.el('exportCliSessions').checked = true;
+  p.el('exportCliSessions').handlers.change({ target: p.el('exportCliSessions') });
+  await sleep(20);
+  assert.strictEqual(p.fn('settings.exportCliSessions'), true);
+  assert.strictEqual(p.store.exporterSettings.exportCliSessions, true);
 });

@@ -150,6 +150,9 @@ class ExportErrorCollector {
       case 'artifact_export':
         return 'Export Artifacts saves the current version of each artifact claude.ai lists. This one was not saved, or only in part, or its file names were changed to stay inside its folder; the other artifacts are in the export. Open it on claude.ai (link in the note) while signed in, and run Export Artifacts again. An artifact that was unpublished, deleted or unshared can no longer be saved. When claude.ai\'s full list could not be read in full (a code, or longer than the export reads), compare index.md with claude.ai/artifacts. Artifacts found only by paging are saved without a card picture.';
 
+      case 'session':
+        return 'A Claude Code or Cowork session could not be saved, or only in part (its list entry, events or files). The other sessions and chats are in the export. Export again while signed in to claude.ai; a session that was deleted can no longer be saved.';
+
       case 'doc_diagram':
         return 'claude.ai draws a Claude Docs document\'s diagrams only on the document\'s own page, so the export shows each by its caption. To keep them, ask Claude in the chat to export the document as a self-contained HTML file, then export the chat again: that copy is saved in artefacts/ and linked from the document. Or open the live document (link in the note).';
 
@@ -5027,12 +5030,28 @@ async function loadExportRecord(org) {
   }
 }
 
+// Sessions (Code and Cowork) from the list that are new or whose last_event_at differs from the record's
+// ({ <id>: last_event_at }); all of them when there is no record of sessions.
+function changedSessions(list, recorded) {
+  const items = Array.isArray(list) ? list : [];
+  if (!recorded || typeof recorded !== 'object' || Array.isArray(recorded)) return items;
+  return items.filter((x) => x && recorded[x.id] !== x.last_event_at);
+}
+
+// CLI sessions (environment_kind 'bridge') are left out unless settings.exportCliSessions is true.
+function sessionsToFetch(list, settings) {
+  const items = (Array.isArray(list) ? list : []).filter(Boolean);
+  const on = !!settings && settings.exportCliSessions === true;
+  const fetch = items.filter((x) => on || x.environment_kind !== 'bridge');
+  return { fetch, leftOut: items.length - fetch.length };
+}
+
 // Adds the exported chats and artifacts ([{ uuid, ver }]) to the record; those not in this export keep what they had.
 // What Export All may record as exported: not a chat that must be fetched again (retry: published pages skipped
 // after a 401), nor a chat or artifact with a file that could not be written to the folder (writeFailures from
 // the folder writer, paths from the export root; a chat's stores are the artifacts-store folders its published
 // pages went into). Otherwise Export Changes would skip them for good.
-function recordableExport(chats, artifacts, writeFailures = [], versions = []) {
+function recordableExport(chats, artifacts, writeFailures = [], versions = [], sessions = []) {
   const failed = (Array.isArray(writeFailures) ? writeFailures : []).map((f) => String(f && f.path || ''));
   const hit = (folder) => typeof folder === 'string' && folder !== '' && failed.some((p) => p.startsWith(`${folder}/`));
   return {
@@ -5040,6 +5059,8 @@ function recordableExport(chats, artifacts, writeFailures = [], versions = []) {
     artifacts: (artifacts || []).filter((a) => a && !hit(a.folder)),
     // { uuid, folder, versions }: an artifact's saved versions, left out with a write failure under its folder.
     versions: (versions || []).filter((a) => a && !hit(a.folder)),
+    // { id, last_event_at, folder }: a session's folder, left out with a write failure under it.
+    sessions: (sessions || []).filter((x) => x && !hit(x.folder)),
   };
 }
 
@@ -5090,7 +5111,7 @@ function runResult({ outcome = 'done', reason = '', target = null, saved = null,
 }
 
 // warnings: the run's warning count (runResult), kept on the entry for the panel's footer.
-async function saveExportRecord(org, at, exportedChats, exportedArtifacts = [], exportedVersions = [], warnings = null) {
+async function saveExportRecord(org, at, exportedChats, exportedArtifacts = [], exportedVersions = [], warnings = null, exportedSessions = []) {
   try {
     const stored = await chrome.storage.local.get([EXPORT_RECORD_KEY]);
     const all = stored && stored[EXPORT_RECORD_KEY] && typeof stored[EXPORT_RECORD_KEY] === 'object' ? stored[EXPORT_RECORD_KEY] : {};
@@ -5107,9 +5128,14 @@ async function saveExportRecord(org, at, exportedChats, exportedArtifacts = [], 
       const old = Array.isArray(artifactVersions[a.uuid]) ? artifactVersions[a.uuid] : [];
       artifactVersions[a.uuid] = [...new Set([...old, ...a.versions])];
     }
+    const hadSessions = mine.sessions && typeof mine.sessions === 'object' && !Array.isArray(mine.sessions);
+    const sessions = { ...(hadSessions ? mine.sessions : {}) };
+    for (const x of exportedSessions || []) sessions[x.id] = x.last_event_at;
+    const withSessions = hadSessions || (exportedSessions && exportedSessions.length);
     const withArtifacts = hadArtifacts || (exportedArtifacts && exportedArtifacts.length);
     const withVersions = hadVersions || (exportedVersions && exportedVersions.length);
     const entry = { at, chats, ...(withArtifacts ? { artifacts } : {}), ...(withVersions ? { artifactVersions } : {}),
+      ...(withSessions ? { sessions } : {}),
       ...(Number.isFinite(warnings) && warnings >= 0 ? { warnings } : {}) };
     await chrome.storage.local.set({ [EXPORT_RECORD_KEY]: { ...all, [org]: entry } });
   } catch (e) {
@@ -6643,6 +6669,7 @@ const WARNING_NOUNS = {
   export_health: ['chat looks incomplete', 'chats look incomplete'],
   str_replace_failed: ['edit could not be replayed', 'edits could not be replayed'],
   artifact_opaque_mutation: ["file changed by a command the export can't follow", "files changed by a command the export can't follow"],
+  session: ['session problem', 'session problems'],
   write: ['file could not be written', 'files could not be written'],
   chat: ['chat could not be exported', 'chats could not be exported'],
   viewer: ['viewer could not be built', 'viewer problems'],
@@ -6693,6 +6720,7 @@ function runSteps(plan) {
   const steps = [];
   if (plan.run === 'bulk') steps.push('chats');
   if (plan.run === 'artifacts' || (plan.run === 'bulk' && plan.withArtifacts)) steps.push('artifacts');
+  if (plan.run === 'bulk') steps.push('sessions');
   if (steps.length) steps.push('viewer');
   return steps;
 }
@@ -6724,7 +6752,9 @@ function runTitleText(plan, totals = {}) {
   const parts = [];
   if (plan.run === 'bulk') parts.push(part('chats', 'chat'));
   if (plan.run === 'artifacts' || (plan.run === 'bulk' && plan.withArtifacts)) parts.push(part('artifacts', 'artifact'));
-  return `Exporting ${parts.join(' and ')}`;
+  if (plan.run === 'bulk' && Number(totals.sessions) > 0) parts.splice(1, 0, part('sessions', 'session'));
+  const head = parts.slice(0, -1).join(', ');
+  return `Exporting ${head ? `${head} and ` : ''}${parts[parts.length - 1]}`;
 }
 
 // "27 chats and 19 artifacts (49 versions)", from a run result's saved counts.
@@ -6733,11 +6763,12 @@ function savedText(result, plan) {
   const n = (x) => Number(x) || 0;
   const items = [];
   if (plan.run === 'bulk') items.push(`${n(s.chats)} chat${n(s.chats) === 1 ? '' : 's'}`);
+  if (plan.run === 'bulk' && n(s.sessions) > 0) items.push(`${n(s.sessions)} session${n(s.sessions) === 1 ? '' : 's'}`);
   if (plan.run === 'artifacts' || plan.withArtifacts || n(s.artifacts)) {
     const v = n(s.versions);
     items.push(`${n(s.artifacts)} artifact${n(s.artifacts) === 1 ? '' : 's'}${v ? ` (${v} version${v === 1 ? '' : 's'})` : ''}`);
   }
-  return items.join(' and ');
+  return items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}` : items.join('');
 }
 
 // "Took 4 min 12 s" / "Took 12 s".
@@ -7390,6 +7421,7 @@ const defaultSettings = {
   megaFormat: 'folder',  // 'folder' | 'zip': where Export selected goes (main screen)
   exportAllChats: true,  // Export selected takes the chats (main screen)
   exportAllArtifacts: true,  // Export selected takes claude.ai's artifacts (main screen)
+  exportCliSessions: false,  // Export All also takes Claude Code CLI sessions (Settings)
   showShortcuts: true,
   useSidePanel: false
 };
@@ -7431,6 +7463,8 @@ function applySettings() {
   document.getElementById('filenameStyle').value = settings.filenameStyle;
   document.getElementById('includeThinking').checked = settings.includeThinking;
   document.getElementById('showShortcuts').checked = settings.showShortcuts;
+  const cliBox = document.getElementById('exportCliSessions');
+  if (cliBox) cliBox.checked = settings.exportCliSessions === true;
 
   // Side panel checkbox (may not exist in all views)
   const sidePanelCheckbox = document.getElementById('useSidePanel');
@@ -7490,6 +7524,11 @@ document.getElementById('filenameStyle').addEventListener('change', (e) => {
 
 document.getElementById('includeThinking').addEventListener('change', (e) => {
   settings.includeThinking = e.target.checked;
+  saveSettings();
+});
+
+document.getElementById('exportCliSessions').addEventListener('change', (e) => {
+  settings.exportCliSessions = !!e.target.checked;
   saveSettings();
 });
 

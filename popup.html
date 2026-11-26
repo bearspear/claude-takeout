@@ -284,6 +284,16 @@
           <div class="step-bar" id="step-artifacts-bar" role="progressbar" aria-label="Artifacts" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="step-artifacts-fill"></div></div>
           <div class="step-sub" id="step-artifacts-sub" aria-live="polite"></div>
         </li>
+        <li id="step-sessions" class="step" data-state="pending" hidden>
+          <div class="step-row">
+            <svg class="s-done" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1b5e20" stroke-width="3"><path d="M5 12l5 5L20 7"></path></svg>
+            <svg class="s-current" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7c3aed" stroke-width="3"><circle cx="12" cy="12" r="8"></circle></svg>
+            <svg class="s-pending" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#6b7280" stroke-width="2"><circle cx="12" cy="12" r="8"></circle></svg>
+            <span class="label">Sessions</span><span class="n" id="step-sessions-count"></span>
+          </div>
+          <div class="step-bar" id="step-sessions-bar" role="progressbar" aria-label="Sessions" aria-valuemin="0" aria-valuemax="0" aria-valuenow="0"><div id="step-sessions-fill"></div></div>
+          <div class="step-sub" id="step-sessions-sub" aria-live="polite"></div>
+        </li>
         <li id="step-viewer" class="step" data-state="pending" hidden>
           <div class="step-row">
             <svg class="s-done" aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1b5e20" stroke-width="3"><path d="M5 12l5 5L20 7"></path></svg>
@@ -369,6 +379,10 @@
       <label class="row">
         <span class="row-text"><span>Web images and card pictures</span><span class="sub">Chrome asks once, during a ZIP export. If you say no, cards show tiles.</span></span>
         <input type="checkbox" id="webImages">
+      </label>
+      <label class="row">
+        <span class="row-text"><span>Include Claude Code CLI sessions</span><span class="sub">Their tool output can contain text from your computer.</span></span>
+        <input type="checkbox" id="exportCliSessions">
       </label>
       <h2 class="later">Panel</h2>
       <label class="row">
