@@ -871,7 +871,7 @@ function renderProject(chat) {
   const items = projectItems(project);
   const instructions = projectInstructions(project);
   // In a viewer with more than one chat, a project chat links its project page.
-  const entry = project && allChats.length > 1 ? listProjects.find(p => p.chats.includes(chat)) : null;
+  const entry = project && allChats.length > 1 ? listProjectOf.get(chat) || null : null;
   box.hidden = !items.length && !instructions && !added.length && !entry;
   box.replaceChildren();
   if (box.hidden) return;
@@ -1957,6 +1957,7 @@ function showArtifacts(on, titles = null) {
 // place of the chat. Only in a viewer with more than one chat. ----
 let listsOn = false;
 let listProjects = []; // projectList over the chats, built once at start
+let listProjectOf = new Map(); // chat -> its listProjects entry
 let listState = null; // { page: 'projects' | 'project' | 'chats', project }: what the screen shows
 let sortedChats = null; // every chat, newest first, for All chats (sorted on its first visit)
 
@@ -2028,8 +2029,9 @@ function listFilter(label, onInput) {
 
 function projectsPage(page, heading, now, memo) {
   const grid = el('div', 'project-grid');
+  const folded = new WeakMap();
   const draw = query => {
-    const matches = filterByText(listProjects, query, p => [p.name, p.description]);
+    const matches = filterByText(listProjects, query, p => [p.name, p.description], folded);
     grid.replaceChildren(...matches.map(p => projectCard(p, now)));
     if (!matches.length) grid.append(el('p', 'list-empty', 'No projects match.'));
   };
@@ -2098,9 +2100,9 @@ function chatRows(chats, now, projectOf, want = 0) {
 // Chat rows and a filter box that redraws them from every chat in `chats`, not only the rows shown. memo: the
 // filter text and rows shown to start from (a page come back to).
 function filteredChatRows(chats, now, withProject, memo) {
-  const projectOf = withProject ? new Map() : null;
-  if (projectOf) for (const p of listProjects) for (const c of p.chats) projectOf.set(c, p);
-  const pick = query => (query.trim() ? filterByText(chats, query, c => [c.title]) : chats);
+  const projectOf = withProject ? listProjectOf : null;
+  const folded = new WeakMap();
+  const pick = query => (query.trim() ? filterByText(chats, query, c => [c.title], folded) : chats);
   let rows = chatRows(pick(memo.query), now, projectOf, memo.rows);
   const filter = listFilter('Filter chats', query => {
     const next = chatRows(pick(query), now, projectOf);
@@ -2773,7 +2775,10 @@ function start() {
   setupStepper();
   allChats = linkProjects(data);
   allChats.forEach(chat => chatsById.set(chat.id, chat));
-  if (allChats.length > 1) listProjects = projectList(allChats, Array.isArray(data.projects) ? data.projects : []);
+  if (allChats.length > 1) {
+    listProjects = projectList(allChats, Array.isArray(data.projects) ? data.projects : []);
+    for (const p of listProjects) for (const c of p.chats) listProjectOf.set(c, p);
+  }
   renderSidebar(data.chats);
   setupSearch();
   try { setWrap(localStorage.getItem(WRAP_KEY) === '1', false); } catch (e) { /* no storage: off */ }

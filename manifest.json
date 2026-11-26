@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Claude Takeout",
-  "version": "1.24.2",
+  "version": "1.24.3",
   "description": "Export Claude conversations to Markdown",
   "icons": {
     "16": "icon16.png",

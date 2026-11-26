@@ -885,3 +885,43 @@ const tests = {
 };
 
 for (const [name, fn] of Object.entries(tests)) test(name, fn);
+
+// A chat fetch claude.ai rate-limits (429) or fails on its side (5xx) is tried again after a pause; other errors
+// are not, and a 429 that keeps coming gives up after the retries.
+function contentWith(replies) {
+  const urls = [], waits = [];
+  let onMessage;
+  const w = { addEventListener() {}, location: {} };
+  const sandbox = {
+    window: w, console: { log() {} },
+    setTimeout: (f, ms) => { waits.push(ms); return setTimeout(f, 0); },
+    document: { createElement: () => ({}), head: { appendChild() {} }, cookie: 'lastActiveOrg=11111111-0000-4000-8000-000000000001' },
+    fetch: async (u) => {
+      urls.push(u);
+      const r = replies.length > 1 ? replies.shift() : replies[0];
+      return { ok: r.status === 200, status: r.status, headers: { get: (k) => (k === 'Retry-After' ? r.retryAfter || null : null) }, json: async () => conv(B, 'Chat B') };
+    },
+    chrome: {
+      runtime: { getURL: (p) => p, lastError: null, onMessage: { addListener: (f) => { onMessage = f; } }, sendMessage() {} },
+      storage: { local: { set() {}, remove() {}, get: (k, cb) => cb({}) } },
+    },
+  };
+  vm.runInNewContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), sandbox);
+  const ask = () => new Promise((r) => onMessage({ action: 'fetchConversation', conversationId: B }, {}, r));
+  return { urls, waits, ask };
+}
+
+test('fetchConversation tries a 429 or 5xx again after a pause', async () => {
+  const a = contentWith([{ status: 429, retryAfter: '3' }, { status: 503 }, { status: 200 }]);
+  const res = await a.ask();
+  assert.strictEqual(res.data && res.data.uuid, B, JSON.stringify(res));
+  assert.strictEqual(a.urls.length, 3);
+  assert.ok(a.waits.includes(3000), `waits ${a.waits}`);
+  const b = contentWith([{ status: 429 }]);
+  const gone = await b.ask();
+  assert.match(String(gone.error), /429/);
+  assert.strictEqual(b.urls.length, 4, 'three retries, then the error');
+  const c = contentWith([{ status: 404 }, { status: 200 }]);
+  assert.match(String((await c.ask()).error), /404/);
+  assert.strictEqual(c.urls.length, 1, 'a 404 is not retried');
+});
