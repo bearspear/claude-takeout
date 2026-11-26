@@ -2725,3 +2725,64 @@ test('a project from disk has an id only when project.json or the chat names one
   assert.strictEqual(p.description, 'D');
   assert.strictEqual(p.updated, '2026-02-02T00:00:00Z');
 });
+
+// ---- sessions (Claude Code and Cowork) ----
+const sessionJson = (id, extra = {}, format = 1) => JSON.stringify({
+  format, session: { id, title: 'Session ' + id, status_bucket: 'done', environment_kind: 'code', config: { origin: 'cli', model: 'claude-sonnet-4-5' },
+    created_at: '2026-02-01T00:00:00Z', updated_at: '2026-02-02T00:00:00Z', last_event_at: '2026-02-02T00:00:00Z', ...extra },
+  events: [{ type: 'user', uuid: id + '-e1', timestamp: '2026-02-01T00:00:00Z', message: { role: 'user', content: 'hello ' + id } }],
+});
+const megaWithSession = root => {
+  put(root, 'index.md', '# All');
+  put(root, 'export-manifest.json', JSON.stringify({ format: 1, exported_at: '2026-11-01T00:00:00Z', kind: 'full', chats: [] }));
+  put(root, 'Chat_a/original.json', chatJson('a'));
+  put(root, 'sessions/Fix_bug/session.json', sessionJson('s1'));
+  put(root, 'sessions/Fix_bug/transcript.md', 'transcript');
+  put(root, 'sessions/Fix_bug/images/1.png', 'png');
+};
+
+test('scanAdded ignores sessions/', () => {
+  const tmp = tmpRoot();
+  megaWithSession(tmp);
+  assert.ok(KNOWN_DIRS.includes('sessions'));
+  assert.deepStrictEqual(scanAdded(find(tmp).archives[0]).files, []);
+});
+
+test('build_viewer keeps an archive\'s sessions', async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  megaWithSession(root);
+  const before = hashTree(root);
+  const res = await writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  assert.strictEqual(res.sessions, 1);
+  const after = hashTree(root);
+  assertKept(before, after, ['viewer.html']);
+  const data = viewerData(root);
+  assert.strictEqual(data.sessions.length, 1);
+  assert.strictEqual(data.sessions[0].id, 's1');
+  assert.strictEqual(data.sessions[0].folder, 'sessions/Fix_bug');
+});
+
+test('a session.json of another format, or a broken one, is skipped with a note', async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  megaWithSession(root);
+  put(root, 'sessions/Future/session.json', sessionJson('s2', {}, 2));
+  put(root, 'sessions/Broken/session.json', '{ nope');
+  const res = await writeViewer(single(root), {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  assert.deepStrictEqual(viewerData(root).sessions.map(s => s.id), ['s1']);
+  assert.ok(res.warnings.some(w => /Future\/session\.json.*format/.test(w)), JSON.stringify(res.warnings));
+  assert.ok(res.warnings.some(w => /Broken\/session\.json/.test(w)), JSON.stringify(res.warnings));
+});
+
+test('a linked sessions folder is not read', async () => {
+  const { readSessions } = require('../tools/archive-lib.js');
+  const root = tmpRoot();
+  const elsewhere = tmpRoot();
+  put(elsewhere, 'X/session.json', sessionJson('s9'));
+  put(root, 'index.md');
+  fs.symlinkSync(elsewhere, path.join(root, 'sessions'));
+  assert.deepStrictEqual(readSessions(root, { warnings: [] }), []);
+});

@@ -16,7 +16,7 @@ const KNOWN_ROOT_FILES = [
 ];
 // What an Export Artifacts root holds beside its artifact folders, besides KNOWN_ROOT_FILES.
 const ARTIFACTS_ROOT_FILES = ['index.html', 'write-errors.txt'];
-const KNOWN_DIRS = ['responses', 'artefacts', 'attachments', 'uploads', 'images', 'project', 'projects', 'viewer-files', 'published'];
+const KNOWN_DIRS = ['responses', 'artefacts', 'attachments', 'uploads', 'images', 'project', 'projects', 'viewer-files', 'published', 'sessions'];
 const IGNORED_NAMES = ['.DS_Store', 'Thumbs.db', '__MACOSX', '.git', 'node_modules'];
 
 // What a killed build_viewer run can leave at an archive root. Not added files; the tool reports them.
@@ -534,6 +534,33 @@ function readJsonObject(file, label, warnings) {
     warnings.push(`${label}: ${e.message}`);
     return null;
   }
+}
+
+// Claude Code and Cowork sessions an export wrote: sessions/<name>/session.json (format 1). Read only through real
+// folders; a file over the cap, unparsable, of another format or without events is skipped with a warning.
+// Returns [{ session, events, folder: 'sessions/<name>', dir (absolute) }], by folder name.
+const SESSION_JSON_MAX = 256 * 1024 * 1024;
+function readSessions(root, { warnings = [] } = {}) {
+  const base = realDirUnder(root, 'sessions');
+  if (!base) return [];
+  const out = [];
+  for (const name of subdirs(base).sort(byCodeUnit)) {
+    const rel = `sessions/${name}`;
+    const dir = realDirUnder(root, rel);
+    const file = dir && realFileUnder(root, `${rel}/session.json`);
+    if (!file) continue;
+    try {
+      if (fs.statSync(file).size > SESSION_JSON_MAX) { warnings.push(`${rel}/session.json is too large, so the session was skipped`); continue; }
+      const json = JSON.parse(readText(file));
+      if (!json || typeof json !== 'object' || Array.isArray(json)) throw new Error('not a session');
+      if (json.format !== 1) { warnings.push(`${rel}/session.json has format ${JSON.stringify(json.format)}, which this tool does not know, so the session was skipped`); continue; }
+      if (!json.session || typeof json.session !== 'object' || Array.isArray(json.session) || !Array.isArray(json.events)) throw new Error('not a session');
+      out.push({ session: json.session, events: json.events, folder: rel, dir });
+    } catch (e) {
+      warnings.push(`${rel}/session.json could not be read (${e.message}), so the session was skipped`);
+    }
+  }
+  return out;
 }
 
 // The export's own folder at root by its exact-case name, unless it is a link (warned) or a chat.
@@ -1270,4 +1297,4 @@ function chatFromDisk(archive, chat, store = null) {
   return { viewerChat, missing, warnings };
 }
 
-module.exports = { readArtifactStore, artifactViewsFromDisk, artifactJsonV2FromDisk, sameFromChats, rewriteChatLinks, realFileUnder, realDirUnder, payloadFromDisk, findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, NotAChat, matchFile, stripBom, embeddableText, isAddedText, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };
+module.exports = { readSessions, readArtifactStore, artifactViewsFromDisk, artifactJsonV2FromDisk, sameFromChats, rewriteChatLinks, realFileUnder, realDirUnder, payloadFromDisk, findArchives, isArchiveRoot, scanAdded, isGeneratedViewer, chatFromDisk, NotAChat, matchFile, stripBom, embeddableText, isAddedText, LEFTOVER_NAME, KNOWN_ROOT_FILES, KNOWN_DIRS, IGNORED_NAMES };

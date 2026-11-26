@@ -1135,3 +1135,34 @@ test('a v1.21 export merges and rebuilds with every version', async () => {
   assert.deepStrictEqual(versions.map(e => [e.ver, e.current]), [['v1', false], ['v2', false], ['v3', true]]);
   assert.ok(versions.filter(e => !e.current).every(e => Number.isSafeInteger(e.part)), JSON.stringify(versions));
 });
+
+test('merge takes the newest copy of a session', async () => {
+  const tmp = tmpRoot();
+  const a = path.join(tmp, 'a');
+  const b = path.join(tmp, 'b');
+  const sess = (id, last, text) => JSON.stringify({ format: 1, session: { id, title: 'S ' + id, last_event_at: last, created_at: last, updated_at: last },
+    events: [{ type: 'user', uuid: id + text, timestamp: last, message: { role: 'user', content: text } }] });
+  mega(a, '2026-11-01T00:00:00Z', { Chat_a: chatJson('a', '2026-10-01T00:00:00Z') });
+  mega(b, '2026-11-05T00:00:00Z', { Chat_b: chatJson('b', '2026-10-02T00:00:00Z') });
+  put(a, 'sessions/Fix/session.json', sess('s1', '2026-10-05T00:00:00Z', 'newer-in-a'));
+  put(a, 'sessions/Fix/images/1.png', 'png');
+  put(a, 'sessions/Only_a/session.json', sess('s2', '2026-10-01T00:00:00Z', 'only'));
+  put(b, 'sessions/Fix_copy/session.json', sess('s1', '2026-10-03T00:00:00Z', 'older-in-b'));
+  put(b, 'sessions/Odd/session.json', JSON.stringify({ format: 2, session: { id: 's3' }, events: [] }));
+  const before = [hashTree(a), hashTree(b)];
+  const out = path.join(tmp, 'out');
+  const r = await merge([a, b], { out, now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  const dest = r.dest;
+  assert.ok(fs.existsSync(path.join(dest, 'sessions', 'Fix', 'images', '1.png')));
+  assert.ok(!fs.existsSync(path.join(dest, 'sessions', 'Fix_copy')));
+  assert.match(fs.readFileSync(path.join(dest, 'sessions', 'Fix', 'session.json'), 'utf8'), /newer-in-a/);
+  const manifest = JSON.parse(fs.readFileSync(path.join(dest, 'export-manifest.json'), 'utf8'));
+  assert.deepStrictEqual(manifest.sessions.items.map(i => [i.id, i.folder]).sort(), [['s1', 'sessions/Fix'], ['s2', 'sessions/Only_a']]);
+  assert.strictEqual(manifest.sessions.listed, 2);
+  assert.ok(r.warnings.some(w => /Odd\/session\.json.*format/.test(w)), JSON.stringify(r.warnings));
+  const viewer = fs.readFileSync(path.join(dest, 'viewer.html'), 'utf8');
+  const data = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(viewer)[1]);
+  assert.deepStrictEqual(data.sessions.map(s => s.id).sort(), ['s1', 's2']);
+  assert.deepStrictEqual([hashTree(a), hashTree(b)], before, 'sources unchanged');
+});
