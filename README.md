@@ -26,6 +26,10 @@ A Chrome extension to export Claude.ai conversations to Markdown, JSON, or compr
 4. Click **Load unpacked**
 5. Select the `claude-takeout` folder
 
+**From a release ZIP (beta testers):** unzip `claude-takeout-<version>.zip` into a folder of its own, then follow steps 2-4 and select that folder. To update, unzip the new release over it and click the reload arrow on the extension's card in `chrome://extensions/`.
+
+**Making a release ZIP:** `node tools/package_extension.js` writes `dist/claude-takeout-<version>.zip` with only the files the extension needs (Node 20+). It refuses when a file the extension uses is missing from its list.
+
 ## Usage
 
 ### Export Current Conversation

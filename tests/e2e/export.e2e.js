@@ -1,7 +1,8 @@
 // Real extension in Chromium against a mock claude.ai: binary bytes through real ZIP exports.
 const { chromium } = require(process.env.PW);
 const fs=require('fs'),os=require('os'),path=require('path'),crypto=require('crypto');
-const EXT=path.resolve(__dirname,'..','..');
+// EXT_DIR: test a packaged copy (tools/package_extension.js, unzipped) instead of the repo.
+const EXT=process.env.EXT_DIR?path.resolve(process.env.EXT_DIR):path.resolve(__dirname,'..','..');
 const ORG='11111111-1111-4111-8111-111111111111';
 const A='aaaaaaaa-0000-4000-8000-000000000001',B='bbbbbbbb-0000-4000-8000-000000000002',C='cccccccc-0000-4000-8000-000000000003';
 const DEL1='d1d1d1d1-0000-4000-8000-000000000001',DEL2='d2d2d2d2-0000-4000-8000-000000000002',UP='e1e1e1e1-0000-4000-8000-000000000001';
