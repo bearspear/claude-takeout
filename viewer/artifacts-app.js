@@ -1375,6 +1375,9 @@
       });
     }
 
+    // Hosted: the export's sessions (ViewerData.sessions), for an artifact's "Made in session" link.
+    const sessions = hosted && Array.isArray(data.sessions) ? data.sessions : [];
+
     // A chat's name as a link to it, opening at messageUuid.
     function chatLink(chat, messageUuid) {
       const button = el('button', 'chat-link', chatTitle(chat));
@@ -1394,7 +1397,14 @@
           group.append(chatLink(c.chat, c.messageUuid));
         });
         return group;
-      });
+      }).concat(sessionsMaking(v, sessions).map(s => {
+        // A session that made it (data.sessions[].artifacts): opens the session in the chat viewer.
+        const group = el('span', 'link-group');
+        const a = el('a', 'chat-link session-link', s.title);
+        a.href = '#session=' + encodeURIComponent(s.id);
+        group.append(el('span', '', 'Made in session '), a);
+        return group;
+      }));
     }
 
     // Hosted: every version the export saved of the artifact (v.versions, artifact.json's), the current one chosen;

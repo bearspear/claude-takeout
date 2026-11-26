@@ -2760,3 +2760,17 @@ test('search finds a session prompt and groups it as a session', () => {
 test('search never finds tool output in a session', () => {
   assert.deepStrictEqual(searchChats(buildSearchIndex([], sessionFixture), 'secretword'), []);
 });
+
+test('a session\'s artifacts join the Artifacts screen\'s views both ways, by short id', () => {
+  const { artifactShortId, sessionArtifacts, sessionsMaking } = require('../viewer/viewer-logic.js');
+  const { uuidToBase58 } = require('../export-core.js');
+  const u = 'abcdef01-2345-4678-89ab-cdef01234567', other = '00000000-1111-4111-8111-111111111111';
+  assert.strictEqual(artifactShortId(u), uuidToBase58(u));
+  assert.strictEqual(artifactShortId(u.toUpperCase()), uuidToBase58(u));
+  assert.strictEqual(artifactShortId('not a uuid'), '');
+  const view = { id: uuidToBase58(u), title: 'Page' };
+  const s = { id: 'cse_1', title: '<b>T</b>', artifacts: [u, u, other, 'junk'] };
+  assert.deepStrictEqual(sessionArtifacts(s, [view]), [{ id: uuidToBase58(u), title: 'Page', view }, { id: uuidToBase58(other), title: uuidToBase58(other), view: null }]);
+  assert.deepStrictEqual(sessionsMaking(view, [s, { id: 'cse_2', artifacts: [other] }, null]), [{ id: 'cse_1', title: '<b>T</b>' }]);
+  assert.deepStrictEqual(sessionsMaking(view, undefined), []);
+});

@@ -70,6 +70,7 @@ svg.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor
 .group-title { padding: 6px 10px 2px; }
 .group-title b { display: block; font: 500 13.5px/1.4 var(--sans); color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .group-title small { display: block; font-size: 11.5px; color: var(--mute); }
+.group-title .group-kind { display: block; font-size: 11px; font-weight: 500; letter-spacing: .02em; color: var(--mute); }
 .snip { padding: 3px 10px 3px 18px; font-size: 12.5px; line-height: 1.4; color: var(--mute); overflow-wrap: anywhere; }
 .group-title:hover, .snip:hover, .group-title:focus-visible, .snip:focus-visible { background: var(--hover); outline: none; }
 #results mark { background: none; color: var(--ink); font-weight: 600; }
@@ -129,6 +130,9 @@ body.artifacts-on #top, body.artifacts-on #project, body.artifacts-on #findbar, 
 #project .open-project { float: right; margin: 7px 0 0 12px; color: var(--soft); font-size: 13px; text-decoration: none; }
 #project .open-project:hover { color: var(--ink); text-decoration: underline; }
 #project .project-line { padding: 7px 0; color: var(--mute); font-size: 13px; }
+#project .session-line { padding: 7px 0; color: var(--mute); font-size: 13px; overflow-wrap: anywhere; }
+#project .session-line a { color: var(--soft); }
+#project .session-line a:hover { color: var(--ink); }
 @media (max-width: 760px) {
   #lists-screen { padding: 8px 16px 40px; }
   .project-cols { grid-template-columns: minmax(0, 1fr); }
@@ -183,6 +187,17 @@ body.lists-on #project, body.lists-on #findbar, body.lists-on #scroll, body.list
 
 /* User message */
 .human { display: flex; flex-direction: column; align-items: flex-end; gap: 8px; margin: 4px 0 12px; }
+/* A session's prompt pictures (sessions/<folder>/images), a picture not saved, and the prompts it labels. */
+.prompt-images { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; margin-bottom: 8px; }
+.prompt-images img.prompt-image { max-width: min(85%, 420px); max-height: 320px; border-radius: 10px; border: 1px solid var(--line); }
+.image-missing { padding: 6px 10px; border: 1px dashed var(--line-strong); border-radius: 8px; color: var(--mute); font-size: 12.5px; }
+.msg.labelled { margin: 6px 0 14px; }
+.msg.labelled .labelled-line { display: flex; align-items: center; gap: 8px; color: var(--mute); font-size: 13px; }
+.msg.labelled .labelled-line::before, .msg.labelled .labelled-line::after { content: ""; flex: 1; border-top: 1px solid var(--line); }
+.msg.labelled details.line { margin: 0; }
+.msg.labelled pre.labelled-text { margin: 6px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 12.5px; color: var(--soft); }
+.tool-children { margin: 8px 0 4px 10px; padding-left: 12px; border-left: 2px solid var(--line); }
+.tool-children .msg { margin: 8px 0; }
 .bubble { background: var(--bub); color: var(--ink); border-radius: 16px; padding: 10px 16px; max-width: min(85%, 600px); font-size: 15px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .bubble.long { width: min(85%, 600px); }
 .bubble.collapsed .bubble-body { max-height: 200px; overflow: hidden; -webkit-mask-image: linear-gradient(#000 calc(100% - 48px), transparent); mask-image: linear-gradient(#000 calc(100% - 48px), transparent); }
@@ -574,6 +589,7 @@ button.chip:hover { border-color: var(--line-strong); }
     <button id="artifacts-nav" class="nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="4" width="7" height="7" rx="1.5"/><rect x="13" y="4" width="7" height="7" rx="1.5"/><rect x="4" y="13" width="7" height="7" rx="1.5"/><rect x="13" y="13" width="7" height="7" rx="1.5"/></svg><span>Artifacts</span><span class="n"></span></button>
     <button id="projects-nav" class="nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5a2 2 0 0 1 2-2h4l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2Z"/></svg><span>Projects</span><span class="n"></span></button>
     <button id="chats-nav" class="nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z"/></svg><span>Chats</span><span class="n"></span></button>
+    <button id="sessions-nav" class="nav" type="button" aria-current="false" hidden><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="m7.5 10 2.5 2-2.5 2M12 15h4"/></svg><span>Sessions</span><span class="n"></span></button>
     <div id="recents">
       <div class="lab">Recents</div>
       <div id="chat-list"></div>

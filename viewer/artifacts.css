@@ -75,6 +75,7 @@ button { font: inherit; color: inherit; }
 #page-from[hidden] { display: none; }
 .chat-link { border: 0; padding: 0; background: none; color: var(--acc); font: inherit; cursor: pointer; text-align: left; overflow-wrap: anywhere; }
 .chat-link:hover { text-decoration: underline; }
+a.chat-link { text-decoration: none; }
 .version-menu { margin-left: auto; }
 .version-menu select { font: inherit; color: var(--ink); background: var(--card); border: 1px solid var(--line); border-radius: 6px; padding: 1px 4px; }
 .code-view { flex: 1; min-height: 0; margin: 0; padding: 16px 20px; overflow: auto; font: 12px/1.55 var(--mono); white-space: pre; tab-size: 4; color: var(--ink); background: var(--bg); }

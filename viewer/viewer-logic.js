@@ -827,6 +827,41 @@ function artifactLinkGroups(view, chats) {
   return groups;
 }
 
+// ---- Sessions and their artifacts ----
+// An artifact's short id (claude.ai's base58 of its uuid, as export-core.js's uuidToBase58), or '' for anything else.
+const SHORT_ID_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
+function artifactShortId(uuid) {
+  const u = String(uuid || '');
+  if (!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(u)) return '';
+  let n = BigInt('0x' + u.replace(/-/g, ''));
+  let out = '';
+  for (; n > 0n; n /= 58n) out = SHORT_ID_ALPHABET[Number(n % 58n)] + out;
+  return out;
+}
+
+// A session's artifacts (its uuids), each { id: the short id, title, view }: view is the Artifacts screen's view of
+// it (data.artifacts, by short id or uuid) or null when the export has none, then titled by its short id.
+function sessionArtifacts(session, views) {
+  const list = Array.isArray(views) ? views.filter(v => v && typeof v === 'object') : [];
+  const out = [];
+  const seen = new Set();
+  for (const uuid of session && Array.isArray(session.artifacts) ? session.artifacts : []) {
+    const id = artifactShortId(uuid);
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    const view = list.find(v => String(v.id) === id || String(v.id).toLowerCase() === String(uuid).toLowerCase()) || null;
+    out.push({ id, title: view && view.title ? String(view.title) : id, view });
+  }
+  return out;
+}
+
+// The sessions that made an artifact view, as sessionArtifacts joins them: [{ id, title }].
+function sessionsMaking(view, sessions) {
+  if (!view || typeof view !== 'object') return [];
+  return (Array.isArray(sessions) ? sessions : []).filter(s => s && typeof s === 'object' && typeof s.id === 'string'
+    && sessionArtifacts(s, [view]).some(a => a.view === view)).map(s => ({ id: s.id, title: String(s.title || 'Untitled session') }));
+}
+
 // The chat viewer's Artifacts entry: shown when the data has the Artifacts screen (an Export All's) and the export has
 // an artifact folder (storeCount, listed or not; a listed artifact not saved has a view only), or a file Claude made
 // in a chat (In chats). count: the listed artifacts, else the In chats files, else the artifact folders. A page not in
@@ -2112,5 +2147,5 @@ function pageZoom(wrapper, frame, opts = {}) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgAsPicture, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
+  module.exports = { artifactShortId, sessionArtifacts, sessionsMaking, markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgAsPicture, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
 }

@@ -310,6 +310,10 @@ function renderTool(block, gallery = null) {
   const pictureOnly = images.length && READ_TOOL.test(String(block.name)) && !block.error;
   const input = pictureOnly ? '' : toolInputText(block.input);
   if (input) body.append(toolPart('Request', input));
+  // A session's Agent step: the subagent's messages, drawn the first time the step opens.
+  const children = Array.isArray(block.children) ? block.children.filter(c => c && typeof c === 'object') : [];
+  const kids = children.length ? el('div', 'tool-children') : null;
+  if (kids) body.append(kids);
   if (block.result && !pictureOnly) body.append(toolPart('Response', block.result, block.error));
   if (images.length) {
     const row = el('div', 'tool-images');
@@ -334,6 +338,13 @@ function renderTool(block, gallery = null) {
   if (!input && !block.result && !missing && !images.length) body.append(el('div', 'line-text', 'No details in this export'));
   const line = foldLine('tool', parts, body);
   if (images.length) line.querySelector('summary').append(thumbs(images.slice(0, 1), 0));
+  if (kids) {
+    const chat = columnChat;
+    line.addEventListener('toggle', () => {
+      if (!line.open || kids.childElementCount) return;
+      kids.append(...children.map(m => renderMessage(m, null, chat)).filter(Boolean));
+    });
+  }
   return [line];
 }
 
@@ -706,6 +717,8 @@ function renderHuman(m) {
     row.append(...chips);
     node.append(row);
   }
+  const pictures = promptImages(m);
+  if (pictures) node.append(pictures);
   const text = m.blocks.filter(b => b.t === 'text').map(b => b.text).join('\n\n');
   if (text) {
     // Code fences show as code blocks. The rest stays exactly as typed.
@@ -733,7 +746,42 @@ function renderHuman(m) {
     }
     node.append(bubble);
   }
-  return chips.length || text ? node : null;
+  return chips.length || text || pictures ? node : null;
+}
+
+// A session's pictures in a prompt ({ t: 'image', href }): from the saved file beside the viewer, by its relative
+// path only (toolImageOk), or a note for one not saved. null when the message has none.
+function promptImages(m) {
+  const images = m.blocks.filter(b => b.t === 'image');
+  if (!images.length) return null;
+  const row = el('div', 'prompt-images');
+  for (const b of images) {
+    if (typeof b.href === 'string' && toolImageOk(b.href) && !SAFE_IMAGE_URI.test(b.href)) {
+      const img = el('img', 'prompt-image');
+      img.src = b.href;
+      img.alt = 'Image in the prompt';
+      img.loading = 'lazy';
+      row.append(img);
+    } else row.append(el('div', 'image-missing', 'Image not saved'));
+  }
+  return row;
+}
+
+// A session's prompt that isn't one: a command run (one line), or a compaction summary or a command's output, folded.
+const LABELLED_TITLES = { compaction: 'Conversation compacted', 'command-output': 'Command output' };
+function renderLabelled(m) {
+  const kind = String(m.labelled);
+  const node = el('section', `msg labelled ${kind}`);
+  const text = m.blocks.filter(b => b.t === 'text').map(b => b.text).join('\n\n');
+  if (kind === 'command') node.append(el('div', 'labelled-line', text || 'Ran a command'));
+  else {
+    const body = el('div', 'line-body');
+    body.append(text ? el('pre', 'labelled-text', text) : el('div', 'line-text', 'No details in this export'));
+    node.append(foldLine('labelled-fold', [el('span', 'label', LABELLED_TITLES[kind] || 'Note')], body));
+  }
+  const pictures = promptImages(m);
+  if (pictures) node.append(pictures);
+  return node;
 }
 
 // The popup. Uploaded text only ever goes in through textContent, so an uploaded .html is source, never a page.
@@ -866,6 +914,8 @@ function renderProject(chat) {
   if (projectFor === chat.id) return;
   projectFor = chat.id;
   const box = document.getElementById('project');
+  const session = sessionOfChat.get(chat);
+  if (session) { renderSessionLine(box, session); return; }
   const project = chat.project;
   const added = addedForChat(allAdded, chat.id);
   const items = projectItems(project);
@@ -909,6 +959,27 @@ function renderProject(chat) {
     const details = fold('archive-files', `Archive files · ${added.length}`);
     details.addEventListener('toggle', () => { if (details.open && details.childElementCount === 1) details.append(addedBox(chat, added)); });
   }
+}
+
+// A session's fold bar line: "Session · <origin>" and its artifacts, each opening on the Artifacts screen when the
+// export has it there, else on claude.ai. Every title is text.
+function renderSessionLine(box, session) {
+  const line = el('div', 'session-line', session.origin ? `Session · ${session.origin}` : 'Session');
+  const arts = sessionArtifacts(session, allArtifactViews);
+  arts.forEach((a, i) => {
+    line.append(i ? ', ' : ' · ');
+    const link = el('a', 'session-artifact', a.title);
+    if (a.view && artifactsApp) link.href = '#a=' + encodeURIComponent(a.id);
+    else {
+      link.href = `https://claude.ai/artifact/${a.id}`;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.title = 'The artifact on claude.ai. It is not in this export.';
+    }
+    line.append(link);
+  });
+  box.replaceChildren(line);
+  box.hidden = false;
 }
 
 // ---- Archive files ----
@@ -1424,7 +1495,7 @@ function branchControl(sib) {
 function renderMessage(m, sib, chat) {
   let node;
   try {
-    node = m.sender === 'human' ? renderHuman(m) : renderAssistant(m, chat);
+    node = m.labelled ? renderLabelled(m) : m.sender === 'human' ? renderHuman(m) : renderAssistant(m, chat);
   } catch (e) {
     console.warn('Could not display a message', m.id, e);
     node = el('section', 'msg failed', "This message couldn't be displayed");
@@ -1471,8 +1542,11 @@ function chatUrl(id) {
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id || '')) ? `https://claude.ai/chat/${id.toLowerCase()}` : null;
 }
 
+// The chat (or session) in the column, for what draws later in it (a subagent's messages in its step).
+let columnChat = null;
 function renderChat(chat, leaf = chat.leaf, anchor = null) {
   const generation = ++renderGeneration;
+  columnChat = chat;
   const box = document.getElementById('chat');
   const scroll = document.getElementById('scroll');
   const title = chat.title || 'Untitled';
@@ -1847,6 +1921,8 @@ let drawn = ''; // the chat and leaf in the column, which a change of file leave
 // The only way to change chat, leaf or file. Writes the hash, then renders. options.replace edits the
 // current history entry; options.anchor keeps a message in place; options.fromHash means the hash is already set.
 function navigate(state, options = {}) {
+  if (state && state.session && sessionsById.has(state.session)) { navigateSession(state, options); return; }
+  if (state && state.session) state = {};
   const fromScreen = artifactsOn || listsOn;
   showArtifacts(false);
   showLists(false);
@@ -1877,13 +1953,44 @@ function navigate(state, options = {}) {
   renderChat(chat, leaf, options.anchor);
 }
 
+// A session in the column, read-only, as a chat with one branch: state { session, msg }. msg (one of its messages)
+// stays in the hash and is scrolled to.
+function navigateSession(state, options) {
+  const session = sessionsById.get(state.session);
+  showArtifacts(false);
+  showLists(false);
+  restoreTitles();
+  const chat = session.chat;
+  const msg = state.msg && chat.messages.some(m => m.id === state.msg) ? state.msg : null;
+  const hash = formatHash({ session: session.id, msg });
+  const replaceHash = h => { try { history.replaceState(null, '', h); } catch (e) { /* the hash stays */ } };
+  if (!options.fromHash && hash !== location.hash) {
+    if (options.replace) replaceHash(hash);
+    else location.hash = hash;
+  } else if (options.fromHash && hash !== location.hash) replaceHash(hash);
+  shown = hash;
+  closeStepper();
+  document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
+  showPanel(chat, null);
+  if (msg && !(find && find.msg === msg)) find = { msg, terms: [], gen: null };
+  const column = `session\n${session.id}`;
+  if (column !== drawn) {
+    drawn = column;
+    renderChat(chat, chat.leaf, options.anchor);
+  }
+  if (find && find.gen === null && find.msg === msg) { find.gen = renderGeneration; tryFind(); }
+}
+
 function onHashChange() {
   if (routeArtifacts(location.hash)) return;
   if (routeLists(location.hash)) return;
   if (location.hash === shown && !artifactsOn && !listsOn) return;
+  const state = parseHash(location.hash);
+  if (state.session && sessionsById.has(state.session)) { navigate(state, { fromHash: true }); return; }
   // An archive with artifacts and no chats has nothing else to show.
   if (!allChats.length && artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); return; }
-  navigate(parseHash(location.hash), { fromHash: true });
+  if (!allChats.length && allSessions.length) { history.replaceState(null, '', '#sessions'); routeLists('#sessions'); return; }
+  navigate(state, { fromHash: true });
 }
 
 // ---- The Artifacts screen: the artifacts app (artifacts-app.js) in #artifacts-screen, in place of the chat ----
@@ -1960,6 +2067,12 @@ let listProjects = []; // projectList over the chats, built once at start
 let listProjectOf = new Map(); // chat -> its listProjects entry
 let listState = null; // { page: 'projects' | 'project' | 'chats', project }: what the screen shows
 let sortedChats = null; // every chat, newest first, for All chats (sorted on its first visit)
+// Sessions (ViewerData.sessions): apart from chats, in no Recents, All chats or project, on their own page (#sessions).
+const sessionsById = new Map();
+const sessionOfChat = new WeakMap(); // a session's chat (what the column draws) -> the session
+let allSessions = [];
+let sortedSessions = null; // newest activity first, for #sessions
+let allArtifactViews = []; // ViewerData.artifacts, for a session's artifact links
 
 // A list page as it was left (filter text, chat rows shown, scroll), kept in its history entry's state while it
 // shows, so Back or Forward to it finds it the same. A new visit (a link, an entry) has no state and starts afresh.
@@ -1992,6 +2105,7 @@ function savedListView() {
 
 function listPageTitle(state) {
   if (state.page === 'project') return state.project.name;
+  if (state.page === 'sessions') return 'Sessions';
   return state.page === 'chats' ? 'Chats' : 'Projects';
 }
 
@@ -2007,6 +2121,7 @@ function renderListPage(state) {
   const memo = { query: saved ? String(saved.query || '') : '', rows: saved ? Number(saved.rows) || 0 : 0 };
   if (state.page === 'projects') projectsPage(page, heading, now, memo);
   else if (state.page === 'project') projectPage(page, heading, state.project, now, memo);
+  else if (state.page === 'sessions') sessionsPage(page, heading, now, memo);
   else chatsPage(page, heading, now, memo);
   screen.replaceChildren(page);
   screen.scrollTop = saved ? Number(saved.scroll) || 0 : 0;
@@ -2052,15 +2167,16 @@ function projectCard(p, now) {
 }
 
 // Chat rows, LIST_PAGE at a time with Show more, at least `want` of them at first. projectOf (a Map, or null): name each
-// chat's project, linked to its page.
-function chatRows(chats, now, projectOf, want = 0) {
+// chat's project, linked to its page. sessions: the rows are sessions, each with its origin.
+function chatRows(chats, now, projectOf, want = 0, sessions = false) {
   const box = el('div', 'chat-rows');
   const row = chat => {
     const line = el('div', 'chat-line');
-    const link = el('a', 'chat-row', chat.title || 'Untitled');
-    link.href = formatHash({ chat: chat.id });
+    const link = el('a', 'chat-row', chat.title || (sessions ? 'Untitled session' : 'Untitled'));
+    link.href = formatHash(sessions ? { session: chat.id } : { chat: chat.id });
     line.append(link);
     const sub = el('div', 'chat-sub');
+    if (sessions && chat.origin) sub.append(el('span', 'chat-origin', String(chat.origin)));
     const p = projectOf ? projectOf.get(chat) : null;
     if (p) {
       const a = el('a', 'chat-project', p.name);
@@ -2072,7 +2188,7 @@ function chatRows(chats, now, projectOf, want = 0) {
     if (sub.childElementCount) line.append(sub);
     return line;
   };
-  if (!chats.length) { box.append(el('p', 'list-empty', 'No chats match.')); return box; }
+  if (!chats.length) { box.append(el('p', 'list-empty', sessions ? 'No sessions match.' : 'No chats match.')); return box; }
   const list = el('div', 'chat-list-rows');
   const more = el('button', 'show-more', 'Show more');
   more.type = 'button';
@@ -2117,6 +2233,21 @@ function chatsPage(page, heading, now, memo) {
   if (!sortedChats) sortedChats = recentChats(allChats, allChats.length);
   const { rows, filter } = filteredChatRows(sortedChats, now, true, memo);
   page.append(heading, el('p', 'list-count', chatCount(sortedChats.length)), filter, rows);
+}
+
+const sessionCount = n => `${n} session${n === 1 ? '' : 's'}`;
+function sessionsPage(page, heading, now, memo) {
+  if (!sortedSessions) sortedSessions = allSessions.slice().sort((a, b) => String(b.updated || '').localeCompare(String(a.updated || '')));
+  const folded = new WeakMap();
+  const pick = query => (query.trim() ? filterByText(sortedSessions, query, s => [s.title, s.origin], folded) : sortedSessions);
+  let rows = chatRows(pick(memo.query), now, null, memo.rows, true);
+  const filter = listFilter('Filter sessions', query => {
+    const next = chatRows(pick(query), now, null, 0, true);
+    rows.replaceWith(next);
+    rows = next;
+  });
+  filter.value = memo.query;
+  page.append(heading, el('p', 'list-count', sessionCount(sortedSessions.length)), filter, rows);
 }
 
 // A project's instructions text, or '' when it has none.
@@ -2199,9 +2330,10 @@ function openList(hash) {
 
 // Shows the screen when hash is one of its own; returns whether it was. An unknown project key shows Projects.
 function routeLists(hash) {
-  if (allChats.length <= 1) return false;
   const want = parseListHash(hash);
   if (!want) return false;
+  // Sessions have their page whenever there are any, also beside one chat; the other pages need more than one chat.
+  if (want.page === 'sessions' ? !allSessions.length : allChats.length <= 1) return false;
   const titles = chatTitles();
   const project = want.page === 'project' ? listProjects.find(p => p.key === want.key) || null : null;
   listState = project ? { page: 'project', project } : { page: want.page === 'project' ? 'projects' : want.page, project: null };
@@ -2216,6 +2348,7 @@ function showLists(on, titles = null) {
   const screen = document.getElementById('lists-screen');
   const projectsNav = document.getElementById('projects-nav');
   const chatsNav = document.getElementById('chats-nav');
+  const sessionsNav = document.getElementById('sessions-nav');
   if (!on) {
     listsOn = false;
     document.body.classList.remove('lists-on');
@@ -2223,6 +2356,7 @@ function showLists(on, titles = null) {
     screen.replaceChildren();
     projectsNav.setAttribute('aria-current', 'false');
     chatsNav.setAttribute('aria-current', 'false');
+    sessionsNav.setAttribute('aria-current', 'false');
     return;
   }
   showArtifacts(false);
@@ -2233,8 +2367,9 @@ function showLists(on, titles = null) {
   closeStepper();
   closeFilesMenu(false);
   document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
-  projectsNav.setAttribute('aria-current', String(listState.page !== 'chats'));
+  projectsNav.setAttribute('aria-current', String(listState.page === 'projects' || listState.page === 'project'));
   chatsNav.setAttribute('aria-current', String(listState.page === 'chats'));
+  sessionsNav.setAttribute('aria-current', String(listState.page === 'sessions'));
   const name = listPageTitle(listState);
   document.getElementById('title').textContent = name;
   document.title = `${name} - Claude Takeout`;
@@ -2406,6 +2541,7 @@ function clearMarks() {
 
 // terms: the lowercase words to highlight in the message. query: the search, for the match bar.
 function openHit(hit, terms, query = '') {
+  if (hit.session) { openSessionHit(hit, terms); return; }
   const chat = chatsById.get(hit.chat);
   if (!chat) return;
   setDrawer(false);
@@ -2426,6 +2562,20 @@ function openHit(hit, terms, query = '') {
   const leaf = onBranch ? now.leaf : leafUnder(chat.messages, hit.msg);
   find = { msg: hit.msg, terms, gen: null };
   navigate({ chat: chat.id, leaf });
+  if (!find) return;
+  find.gen = renderGeneration;
+  tryFind();
+}
+
+// A search hit in a session: the session, at the message with its match highlighted. No match bar: that is chats'.
+function openSessionHit(hit, terms) {
+  const session = sessionsById.get(hit.session);
+  if (!session) return;
+  setDrawer(false);
+  closeStepper();
+  if (hit.msg === null || !session.chat.messages.some(m => m.id === hit.msg)) { navigate({ session: session.id }); return; }
+  find = { msg: hit.msg, terms, gen: null };
+  navigate({ session: session.id, msg: hit.msg });
   if (!find) return;
   find.gen = renderGeneration;
   tryFind();
@@ -2580,29 +2730,36 @@ function showResults(query) {
   document.querySelector('.find .clear').hidden = !query;
   fileSearchGen++;  // a file search still running for an earlier query stops
   if (!q) { holder.replaceChildren(); closeStepper(); return; }
-  if (!searchIndex) searchIndex = buildSearchIndex(allChats);
+  if (!searchIndex) searchIndex = buildSearchIndex(allChats, allSessions);
   const groups = groupHits(searchChats(searchIndex, q, Infinity));
+  // A group is a chat's or a session's (g.session, its id in g.id); a session's opens it, labelled Session.
+  const keyOf = g => (g.session ? `session\n${g.id}` : g.chat);
+  const targetOf = g => (g.session ? (sessionsById.get(g.id) || {}).chat : chatsById.get(g.chat));
   // Matches are counted as the match bar counts them: in what the conversation shows.
-  const plans = new Map(groups.slice(0, GROUP_LIMIT).map(g => [g.chat, findPlan(chatsById.get(g.chat), q)]));
+  const plans = new Map(groups.slice(0, GROUP_LIMIT).map(g => [keyOf(g), findPlan(targetOf(g), q)]));
   const matches = [...plans.values()].reduce((n, p) => n + p.total, 0);
   const plural = (n, w, s = 's') => `${n} ${w}${n === 1 ? '' : s}`;
+  const sessionGroups = groups.filter(g => g.session).length;
+  const counted = [groups.length - sessionGroups ? plural(groups.length - sessionGroups, 'chat') : null, sessionGroups ? plural(sessionGroups, 'session') : null].filter(Boolean).join(' · ');
   // Matches are counted in the chats listed, so past GROUP_LIMIT the summary says so.
   const note = !groups.length ? 'No matches'
-    : `${plural(groups.length, 'chat')} · ${plural(matches, 'match', 'es')}${groups.length > GROUP_LIMIT ? ` in the first ${GROUP_LIMIT}` : ''}`;
+    : `${counted} · ${plural(matches, 'match', 'es')}${groups.length > GROUP_LIMIT ? ` in the first ${GROUP_LIMIT}` : ''}`;
   const list = el('div', 'list');
   for (const g of groups.slice(0, GROUP_LIMIT)) {
-    const chat = chatsById.get(g.chat);
+    const chat = targetOf(g);
     const box = el('div', 'group');
     const title = el('button', 'group-title');
     title.type = 'button';
+    if (g.session) title.append(el('span', 'group-kind', 'Session'));
     const name = el('b');
     name.append(...withMarks((chat && chat.title) || 'Untitled', g.terms));
     title.append(name);
-    const plan = plans.get(g.chat);
+    const plan = plans.get(keyOf(g));
     if (plan && plan.total) title.append(el('small', '', `${plural(plan.total, 'match', 'es')} in ${plural(plan.items.length, 'message')}`));
     else if (g.count) title.append(el('small', '', 'In pasted text or file names'));
     // The title opens the first match the conversation shows; a hit only in pasted text comes after.
-    const first = plan && plan.items.length ? { chat: g.chat, msg: plan.items[0].msg } : (g.snippets[0] || { chat: g.chat, msg: null });
+    const own = g.session ? { chat: null, session: g.id } : { chat: g.chat };
+    const first = plan && plan.items.length ? { ...own, msg: plan.items[0].msg } : (g.snippets[0] || { ...own, msg: null });
     title.addEventListener('click', () => openHit(first, g.terms, q));
     box.append(title);
     for (const hit of g.snippets) {
@@ -2706,7 +2863,7 @@ function setupSearch() {
   let timer = 0;
   input.disabled = false;
   const reset = () => { clearTimeout(timer); input.value = ''; showResults(''); };
-  input.addEventListener('focus', () => { if (!searchIndex) searchIndex = buildSearchIndex(allChats); });
+  input.addEventListener('focus', () => { if (!searchIndex) searchIndex = buildSearchIndex(allChats, allSessions); });
   const files = document.getElementById('search-files');
   try { files.checked = localStorage.getItem(SEARCH_FILES_KEY) === '1'; } catch (e) { /* no storage: off */ }
   files.addEventListener('change', () => {
@@ -2775,11 +2932,21 @@ function start() {
   setupStepper();
   allChats = linkProjects(data);
   allChats.forEach(chat => chatsById.set(chat.id, chat));
+  allArtifactViews = Array.isArray(data.artifacts) ? data.artifacts : [];
+  allSessions = (Array.isArray(data.sessions) ? data.sessions : []).filter(s => s && typeof s === 'object' && typeof s.id === 'string' && s.id
+    && s.chat && typeof s.chat === 'object' && Array.isArray(s.chat.messages));
+  for (const s of allSessions) {
+    if (!s.chat.title) s.chat.title = s.title || 'Untitled session';
+    if (!s.chat.files || typeof s.chat.files !== 'object') s.chat.files = {};
+    sessionsById.set(s.id, s);
+    sessionOfChat.set(s.chat, s);
+  }
   if (allChats.length > 1) {
     listProjects = projectList(allChats, Array.isArray(data.projects) ? data.projects : []);
     for (const p of listProjects) for (const c of p.chats) listProjectOf.set(c, p);
   }
   renderSidebar(data.chats);
+  if (allSessions.length) setupListEntry('sessions-nav', allSessions.length, '#sessions');
   setupSearch();
   try { setWrap(localStorage.getItem(WRAP_KEY) === '1', false); } catch (e) { /* no storage: off */ }
   document.getElementById('menu').addEventListener('click', () => setDrawer(true));
@@ -2802,8 +2969,10 @@ function start() {
   if (!data.chats.length) document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
   if (routeArtifacts(location.hash)) return;
   if (routeLists(location.hash)) return;
-  if (data.chats.length) navigate(parseHash(location.hash), { replace: true });
+  const first = parseHash(location.hash);
+  if (data.chats.length || (first.session && sessionsById.has(first.session))) navigate(first, { replace: true });
   else if (artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); }
+  else if (allSessions.length) { history.replaceState(null, '', '#sessions'); routeLists('#sessions'); }
 }
 
 start();
