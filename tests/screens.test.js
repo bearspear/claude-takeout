@@ -2002,3 +2002,15 @@ test('an upgrade keeps an Artifacts-only setup: no stored exportAllSessions with
   assert.strictEqual(explicit.plan.run, 'bulk');
   assert.strictEqual(explicit.box, true);
 });
+
+test('the upgrade save keeps the top-level useSidePanel that background.js reads', async () => {
+  const store = { exporterSettings: { exportAllChats: false, useSidePanel: false }, useSidePanel: true };
+  const { fn } = loadPopup({ before: (sb) => {
+    sb.chrome.storage.local.get = async (keys) => Object.fromEntries((Array.isArray(keys) ? keys : [keys]).filter((k) => k in store).map((k) => [k, JSON.parse(JSON.stringify(store[k]))]));
+    sb.chrome.storage.local.set = async (o) => { Object.assign(store, JSON.parse(JSON.stringify(o))); };
+  } });
+  await fn('loadSettings')();
+  await sleep(5);
+  assert.strictEqual(store.useSidePanel, true);
+  assert.strictEqual(store.exporterSettings.exportAllSessions, false);
+});

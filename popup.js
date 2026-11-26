@@ -7712,19 +7712,22 @@ let settings = { ...defaultSettings };
 async function loadSettings() {
   try {
     const stored = await chrome.storage.local.get(['exporterSettings', 'useSidePanel']);
+    // Upgrade from before the Sessions box: Chats off was the Artifacts-only export, which a ticked Sessions box
+    // would turn into Export All. Such a setup starts with Sessions off, and keeps it (saved below).
+    let upgraded = false;
     if (stored.exporterSettings) {
       settings = { ...defaultSettings, ...stored.exporterSettings };
-      // Upgrade from before the Sessions box: Chats off was the Artifacts-only export, which a ticked Sessions box
-      // would turn into Export All. Such a setup starts with Sessions off, and keeps it.
       if (!('exportAllSessions' in stored.exporterSettings) && stored.exporterSettings.exportAllChats === false) {
         settings.exportAllSessions = false;
-        saveSettings();
+        upgraded = true;
       }
     }
     // Top-level useSidePanel takes precedence (set by background.js listener)
     if (typeof stored.useSidePanel === 'boolean') {
       settings.useSidePanel = stored.useSidePanel;
     }
+    // Saved after the override, so the top-level mirror background.js reads isn't replaced by a stale value.
+    if (upgraded) saveSettings();
     applySettings();
   } catch (e) {
     console.error('Failed to load settings:', e);
