@@ -889,26 +889,29 @@ for (const [name, fn] of Object.entries(tests)) test(name, fn);
 // A chat fetch claude.ai rate-limits (429) or fails on its side (5xx) is tried again after a pause; other errors
 // are not, and a 429 that keeps coming gives up after the retries.
 function contentWith(replies) {
-  const urls = [], waits = [];
+  const urls = [], waits = [], inits = [];
   let onMessage;
   const w = { addEventListener() {}, location: {} };
   const sandbox = {
-    window: w, console: { log() {} },
+    window: w, TextEncoder, console: { log() {} },
     setTimeout: (f, ms) => { waits.push(ms); return setTimeout(f, 0); },
     document: { createElement: () => ({}), head: { appendChild() {} }, cookie: 'lastActiveOrg=11111111-0000-4000-8000-000000000001' },
-    fetch: async (u) => {
-      urls.push(u);
+    fetch: async (u, init) => {
+      urls.push(u); inits.push(init);
       const r = replies.length > 1 ? replies.shift() : replies[0];
-      return { ok: r.status === 200, status: r.status, headers: { get: (k) => (k === 'Retry-After' ? r.retryAfter || null : null) }, json: async () => conv(B, 'Chat B') };
+      return { ok: r.status === 200, status: r.status, headers: { get: (k) => (k === 'Retry-After' ? r.retryAfter || null : null) }, json: async () => (r.body || conv(B, 'Chat B')) };
     },
     chrome: {
       runtime: { getURL: (p) => p, lastError: null, onMessage: { addListener: (f) => { onMessage = f; } }, sendMessage() {} },
       storage: { local: { set() {}, remove() {}, get: (k, cb) => cb({}) } },
     },
   };
-  vm.runInNewContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), sandbox);
+  vm.createContext(sandbox);
+  vm.runInContext(fs.readFileSync(path.join(REPO, 'session-core.js'), 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(path.join(REPO, 'content.js'), 'utf8'), sandbox);
   const ask = () => new Promise((r) => onMessage({ action: 'fetchConversation', conversationId: B }, {}, r));
-  return { urls, waits, ask };
+  const send = (msg) => new Promise((r) => onMessage(msg, {}, r));
+  return { urls, waits, inits, ask, send };
 }
 
 test('fetchConversation tries a 429 or 5xx again after a pause', async () => {
@@ -924,4 +927,57 @@ test('fetchConversation tries a 429 or 5xx again after a pause', async () => {
   const c = contentWith([{ status: 404 }, { status: 200 }]);
   assert.match(String((await c.ask()).error), /404/);
   assert.strictEqual(c.urls.length, 1, 'a 404 is not retried');
+});
+
+const SESS = { id: 'cse_abc1', title: 'T', status: 'idle', created_at: 'c', updated_at: 'u', session_context: { headers: { secret: 'x' } } };
+
+test('listSessions sends the session headers and keeps only kept fields', async () => {
+  const h = contentWith([{ status: 200, body: { data: [SESS], resume_token: 'r' } }]);
+  const res = await h.send({ action: 'listSessions' });
+  assert.ok(h.urls[0].endsWith('/v1/code/sessions?exclude_tags=-&limit=100'), h.urls[0]);
+  const hd = h.inits[0].headers;
+  assert.strictEqual(hd['anthropic-version'], '2023-06-01');
+  assert.strictEqual(hd['anthropic-beta'], 'ccr-byoc-2025-07-29');
+  assert.strictEqual(hd['x-organization-uuid'], '11111111-0000-4000-8000-000000000001');
+  assert.strictEqual(res.sessions.length, 1);
+  assert.strictEqual(res.sessions[0].id, 'cse_abc1');
+  assert.ok(!JSON.stringify(res).includes('session_context'));
+  assert.strictEqual(res.orgId, '11111111-0000-4000-8000-000000000001');
+});
+
+test('listSessions says a list of 100 sessions may be incomplete', async () => {
+  const many = Array.from({ length: 100 }, (_, i) => ({ ...SESS, id: 'cse_' + i }));
+  assert.strictEqual((await contentWith([{ status: 200, body: { data: many } }]).send({ action: 'listSessions' })).incomplete, true);
+  assert.strictEqual((await contentWith([{ status: 200, body: { data: [SESS, SESS, SESS], resume_token: 'r' } }]).send({ action: 'listSessions' })).incomplete, false);
+});
+
+test('fetchSessionEvents asks one page of 200 after the given id', async () => {
+  const h = contentWith([{ status: 200, body: { data: [{ uuid: 'e6', type: 'user', created_at: 't', message: { role: 'user', content: 'hi' } }], last_id: 'e6', has_more: true } }]);
+  const res = await h.send({ action: 'fetchSessionEvents', id: 'cse_abc1', after: 'e5' });
+  assert.ok(h.urls[0].includes('/v1/sessions/cse_abc1/events?limit=200'), h.urls[0]);
+  assert.ok(h.urls[0].endsWith('&after_id=e5'), h.urls[0]);
+  assert.strictEqual(res.lastId, 'e6', JSON.stringify(res));
+  assert.strictEqual(res.hasMore, true);
+  assert.ok(Array.isArray(res.events));
+});
+
+test('fetchSessionEvents refuses a bad id', async () => {
+  const h = contentWith([{ status: 200, body: {} }]);
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(await h.send({ action: 'fetchSessionEvents', id: '../x' }))), { error: 'bad id' });
+  assert.strictEqual(h.urls.length, 0);
+});
+
+test('session requests retry a 429 like chats', async () => {
+  const h = contentWith([{ status: 429 }, { status: 200, body: { data: [SESS] } }]);
+  const res = await h.send({ action: 'listSessions' });
+  assert.strictEqual(res.sessions.length, 1);
+  assert.strictEqual(h.urls.length, 2);
+});
+
+test('a failed session request answers with a code only', async () => {
+  const h = contentWith([{ status: 500 }]);
+  const res = await h.send({ action: 'listSessions' });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(res)), { error: 'HTTP 500' });
+  assert.strictEqual(h.urls.length, 4);
+  assert.ok(!/http|claude\.ai/i.test(res.error.replace('HTTP', '')));
 });
