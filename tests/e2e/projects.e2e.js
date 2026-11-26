@@ -291,11 +291,18 @@ function projectOf(c) {
   check('back: the filter is kept', (await cFilter.inputValue()) === 'Chat 12' && backRows.length === 13 && backRows.includes('Chat 12') && backRows.includes('Chat 212'), `${await cFilter.inputValue()} ${backRows.length}`);
   await cFilter.fill('');
   await pages.click('#lists-screen button.show-more');
+  // Scrolled, then a row clicked at once (before the save after scrolling would run).
   await pages.evaluate(() => { document.getElementById('lists-screen').scrollTop = 3000; });
-  await pages.waitForTimeout(250);
+  await pages.evaluate(() => new Promise(r => requestAnimationFrame(r)));
   const leftAt = await pages.evaluate(() => document.getElementById('lists-screen').scrollTop);
-  await pages.locator('#lists-screen a.chat-row:text-is("Chat 40")').click();
-  await pages.waitForFunction(() => location.hash.includes('chat=c040'));
+  const target = await pages.evaluate(() => {
+    const top = document.getElementById('lists-screen').getBoundingClientRect().top;
+    const a = [...document.querySelectorAll('#lists-screen a.chat-row')].find(x => x.getBoundingClientRect().top > top + 40);
+    const r = a.getBoundingClientRect();
+    return { x: r.left + 10, y: r.top + r.height / 2 };
+  });
+  await pages.mouse.click(target.x, target.y);
+  await pages.waitForFunction(() => location.hash.includes('chat='));
   await pages.goBack();
   await pages.waitForFunction(() => document.title === 'Chats - Claude Takeout');
   await pages.waitForTimeout(100);

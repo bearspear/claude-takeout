@@ -1861,10 +1861,12 @@ function navigate(state, options = {}) {
   const leaf = chain.length ? chain[chain.length - 1].id : null;
   const open = resolveFile(chat.files, want.file, want.version, allAdded);
   const hash = formatHash({ chat: chat.id, leaf, file: open && open.file, version: open && open.version });
+  // replaceState can throw (Safari allows 100 calls in 30 s): the hash then stays as it was.
+  const replaceHash = h => { try { history.replaceState(null, '', h); } catch (e) { /* the hash stays */ } };
   if (!options.fromHash && hash !== location.hash) {
-    if (options.replace) history.replaceState(null, '', hash);
+    if (options.replace) replaceHash(hash);
     else location.hash = hash;
-  } else if (options.fromHash && hash !== location.hash) history.replaceState(null, '', hash);
+  } else if (options.fromHash && hash !== location.hash) replaceHash(hash);
   shown = hash;
   if (fromScreen) document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
   if (stepper && stepper.chat !== chat.id) closeStepper();
@@ -1960,7 +1962,8 @@ let sortedChats = null; // every chat, newest first, for All chats (sorted on it
 
 // A list page as it was left (filter text, chat rows shown, scroll), kept in its history entry's state while it
 // shows, so Back or Forward to it finds it the same. A new visit (a link, an entry) has no state and starts afresh.
-// Saved at once on a filter or Show more (a link may be clicked right after), after a pause on scrolling.
+// Saved after a pause in typing or scrolling, at once on Show more, and any save still waiting is written on a click
+// (capture, before a link's navigation): few history calls (Safari allows 100 in 30 s), none lost on leaving.
 let listSaveTimer = null;
 function saveListView() {
   clearTimeout(listSaveTimer);
@@ -1974,7 +1977,12 @@ function saveListView() {
 function saveListViewSoon() {
   clearTimeout(listSaveTimer);
   const hash = location.hash;
-  listSaveTimer = setTimeout(() => { if (location.hash === hash) saveListView(); }, 150);
+  listSaveTimer = setTimeout(() => { listSaveTimer = null; if (location.hash === hash) saveListView(); }, 300);
+}
+function flushListView() {
+  if (listSaveTimer === null) return;
+  saveListView();
+  listSaveTimer = null;
 }
 function savedListView() {
   const list = history.state && history.state.list;
@@ -2014,7 +2022,7 @@ function listFilter(label, onInput) {
   input.setAttribute('aria-label', label);
   input.autocomplete = 'off';
   input.spellcheck = false;
-  input.addEventListener('input', () => { onInput(input.value); saveListView(); });
+  input.addEventListener('input', () => { onInput(input.value); saveListViewSoon(); });
   return input;
 }
 
@@ -2785,6 +2793,7 @@ function start() {
   });
   window.addEventListener('hashchange', onHashChange);
   document.getElementById('lists-screen').addEventListener('scroll', () => { if (listsOn) saveListViewSoon(); }, { passive: true });
+  document.addEventListener('click', flushListView, true);
   if (!data.chats.length) document.getElementById('chat').append(el('div', 'empty', 'No chats in this archive'));
   if (routeArtifacts(location.hash)) return;
   if (routeLists(location.hash)) return;
