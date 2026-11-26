@@ -961,15 +961,53 @@ function renderProject(chat) {
   }
 }
 
-// A session's fold bar line: "Session · <origin>" and its artifacts, each opening on the Artifacts screen when the
-// export has it there, else on claude.ai. Every title is text.
+// An empty chat claude.ai made when an artifact was opened: "Opened from the artifact <title>". The title is the
+// store's, else the listed artifact's; it opens the artifact in the side panel when the export has it, else its
+// claude.ai page in a new tab. Every title is text.
+function openedFromLine(chat) {
+  const line = el('p', 'opened-from');
+  const id = artifactShortId(chat.startedWith);
+  const opened = chat.opened && typeof chat.opened === 'object' ? chat.opened : {};
+  const view = allArtifactViews.find(v => v && (String(v.id) === id || String(v.id).toLowerCase() === chat.startedWith)) || null;
+  const title = (typeof opened.title === 'string' && opened.title) || (view && typeof view.title === 'string' && view.title) || '';
+  const link = el('a', '', title || 'an artifact');
+  const file = typeof opened.file === 'string' && Object.prototype.hasOwnProperty.call(chat.files, opened.file) ? opened.file : null;
+  if (file) link.href = formatHash({ chat: chat.id, file, version: opened.version });
+  else {
+    link.href = `https://claude.ai/artifact/${id}`;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.title = 'The artifact on claude.ai. It is not in this export.';
+  }
+  line.append(title ? 'Opened from the artifact ' : 'Opened from ', link);
+  if (file) {
+    const button = el('button', 'open-artifact', 'Open artifact');
+    button.type = 'button';
+    button.addEventListener('click', () => navigate({ chat: chat.id, file, version: opened.version }));
+    line.append(' ', button);
+  }
+  return line;
+}
+
+// A session's fold bar line: "Session · <origin>" and its artifacts, each opening in the side panel when the session
+// published it (its card's file, newest version; the panel links the Artifacts screen), else on the Artifacts screen
+// when the export has it there, else on claude.ai. Every title is text.
 function renderSessionLine(box, session) {
   const line = el('div', 'session-line', session.origin ? `Session · ${session.origin}` : 'Session');
   const arts = sessionArtifacts(session, allArtifactViews);
+  const pages = session.pages && typeof session.pages === 'object' ? session.pages : {};
+  const fileOf = new Map();
+  for (const uuid of Object.keys(pages)) {
+    const id = pages[uuid];
+    const file = typeof id === 'string' && Object.prototype.hasOwnProperty.call(session.chat.files || {}, id) ? session.chat.files[id] : null;
+    if (file && Array.isArray(file.versions) && file.versions.length) fileOf.set(artifactShortId(uuid), { id, version: file.versions.length - 1 });
+  }
   arts.forEach((a, i) => {
     line.append(i ? ', ' : ' · ');
-    const link = el('a', 'session-artifact', a.title);
-    if (a.view && artifactsApp) link.href = '#a=' + encodeURIComponent(a.id);
+    const page = fileOf.get(a.id);
+    const link = el('a', 'session-artifact', page ? String(session.chat.files[page.id].name || a.title) : a.title);
+    if (page) link.href = formatHash({ session: session.id, file: page.id, version: page.version });
+    else if (a.view && artifactsApp) link.href = '#a=' + encodeURIComponent(a.id);
     else {
       link.href = `https://claude.ai/artifact/${a.id}`;
       link.target = '_blank';
@@ -1570,6 +1608,7 @@ function renderChat(chat, leaf = chat.leaf, anchor = null) {
   document.title = `${title} - Claude Takeout`;
   document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', String(item.dataset.id === chat.id)));
 
+  if (!chat.messages.length && chat.startedWith) box.append(openedFromLine(chat));
   const chain = chainFrom(chat.messages, leaf);
   const counts = siblingCounts(chat.messages);
   const sibsOf = m => {
@@ -1768,7 +1807,9 @@ function pageNodes(chat, file, version) {
     return [frame];
   }
   // An added page is no part of the chat that happens to be open, so it gets none of that chat's files.
-  const doc = previewDoc(version.text, file.added ? () => null : siblingLookup(chat));
+  // A session's published page (a version read from an artifact preview payload): as the Artifacts screen previews it.
+  const doc = version.payload ? artifactPreviewDoc(version.text, version.start, version.payload)
+    : previewDoc(version.text, file.added ? () => null : siblingLookup(chat));
   const frame = previewFrame(doc.srcdoc, file.name || '');
   // HTML, a scripted SVG and an SVG the picture refused: the page's own zoom bar.
   const wrapper = el('div', 'page-zoom');
@@ -1869,9 +1910,13 @@ function drawFromPart(chat, open, file, version) {
   document.getElementById('panel-body').replaceChildren(el('div', 'file-loading', 'Loading…'));
   loadPart(version.part).then(part => {
     if (load !== panelLoad) return;
-    const text = part && Object.prototype.hasOwnProperty.call(part, version.key) ? part[version.key] : null;
+    const value = part && Object.prototype.hasOwnProperty.call(part, version.key) ? part[version.key] : null;
+    // A session's published page points at the artifact step's preview payload: its start file, and the files beside it.
+    const text = partText(value, version.start);
     if (typeof text === 'string') {
       version.text = text;
+      // Its preview is then built as the Artifacts screen builds it, from the whole payload (scripts, styles, pictures).
+      if (value && typeof value === 'object') Object.defineProperty(version, 'payload', { value, configurable: true });
       drawPanel(chat, open, file, version);
     } else if (version.href) {
       // Its own copy in artefacts/ is still beside the viewer.
@@ -1935,7 +1980,12 @@ function navigate(state, options = {}) {
   const ids = new Set(chat.messages.map(m => m.id));
   const chain = chainFrom(chat.messages, ids.has(want.leaf) ? want.leaf : chat.leaf);
   const leaf = chain.length ? chain[chain.length - 1].id : null;
-  const open = resolveFile(chat.files, want.file, want.version, allAdded);
+  let open = resolveFile(chat.files, want.file, want.version, allAdded);
+  // A chat opened from an artifact, with no messages: that artifact in the side panel, when the chat is drawn anew.
+  // Not when the viewer opens on it with no hash (options.landing): its Open artifact button does that.
+  if (!open && !options.landing && !want.file && !chat.messages.length && chat.opened && chat.opened.file && `${chat.id}\n${leaf}` !== drawn) {
+    open = resolveFile(chat.files, chat.opened.file, chat.opened.version, allAdded);
+  }
   const hash = formatHash({ chat: chat.id, leaf, file: open && open.file, version: open && open.version });
   // replaceState can throw (Safari allows 100 calls in 30 s): the hash then stays as it was.
   const replaceHash = h => { try { history.replaceState(null, '', h); } catch (e) { /* the hash stays */ } };
@@ -1953,8 +2003,10 @@ function navigate(state, options = {}) {
   renderChat(chat, leaf, options.anchor);
 }
 
-// A session in the column, read-only, as a chat with one branch: state { session, msg }. msg (one of its messages)
-// stays in the hash and is scrolled to.
+// A session in the column, read-only, as a chat with one branch: state { session, msg, file, version }. msg (one of
+// its messages) stays in the hash and is scrolled to when it changes or the column is drawn again, never on a panel
+// action (a card, a version, closing), which keeps msg in the hash.
+let sessionMsgAt = ''; // the session and msg last scrolled to
 function navigateSession(state, options) {
   const session = sessionsById.get(state.session);
   showArtifacts(false);
@@ -1962,7 +2014,9 @@ function navigateSession(state, options) {
   restoreTitles();
   const chat = session.chat;
   const msg = state.msg && chat.messages.some(m => m.id === state.msg) ? state.msg : null;
-  const hash = formatHash({ session: session.id, msg });
+  // A file in the side panel, as in a chat (a published page's card, or the fold bar's artifact link).
+  const open = resolveFile(chat.files, state.file, state.version, []);
+  const hash = formatHash({ session: session.id, msg, file: open && open.file, version: open && open.version });
   const replaceHash = h => { try { history.replaceState(null, '', h); } catch (e) { /* the hash stays */ } };
   if (!options.fromHash && hash !== location.hash) {
     if (options.replace) replaceHash(hash);
@@ -1971,9 +2025,12 @@ function navigateSession(state, options) {
   shown = hash;
   closeStepper();
   document.querySelectorAll('.item').forEach(item => item.setAttribute('aria-current', 'false'));
-  showPanel(chat, null);
-  if (msg && !(find && find.msg === msg)) find = { msg, terms: [], gen: null };
+  showPanel(chat, open);
   const column = `session\n${session.id}`;
+  const at = `${session.id}\n${msg || ''}`;
+  const jump = !!msg && (column !== drawn || at !== sessionMsgAt);
+  sessionMsgAt = at;
+  if (jump && !(find && find.msg === msg)) find = { msg, terms: [], gen: null };
   if (column !== drawn) {
     drawn = column;
     renderChat(chat, chat.leaf, options.anchor);
@@ -2970,7 +3027,7 @@ function start() {
   if (routeArtifacts(location.hash)) return;
   if (routeLists(location.hash)) return;
   const first = parseHash(location.hash);
-  if (data.chats.length || (first.session && sessionsById.has(first.session))) navigate(first, { replace: true });
+  if (data.chats.length || (first.session && sessionsById.has(first.session))) navigate(first, { replace: true, landing: !first.chat && !first.session });
   else if (artifactsApp) { history.replaceState(null, '', '#artifacts'); routeArtifacts('#artifacts'); }
   else if (allSessions.length) { history.replaceState(null, '', '#sessions'); routeLists('#sessions'); }
 }

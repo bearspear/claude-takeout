@@ -1771,6 +1771,98 @@ test('the sessions step is done after the viewer step starts, also with no sessi
   assert.strictEqual(states.sessions, 'done');
 });
 
+test("Export All gives a session's published artifact a card from the artifacts store (v1.25.1)", async () => {
+  const { list, chats } = oneChat();
+  const shortId = require('../export-core.js').uuidToBase58(S_ART);
+  const frames = [{ slug: S_ART, title: 'Panel', typeSlug: '', typeTitle: '', sourceSurface: 'code', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }];
+  const pages = { [S_ART]: { title: 'Panel', live: P_LIVE, versions: { [P_LIVE]: { files: { 'index.html': '<p>Panel</p>' } } } } };
+  const events = [
+    ...sessionEventsFixture(),
+    { type: 'assistant', uuid: 'e5', created_at: '2026-11-20T10:00:05Z', message: { role: 'assistant', content: [{ type: 'tool_use', id: 'tu2', name: 'Artifact', input: { file_path: '/home/user/panel.html', description: 'Panel' } }] } },
+    { type: 'user', uuid: 'e6', created_at: '2026-11-20T10:00:06Z', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'tu2', content: [{ type: 'text', text: `Published /home/user/panel.html at https://claude.ai/artifact/${shortId} (Version 1, version id ${P_LIVE})` }] }] } },
+  ];
+  const viewerSessions = [];
+  const fakeViewer = (sb) => {
+    sb.__viewer = (opts) => { viewerSessions.push(...JSON.parse(JSON.stringify(opts.sessions || []))); };
+    vm.runInContext('writeViewer = async (zip, chats, opts) => { __viewer(opts); zip.file("viewer.html", "<html>"); return true; }', sb);
+  };
+  const { result, saved } = await bulkRun({ list, chats, frames, pages, setup: fakeViewer, options: { withArtifacts: true },
+    sessions: sessionList(coworkSession()), sessionPages: { [S_COWORK]: onePage(events) } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(viewerSessions.length, 1);
+  const v = viewerSessions[0];
+  const id = v.pages && v.pages[S_ART];
+  const file = id && v.chat.files[id];
+  assert.ok(file, JSON.stringify(v.pages));
+  const artFolder = Object.keys(saved.written).find((n) => /^artifacts\/[^/]+\/artifact\.json$/.test(n)).split('/')[1];
+  const verFolder = Object.keys(saved.written).find((n) => n.startsWith(`artifacts/${artFolder}/`) && n.endsWith('/index.html')).split('/')[2];
+  assert.strictEqual(file.name, 'Panel');
+  assert.strictEqual(file.artifact, shortId);
+  assert.strictEqual(file.versions.length, 1);
+  const ver = file.versions[0];
+  assert.strictEqual(ver.href, `artifacts/${encodeURIComponent(artFolder)}/${verFolder}/index.html`);
+  assert.strictEqual(ver.text, null, 'no page text in viewer.html');
+  assert.ok(Number.isSafeInteger(ver.part) && ver.part > 0 && /^a\d+$/.test(ver.key) && ver.start === 'index.html', JSON.stringify(ver));
+  const partBody = String(saved.written[`viewer-files/part-${String(ver.part).padStart(4, '0')}.js`]);
+  assert.ok(partBody.includes('<p>Panel<\\/p>'), `the preview is in that part: ${partBody.slice(0, 200)}`);
+  const cards = v.chat.messages.flatMap((m) => m.blocks.filter((b) => b.t === 'card'));
+  assert.deepStrictEqual(cards, [{ t: 'card', file: id, version: 0 }]);
+});
+
+test('Export All: a chat opened from an artifact says so, links the artifact folder, and opens it in the viewer (v1.25.1)', async () => {
+  const opened = { uuid: 'c-open', name: 'Takeout page', created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-20T10:00:00Z', current_leaf_message_uuid: null,
+    settings: { started_with_artifact: { artifact_uuid: S_ART.toUpperCase() } }, chat_messages: [] };
+  const gone = { ...opened, uuid: 'c-gone', name: 'Gone page', settings: { started_with_artifact: { artifact_uuid: '99999999-2222-4222-8222-222222222222' } } };
+  const list = [opened, gone].map((c) => ({ uuid: c.uuid, name: c.name, updated_at: c.updated_at }));
+  const frames = [{ slug: S_ART, title: 'Panel', typeSlug: '', typeTitle: '', sourceSurface: 'code', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }];
+  const pages = { [S_ART]: { title: 'Panel', live: P_LIVE, versions: { [P_LIVE]: { files: { 'index.html': '<p>Panel</p>' } } } } };
+  let viewerData = null;
+  const fakeViewer = (sb) => {
+    sb.__viewer = (data) => { viewerData = JSON.parse(JSON.stringify(data)); };
+    vm.runInContext('writeViewer = async (zip, chats, opts) => { __viewer(CTViewer.buildViewerData(chats, { exported: "x", artifacts: opts.artifacts, sessions: opts.sessions })); zip.file("viewer.html", "<html>"); return true; }', sb);
+  };
+  const { result, saved } = await bulkRun({ list, chats: { 'c-open': opened, 'c-gone': gone }, frames, pages, setup: fakeViewer, options: { withArtifacts: true } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  const w = saved.written;
+  const artFolder = Object.keys(w).find((n) => /^artifacts\/[^/]+\/artifact\.json$/.test(n)).split('/')[1];
+  const chatDir = (name) => Object.keys(w).find((n) => n.endsWith('/README.md') && n.startsWith(name)).split('/')[0];
+  const line = `This chat was opened from the artifact [Panel](../artifacts/${encodeURIComponent(artFolder)}/) and has no messages.`;
+  assert.ok(w[`${chatDir('Takeout')}/README.md`].includes(line), w[`${chatDir('Takeout')}/README.md`]);
+  assert.ok(w[`${chatDir('Takeout')}/full_chat.md`].includes(line));
+  assert.ok(w[`${chatDir('Gone')}/README.md`].includes('This chat was opened from [an artifact](https://claude.ai/artifact/'), w[`${chatDir('Gone')}/README.md`]);
+  assert.ok(!result.warningList.some((x) => x.type === 'export_health'), JSON.stringify(result.warningList));
+  const chat = viewerData.chats.find((c) => c.id === 'c-open');
+  assert.strictEqual(chat.startedWith, S_ART);
+  const file = chat.files[chat.opened.file];
+  assert.strictEqual(chat.opened.title, 'Panel');
+  assert.match(file.versions[chat.opened.version].href, new RegExp(`^artifacts/${encodeURIComponent(artFolder)}/[^/]+/index\\.html$`));
+  assert.ok(file.versions[chat.opened.version].part > 0);
+  assert.ok(!('opened' in viewerData.chats.find((c) => c.id === 'c-gone')));
+});
+
+test('an artifact chat links claude.ai when the artifact step never runs (the tab went away)', async () => {
+  const opened = { uuid: 'c-open', name: 'Takeout page', created_at: '2026-11-20T10:00:00Z', updated_at: '2026-11-20T10:00:00Z', current_leaf_message_uuid: null,
+    settings: { started_with_artifact: { artifact_uuid: S_ART } }, chat_messages: [] };
+  const later = Object.assign(loadFixture(), { uuid: 'c-later', updated_at: '2026-01-01T00:00:00Z' });
+  const list = [{ uuid: 'c-open', name: opened.name, updated_at: opened.updated_at }, { uuid: 'c-later', name: later.name, updated_at: later.updated_at }];
+  const frames = [{ slug: S_ART, title: 'Panel', typeSlug: '', typeTitle: '', sourceSurface: 'code', rel: 'mine', live: P_LIVE, updatedAt: '2026-11-01T00:00:00Z', createdAt: '2026-10-01T00:00:00Z' }];
+  const pages = { [S_ART]: { title: 'Panel', live: P_LIVE, versions: { [P_LIVE]: { files: { 'index.html': '<p>Panel</p>' } } } } };
+  const goneTab = (sb) => {
+    const send = sb.chrome.tabs.sendMessage;
+    sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+      if (msg.action === 'fetchConversation' && msg.conversationId === 'c-later') { sb.chrome.runtime.lastError = { message: 'Could not establish connection. Receiving end does not exist.' }; cb(undefined); sb.chrome.runtime.lastError = undefined; return; }
+      send(id, msg, cb);
+    };
+  };
+  const { result, saved } = await bulkRun({ list, chats: { 'c-open': opened, 'c-later': later }, frames, pages, setup: goneTab, options: { withArtifacts: true } });
+  assert.ok(result, 'a run result');
+  const w = saved.written;
+  assert.ok(!Object.keys(w).some((n) => /^artifacts\/[^/]+\/artifact\.json$/.test(n)), 'the artifact step did not run: ' + Object.keys(w).join());
+  const readme = w[Object.keys(w).find((n) => n.startsWith('Takeout') && n.endsWith('/README.md'))];
+  assert.ok(readme.includes(`This chat was opened from the artifact [Panel](https://claude.ai/artifact/${require('../export-core.js').uuidToBase58(S_ART)}) and has no messages.`), readme);
+  assert.ok(!readme.includes('../artifacts/'));
+});
+
 test('runSessionStep builds each session for the viewer, images by relative path', async () => {
   const { sandbox } = exportPopup();
   const written = {};

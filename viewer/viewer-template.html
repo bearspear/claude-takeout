@@ -133,6 +133,11 @@ body.artifacts-on #top, body.artifacts-on #project, body.artifacts-on #findbar, 
 #project .session-line { padding: 7px 0; color: var(--mute); font-size: 13px; overflow-wrap: anywhere; }
 #project .session-line a { color: var(--soft); }
 #project .session-line a:hover { color: var(--ink); }
+#chat .opened-from { margin: 24px 0; color: var(--mute); font-size: 14px; overflow-wrap: anywhere; }
+#chat .opened-from a { color: var(--soft); }
+#chat .opened-from a:hover { color: var(--ink); }
+#chat .opened-from .open-artifact { margin-left: 6px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 8px; background: none; color: var(--ink); font: inherit; font-size: 13px; cursor: pointer; }
+#chat .opened-from .open-artifact:hover { background: var(--hover); }
 @media (max-width: 760px) {
   #lists-screen { padding: 8px 16px 40px; }
   .project-cols { grid-template-columns: minmax(0, 1fr); }

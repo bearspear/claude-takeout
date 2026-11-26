@@ -2186,6 +2186,22 @@ function generateLinksAndSources(urls, webSources) {
 // In a mega-ZIP, sharedProjects stores each project's files once at the archive
 // root: { root, byUuid: Map, usedDirs: Set }. Without it, files go in this folder.
 // folderName is this folder's path from the ZIP root, for the viewer's links.
+// A chat claude.ai made when an artifact was opened (startedWithArtifact) with no messages (chain: getMessageChain):
+// { uuid, title, href, local } for openedArtifactLine, or null. href is its claude.ai page. In Export All (shared), an
+// artifact the step is to save gets its store record now (its folder name and listed title): local is
+// ../artifacts/<folder>/, which the chat's files get only once the step has written it (openedLinks in bulkExportZip).
+function openedArtifactOf(data, chain, shared = null) {
+  const uuid = startedWithArtifact(data);
+  if (!uuid || (Array.isArray(chain) && chain.length)) return null;
+  const listed = shared && shared.listedArtifacts instanceof Map ? shared.listedArtifacts.get(uuid) : null;
+  const href = `https://claude.ai/artifact/${uuidToBase58(uuid) || uuid}`;
+  if (shared && shared.store && shared.includedArtifactIds instanceof Set && shared.includedArtifactIds.has(uuid)) {
+    const rec = publishedStoreRecord(shared, { uuid, title: listed ? listed.title : '' });
+    return { uuid, title: rec.title || '', href, local: `../${shared.store.prefix}${encodePath(rec.dir)}/` };
+  }
+  return { uuid, title: listed ? artifactText(listed.title) : '', href, local: null };
+}
+
 async function populateConversationFolder(folder, data, onProgress = null, organizationId = null, sharedProjects = null, folderName = '', fetchPublished = null) {
   const title = data.name || 'Claude Conversation';
   const messages = getMessageChain(data);
@@ -3058,9 +3074,13 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     addFileWithBOM(folder, 'links_and_sources.md', linksAndSourcesContent);
   }
 
+  // A chat claude.ai made when an artifact was opened, with no messages: where it came from, linked to the artifact's
+  // folder when this Export All saves it, else to claude.ai.
+  const openedFrom = openedArtifactOf(data, messages, sharedProjects);
   // The Markdown links to what this export really saved.
-  const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames, webImages, toolImages, publishedLinks: pageLinks };
-  addFileWithBOM(folder, 'full_chat.md', convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking, ...saved }));
+  const saved = { artifacts, artifactIndex, attachmentFiles, uploadNames: savedUploadNames, presentedNames, webImages, toolImages, publishedLinks: pageLinks, openedFrom };
+  const fullChatMd = convertToMarkdown(data, { embedArtifacts: true, includeThinking: settings.includeThinking, ...saved });
+  addFileWithBOM(folder, 'full_chat.md', fullChatMd);
   const integratedChatMd = convertToMarkdown(data, { embedArtifacts: true, seamlessMd: true, includeThinking: settings.includeThinking, ...saved });
   addFileWithBOM(folder, 'integrated_chat.md', integratedChatMd);
   folder.file('integrated_chat.txt', markdownToPlainText(integratedChatMd));
@@ -3073,6 +3093,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     `**Created:** ${formatTimestamp(data.created_at)}`,
     `**Exported:** ${formatTimestamp(new Date().toISOString())}`,
     `**Link:** [https://claude.ai/chat/${data.uuid}](https://claude.ai/chat/${data.uuid})`,
+    ...(openedFrom ? ['', openedArtifactLine(openedFrom.title, openedFrom.href)] : []),
     '',
     '---',
     '',
@@ -3218,7 +3239,21 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
     }
   }
 
-  addFileWithBOM(folder, 'README.md', readmeLines.join('\n'));
+  const readmeMd = readmeLines.join('\n');
+  addFileWithBOM(folder, 'README.md', readmeMd);
+  // The artifact this empty chat was opened from, once the artifact step has written its folder: its lines link there.
+  if (openedFrom && openedFrom.local && sharedProjects && Array.isArray(sharedProjects.openedLinks)) {
+    const remote = openedArtifactLine(openedFrom.title, openedFrom.href);
+    const local = openedArtifactLine(openedFrom.title, openedFrom.local);
+    const swap = (text) => text.split(remote).join(local);
+    sharedProjects.openedLinks.push({ uuid: openedFrom.uuid, relink: () => {
+      addFileWithBOM(folder, 'README.md', swap(readmeMd));
+      addFileWithBOM(folder, 'full_chat.md', swap(fullChatMd));
+      const integrated = swap(integratedChatMd);
+      addFileWithBOM(folder, 'integrated_chat.md', integrated);
+      folder.file('integrated_chat.txt', markdownToPlainText(integrated));
+    } });
+  }
 
   // The viewer's copy of this chat. It can only fail by itself: the chat is
   // already written, so a failure is reported and the export carries on.
@@ -4248,6 +4283,8 @@ function publishedLines(block, links = null, up = '') {
 function convertToMarkdown(data, options = {}) {
   const { embedArtifacts = false, seamlessMd = false, includeThinking = true,
     attachmentFiles = null, uploadNames = null, presentedNames = {}, webImages = {}, toolImages = {}, publishedLinks: pageLinks = null } = options;
+  // A chat opened from an artifact, with no messages: options.openedFrom ({ title, href }), else its claude.ai page.
+  const openedFrom = options.openedFrom !== undefined ? options.openedFrom : openedArtifactOf(data, getMessageChain(data));
   const lines = [];
   const title = data.name || 'Claude Conversation';
 
@@ -4278,6 +4315,7 @@ function convertToMarkdown(data, options = {}) {
     lines.push(`**Link:** [https://claude.ai/chat/${data.uuid}](https://claude.ai/chat/${data.uuid})  `);
   }
   lines.push('');
+  if (openedFrom) lines.push(openedArtifactLine(openedFrom.title, openedFrom.href), '');
 
   // Use message chain to handle branched conversations
   const messages = getMessageChain(data);
@@ -5419,7 +5457,9 @@ async function bulkExportZip(options = {}) {
     // only an included artifact's listed version keeps its preview in memory for the artifact step.
     const store = artifactStore(megaZip, { prefix: 'artifacts/' });
     const listedArtifacts = new Map((artifactList ? artifactList.artifacts : []).map((a) => [String(a.slug).toLowerCase(), a]));
-    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), store, listedArtifacts, previewWanted: publishedPreviewWanted(includedArtifacts) };
+    // includedArtifactIds: the artifacts the step will save, so a chat opened from one can link its folder.
+    const sharedProjects = { root: megaZip, byUuid: new Map(), usedDirs: new Set(), store, listedArtifacts, previewWanted: publishedPreviewWanted(includedArtifacts),
+      includedArtifactIds: new Set(includedArtifacts.map((a) => String(a.slug).toLowerCase())), openedLinks: [] };
     // A Claude Docs artifact's uuid -> the chat in this export that rebuilt its text (the latest), for its artifact.json note.
     const docChats = new Map();
     const viewerChats = [];
@@ -5582,16 +5622,26 @@ async function bulkExportZip(options = {}) {
         },
       });
       writeFailures.push(...step.writeFailures);
+      // Chats opened from an artifact the step wrote link its folder now (they link claude.ai until then).
+      for (const o of sharedProjects.openedLinks) {
+        try { if (store.written(store.record(o.uuid))) o.relink(); } catch (e) { /* the claude.ai link stays */ }
+      }
+      if (run && sharedProjects.openedLinks.length) writeFailures.push(...await megaZip.flush());
     }
     if (stopRequested()) return await stoppedRun();
     // The sessions, after the artifacts so a session's README links the artifact folders it made. Skipped, like the
     // artifact step, when the tab is gone.
     let sessionStep = null;
     if (includedSessions.length && !tabGone) {
-      const artifactFolders = new Map(store.records().filter((rec) => store.written(rec) || rec.versions.size).map((rec) => [rec.uuid, rec.dir]));
+      const storeRecs = store.records().filter((rec) => store.written(rec) || rec.versions.size);
+      const artifactFolders = new Map(storeRecs.map((rec) => [rec.uuid, rec.dir]));
+      // The store as the viewer takes it, for the cards of the pages a session published: the artifact step's views
+      // (each current version's preview part) and every record (versions, folders, older versions' parts).
+      let viewerArtifacts = null;
+      try { viewerArtifacts = { views: step ? step.views : [], records: storeRecs.map((rec) => viewerStoreRecord(store, rec)) }; } catch (e) { /* cards with the claude.ai link only */ }
       emit('sessions', 0, includedSessions.length, '');
       sessionStep = await runSessionStep(megaZip, {
-        sessions: includedSessions, artifactFolders, signal, run: !!run, budget: run ? Infinity : SESSION_ZIP_BUDGET, usedFolders: usedFolderNames,
+        sessions: includedSessions, artifactFolders, viewerArtifacts, signal, run: !!run, budget: run ? Infinity : SESSION_ZIP_BUDGET, usedFolders: usedFolderNames,
         fetchPage: (id, after, limit) => sendToTab(tab.id, { action: 'fetchSessionEvents', id, after, limit }),
         onProgress: (done, n, sub, info = {}) => {
           // On disk, each session is written as it is done: the run result counts it now.
@@ -6587,7 +6637,8 @@ const sessionCellText = (t) => mdLinkText(String(t || '')).replace(/[()|]/g, '\\
 // artifactFolders (Map: artifact uuid, lowercase -> its folder in artifacts/), fetchPage(id, after) -> content.js's
 // fetchSessionEvents reply (limit: SESSION_PAGE_LADDER; a 'too large' reply is asked again smaller), signal ({ stopped }: checked before each session and between its pages; the session in
 // hand is dropped), run (on disk: flush after each session), budget (bytes of kept events for all sessions; past it
-// the rest are skipped with one warning), usedFolders (lowercase names to claim against; folder names are claimed
+// the rest are skipped with one warning), viewerArtifacts ({ views, records }, the artifacts store as buildViewerData
+// takes it: the cards of the pages a session published), usedFolders (lowercase names to claim against; folder names are claimed
 // in it), onProgress(done, total, sub, { written }) }. A session is paged while hasMore, at most SESSION_PAGE_CAP
 // pages and SESSION_BYTES_CAP bytes; a cut or failed one is saved as far as it got, warned and not in saved.
 // Never throws. Returns { saved: [{ id, last_event_at, folder }] (written whole, for the record), rows: [{ id, title,
@@ -6597,6 +6648,7 @@ const sessionCellText = (t) => mdLinkText(String(t || '')).replace(/[()|]/g, '\\
 async function runSessionStep(root, opts = {}) {
   const { sessions = [], fetchPage, run = false, onProgress = null } = opts;
   const artifactFolders = opts.artifactFolders instanceof Map ? opts.artifactFolders : new Map();
+  const viewerArtifacts = opts.viewerArtifacts && typeof opts.viewerArtifacts === 'object' ? opts.viewerArtifacts : null;
   const budget = Number.isFinite(opts.budget) ? opts.budget : Infinity;
   const used = opts.usedFolders instanceof Set ? opts.usedFolders : new Set();
   const signal = opts.signal && typeof opts.signal === 'object' ? opts.signal : null;
@@ -6682,7 +6734,7 @@ async function runSessionStep(root, opts = {}) {
       out.written++;
       out.rows.push({ id: s.id, title, folder: dir, origin: (s.config && typeof s.config.origin === 'string' && s.config.origin) || s.environment_kind || '', last_event_at: s.last_event_at || null, turns: sessionTurns(events) });
       // The viewer's copy, built now so the raw events can be let go: text and relative image paths, no image data.
-      try { out.viewerSessions.push(CTViewer.buildViewerSession(s, pictures.events, { folder: dir })); }
+      try { out.viewerSessions.push(CTViewer.buildViewerSession(s, pictures.events, { folder: dir, ...(viewerArtifacts ? { artifacts: viewerArtifacts } : {}) })); }
       catch (e) { console.warn('Viewer: could not add a session:', e && e.message); out.warnings.push(`Session ${quoted}: not in viewer.html (it could not be built)`); }
       if (!problem) out.saved.push({ id: s.id, last_event_at: sessionStamp(s), folder: dir });
       // On disk each session is written before the next is fetched; its events are let go here.

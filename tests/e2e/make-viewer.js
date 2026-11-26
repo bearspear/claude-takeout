@@ -10,11 +10,12 @@ const REPO = path.resolve(__dirname, '..', '..');
 
 // conversations: claude.ai API payloads. ctxOf(conversation): extra buildViewerChat context, such as artifacts.
 // dataOpts: more buildViewerData options, such as sessions or artifacts.
-function buildHtml(conversations, exported = new Date().toISOString(), ctxOf = () => ({}), dataOpts = {}) {
+// assembleOpts: passed on to assembleViewer (fileScripts, for a page that loads viewer-files/ parts).
+function buildHtml(conversations, exported = new Date().toISOString(), ctxOf = () => ({}), dataOpts = {}, assembleOpts = {}) {
   const read = f => fs.readFileSync(path.join(REPO, f), 'utf8');
   const [template, logic, app, marked, katex, css, highlight, artifactsApp, artifactsCss] = VIEWER_ASSETS.map(read);
   const chats = conversations.map(c => buildViewerChat(c, { model: modelLabel(c.model, getModelName(c)), ...ctxOf(c) }));
-  return assembleViewer({ template, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data: buildViewerData(chats, { ...dataOpts, exported }) });
+  return assembleViewer({ ...assembleOpts, template, css, marked, katex, highlight, logic, app, artifactsApp, artifactsCss, data: buildViewerData(chats, { ...dataOpts, exported }) });
 }
 
 // As buildHtml, with large upload text moved into parts as an export does. Returns { html, parts: [{ name, body }] }.

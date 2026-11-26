@@ -114,7 +114,10 @@ function parseHash(hash) {
       out[key] = value;
     }
   });
-  if (session !== null) return msg !== null ? { session, msg } : { session };
+  // A session keeps its open file and version (the side panel), never a chat's leaf.
+  if (session !== null) {
+    return { session, ...(msg !== null ? { msg } : {}), ...(out.file !== null ? { file: out.file } : {}), ...(out.version !== null ? { version: out.version } : {}) };
+  }
   return out;
 }
 
@@ -123,6 +126,10 @@ function formatHash(state) {
   if (state && state.session) {
     parts.push('session=' + encodeURIComponent(state.session));
     if (state.msg) parts.push('msg=' + encodeURIComponent(state.msg));
+    ['file', 'version'].forEach(key => {
+      const v = state[key];
+      if (v !== null && v !== undefined && v !== '') parts.push(key + '=' + encodeURIComponent(v));
+    });
     return '#' + parts.join('&');
   }
   ['chat', 'leaf', 'file', 'version'].forEach(key => {
@@ -904,6 +911,15 @@ function resolveFile(files, id, version, added) {
   const count = (files[id].versions || []).length;
   if (!count) return null;
   return { file: id, version: Number.isInteger(version) && version >= 0 && version < count ? version : count - 1 };
+}
+
+// A file version's text from its loaded part: the text itself, or, for a session's published page (whose version
+// points at the artifact step's preview payload { texts: [[path, text]], images }), the text of its start file.
+function partText(value, start) {
+  if (typeof value === 'string') return value;
+  const texts = value && typeof value === 'object' && Array.isArray(value.texts) ? value.texts : [];
+  const hit = texts.find(t => Array.isArray(t) && t[0] === start);
+  return hit && typeof hit[1] === 'string' ? hit[1] : null;
 }
 
 // views: the tabs this version gets, first one showing. None and not missing: details and maybe a link.
@@ -2147,5 +2163,5 @@ function pageZoom(wrapper, frame, opts = {}) {
 }
 
 if (typeof module === 'object' && module.exports) {
-  module.exports = { artifactShortId, sessionArtifacts, sessionsMaking, markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgAsPicture, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
+  module.exports = { partText, artifactShortId, sessionArtifacts, sessionsMaking, markdownParser, splitFences, chainFrom, siblingsOf, leafUnder, switchBranch, parseHash, formatHash, placeholderMark, splitPlaceholders, protectMath, addCitations, beforeCitation, fillPlaceholders, sanitizeHtml, toolInputText, HIGHLIGHT_LIMIT, tameMarkdown, languageOfFile, PREVIEW_CSP, REMOTE_NOTE, inlineSiblings, remoteScripts, previewDoc, resolveArtifactPath, inlineArtifact, artifactPreviewDoc, STORAGE_SHIM, RTC_SHIM, decodeAttr, artifactTabs, relativeTime, parseArtifactHash, chatFileTexts, versionCopyTexts, fileKindGroup, inChatsFiles, alsoInChat, artifactSourceLine, artifactLinkGroups, artifactsEntry, FLAG_NOTES, flagNote, parseInChatsHash, formatInChatsHash, resolveFile, OPENABLE_EXTENSIONS, isAddedId, addedFile, addedForChat, addedTree, filterAdded, fileViews, fileKindLabel, openableHref, buildSearchIndex, searchChats, parseQuery, groupHits, markTerms, chatFiles, countTerms, foldCase, shownText, findPlan, groupChats, linkProjects, RECENT_LIMIT, LIST_PAGE, recentChats, projectList, filterByText, parseListHash, copyText, attachmentNames, uploadName, fileSearchSources, fileHit, downloadName, dataUrlBytes, saveBytes, designCanvas, boardFlags, noteFill, DESIGN_BOARD_MAX, DESIGN_NOTE_MAX, canvasScale, CANVAS_ZOOM_MIN, CANVAS_ZOOM_MAX, canvasFit, clampPan, panAbout, DESIGN_COORD_MAX, DESIGN_SIZE_MAX, ZOOM_STEPS, PICTURE_MAX_SIDE, clampZoom, stepZoom, wheelFactor, zoomAbout, fitZoom, pictureRange, doubleClickZoom, svgNaturalSize, svgHasScripts, svgAsPicture, svgDataUrl, pageFit, SIZE_SCRIPT, pageZoom };
 }
