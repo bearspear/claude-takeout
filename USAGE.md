@@ -89,7 +89,9 @@ For exporting your whole history:
 
 A ZIP contains one folder per conversation, plus an `index.md` master table and an `export-manifest.json` listing every chat it holds, with each chat's `updated_at`, at the root. The name has your claude.ai display name; it is left out if claude.ai doesn't give one.
 
-**Folder from the popup.** Chrome only lets the side panel ask for a folder. From the popup, **Export selected** (Folder) opens the side panel with your choices carried over and a note; click **Export selected** there. Dismiss the note to keep your own choices.
+**Export selected from the popup.** The popup closes when it loses focus (a click on the claude.ai tab closes it), which would end an export inside it, and Chrome only lets the side panel ask for a folder. So from the popup, **Export selected** (Folder or ZIP) opens the side panel with your choices carried over and a note; click **Export selected** there. Dismiss the note to keep your own choices. One **Export selected** runs at a time across the popup and every sidebar; a second says another export is running.
+
+**If the claude.ai tab closes or reloads.** Export All asks the tab again after a reload. When the tab is gone (closed, or moved off claude.ai), it asks for no more chats, skips the artifacts and finishes with the chats it has, with the warning "The claude.ai tab closed or stopped answering: N chats not exported". Only the exported chats are recorded, so **Changes only** takes the rest next time.
 
 **Stop.** Stopping a folder export keeps the files already written, writes no viewer, index or manifest, and records nothing, so the next Changes only export takes those chats again. Stopping a ZIP export downloads nothing.
 
@@ -105,7 +107,7 @@ If a single conversation fails (deleted, server hiccup, rate limit), the bulk ex
 
 ### Export Artifacts
 
-Saves what claude.ai/artifacts lists: every artifact you made in any chat, project or Claude Code session, plus artifacts shared with you. It is **Everything on claude.ai** with **Chats** unticked and **Artifacts** ticked, and it is separate from a run with chats (**Changes only** is disabled for it). Open claude.ai in a tab, signed in; the button is **Export selected**. It saves into a folder or a ZIP as **Save as** says; use **Folder** for a large account, since a ZIP is built in memory. In a folder, the popup opens the side panel, where you click the button again.
+Saves what claude.ai/artifacts lists: every artifact you made in any chat, project or Claude Code session, plus artifacts shared with you. It is **Everything on claude.ai** with **Chats** unticked and **Artifacts** ticked, and it is separate from a run with chats (**Changes only** is disabled for it). Open claude.ai in a tab, signed in; the button is **Export selected**. It saves into a folder or a ZIP as **Save as** says; use **Folder** for a large account, since a ZIP is built in memory. From the popup, it opens the side panel, where you click the button again.
 
 You get `claude-takeout-artifacts-<your name>-<YYYY-MM-DD>_<HHMM>` with:
 

@@ -102,7 +102,7 @@ Files that are **not** part of the extension and may sit in the working tree: `t
 | Click handlers + `refresh` | Button → action mapping. Each per-conversation handler calls `ensureProjectName` before generating the filename or starting the ZIP. |
 | Settings | `loadSettings`, `saveSettings`, `applySettings`; settings shape: `{ filenameStyle, includeThinking, megaZipScope, megaFormat, exportAllChats, exportAllArtifacts, showShortcuts, useSidePanel }` persisted under `chrome.storage.local.exporterSettings`. `useSidePanel` is mirrored at top-level for the background worker. |
 | Keyboard shortcuts | `Alt+Z` (Export ZIP), `Alt+M` (Markdown), `Alt+E` (Markdown + files), `Alt+J` (JSON), `Alt+A` (Export selected), `Alt+R` (Refresh); the main screen only. The buttons list is `EXPORT_BUTTONS`. |
-| `exclusiveExport`, `onExport` | One export at a time: the export buttons are disabled while one runs, and a second click or shortcut does nothing. |
+| `exclusiveExport`, `onExport` | One export at a time: the export buttons are disabled while one runs, and a second click or shortcut does nothing. Across pages, `runSelected` holds the Web Lock `EXPORT_LOCK`. |
 | `generateFilename` | `[<Project>-project]_` prefix + filenameStyle, with an optional suffix such as `_embedded` added after the title is cut to length. |
 | Bootstrap | `loadSettings()` then `requestData()`. |
 
@@ -338,7 +338,7 @@ If a new endpoint becomes necessary, follow `fetchUploadedFile`'s pattern: try a
     "<org id>": { "at": "ISO time of that export", "warnings": 0 /* the run's warning count, for the panel footer */, "chats": { "<chat uuid>": "updated_at as the chat list gave it" }, "artifacts": { "<artifact uuid>": "its live version as listed (paged:<updatedAt> for one found only by paging); only artifacts saved whole and written" }, "artifactVersions": { "<artifact uuid>": ["version ids an Export All saved whole or found gone (v1.21); Export Changes skips them"] } }
   },
   // chrome.storage.session (not local): "takeoutCounts" { <org>: { chats, artifacts, changedChats, changedArtifacts, at } }, Count's cache for 10 min;
-  // "folderExportNote" { at, choices } handoff from a popup folder export to the sidebar
+  // "folderExportNote" { at, choices } handoff from the popup's Export selected (folder or ZIP) to the sidebar
   // recordableExport leaves out chats and artifacts with a write failure, and chats whose published pages were skipped after a 401
 }
 ```

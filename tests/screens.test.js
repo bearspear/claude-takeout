@@ -852,7 +852,7 @@ test('a malformed note is ignored', async () => {
     { at: Date.now(), choices: { scope: 'x', chats: true, artifacts: true, format: 'folder' } },
     { at: Date.now(), choices: { scope: 'all', chats: false, artifacts: false, format: 'folder' } },
     { at: Date.now(), choices: { scope: 'all', chats: 'yes', artifacts: true, format: 'folder' } },
-    { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: true, format: 'zip' } },
+    { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: true, format: 'pdf' } },
     { at: Date.now() - 61000, choices: { scope: 'all', chats: true, artifacts: true, format: 'folder' } },
     Date.now(), 'x', null,
   ];
@@ -1116,4 +1116,164 @@ test('a single-chat ZIP with notes only reports no errors.txt to point at', asyn
   assert.strictEqual(notesOnly.hasErrors, false);
   const withWarning = await run("r.errorCollector.addWarning('upload', 'x', 'm');");
   assert.strictEqual(withWarning.hasErrors, true);
+});
+
+// Export All asks the tab for each chat through sendToTab: a tab that lost its content script gets it again, and
+// a tab that is gone ends the run instead of failing every chat that is left.
+const twoTabChats = () => {
+  const a = Object.assign(loadFixture(), { uuid: 'c-a', name: 'Chat A' });
+  const b = Object.assign(loadFixture(), { uuid: 'c-b', name: 'Chat B' });
+  const list = [{ uuid: 'c-a', name: 'Chat A', updated_at: '2026-01-01T00:00:00Z' }, { uuid: 'c-b', name: 'Chat B', updated_at: '2026-01-02T00:00:00Z' }];
+  return { list, chats: { 'c-a': a, 'c-b': b } };
+};
+// The tab stops answering from the chat numbered from (0 = the first). reinjects: injecting content.js works.
+// url: what chrome.tabs.get says the tab shows.
+const lostTab = ({ reinjects, from = 0, url = 'https://claude.ai/chat/x' }) => (sb) => {
+  const plain = sb.chrome.tabs.sendMessage;
+  let injected = false;
+  sb.__fetches = 0;
+  sb.__injects = 0;
+  sb.chrome.tabs.get = async (id) => ({ id, url });
+  sb.chrome.scripting = { executeScript: async () => { sb.__injects++; if (!reinjects) throw new Error('No tab with id: 1.'); injected = true; } };
+  sb.chrome.tabs.sendMessage = (id, msg, cb) => {
+    if (msg.action === 'fetchConversation') {
+      sb.__fetches++;
+      if (!injected && sb.__fetches > from) {
+        sb.chrome.runtime.lastError = { message: 'Could not establish connection. Receiving end does not exist.' };
+        cb(undefined);
+        sb.chrome.runtime.lastError = null;
+        return;
+      }
+    }
+    plain(id, msg, cb);
+  };
+};
+
+test('Export All re-injects content.js when the tab stopped answering', async () => {
+  const { list, chats } = twoTabChats();
+  const { result } = await bulkRun({ list, chats, setup: lostTab({ reinjects: true }) });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.strictEqual(result.saved.chats, 2);
+  assert.ok(!result.warningList.some((w) => w.type === 'chat'), JSON.stringify(result.warningList));
+});
+
+const threeTabChats = () => {
+  const { list, chats } = twoTabChats();
+  chats['c-c'] = Object.assign(loadFixture(), { uuid: 'c-c', name: 'Chat C' });
+  list.push({ uuid: 'c-c', name: 'Chat C', updated_at: '2026-01-03T00:00:00Z' });
+  return { list, chats };
+};
+
+test('Export All keeps what it has when the claude.ai tab is gone, ZIP included, and asks it nothing more', async () => {
+  const { list, chats } = threeTabChats();
+  let sb = null;
+  const { result, store, saved } = await bulkRun({ list, chats, setup: (s) => { sb = s; lostTab({ reinjects: false, from: 1 })(s); } });
+  assert.strictEqual(result.outcome, 'done', result.reason);
+  assert.ok(saved, 'the ZIP is downloaded with the chat already exported');
+  assert.ok(Object.keys(saved.written).some((n) => n.startsWith('Chat_A/')), Object.keys(saved.written).join());
+  assert.strictEqual(result.saved.chats, 1);
+  assert.strictEqual(sb.__fetches, 2, 'the third chat is never asked for');
+  const mine = result.warningList.filter((w) => /claude\.ai tab closed or stopped answering/.test(w.text));
+  assert.strictEqual(mine.length, 1, JSON.stringify(result.warningList));
+  assert.match(mine[0].text, /2 chats not exported/);
+  assert.deepStrictEqual(Object.keys(store.exportRecord['org-1'].chats), ['c-a'], 'only the exported chat is recorded');
+  assert.match(saved.written['index.md'], /claude\.ai tab closed or stopped answering/);
+});
+
+test('content.js is never injected into a tab that left claude.ai', async () => {
+  const { list, chats } = twoTabChats();
+  let sb = null;
+  const { result } = await bulkRun({ list, chats, setup: (s) => { sb = s; lostTab({ reinjects: true, url: 'https://example.com/' })(s); } });
+  assert.strictEqual(sb.__injects, 0);
+  assert.strictEqual(sb.__fetches, 1);
+  assert.strictEqual(result.saved.chats, 0);
+  assert.ok(result.warningList.some((w) => /claude\.ai tab closed or stopped answering/.test(w.text)), JSON.stringify(result.warningList));
+});
+
+test('Alt shortcuts take the letter typed, and the key pressed when Option types a symbol', () => {
+  const p = panelOn('https://claude.ai/new');
+  const clicked = [];
+  for (const id of ['exportZip', 'exportMd', 'exportSelected']) p.el(id).click = () => { clicked.push(id); };
+  p.seen.keydown({ altKey: true, key: 'Ω', code: 'KeyZ', preventDefault() {} });
+  p.seen.keydown({ altKey: true, key: 'µ', code: 'KeyM', preventDefault() {} });
+  p.seen.keydown({ altKey: true, key: 'å', code: 'KeyA', preventDefault() {} });
+  assert.deepStrictEqual(clicked, ['exportZip', 'exportMd', 'exportSelected']);
+  // QWERTZ: the Z key sits where QWERTY has Y; AZERTY: A where QWERTY has Q.
+  clicked.length = 0;
+  p.seen.keydown({ altKey: true, key: 'z', code: 'KeyY', preventDefault() {} });
+  p.seen.keydown({ altKey: true, key: 'y', code: 'KeyZ', preventDefault() {} });
+  p.seen.keydown({ altKey: true, key: 'a', code: 'KeyQ', preventDefault() {} });
+  assert.deepStrictEqual(clicked, ['exportZip', 'exportSelected']);
+});
+
+test('popup ZIP export hands off to the side panel too, with ZIP in the note', async () => {
+  const session = {};
+  const popup = loadPopup({ location: '/popup.html', session });
+  const sb = popup.sandbox;
+  let opened = null;
+  let noteAtOpen = null;
+  const ran = [];
+  sb.__ran = ran;
+  vm.runInContext("bulkExportZip = async () => { globalThis.__ran.push('bulk'); return runResult({ outcome: 'done', target: { kind: 'zip', name: 'x' } }); }", sb);
+  sb.window.showDirectoryPicker = async () => new FakeDir();
+  sb.chrome.sidePanel.open = async (o) => { opened = o; noteAtOpen = session.folderExportNote; };
+  vm.runInContext("currentTabId = 7; panel.onClaude = true; settings.megaFormat = 'zip'; settings.megaZipScope = 'all'; settings.exportAllChats = true; settings.exportAllArtifacts = true", sb);
+  await sb.document.getElementById('exportSelected').handlers.click();
+  await sleep(5);
+  assert.deepStrictEqual(ran, [], 'nothing runs in the popup, which closes when it loses focus');
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(opened)), { tabId: 7 });
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(noteAtOpen.choices)), { scope: 'all', chats: true, artifacts: true, format: 'zip' });
+});
+
+test('side panel takes a ZIP note and says so', async () => {
+  const session = { folderExportNote: { at: Date.now(), choices: { scope: 'all', chats: true, artifacts: false, format: 'zip' } } };
+  const p = loadPopup({ location: '/sidepanel.html', session, before: NOTE_QUERY });
+  await sleep(20);
+  const doc = p.sandbox.document;
+  assert.strictEqual(vm.runInContext('settings.megaFormat', p.sandbox), 'zip');
+  assert.strictEqual(doc.getElementById('handoffText').textContent, 'Continued from the popup, which closes when you click elsewhere and would stop the export. Your choices came along: All, chats, ZIP. Click Export selected to start.');
+});
+
+test('a failed side panel open takes the note back', async () => {
+  const session = {};
+  const popup = loadPopup({ location: '/popup.html', session });
+  const sb = popup.sandbox;
+  sb.chrome.sidePanel.open = async () => { throw new Error('no window'); };
+  sb.window.showDirectoryPicker = async () => new FakeDir();
+  vm.runInContext("currentTabId = 7; panel.onClaude = true; settings.megaFormat = 'folder'; settings.exportAllChats = true; settings.exportAllArtifacts = false", sb);
+  await sb.document.getElementById('exportSelected').handlers.click();
+  await sleep(5);
+  assert.ok(!('folderExportNote' in session), 'a sidebar opened later does not apply it unasked');
+});
+
+// One Export selected at a time across the popup and every sidebar (navigator.locks is shared by the extension's pages).
+test('Export selected waits for a run in another page', async () => {
+  const held = new Set();
+  const locks = { request: async (name, opts, cb) => {
+    if (held.has(name)) return cb(null);
+    held.add(name);
+    try { return await cb({ name }); } finally { held.delete(name); }
+  } };
+  const pages = [0, 1].map(() => panelOn('https://claude.ai/new'));
+  let release;
+  const ran = [];
+  for (const [i, p] of pages.entries()) {
+    p.sandbox.navigator = { locks };
+    p.sandbox.__ran = ran;
+    p.sandbox.__i = i;
+    p.fn("settings.megaFormat = 'zip'; settings.exportAllChats = true; settings.exportAllArtifacts = false; panel.onClaude = true");
+  }
+  await sleep(30);
+  pages[0].sandbox.__wait = new Promise((r) => { release = r; });
+  for (const p of pages) vm.runInContext("bulkExportZip = async () => { globalThis.__ran.push(__i); if (globalThis.__wait) await globalThis.__wait; return runResult({ outcome: 'done', target: { kind: 'zip', name: 'x' } }); }", p.sandbox);
+  const first = vm.runInContext('runSelected()', pages[0].sandbox);
+  await sleep(5);
+  const second = await vm.runInContext('runSelected()', pages[1].sandbox);
+  assert.strictEqual(second, null);
+  assert.deepStrictEqual(ran, [0]);
+  assert.match(vm.runInContext('panel.flash', pages[1].sandbox), /Another export is running/);
+  release();
+  await first;
+  await vm.runInContext('runSelected()', pages[1].sandbox);
+  assert.deepStrictEqual(ran, [0, 1]);
 });

@@ -6409,3 +6409,48 @@ test('viewerProject takes id, description and updated from the project record', 
   assert.ok(cut.description.startsWith('xxxxx\n[... truncated') && cut.description.includes('project/project.json'));
   assert.ok(!('id' in viewerProject({ project_uuid: 'project' }, {}, {}, 'f', [], '', 5)));
 });
+
+// A 401 in an artifact's history leaves the versions it never fetched unsaved, so the artifact is not whole and the
+// next Export Changes fetches them.
+test('a 401 on an older version\'s info leaves the artifact not whole', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: histPage('Guide', {
+    v1: { infoError: { error: 'HTTP 401', status: 401 }, files: { 'index.html': 'one' } },
+    v2: { files: { 'index.html': 'two' } },
+    [LIVE]: { files: { 'index.html': 'live' } },
+  }) });
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: '' });
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return JSON.stringify({ whole: step.whole });
+  })()`, sb));
+  assert.deepStrictEqual(out.whole, [false]);
+  assert.deepStrictEqual(infoCalls(fetcher), [[U(1), LIVE], [U(1), 'v1']], 'nothing is fetched after the 401');
+});
+
+test('an artifact kept from the store after an earlier 401 is not whole while its older versions are unfetched', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({
+    [U(1)]: livePage('First', { 'index.html': { body: 'x', error: { error: 'HTTP 401', status: 401 } } }),
+    [U(2)]: histPage('Guide', { v1: { files: { 'index.html': 'one' } }, [LIVE]: { files: { 'index.html': 'live' } } }),
+  });
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'First'), art(U(2), 'Guide')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const whole = { folder: '${LIVE}', files: [{ path: 'index.html', savedAs: 'index.html', size: 4, contentType: 'text/html', sha256: '${'c'.repeat(64)}' }],
+      start: 'index.html', startSaved: 'index.html', incomplete: false, missing: [], saved: true, publishedIn: [] };
+    Object.defineProperty(whole, 'preview', { value: { texts: [['index.html', 'live']], images: [] } });
+    const rec = store.record('${U(2)}', { title: 'Guide' });
+    rec.versions.set('${LIVE}', whole);
+    rec.history = ['v1', '${LIVE}'];
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 2, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return JSON.stringify({ whole: step.whole });
+  })()`, sb));
+  assert.ok(!infoCalls(fetcher).some(([u]) => u === U(2)), 'its kept version is not fetched again');
+  assert.deepStrictEqual(out.whole, [false, false]);
+});
