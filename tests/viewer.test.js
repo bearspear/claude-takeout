@@ -2728,3 +2728,35 @@ test('buildViewerSession cuts every tool input string at 2 KB; chats keep theirs
     content: [{ type: 'tool_use', id: 'u', name: 'create_file', input: { path: '/a', file_text: mid } }] }] }, {});
   assert.strictEqual(chat.messages[0].blocks[0].input.file_text, mid);
 });
+
+test('session hashes round-trip', () => {
+  assert.deepStrictEqual(parseHash('#session=cse_ab&msg=u1'), { session: 'cse_ab', msg: 'u1' });
+  assert.strictEqual(formatHash({ session: 'cse_ab', msg: 'u1', chat: 'x' }), '#session=cse_ab&msg=u1');
+  assert.deepStrictEqual(parseHash(formatHash({ session: 'cse_ab' })), { session: 'cse_ab' });
+});
+
+test('parseListHash reads #sessions', () => {
+  assert.deepStrictEqual(parseListHash('#sessions'), { page: 'sessions' });
+});
+
+const sessionFixture = [{ id: 'cse_1', title: 'Fix parser', chat: { id: 'cse_1', title: 'Fix parser', messages: [
+  { id: 'u1', parent: null, sender: 'human', blocks: [{ t: 'text', text: 'please refactor the zebra module' }] },
+  { id: 'u2', parent: 'u1', sender: 'assistant', blocks: [{ t: 'tool_result', text: 'secretword output' }, { t: 'text', text: 'done' }] },
+] } }];
+
+test('search finds a session prompt and groups it as a session', () => {
+  const hits = searchChats(buildSearchIndex([], sessionFixture), 'zebra');
+  assert.strictEqual(hits.length, 1);
+  assert.strictEqual(hits[0].session, 'cse_1');
+  assert.strictEqual(hits[0].msg, 'u1');
+  assert.ok(hits[0].snippet.includes('zebra'));
+  const g = groupHits(hits);
+  assert.strictEqual(g.length, 1);
+  assert.strictEqual(g[0].session, true);
+  assert.strictEqual(g[0].id, 'cse_1');
+  assert.strictEqual(searchChats(buildSearchIndex([], sessionFixture), 'parser')[0].msg, null);
+});
+
+test('search never finds tool output in a session', () => {
+  assert.deepStrictEqual(searchChats(buildSearchIndex([], sessionFixture), 'secretword'), []);
+});

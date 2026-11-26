@@ -94,10 +94,16 @@ function safeDecode(s) {
 function parseHash(hash) {
   const out = { chat: null, leaf: null, file: null, version: null };
   const text = String(hash || '').replace(/^#/, '');
+  let session = null, msg = null;
   text.split('&').forEach(part => {
     const eq = part.indexOf('=');
     if (eq < 0) return;
     const key = part.slice(0, eq);
+    if (key === 'session' || key === 'msg') {
+      const v = safeDecode(part.slice(eq + 1));
+      if (v !== null && v !== '') { if (key === 'session') session = v; else msg = v; }
+      return;
+    }
     if (!Object.prototype.hasOwnProperty.call(out, key)) return;
     const value = safeDecode(part.slice(eq + 1));
     if (value === null || value === '') return;
@@ -108,11 +114,17 @@ function parseHash(hash) {
       out[key] = value;
     }
   });
+  if (session !== null) return msg !== null ? { session, msg } : { session };
   return out;
 }
 
 function formatHash(state) {
   const parts = [];
+  if (state && state.session) {
+    parts.push('session=' + encodeURIComponent(state.session));
+    if (state.msg) parts.push('msg=' + encodeURIComponent(state.msg));
+    return '#' + parts.join('&');
+  }
   ['chat', 'leaf', 'file', 'version'].forEach(key => {
     const v = state && state[key];
     if (v !== null && v !== undefined && v !== '') parts.push(key + '=' + encodeURIComponent(v));
@@ -1024,7 +1036,7 @@ function messageSearchText(m) {
 // Search over every message on every branch, plus titles. One entry per message (and per title, msg null):
 // { chat, msg, lower } plus the title or the message (src), whose text is rebuilt for a snippet, so a big archive
 // holds only the lowercase copy.
-function buildSearchIndex(chats) {
+function buildSearchIndex(chats, sessions = []) {
   const index = [];
   for (const chat of chats) {
     const title = chat.title || '';
@@ -1033,6 +1045,16 @@ function buildSearchIndex(chats) {
       const text = messageSearchText(m);
       if (!text) continue;
       index.push({ chat: chat.id, msg: m.id, src: m, lower: text.toLowerCase() });
+    }
+  }
+  for (const session of sessions || []) {
+    const chat = session.chat || {};
+    const title = session.title || chat.title || '';
+    index.push({ chat: null, session: session.id, msg: null, title, lower: title.toLowerCase() });
+    for (const m of chat.messages || []) {
+      const text = messageSearchText(m);
+      if (!text) continue;
+      index.push({ chat: null, session: session.id, msg: m.id, src: m, lower: text.toLowerCase() });
     }
   }
   return index;
@@ -1106,7 +1128,7 @@ function searchChats(index, query, limit = 50) {
     }
     let snippet;
     hits.push({
-      chat: e.chat, msg: e.msg, terms,
+      chat: e.chat, ...(e.session ? { session: e.session } : {}), msg: e.msg, terms,
       get snippet() { if (snippet === undefined) snippet = snippetAt(entryText(e), e.lower, at, len); return snippet; },
     });
   }
@@ -1213,8 +1235,13 @@ function findPlan(chat, query) {
 function groupHits(hits, perChat = 3) {
   const groups = new Map();
   hits.forEach((h, i) => {
-    if (!groups.has(h.chat)) groups.set(h.chat, { chat: h.chat, title: false, count: 0, snippets: [], order: i, terms: [] });
-    const g = groups.get(h.chat);
+    const key = h.session || h.chat;
+    if (!groups.has(key)) {
+      const created = { chat: h.chat, title: false, count: 0, snippets: [], order: i, terms: [] };
+      if (h.session) { created.session = true; created.id = h.session; }
+      groups.set(key, created);
+    }
+    const g = groups.get(key);
     for (const t of h.terms || []) if (!g.terms.includes(t)) g.terms.push(t);
     if (h.msg === null) { g.title = true; return; }
     g.count++;
@@ -1476,6 +1503,7 @@ function filterByText(items, query, fields, cache = null) {
 function parseListHash(hash) {
   if (hash === '#projects') return { page: 'projects' };
   if (hash === '#chats') return { page: 'chats' };
+  if (hash === '#sessions') return { page: 'sessions' };
   const m = /^#project=(.+)$/.exec(hash);
   if (!m) return null;
   try { return { page: 'project', key: decodeURIComponent(m[1]) }; } catch (e) { return null; }
