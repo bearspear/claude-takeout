@@ -2786,3 +2786,28 @@ test('a linked sessions folder is not read', async () => {
   fs.symlinkSync(elsewhere, path.join(root, 'sessions'));
   assert.deepStrictEqual(readSessions(root, { warnings: [] }), []);
 });
+
+const sessionsOnly = (root, id = 's1') => {
+  put(root, 'index.md', '# Changes');
+  put(root, 'export-manifest.json', JSON.stringify({ format: 1, exported_at: '2026-11-01T00:00:00Z', kind: 'changes', chats: [], sessions: { listed: 1, leftOut: 0, items: [] } }));
+  put(root, 'sessions/Only/session.json', sessionJson(id));
+};
+
+test('build_viewer builds a viewer for a sessions-only archive', async () => {
+  const { writeViewer } = tool();
+  const root = tmpRoot();
+  sessionsOnly(root);
+  const archive = findArchives(root).archives[0];
+  assert.ok(archive && archive.kind === 'mega' && archive.chats.length === 0);
+  assert.ok(require('../tools/archive-lib.js').isArchiveRoot(root));
+  const res = await writeViewer(archive, {});
+  assert.strictEqual(res.status, 'written', res.reason);
+  assert.deepStrictEqual(viewerData(root).sessions.map(s => s.id), ['s1']);
+});
+
+test('a folder with only an unreadable session is not an archive', () => {
+  const root = tmpRoot();
+  sessionsOnly(root);
+  put(root, 'sessions/Only/session.json', sessionJson('s1', {}, 2));
+  assert.deepStrictEqual(findArchives(root).archives, []);
+});

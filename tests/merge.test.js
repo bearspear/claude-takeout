@@ -1166,3 +1166,27 @@ test('merge takes the newest copy of a session', async () => {
   assert.deepStrictEqual(data.sessions.map(s => s.id).sort(), ['s1', 's2']);
   assert.deepStrictEqual([hashTree(a), hashTree(b)], before, 'sources unchanged');
 });
+
+test('merging two sessions-only archives keeps the newest copy, counts skipped ones and reports on a dry run', async () => {
+  const tmp = tmpRoot();
+  const sess = (id, last, text, format = 1) => JSON.stringify({ format, session: { id, title: 'S ' + id, last_event_at: last },
+    events: [{ type: 'user', uuid: id + text, timestamp: last, message: { role: 'user', content: text } }] });
+  const only = (root, at, files) => {
+    put(root, 'index.md', '# Changes');
+    put(root, 'export-manifest.json', JSON.stringify({ format: 1, exported_at: at, kind: 'changes', chats: [] }));
+    for (const [rel, text] of Object.entries(files)) put(root, rel, text);
+  };
+  const a = path.join(tmp, 'a');
+  const b = path.join(tmp, 'b');
+  only(a, '2026-11-01T00:00:00Z', { 'sessions/Fix/session.json': sess('s1', '2026-10-05T00:00:00Z', 'newer') });
+  only(b, '2026-11-05T00:00:00Z', { 'sessions/Fix/session.json': sess('s1', '2026-10-03T00:00:00Z', 'older'), 'sessions/Odd/session.json': sess('s3', '2026-10-03T00:00:00Z', 'x', 2) });
+  const dry = await merge([a, b], { out: path.join(tmp, 'dry'), now: NOW, dryRun: true });
+  assert.strictEqual(dry.status, 'written', dry.reason);
+  assert.strictEqual(dry.sessions, 1);
+  const r = await merge([a, b], { out: path.join(tmp, 'out'), now: NOW });
+  assert.strictEqual(r.status, 'written', r.reason);
+  assert.match(fs.readFileSync(path.join(r.dest, 'sessions', 'Fix', 'session.json'), 'utf8'), /newer/);
+  const manifest = JSON.parse(fs.readFileSync(path.join(r.dest, 'export-manifest.json'), 'utf8'));
+  assert.deepStrictEqual([manifest.sessions.listed, manifest.sessions.leftOut], [1, 1]);
+  assert.strictEqual(r.viewer.status, 'written', r.viewer.reason);
+});

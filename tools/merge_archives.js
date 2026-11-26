@@ -518,6 +518,7 @@ function readSource(source, order, report) {
 // Every mega source's sessions (lib.readSessions), the newest copy of each id by last_event_at, then the later export,
 // then the later source. Each: { id, title, last, session, dir, exportedAt, order }.
 function pickSessions(sources, archivesOf, report) {
+  const counts = { skipped: 0 };
   const best = new Map();
   const lastOf = s => time(s.last_event_at) > -Infinity ? s.last_event_at : s.updated_at || s.created_at || null;
   for (const src of sources) {
@@ -526,9 +527,9 @@ function pickSessions(sources, archivesOf, report) {
       const manifest = readJson(path.join(archive.root, 'export-manifest.json'));
       const exportedAt = manifest && typeof manifest.exported_at === 'string' ? manifest.exported_at : null;
       const warnings = [];
-      for (const x of lib.readSessions(archive.root, { warnings })) {
+      for (const x of lib.readSessions(archive.root, { warnings, counts })) {
         const id = typeof x.session.id === 'string' && x.session.id ? x.session.id : null;
-        if (!id) { warnings.push(`${x.folder}/session.json has no id, so the session was skipped`); continue; }
+        if (!id) { counts.skipped++; warnings.push(`${x.folder}/session.json has no id, so the session was skipped`); continue; }
         const c = { id, title: typeof x.session.title === 'string' ? x.session.title : '', last: lastOf(x.session), session: x.session, dir: x.dir, base: path.posix.basename(x.folder), exportedAt, order: src.order };
         const o = best.get(id);
         const tc = time(c.last);
@@ -538,7 +539,9 @@ function pickSessions(sources, archivesOf, report) {
       for (const w of warnings) report.warnings.push(`${src.label}: ${w}`);
     }
   }
-  return [...best.values()].sort((a, b) => time(b.last) - time(a.last) || a.id.localeCompare(b.id));
+  const list = [...best.values()].sort((a, b) => time(b.last) - time(a.last) || a.id.localeCompare(b.id));
+  list.skipped = counts.skipped;
+  return list;
 }
 
 // True when a is a newer copy of the same chat than b.
@@ -657,11 +660,12 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
     const stores = readStores(sources, archivesOf, all, report);
     const merged = mergeRecords(stores);
     report.artifacts = merged.length;
-    if (!all.length && !merged.length) throw new Error('no Claude chats or artifacts were found in the sources');
+    if (!all.length && !merged.length && !sessionsChosen.length) throw new Error('no Claude chats or artifacts were found in the sources');
     const { chosen, replaced } = pickNewest(all);
     chosen.sort((a, b) => time(b.updatedAt) - time(a.updatedAt) || a.folder.localeCompare(b.folder));
     report.replaced = replaced;
     report.chats = chosen.length;
+    report.sessions = sessionsChosen.length;
     for (const s of sources) s.chats = chosen.filter(c => c.order === s.order).length;
     report.sources = sources.map(s => ({ path: s.input, chats: s.chats }));
 
@@ -752,7 +756,7 @@ async function merge(inputs, { out, name = null, dryRun = false, now = new Date(
       chats: chosen.map(c => ({ uuid: c.uuid, name: c.name, updated_at: c.updatedAt, folder: c.out, from: c.source })),
       // readArtifactStore reads this key for listFetched.
       // decided_at and listed_at: when claude.ai's lists were asked, so a later merge ranks this one by them.
-      ...(sessionsChosen.length ? { sessions: { listed: sessionsChosen.length, leftOut: 0,
+      ...(sessionsChosen.length ? { sessions: { listed: sessionsChosen.length, leftOut: sessionsChosen.skipped,
         items: sessionsChosen.map(x => ({ id: x.id, title: x.title, folder: `sessions/${x.out}`, last_event_at: x.last })) } } : {}),
       ...(written && hadList ? { artifacts: { listed: written.listed, thumbs: written.thumbs, decided_at: merged.decidedAt,
         listed_at: Object.fromEntries(merged.filter(m => m.listed && m.listedAt).map(m => [m.uuid, m.listedAt])) } } : {}),

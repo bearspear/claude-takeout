@@ -316,7 +316,6 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
     const withArtifacts = standalone || (archive.kind === 'mega' && store.layout !== 'none');
     if (withArtifacts) report.artifacts = store.records.size;
     if (standalone && !store.records.size) return finish('skipped', 'no artifacts in it');
-    if (!archive.chats.length && !standalone && !store.records.size) return finish('skipped', 'no Claude chats in it');
 
     // Sessions of an Export All (sessions/<name>/session.json), for the viewer's Sessions page.
     const sessions = archive.kind === 'mega'
@@ -325,6 +324,7 @@ async function writeViewer(archive, { force = false, dryRun = false } = {}) {
       })
       : [];
     report.sessions = sessions.length;
+    if (!archive.chats.length && !standalone && !store.records.size && !sessions.length) return finish('skipped', 'no Claude chats in it');
 
     const { chats, idByDir, chatFolders } = await collectChats(archive, report, store);
     report.chats = chats.length;
