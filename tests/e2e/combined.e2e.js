@@ -662,14 +662,16 @@ const navs = dir => [
   // for data: and blob:, which the page's frame-src file: would refuse as well, the guard's frame-src 'none'.
   const esc = t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const escapeFile = 'file://' + path.join(base, 'escape.html');
+  const framed = (target, directive) => new RegExp(`^(?:Framing '${esc(target)}' violates|Refused to frame '${esc(target)}' because it violates) the following Content Security Policy directive: "${esc(directive)}`);
   const refusal = name => ({
     navfile: new RegExp(`^Not allowed to load local resource: ${esc(escapeFile)}$`),
     navrefresh: new RegExp(`^Not allowed to load local resource: ${esc(escapeFile)}$`),
     navlink: new RegExp(`^Not allowed to load local resource: ${esc(escapeFile)}$`),
     navabs: /^Not allowed to load local resource: file:\/\/\/etc\/hosts$/,
-    navhttps: /^Framing 'https:\/\/remote\.test\/' violates the following Content Security Policy directive: "frame-src /,
-    navdata: /^Framing '' violates the following Content Security Policy directive: "frame-src 'none'"/,
-    navblob: /^Framing '' violates the following Content Security Policy directive: "frame-src 'none'"/,
+    // Chromium's wording changed from "Framing 'X' violates" to "Refused to frame 'X' because it violates"; both count.
+    navhttps: framed('https://remote.test/', 'frame-src '),
+    navdata: framed('', "frame-src 'none'\""),
+    navblob: framed('', "frame-src 'none'\""),
   })[name];
   for (const [i, [name]] of navs(base).entries()) {
     const nv = await open(dir, `#a=${p(40 + i)}`);

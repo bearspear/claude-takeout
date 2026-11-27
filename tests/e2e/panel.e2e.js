@@ -6,7 +6,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const EXT = path.resolve(__dirname, '..', '..');
+// EXT_DIR: test a packaged copy (tools/package_extension.js, unzipped) instead of the repo.
+const EXT = process.env.EXT_DIR ? path.resolve(process.env.EXT_DIR) : path.resolve(__dirname, '..', '..');
 const ORG = '11111111-1111-4111-8111-111111111111';
 const ID = { A: 'aaaaaaaa-0000-4000-8000-000000000001', B: 'bbbbbbbb-0000-4000-8000-000000000002' };
 const msg = (uuid, parent, sender, text) => ({

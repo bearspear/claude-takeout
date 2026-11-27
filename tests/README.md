@@ -11,6 +11,7 @@ Needs Node 20+ and Python 3.10+, with no packages to install.
 | `panel.test.js` | Side panel following the selected chat, refreshes and content script recovery |
 | `export.test.js` | Artifact replay, heredocs, failed tool calls, binaries, delivered files, warnings, and JS and Python parity |
 | `fixtures/export-baseline.json` | SHA-256 of every file an export writes for the fixture (dates scrubbed, `viewer.html` and `viewer-check.gif` left out), checked by `export.test.js` |
+| `package.test.js` | `tools/package_extension.js`: every file the extension references is packaged, no developer files, the ZIP holds exactly the list |
 | `test_replay_bash.py` | `replay_bash.py` replay order and containment |
 | `viewer.test.js` | Viewer tree, hash, Markdown steps and data building |
 | `archive.test.js` | Old-archive tool: finding archives (an Export Artifacts folder holds none), ZIP extraction, added files, `--force`, and that existing files stay unchanged, every artifacts layout (`readArtifactStore`, `artifactViewsFromDisk`), real-folder-only path resolution, `rewriteChatLinks`, and an Export Artifacts folder with a viewer being read as an artifacts-only archive |
@@ -65,6 +66,8 @@ PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests
 ```
 
 `combined.e2e.js` covers an Export All's viewer with artifacts, and `design.e2e.js` the Design canvas. Both launch Chromium with `--disable-features=IsolateSandboxedIframes`: Chrome gives sandboxed frames processes of their own, and Playwright doesn't attach to a sandboxed frame inside another (the preview in its guard frame), so its console, requests and frame would go unseen. In one process they are seen; the sandbox, origin and policies are the same either way.
+
+`export.e2e.js` and `panel.e2e.js` load the repo as the extension; with `EXT_DIR=<folder>` they load that folder instead, such as a release ZIP from `node tools/package_extension.js` unzipped, to check the package runs.
 
 `viewer.e2e.js` is the only coverage for `sanitizeHtml`, so run it after changing anything in the viewer.
 
