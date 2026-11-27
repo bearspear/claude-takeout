@@ -504,7 +504,7 @@ async function viewerUploadText(name, content) {
       : (content.size <= limit ? await content.text() : null);
     return text !== null && text.length <= limit ? fixMojibake(text) : null;
   } catch (e) {
-    console.warn(`Viewer: could not read ${name}:`, e.message);
+    console.warn('Viewer: could not read an upload:', e.message);
     return null;
   }
 }
@@ -1124,7 +1124,7 @@ async function fetchProjectDocs(data, organizationId) {
     const projectResponse = await fetch(projectUrl, { credentials: 'include' });
     if (projectResponse.ok) {
       projectJson = await projectResponse.json();
-      console.log(`Fetched project metadata: ${projectJson.name || projectUuid}`);
+      console.log('Fetched project metadata');
     } else {
       metadataError = {
         type: 'project_metadata',
@@ -1133,7 +1133,7 @@ async function fetchProjectDocs(data, organizationId) {
         url: projectUrl,
         projectUuid
       };
-      console.log(`Failed to fetch project metadata: ${projectResponse.status}`);
+      console.log('Failed to fetch project metadata:', projectResponse.status);
     }
   } catch (e) {
     metadataError = {
@@ -1143,7 +1143,7 @@ async function fetchProjectDocs(data, organizationId) {
       url: `https://claude.ai/api/organizations/${organizationId}/projects/${projectUuid}`,
       projectUuid
     };
-    console.log(`Error fetching project metadata: ${e.message}`);
+    console.log('Error fetching project metadata:', e.message);
   }
 
   try {
@@ -1151,7 +1151,7 @@ async function fetchProjectDocs(data, organizationId) {
     const listUrl = `https://claude.ai/api/organizations/${organizationId}/projects/${projectUuid}/docs`;
     const listResponse = await fetch(listUrl, { credentials: 'include' });
     if (!listResponse.ok) {
-      console.log(`Failed to fetch project docs list: ${listResponse.status}`);
+      console.log('Failed to fetch project docs list:', listResponse.status);
       failures.push({
         filename: 'docs list',
         error: `HTTP ${listResponse.status}`,
@@ -1167,7 +1167,7 @@ async function fetchProjectDocs(data, organizationId) {
       return { files: [], docsJson: docs, projectJson, failures: [], metadataError };
     }
 
-    console.log(`Found ${docs.length} project docs`);
+    console.log('Project docs found:', docs.length);
 
     // Extract content from docs - check if already in list response first
     const projectFiles = [];
@@ -1204,7 +1204,7 @@ async function fetchProjectDocs(data, organizationId) {
             }
           } catch (e) {
             urlsTried.push({ url, status: null, error: e.message });
-            console.log(`Failed to fetch ${url}: ${e.message}`);
+            console.log('Failed to fetch a project doc:', e.message);
           }
         }
       }
@@ -1216,7 +1216,7 @@ async function fetchProjectDocs(data, organizationId) {
           content: fixMojibake(content)
         });
       } else {
-        console.log(`Could not fetch content for doc: ${filename}`);
+        console.log('Could not fetch the content of a project doc');
         failures.push({
           filename,
           error: 'Could not fetch content from any endpoint',
@@ -1296,7 +1296,7 @@ async function saveProjectFiles(folder, basePath, files, organizationId, convers
       folder.file(`${basePath}/files/${finalName}`, blob);
       names.push(finalName);
     } catch (err) {
-      console.error(`Failed to download project file ${finalName}:`, err);
+      console.error('Failed to download a project file:', err && err.message);
       failures.push({ filename: finalName, error: err.message, uuid, httpStatus: err.httpStatus || null, urlsTried: err.urlsTried || [] });
     }
   }
@@ -2290,7 +2290,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         taken.add(finalName.toLowerCase());
         projectFiles[finalName] = doc.content;
       }
-      console.log(`Fetched ${apiDocs.length} project files from API`);
+      console.log('Project files fetched from the API:', apiDocs.length);
     }
 
     // Download knowledge files, once per project in a mega-ZIP.
@@ -2691,7 +2691,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       // replayed against it aren't missing.
       errorCollector.clearWarnings('str_replace_failed', name);
     } catch (err) {
-      console.error(`Failed to download presented file ${file.filename}:`, err);
+      console.error('Failed to download a presented file:', err && err.message);
       errorCollector.addError('presented_file', name, err.message, {
         uuid: file.uuid,
         path: file.path,
@@ -2732,7 +2732,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       savedDeliveries.push(file);
       savedFiles.push({ path: file.path, filename: file.filename, msgIndex: file.msgIndex, blockIndex: file.blockIndex });
     } catch (err) {
-      console.error(`Failed to download delivered file ${file.filename}:`, err);
+      console.error('Failed to download a delivered file:', err && err.message);
       errorCollector.addError('delivered_file', file.filename, err.message, {
         uuid: file.uuid,
         path: file.path,
@@ -2819,7 +2819,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
       folder.file(`artefacts/${htmlName}`, claudeDocHtml(title, markdown));
       docHtmlFiles.push(htmlName);
     } catch (err) {
-      console.warn(`Could not write ${htmlName}:`, err.message);
+      console.warn('Could not write a Claude Docs HTML copy:', err.message);
     }
     // Its diagrams' code, named uniquely the same way.
     (docJsx[key] || []).forEach(({ code }, i) => {
@@ -2974,7 +2974,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         }
       }
     } catch (err) {
-      console.error(`Failed to process ${file.filename}:`, err);
+      console.error('Failed to process an upload:', err && err.message);
 
       // Add to error collector with full context
       errorCollector.addError('upload', file.filename, err.message, {
@@ -3006,7 +3006,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         await addArtefactBlob(folder, artifacts, file.filename, await fetchUploadedFile(null, file.uuid, organizationId, data.uuid, null));
         attachedSaved.push(file);
       } catch (err) {
-        console.error(`Failed to download attached file ${file.filename}:`, err);
+        console.error('Failed to download an attached file:', err && err.message);
         errorCollector.addError('delivered_file', file.filename, err.message, {
           uuid: file.uuid, path: file.path, urlsTried: err.urlsTried || [], httpStatus: err.httpStatus || null
         });
@@ -3034,7 +3034,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         const mime = (source.blob.type && source.blob.type !== 'application/octet-stream') ? source.blob.type : inferMimeFromFilename(source.filename);
         encoded.set(source, `data:${mime};base64,${b64}`);
       } catch (encErr) {
-        console.warn(`Could not build data URI for ${source.filename}:`, encErr.message);
+        console.warn('Could not build a data URI for an upload:', encErr.message);
         encoded.set(source, null);
       }
     }
@@ -3048,7 +3048,7 @@ async function populateConversationFolder(folder, data, onProgress = null, organ
         // folder.file() with the same path overwrites the existing entry.
         addFileWithBOM(folder, `artefacts/${filename}`, substituted);
         viewerArtifacts[filename] = substituted;
-        console.log(`[Claude Takeout] Inlined ${replacements} upload reference(s) in artefacts/${filename}`);
+        console.log('[Claude Takeout] Upload references inlined:', replacements);
       }
     }
   }
@@ -3743,7 +3743,7 @@ const publishedSignedOutReply = (r) => !!(r && (r.status === 401 || r.error === 
 // (see previewKind); otherwise both are empty. Chat exports ignore them. With zip ({ date }: the current version of an
 // artifact in the store), two or more saved files are also written as <version folder>.zip beside the folder
 // (versionZip); zipped says whether it was.
-async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished, collect = false, zip = null }) {
+async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished, collect = false, zip = null, stopped = null }) {
   const start = publishedStart(files);
   const missing = [];
   const problems = [];
@@ -3778,6 +3778,8 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
     const checked = !(f.size == null && !f.sha256);
     if (!checked) unverified.set(f.path, null);
     if (state.publishedSignedOut) { fail(null); continue; }
+    // Stop: the files not asked for yet are missing, so the version is incomplete and asked for again next time.
+    if (typeof stopped === 'function' && stopped()) { fail(null); continue; }
     if (checked && (f.size == null || !f.sha256)) { fail('bad listing'); continue; }
     if (f.size != null) {
       if (f.size > PUBLISHED_MAX_FILE) { fail('too large'); continue; }
@@ -3814,9 +3816,8 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   // The start file first, then a Design canvas's layout (project/canvas.json) and its boards, then the rest.
   for (const [f, bytes] of candidates.slice().sort((a, b) => previewRank(a[0].path, start && start.path) - previewRank(b[0].path, start && start.path))) keep(f, bytes);
   const startOk = !!start && !missing.includes(start.path);
-  // zip.whole: only a version saved whole (a chat's fetch in Export All, which the artifact step fetches again when
-  // it isn't, so a ZIP of a part would be left beside the step's own files).
-  const wroteZip = zip && !(zip.whole && missing.length) ? await writeVersionZip(target, prefix, zipped, zip.date) : false;
+  // Only a version saved whole gets its ZIP: a ZIP of part of a version would pass for all of it.
+  const wroteZip = zip && !missing.length ? await writeVersionZip(target, prefix, zipped, zip.date) : false;
   return {
     saved: written > 0, zipped: wroteZip, missing, problems, incomplete: missing.length > 0,
     start: startOk ? start.path : null, startSaved: startOk ? names.get(start.path) : null, startSize: startOk ? startSize : null,
@@ -4064,7 +4065,7 @@ async function savePublishedPages(folder, data, ctx = {}) {
     const got = await fetchPublishedFiles({
       target, prefix: exportAll ? store.versionFolder(rec.store, v.key) : `published/${rec.dir}/${v.folderName}/`, uuid: rec.uuid, ver: v.ver, files: v.files, names: v.names,
       state, onSignedOut: markSignedOut, fetchPublished, collect: wanted(rec.uuid, v.ver),
-      zip: exportAll && wanted(rec.uuid, v.ver) ? { date: rec.store.meta.updatedAt, whole: true } : null,
+      zip: exportAll && wanted(rec.uuid, v.ver) ? { date: rec.store.meta.updatedAt } : null,
     });
     // A 401 that cut this fetch short (not part of artifact.json): later chats blame it, not their own cause.
     if (!outBefore && state.publishedSignedOut) Object.defineProperty(v, 'signedOutGap', { value: true, configurable: true });
@@ -4855,6 +4856,7 @@ function hideProgress() {
 // Runs once an export has ended: a tab change that came in meanwhile is followed now.
 // The export buttons come back as the choices and the loaded chat now stand, not as they were at the click.
 function finishRun() {
+  if (!exportRunning && !activeRun && typeof applyHeldSettings === 'function') applyHeldSettings();
   if (typeof document !== 'undefined') {
     for (const id of CHAT_BUTTONS) document.getElementById(id).disabled = !conversationData || exportRunning;
     renderEverything();
@@ -5843,7 +5845,7 @@ async function bulkExportZip(options = {}) {
       // Only chats and artifacts really in the archive are recorded, so one that failed is tried again next time.
       const recordable = recordableExport(exportedChats, exportedArtifacts, writeFailures, exportedVersions, sessionStep ? sessionStep.saved : []);
       if (org && (recordable.chats.length || recordable.artifacts.length || recordable.versions.length || recordable.sessions.length)) await saveExportRecord(org, startedAt, recordable.chats, recordable.artifacts, recordable.versions, warningList.length, recordable.sessions);
-      if (errors.length) console.error('Export errors:', errors);
+      if (errors.length) console.error('Export errors:', errors.length);
     } catch (e) {
       // Nothing reached disk: a ZIP is written only when the export finishes.
       zeroSaved();
@@ -6258,7 +6260,7 @@ async function saveArtifact(root, a, ctx) {
         warn(name, `Artifact "${name}": file names changed to stay inside its folder: ${parts.join('; ')}.`, openNote);
       }
       got = await fetchPublishedFiles({ target: root, prefix: store.versionFolder(rec, info.ver), uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished, collect: true,
-        zip: { date: rec.meta.updatedAt } });
+        zip: { date: rec.meta.updatedAt }, stopped: ctx.stopped });
       meta.missing = got.missing;
       meta.incomplete = got.incomplete;
       markUnverified(files, got.unverified);
@@ -6291,7 +6293,10 @@ async function saveArtifact(root, a, ctx) {
       if (got.problems.length) {
         warn(name, `Artifact "${name}" (${info.ver}): ${artifactCount(got.problems.length, 'file')} could not be saved: ${got.problems.join(', ')}.`, openNote);
       }
-      if (meta.missing.length) notes.push(`${artifactCount(meta.missing.length, 'file')} not saved (see errors.txt)`);
+      // A stop leaves files unasked, with nothing in errors.txt about them.
+      const cutByStop = meta.missing.length && !got.problems.length && typeof ctx.stopped === 'function' && ctx.stopped();
+      if (cutByStop) notes.push('export stopped before all its files were saved');
+      else if (meta.missing.length) notes.push(`${artifactCount(meta.missing.length, 'file')} not saved (see errors.txt)`);
       if ([...got.unverified.values()].some(Boolean)) notes.push("files not checked against claude.ai's checksum");
     }
   } catch (e) {
@@ -6369,6 +6374,16 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
   const { fetchPublished, state, warn, store } = ctx;
   const out = { settled: [], saved: [], failed: [], unfetched: [] };
   const problems = [];
+  // Stop: every version from..end not saved yet is unfetched (the artifact is not whole), and nothing is warned.
+  const leftOut = (from) => {
+    for (let j = from; j < rec.history.length; j++) {
+      const w = rec.history[j];
+      if (w === rec.current || skip.has(w) || out.saved.includes(w) || out.unfetched.includes(w)) continue;
+      const kept = rec.versions.get(w);
+      if (j > from && (storeVersionWhole(kept) || (kept && kept.sameAs))) out.saved.push(w);
+      else out.unfetched.push(w);
+    }
+  };
   for (let i = 0; i < rec.history.length; i++) {
     const ver = rec.history[i];
     if (ver === rec.current || skip.has(ver)) continue;
@@ -6376,7 +6391,7 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
     if (storeVersionWhole(prev) || (prev && prev.sameAs)) { out.saved.push(ver); continue; }
     if (state.publishedSignedOut) { out.unfetched.push(ver); continue; }
     // Stop (ctx.stopped): the versions saved so far stay.
-    if (typeof ctx.stopped === 'function' && ctx.stopped()) break;
+    if (typeof ctx.stopped === 'function' && ctx.stopped()) { leftOut(i); break; }
     if (typeof ctx.onVersion === 'function') ctx.onVersion(i + 1, rec.history.length);
     const reply = await fetchPublished({ action: 'publishedPageInfo', uuid: rec.uuid, ver });
     if (publishedSignedOutReply(reply)) { ctx.signOut(); out.unfetched.push(ver); continue; }
@@ -6390,7 +6405,7 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
     const { names } = publishedSavedNames(info.files.map((f) => f.path));
     const files = info.files.map((f) => ({ path: f.path, savedAs: names.get(f.path), size: f.size, contentType: f.contentType, sha256: f.sha256 }));
     const got = await fetchPublishedFiles({ target: root, prefix: store.versionFolder(rec, ver), uuid: rec.uuid, ver, files, names, state,
-      onSignedOut: ctx.signOut, fetchPublished, collect: true });
+      onSignedOut: ctx.signOut, fetchPublished, collect: true, stopped: ctx.stopped });
     markUnverified(files, got.unverified);
     if (info.listFromLive) for (const f of files) f.verified = false;
     const v = {
@@ -6401,6 +6416,8 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
     rec.versions.set(ver, v);
     // Its preview goes into a part now (runArtifactStep's placeOlder), so no artifact holds all its versions' previews.
     if (got.saved && typeof ctx.placeOlder === 'function') ctx.placeOlder(rec, ver, artifactPayload(got));
+    // Stopped inside this version's files: it stays as far as it got, incomplete, and is asked for again next time.
+    if (got.missing.length && typeof ctx.stopped === 'function' && ctx.stopped()) { leftOut(i); break; }
     if (got.saved && !v.incomplete && (info.listFromLive || !got.missing.length)) out.saved.push(ver);
     else { out.failed.push(ver); problems.push(...(got.problems.length ? got.problems : ['not saved'])); }
   }
@@ -6970,9 +6987,10 @@ function everythingSummary({ plan, counts, format, since, isPopup, stale = false
   return parts.join(' ');
 }
 
-function exportDisabledReason(plan, counts, since) {
+// Only an empty plan disables Export selected. Nothing changed is said in the summary, never enforced: the counts
+// are a snapshot, and a chat made after them would be blocked until they expire.
+function exportDisabledReason(plan) {
   if (!plan.run) return 'Tick Chats, Artifacts or Sessions.';
-  if (nothingChanged(plan, counts)) return since ? `Nothing changed since ${since}.` : 'Nothing changed since the last Export All.';
   return '';
 }
 
@@ -7186,7 +7204,10 @@ async function countEverything({ org, tabId, withArtifacts, force = false }) {
   };
   const chatsReply = await ask({ action: 'fetchAllConversations' });
   if (!Array.isArray(chatsReply.data)) throw new Error('bad response');
-  const record = await loadExportRecord(org);
+  // The tab answers for the org it is signed in to now, which may not be the one the panel last saw: the counts are
+  // that org's, cached under it, and not shown here.
+  const answered = typeof chatsReply.orgId === 'string' && chatsReply.orgId ? chatsReply.orgId : org;
+  const record = await loadExportRecord(answered);
   const counts = {
     chats: chatsReply.data.length,
     changedChats: changedSince(chatsReply.data, record && record.chats).length,
@@ -7194,7 +7215,7 @@ async function countEverything({ org, tabId, withArtifacts, force = false }) {
     changedArtifacts: null,
     at: new Date().toISOString(),
   };
-  if (withArtifacts) {
+  if (withArtifacts && answered === org) {
     const reply = await ask({ action: 'listArtifacts' });
     if (!Array.isArray(reply.frames)) throw new Error('bad response');
     const { artifacts } = artifactsFromList(reply);
@@ -7203,8 +7224,9 @@ async function countEverything({ org, tabId, withArtifacts, force = false }) {
   }
   try {
     const all = await readCountsCache();
-    await chrome.storage.session.set({ [COUNTS_KEY]: { ...all, [org]: counts } });
+    await chrome.storage.session.set({ [COUNTS_KEY]: { ...all, [answered]: counts } });
   } catch (e) { /* the count still counts without a cache */ }
+  if (answered !== org) throw new Error('organization changed');
   return counts;
 }
 
@@ -7255,7 +7277,7 @@ async function exportSingle(label, make, errorLabel) {
     download(content, filename, type);
     chatSaved(label, content, data);
   } catch (e) {
-    console.error(`${errorLabel} export error:`, e);
+    console.error(errorLabel, 'export error:', e);
     chatResult('error', 'Export failed: ' + e.message);
   }
 }
@@ -7394,7 +7416,7 @@ function renderEverything() {
 
   // Counts older than the cache limit still show their numbers, but no longer say Nothing changed or disable Export.
   const fresh = countsFresh(counts);
-  const reason = panel.onClaude ? exportDisabledReason(plan, fresh ? counts : null, since) : 'Open claude.ai to export.';
+  const reason = panel.onClaude ? exportDisabledReason(plan) : 'Open claude.ai to export.';
   $('exportSelected').disabled = !!reason || exportRunning;
   const text = panel.onClaude ? everythingSummary({ plan, counts, format: zip ? 'zip' : 'folder', since, isPopup: IS_POPUP, stale: !fresh }) : reason;
   clearTimeout(panel.staleTimer);
@@ -7445,14 +7467,19 @@ function flashSummary(text) {
 document.getElementById('countBtn').addEventListener('click', async () => {
   if (panel.counting || !panel.onClaude || !orgId || currentTabId == null) return;
   const plan = currentPlan();
+  const org = orgId;
   panel.counting = true;
   panel.countError = '';
   renderEverything();
   try {
-    panel.counts = await countEverything({ org: orgId, tabId: currentTabId, withArtifacts: plan.withArtifacts, force: true });
-    panel.countsOrg = orgId;
+    const counts = await countEverything({ org, tabId: currentTabId, withArtifacts: plan.withArtifacts, force: true });
+    // The panel moved to another org meanwhile: these counts are not its counts.
+    if (orgId === org) {
+      panel.counts = counts;
+      panel.countsOrg = org;
+    }
   } catch (e) {
-    panel.countError = (e && e.message) || 'unknown';
+    if (orgId === org) panel.countError = (e && e.message) || 'unknown';
   } finally {
     panel.counting = false;
     renderEverything();
@@ -7788,6 +7815,9 @@ async function loadSettings() {
 
 // Save settings to storage
 async function saveSettings() {
+  // Remembered until its change event comes back, so a late echo of an older save can't undo a newer choice.
+  ownSaves.push(JSON.stringify(settings));
+  if (ownSaves.length > 50) ownSaves.shift();
   try {
     // Save all settings together, plus useSidePanel at top level for background.js
     await chrome.storage.local.set({
@@ -7798,6 +7828,36 @@ async function saveSettings() {
     console.error('Failed to save settings:', e);
   }
 }
+
+// A change saved by the other page (the popup or the side panel, both open at once) reaches this one. This page's
+// own saves come back here too, with the values it already has.
+// A change that comes in while an export runs waits for it to end (finishRun), so one run never mixes settings.
+const ownSaves = [];  // JSON of the settings this page saved, oldest first, until their change events come back
+let heldSettings = null;
+function settingsChanged(changes, area) {
+  if (area !== 'local' || !changes) return;
+  const next = changes.exporterSettings && changes.exporterSettings.newValue;
+  const side = changes.useSidePanel && changes.useSidePanel.newValue;
+  if ((!next || typeof next !== 'object') && typeof side !== 'boolean') return;
+  if (next && typeof next === 'object') {
+    const own = ownSaves.indexOf(JSON.stringify(next));
+    if (own !== -1) { ownSaves.splice(0, own + 1); return; }
+  }
+  heldSettings = {
+    next: next && typeof next === 'object' ? next : (heldSettings && heldSettings.next) || null,
+    side: typeof side === 'boolean' ? side : heldSettings ? heldSettings.side : undefined,
+  };
+  if (!exportRunning && !activeRun) applyHeldSettings();
+}
+function applyHeldSettings() {
+  if (!heldSettings) return;
+  const { next, side } = heldSettings;
+  heldSettings = null;
+  if (next) settings = { ...defaultSettings, ...next };
+  if (typeof side === 'boolean') settings.useSidePanel = side;
+  applySettings();
+}
+if (chrome.storage && chrome.storage.onChanged) chrome.storage.onChanged.addListener(settingsChanged);
 
 // Apply settings to UI
 function applySettings() {

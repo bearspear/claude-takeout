@@ -358,7 +358,7 @@ test('exportDisabledReason', () => {
   assert.strictEqual(why(plan({ chats: true, artifacts: true, scope: 'all', hasRecord: true }), zero), '');
   assert.strictEqual(why(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true }), null), '');
   assert.strictEqual(why(plan({ chats: true, artifacts: true, scope: 'changes', hasRecord: true }), { ...zero, changedChats: 1 }), '');
-  assert.strictEqual(why(plan({ chats: true, artifacts: false, scope: 'changes', hasRecord: true }), { ...zero, changedArtifacts: 4 }, '2026-11-23 09:51'), 'Nothing changed since 2026-11-23 09:51.');
+  assert.strictEqual(why(plan({ chats: true, artifacts: false, scope: 'changes', hasRecord: true }), { ...zero, changedArtifacts: 4 }, '2026-11-23 09:51'), '');
 });
 
 test('warningGroups groups by type and caps lines', () => {
@@ -940,14 +940,15 @@ test('a run that ends Done clears the counts and their cache', async () => {
   assert.ok('other' in store.takeoutCounts, 'another org keeps its counts');
 });
 
-test('counts older than 10 minutes do not disable Export selected', async () => {
+test('counts never disable Export selected; older than 10 minutes they stop saying Nothing changed', async () => {
   const stored = { exportRecord: { 'org-1': { at: '2026-11-23T09:51:00', chats: { a: '1' } } } };
   const p = panelOn('https://claude.ai/new', { stored });
   await sleep(50);
   p.fn("settings.megaZipScope = 'changes'; settings.exportAllSessions = false");
   p.fn("panel.counts = { chats: 2, artifacts: 0, changedChats: 0, changedArtifacts: 0, at: new Date().toISOString() }");
   p.fn('renderEverything')();
-  assert.strictEqual(p.el('exportSelected').disabled, true, 'fresh counts say nothing changed');
+  assert.strictEqual(p.el('exportSelected').disabled, false, 'fresh counts say nothing changed, and allow it');
+  assert.match(p.el('summary').textContent, /Nothing changed/);
   p.fn("panel.counts = { chats: 2, artifacts: 0, changedChats: 0, changedArtifacts: 0, at: new Date(Date.now() - 11 * 60000).toISOString() }");
   p.fn('renderEverything')();
   assert.strictEqual(p.el('exportSelected').disabled, false);
@@ -1458,7 +1459,7 @@ test('exportPlan maps Sessions', () => {
   // Count doesn't count sessions, so with Sessions ticked the counts can't say nothing changed.
   const zero = { chats: 5, artifacts: 5, changedChats: 0, changedArtifacts: 0, at: 'x' };
   assert.strictEqual(f2('exportDisabledReason')(plan({ chats: true, artifacts: true, sessions: true, scope: 'changes', hasRecord: true }), zero, 'then'), '');
-  assert.strictEqual(f2('exportDisabledReason')(plan({ chats: true, artifacts: true, sessions: false, scope: 'changes', hasRecord: true }), zero, 'then'), 'Nothing changed since then.');
+  assert.strictEqual(f2('exportDisabledReason')(plan({ chats: true, artifacts: true, sessions: false, scope: 'changes', hasRecord: true }), zero, 'then'), '');
 });
 
 test('the summary names sessions', () => {
@@ -2105,4 +2106,122 @@ test('the upgrade save keeps the top-level useSidePanel that background.js reads
   await sleep(5);
   assert.strictEqual(store.useSidePanel, true);
   assert.strictEqual(store.exporterSettings.exportAllSessions, false);
+});
+
+// ---- Should-fix batch (v1.25.5) ----
+
+test('Count keys its counts by the org the claude.ai tab answered for', async () => {
+  const session = {};
+  const { fn } = countSetup(session, { exportRecord: { o: { chats: { a: '1', b: '2' } } } });
+  // countSetup's tab answers orgId 'o'; the panel still thinks it is on 'stale'.
+  await assert.rejects(fn('countEverything')({ org: 'stale', tabId: 1, withArtifacts: false, force: true }), /organization changed/);
+  assert.ok(!('stale' in session.takeoutCounts));
+  assert.strictEqual(session.takeoutCounts.o.chats, 2);
+  assert.strictEqual(session.takeoutCounts.o.changedChats, 0);
+});
+
+test('a count that finishes after the org changed is not shown', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  let release;
+  p.sandbox.chrome.tabs.sendMessage = (id, msg, cb) => {
+    if (msg.action === 'fetchAllConversations') release = () => cb({ data: [{ uuid: 'a', updated_at: '1' }], orgId: 'org-1' });
+    else if (msg.action === 'listArtifacts') cb({ frames: [] });
+    else cb({});
+  };
+  p.sandbox.chrome.storage.session = { get: async () => ({}), set: async () => {} };
+  const run = p.el('countBtn').handlers.click();
+  await sleep(10);
+  p.fn("orgId = 'org-2'");
+  release();
+  await run;
+  assert.strictEqual(p.fn('panel.counts'), null);
+  assert.strictEqual(p.el('chatCount').textContent, '–');
+});
+
+test('Nothing changed is said but never disables Export selected', () => {
+  const { fn } = loadPopup();
+  const plan = fn('exportPlan'), why = fn('exportDisabledReason');
+  const zero = { chats: 5, artifacts: 5, changedChats: 0, changedArtifacts: 0, at: 'x' };
+  assert.strictEqual(why(plan({ chats: true, artifacts: false, scope: 'changes', hasRecord: true }), zero, 'then'), '');
+  assert.strictEqual(why(plan({ chats: false, artifacts: false, sessions: false, scope: 'all', hasRecord: true }), zero), 'Tick Chats, Artifacts or Sessions.');
+});
+
+const pageFiles = (n) => Array.from({ length: n }, (_, i) => ({ path: `f${i}.txt`, size: null }));
+const pageNames = (files) => new Map(files.map((f) => [f.path, f.path]));
+
+test('Stop ends a version file loop before the next file', async () => {
+  const { fn } = loadPopup();
+  const files = pageFiles(5);
+  let asked = 0;
+  const written = {};
+  const got = await fn('fetchPublishedFiles')({
+    target: { file: (p, b) => { written[p] = b; } }, prefix: 'v/', uuid: 'u', ver: 'v1', files, names: pageNames(files),
+    fetchPublished: async () => { asked++; return { base64: 'YQ==' }; }, stopped: () => asked >= 2,
+  });
+  assert.strictEqual(asked, 2);
+  assert.strictEqual(Object.keys(written).length, 2);
+  assert.strictEqual(got.incomplete, true);
+  assert.deepStrictEqual(Array.from(got.missing), ['f2.txt', 'f3.txt', 'f4.txt']);
+});
+
+test('a version with a file missing gets no ZIP', async () => {
+  const { sandbox, fn } = loadPopup();
+  sandbox.versionZip = async () => 'ZIP';
+  const files = pageFiles(3);
+  const written = {};
+  const got = await fn('fetchPublishedFiles')({
+    target: { file: (p, b) => { written[p] = b; } }, prefix: 'v/', uuid: 'u', ver: 'v1', files, names: pageNames(files),
+    fetchPublished: async ({ path: p }) => (p === 'f1.txt' ? { error: 'HTTP 500', status: 500 } : { base64: 'YQ==' }), zip: { date: '' },
+  });
+  assert.strictEqual(got.zipped, false);
+  assert.ok(!('v.zip' in written));
+  const whole = await fn('fetchPublishedFiles')({
+    target: { file: (p, b) => { written[p] = b; } }, prefix: 'w/', uuid: 'u', ver: 'v2', files, names: pageNames(files),
+    fetchPublished: async () => ({ base64: 'YQ==' }), zip: { date: '' },
+  });
+  assert.strictEqual(whole.zipped, true);
+});
+
+test('a settings change made in another page reaches this one', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  const registered = p.fn('typeof settingsChanged === "function" ? settingsChanged : null');
+  assert.ok(registered, 'settingsChanged listener');
+  registered({ exporterSettings: { newValue: { ...p.fn('settings'), megaFormat: 'zip', exportAllArtifacts: false } } }, 'local');
+  assert.strictEqual(p.fn('settings.megaFormat'), 'zip');
+  assert.strictEqual(p.el('pickArtifacts').checked, false);
+  registered({ exporterSettings: { newValue: { megaFormat: 'folder' } } }, 'session');
+  assert.strictEqual(p.fn('settings.megaFormat'), 'zip');
+});
+
+test('console messages carry no chat, file or project names', () => {
+  for (const file of ['popup.js', 'content.js']) {
+    const src = fs.readFileSync(path.join(REPO_DIR, file), 'utf8');
+    const bad = src.split('\n').map((l, i) => [i + 1, l]).filter(([, l]) => /console\.(log|warn|error|info)\(`/.test(l));
+    assert.deepStrictEqual(bad, [], `${file}: template strings in console calls`);
+  }
+});
+
+test("this page's own save echoing back late does not undo a newer choice", async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.el('formatZip').handlers.click();
+  const first = JSON.parse(JSON.stringify(p.store.exporterSettings));
+  p.el('formatFolder').handlers.click();
+  await sleep(10);
+  p.fn('settingsChanged')({ exporterSettings: { newValue: first } }, 'local');
+  assert.strictEqual(p.fn('settings.megaFormat'), 'folder');
+});
+
+test('a settings change from the other page waits for a running export', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.fn('exportRunning = true');
+  p.fn('settingsChanged')({ exporterSettings: { newValue: { ...p.fn('settings'), includeThinking: false, megaFormat: 'zip' } } }, 'local');
+  assert.strictEqual(p.fn('settings.megaFormat'), 'folder');
+  p.fn('exportRunning = false');
+  p.fn('finishRun')();
+  assert.strictEqual(p.fn('settings.megaFormat'), 'zip');
+  assert.strictEqual(p.fn('settings.includeThinking'), false);
 });

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Claude Takeout",
-  "version": "1.25.4",
+  "version": "1.25.5",
   "description": "Export your claude.ai chats, artifacts and Claude Code and Cowork sessions to Markdown, a ZIP or a folder, with an offline viewer.",
   "icons": {
     "16": "icon16.png",
