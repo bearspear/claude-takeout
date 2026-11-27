@@ -6532,3 +6532,52 @@ test('openedArtifactLine escapes Markdown in the title as the index cells do', (
   const { openedArtifactLine } = require('../export-core.js');
   assert.strictEqual(openedArtifactLine('<b>x</b>*y*_z_', 'u/'), 'This chat was opened from the artifact [\\<b\\>x\\</b\\>\\*y\\*\\_z\\_](u/) and has no messages.');
 });
+
+test('Stop inside an older version warns nothing and leaves the artifact not whole', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: histPage('Guide', {
+    v1: { files: { 'index.html': 'one', 'b.js': 'b' } },
+    v2: { files: { 'index.html': 'two' } },
+    [LIVE]: { files: { 'index.html': 'live' } },
+  }) });
+  const signal = { stopped: false };
+  const fetch = async (msg) => {
+    const reply = await fetcher.fetch(msg);
+    if (msg.action === 'publishedPageFile' && msg.ver === 'v1') signal.stopped = true;
+    return reply;
+  };
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetch, __arts: [art(U(1), 'Guide')], __signal: signal });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null, signal: __signal });
+    return JSON.stringify({ whole: step.whole, warnings: step.collector.warnings.map((w) => w.error) });
+  })()`, sb));
+  assert.deepStrictEqual(out.warnings, []);
+  assert.deepStrictEqual(out.whole, [false]);
+});
+
+test('Stop inside the current version notes the stop, not errors.txt', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: histPage('Guide', { [LIVE]: { files: { 'index.html': 'live', 'b.js': 'b' } } }) });
+  const signal = { stopped: false };
+  const fetch = async (msg) => {
+    const reply = await fetcher.fetch(msg);
+    if (msg.action === 'publishedPageFile') signal.stopped = true;
+    return reply;
+  };
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetch, __arts: [art(U(1), 'Guide')], __signal: signal });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null, signal: __signal });
+    return JSON.stringify({ rows: step.rows, warnings: step.collector.warnings.length, whole: step.whole });
+  })()`, sb));
+  const text = JSON.stringify(out.rows);
+  assert.doesNotMatch(text, /see errors\.txt/);
+  assert.match(text, /stopped before/);
+  assert.strictEqual(out.warnings, 0);
+  assert.deepStrictEqual(out.whole, [false]);
+});

@@ -4856,6 +4856,7 @@ function hideProgress() {
 // Runs once an export has ended: a tab change that came in meanwhile is followed now.
 // The export buttons come back as the choices and the loaded chat now stand, not as they were at the click.
 function finishRun() {
+  if (!exportRunning && !activeRun && typeof applyHeldSettings === 'function') applyHeldSettings();
   if (typeof document !== 'undefined') {
     for (const id of CHAT_BUTTONS) document.getElementById(id).disabled = !conversationData || exportRunning;
     renderEverything();
@@ -6292,7 +6293,10 @@ async function saveArtifact(root, a, ctx) {
       if (got.problems.length) {
         warn(name, `Artifact "${name}" (${info.ver}): ${artifactCount(got.problems.length, 'file')} could not be saved: ${got.problems.join(', ')}.`, openNote);
       }
-      if (meta.missing.length) notes.push(`${artifactCount(meta.missing.length, 'file')} not saved (see errors.txt)`);
+      // A stop leaves files unasked, with nothing in errors.txt about them.
+      const cutByStop = meta.missing.length && !got.problems.length && typeof ctx.stopped === 'function' && ctx.stopped();
+      if (cutByStop) notes.push('export stopped before all its files were saved');
+      else if (meta.missing.length) notes.push(`${artifactCount(meta.missing.length, 'file')} not saved (see errors.txt)`);
       if ([...got.unverified.values()].some(Boolean)) notes.push("files not checked against claude.ai's checksum");
     }
   } catch (e) {
@@ -6370,6 +6374,16 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
   const { fetchPublished, state, warn, store } = ctx;
   const out = { settled: [], saved: [], failed: [], unfetched: [] };
   const problems = [];
+  // Stop: every version from..end not saved yet is unfetched (the artifact is not whole), and nothing is warned.
+  const leftOut = (from) => {
+    for (let j = from; j < rec.history.length; j++) {
+      const w = rec.history[j];
+      if (w === rec.current || skip.has(w) || out.saved.includes(w) || out.unfetched.includes(w)) continue;
+      const kept = rec.versions.get(w);
+      if (j > from && (storeVersionWhole(kept) || (kept && kept.sameAs))) out.saved.push(w);
+      else out.unfetched.push(w);
+    }
+  };
   for (let i = 0; i < rec.history.length; i++) {
     const ver = rec.history[i];
     if (ver === rec.current || skip.has(ver)) continue;
@@ -6377,7 +6391,7 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
     if (storeVersionWhole(prev) || (prev && prev.sameAs)) { out.saved.push(ver); continue; }
     if (state.publishedSignedOut) { out.unfetched.push(ver); continue; }
     // Stop (ctx.stopped): the versions saved so far stay.
-    if (typeof ctx.stopped === 'function' && ctx.stopped()) break;
+    if (typeof ctx.stopped === 'function' && ctx.stopped()) { leftOut(i); break; }
     if (typeof ctx.onVersion === 'function') ctx.onVersion(i + 1, rec.history.length);
     const reply = await fetchPublished({ action: 'publishedPageInfo', uuid: rec.uuid, ver });
     if (publishedSignedOutReply(reply)) { ctx.signOut(); out.unfetched.push(ver); continue; }
@@ -6402,6 +6416,8 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
     rec.versions.set(ver, v);
     // Its preview goes into a part now (runArtifactStep's placeOlder), so no artifact holds all its versions' previews.
     if (got.saved && typeof ctx.placeOlder === 'function') ctx.placeOlder(rec, ver, artifactPayload(got));
+    // Stopped inside this version's files: it stays as far as it got, incomplete, and is asked for again next time.
+    if (got.missing.length && typeof ctx.stopped === 'function' && ctx.stopped()) { leftOut(i); break; }
     if (got.saved && !v.incomplete && (info.listFromLive || !got.missing.length)) out.saved.push(ver);
     else { out.failed.push(ver); problems.push(...(got.problems.length ? got.problems : ['not saved'])); }
   }
@@ -7799,6 +7815,9 @@ async function loadSettings() {
 
 // Save settings to storage
 async function saveSettings() {
+  // Remembered until its change event comes back, so a late echo of an older save can't undo a newer choice.
+  ownSaves.push(JSON.stringify(settings));
+  if (ownSaves.length > 50) ownSaves.shift();
   try {
     // Save all settings together, plus useSidePanel at top level for background.js
     await chrome.storage.local.set({
@@ -7812,12 +7831,29 @@ async function saveSettings() {
 
 // A change saved by the other page (the popup or the side panel, both open at once) reaches this one. This page's
 // own saves come back here too, with the values it already has.
+// A change that comes in while an export runs waits for it to end (finishRun), so one run never mixes settings.
+const ownSaves = [];  // JSON of the settings this page saved, oldest first, until their change events come back
+let heldSettings = null;
 function settingsChanged(changes, area) {
   if (area !== 'local' || !changes) return;
   const next = changes.exporterSettings && changes.exporterSettings.newValue;
   const side = changes.useSidePanel && changes.useSidePanel.newValue;
   if ((!next || typeof next !== 'object') && typeof side !== 'boolean') return;
-  if (next && typeof next === 'object') settings = { ...defaultSettings, ...next };
+  if (next && typeof next === 'object') {
+    const own = ownSaves.indexOf(JSON.stringify(next));
+    if (own !== -1) { ownSaves.splice(0, own + 1); return; }
+  }
+  heldSettings = {
+    next: next && typeof next === 'object' ? next : (heldSettings && heldSettings.next) || null,
+    side: typeof side === 'boolean' ? side : heldSettings ? heldSettings.side : undefined,
+  };
+  if (!exportRunning && !activeRun) applyHeldSettings();
+}
+function applyHeldSettings() {
+  if (!heldSettings) return;
+  const { next, side } = heldSettings;
+  heldSettings = null;
+  if (next) settings = { ...defaultSettings, ...next };
   if (typeof side === 'boolean') settings.useSidePanel = side;
   applySettings();
 }

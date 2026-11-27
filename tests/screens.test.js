@@ -2202,3 +2202,26 @@ test('console messages carry no chat, file or project names', () => {
     assert.deepStrictEqual(bad, [], `${file}: template strings in console calls`);
   }
 });
+
+test("this page's own save echoing back late does not undo a newer choice", async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.el('formatZip').handlers.click();
+  const first = JSON.parse(JSON.stringify(p.store.exporterSettings));
+  p.el('formatFolder').handlers.click();
+  await sleep(10);
+  p.fn('settingsChanged')({ exporterSettings: { newValue: first } }, 'local');
+  assert.strictEqual(p.fn('settings.megaFormat'), 'folder');
+});
+
+test('a settings change from the other page waits for a running export', async () => {
+  const p = panelOn('https://claude.ai/new');
+  await sleep(50);
+  p.fn('exportRunning = true');
+  p.fn('settingsChanged')({ exporterSettings: { newValue: { ...p.fn('settings'), includeThinking: false, megaFormat: 'zip' } } }, 'local');
+  assert.strictEqual(p.fn('settings.megaFormat'), 'folder');
+  p.fn('exportRunning = false');
+  p.fn('finishRun')();
+  assert.strictEqual(p.fn('settings.megaFormat'), 'zip');
+  assert.strictEqual(p.fn('settings.includeThinking'), false);
+});
