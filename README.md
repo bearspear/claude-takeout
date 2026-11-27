@@ -425,6 +425,10 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.25.6
+
+- **View-only artifacts say so** - An artifact shared with you to view only can't be downloaded: claude.ai lists its files but refuses them to viewers. The export now asks for one file, stops at the refusal, and gives one plain warning (make your own copy on claude.ai, or ask the owner for edit access) instead of an "HTTP 403" line per file. Its older versions aren't asked for, and its row says "view only".
+
 ### v1.25.5
 
 - **Count follows the org** - Count's numbers are kept under the org the claude.ai tab answered for. A count that finishes after you switched org, or that the tab answered for another org, isn't shown ("organization changed").

@@ -162,7 +162,7 @@ function docTools(prefix = 'mcp__Claude_Docs__', { node = 'node-1', title = 'Lor
 }
 
 // Answers content.js's publishedPageInfo and publishedPageFile from a table, and records every call.
-// pages: { <uuid>: { title, history, live: <ver of ''>, error: <info response>, versions: { <ver>: { rejected,
+// pages: { <uuid>: { title, history, live: <ver of ''>, error: <info response>, viewOnly, versions: { <ver>: { rejected,
 // files: { <path>: text | { body, sha256, type, error, unverified } } } } } }. A file's sha256 defaults to that of its
 // body; an unverified one (listed from the frame info, as Cowork pages are) has no size and no sha256.
 function publishedFetcher(pages) {
@@ -183,6 +183,7 @@ function publishedFetcher(pages) {
         ver, title: page.title, history: page.history || Object.keys(page.versions), rejected: v.rejected || [],
         ...(page.runtimeSkipped !== undefined ? { runtimeSkipped: page.runtimeSkipped } : {}),
         ...(v.listFromLive ? { listFromLive: true } : {}),
+        ...(page.viewOnly ? { viewOnly: true } : {}),
         files: Object.entries(v.files).map(([path, raw]) => {
           const f = fileOf(raw);
           const body = Buffer.from(f.body);
