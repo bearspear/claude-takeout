@@ -373,10 +373,29 @@ Check the browser console for error details. Common causes:
 
 ## Privacy & Security
 
-- **No external servers** - All processing happens locally in your browser
-- **No API keys stored** - Uses your existing Claude session
-- **No data collection** - Nothing is sent anywhere except to your downloads folder
-- **Open source** - Full source code visible in extension files
+Claude Takeout runs in your browser and talks only to claude.ai. It has no server, no analytics and no account of its own.
+
+**What it reads.** It uses your existing claude.ai sign-in (the session cookie the site already set) to call the same endpoints claude.ai's own pages use: your chats, projects and their files, uploads, the artifacts list and published pages, Claude Code and Cowork sessions, and your display name (only for the export's file name). It stores no password, token or API key.
+
+**Where the data goes.** Only into the ZIP or folder you save. Nothing is uploaded or sent to anyone. Published pages and artifact card pictures come from claude.ai's own file host (`*.frame.claudeusercontent.com`). The private access token those requests need stays inside the claude.ai tab and is never written into an export, shown or logged.
+
+**What it keeps in Chrome.** In the extension's own storage: your settings, your organization ID, and a record of what the last Export All saved (chat, artifact and session IDs with their update times, no content) so **Changes only** can skip what didn't change. The counts are kept for 10 minutes and cleared when Chrome closes. Removing the extension deletes all of it.
+
+**Permissions Chrome asks for:**
+
+| Permission | Why |
+|---|---|
+| Read and change your data on claude.ai | To call claude.ai's endpoints as you, and to find your organization ID. It never changes anything on claude.ai: every request reads. |
+| `activeTab`, `scripting` | To reach the claude.ai tab you're on, including one that was open before the extension was installed or reloaded. |
+| `storage` | Settings and the record above. |
+| `sidePanel` | The optional side panel. |
+| Optional: read your data on all websites (`https://*/*`) | Only asked when you choose it: Settings > **Web images and card pictures**, or Chrome's prompt during a ZIP export that has such images. Used only to save images from Claude's web searches and artifacts' card pictures, fetched without cookies. Without it those images are links or tiles and nothing else changes. Folder exports never ask. |
+
+**Sessions.** A Claude Code or Cowork session export keeps only the listed fields of each event, removes `<system-reminder>` blocks and masks text shaped like API keys and tokens. It never saves the session's environment settings. The masking catches common key formats, not every secret, so read a session's transcript before you share it.
+
+**Your exports are private.** An export holds the full text of your chats, files and sessions. Treat it like the chats themselves. The offline viewer works with no network; previews of generated pages run in a sandbox (see [USAGE.md](USAGE.md) for what a preview can and can't reach).
+
+**Open source.** Every file the extension runs is in this repository, unminified apart from the vendored libraries (JSZip, marked, KaTeX, highlight.js).
 
 ## Technical Documentation
 
@@ -405,6 +424,11 @@ Two stdlib-only Python 3 scripts and one Node tool ship with the extension:
 See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPROACH.md](docs/WASM_REPLAY_APPROACH.md) for the architectural reasoning behind keeping bash replay in a separate CLI rather than embedding it in the extension.
 
 ## Changelog
+
+### v1.25.4
+
+- **Privacy & Security rewritten for beta testers** - What the extension reads, where data goes, what it keeps in Chrome, and why it asks for each permission.
+- **Side panel names the right folder** - A published page's version that can't open from the viewer said "the published folder" in an Export All, where it is in `artifacts/`. It now says the artifacts folder there, and the published folder only in a single chat's ZIP.
 
 ### v1.25.3
 
