@@ -6529,7 +6529,7 @@ async function runArtifactStep(root, opts = {}) {
   // per artifact: the version ids now saved whole or settled (the current one when whole, its history's saved and
   // settled), which Export All adds to its record whether or not the artifact is whole.
   const versionsSaved = [];
-  let versionCount = 0;  // versions saved whole: each current one and every older one saveHistory saved (the run result's count)
+  let versionCount = 0;  // versions saved whole: each current one with files (not a Claude Docs document) and every older one saveHistory saved (the run result's count)
   const writeFailures = [];
   let thumbs = 0;
   let partCount = 0;
@@ -6580,7 +6580,8 @@ async function runArtifactStep(root, opts = {}) {
         const m = saved.meta || {};
         const currentOk = !!(m.ver && !m.incomplete && !(m.missing && m.missing.length) && !saved.view.notExported);
         versionsSaved.push([...(currentOk ? [m.ver] : []), ...(saved.history ? [...saved.history.saved, ...saved.history.settled] : [])]);
-        versionCount += (currentOk ? 1 : 0) + (saved.history ? saved.history.saved.length : 0);
+        // A Claude Docs document settles its version but has no files saved, so it is not counted.
+        versionCount += (currentOk && !saved.view.docs ? 1 : 0) + (saved.history ? saved.history.saved.length : 0);
       }
       let view = { ...saved.view, thumb: null, part: null, key: null };
       // The card picture and the preview part are extras: a failure leaves them out, with no warning.

@@ -18,3 +18,6 @@ __pycache__/
 
 # Packaged extension (tools/package_extension.js)
 dist/
+
+# Superpowers plan workspaces (scratch, per machine)
+.superpowers/

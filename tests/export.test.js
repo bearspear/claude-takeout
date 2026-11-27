@@ -4052,6 +4052,35 @@ test('runArtifactStep under artifacts/ writes folders, artifact.json and views w
   assert.strictEqual(out.signedOut, false);
 });
 
+test('runArtifactStep counts no saved version for a Claude Docs document, though it settles its version', async () => {
+  const frames = [art(U(1), 'Guide'), art(U(2), 'Plan', { typeSlug: DOCS_TYPE, typeTitle: 'Docs' })];
+  const { out, fetcher } = await runStep(frames, { [U(1)]: livePage('Guide', { 'index.html': '<h1>G</h1>' }) });
+  assert.strictEqual(out.versionCount, 1, 'only the page has files saved');
+  assert.deepStrictEqual(out.versionsSaved, [[LIVE], [LIVE]], 'Export Changes still skips the document next time');
+  assert.ok(!fetcher.calls.some((c) => c.uuid === U(2)), 'nothing is fetched for the document');
+});
+
+test('askForCardPictures asks in the click only when the permission is not known to be granted, and remembers the answer', async () => {
+  const sb = exportPopup().sandbox;
+  const asked = [];
+  let answer = true;
+  sb.chrome.permissions = { contains: async () => false, request: (o) => { asked.push(o); return typeof answer === 'function' ? answer() : Promise.resolve(answer); } };
+  await new Promise((r) => setImmediate(r));  // the load-time check settles first
+  vm.runInContext('webImagesGranted = true', sb);
+  assert.strictEqual(vm.runInContext('askForCardPictures()', sb), null, 'granted: nothing asked');
+  assert.strictEqual(asked.length, 0);
+  for (const [known, reply, granted] of [[null, true, true], [false, false, false], [false, () => Promise.reject(new Error('no gesture')), false]]) {
+    vm.runInContext(`webImagesGranted = ${known}`, sb);
+    answer = reply;
+    const p = vm.runInContext('askForCardPictures()', sb);
+    assert.strictEqual(asked.length > 0, true, 'asked at once, before any await');
+    assert.strictEqual(await p, granted);
+    assert.strictEqual(vm.runInContext('webImagesGranted', sb), granted);
+  }
+  assert.deepStrictEqual(JSON.parse(JSON.stringify(asked[0])), { origins: ['https://*/*'] });
+  assert.strictEqual(asked.length, 3);
+});
+
 test('runArtifactStep keeps card pictures under the root viewer-files', async () => {
   const frames = [art(U(1), 'Guide')];
   const popup = exportPopup({ routes: [[/_thumb\.img/, () => ({ ok: true, status: 200, headers: { get: () => 'image/png' }, arrayBuffer: async () => new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]).buffer })]] });

@@ -8,15 +8,20 @@ Needs Node 20+ and Python 3.10+, with no packages to install.
 
 | File | Covers |
 |---|---|
-| `panel.test.js` | Side panel following the selected chat, refreshes and content script recovery |
-| `export.test.js` | Artifact replay, heredocs, failed tool calls, binaries, delivered files, warnings, and JS and Python parity |
+| `helpers.js` | Not a test: loads the real `popup.js` in a VM with stubbed Chrome and DOM APIs, plus the fake claude.ai frame host (`publishedFetcher`) |
+| `background.test.js` | `background.js`: the two side-panel toggles, every other message left alone, no Side Panel API, the stored preference applied on start |
+| `panel.test.js` | Side panel following the selected chat, refreshes and content script recovery, `content.js` (published pages, artifact lists, sessions) |
+| `screens.test.js` | The panel's screens: their sentences, the markup of both pages (identical, ids, colours), counts, folder handoff, the screens driven against fake elements |
+| `export.test.js` | Artifact replay, heredocs, failed tool calls, binaries, delivered files, warnings, published pages, Export Artifacts and Export All's artifacts, card pictures, and JS and Python parity |
+| `session.test.js` | Claude Code and Cowork sessions: the `session-core.js` filter, stripping and masking, transcript and README, `buildViewerSession`, the record |
+| `fixtures/conversation.json` | The synthetic chat most tests export |
 | `fixtures/export-baseline.json` | SHA-256 of every file an export writes for the fixture (dates scrubbed, `viewer.html` and `viewer-check.gif` left out), checked by `export.test.js` |
 | `package.test.js` | `tools/package_extension.js`: every file the extension references is packaged, no developer files, the ZIP holds exactly the list |
 | `test_replay_bash.py` | `replay_bash.py` replay order and containment |
 | `viewer.test.js` | Viewer tree, hash, Markdown steps and data building |
 | `archive.test.js` | Old-archive tool: finding archives (an Export Artifacts folder holds none), ZIP extraction, added files, `--force`, and that existing files stay unchanged, every artifacts layout (`readArtifactStore`, `artifactViewsFromDisk`), real-folder-only path resolution, `rewriteChatLinks`, and an Export Artifacts folder with a viewer being read as an artifacts-only archive |
 | `merge.test.js` | `merge_archives.js`: newest copy per chat, the artifacts store from every source layout (newest source per version, `listed` rules, `sameAs` re-pointing, copies), link rewriting and unmapped links, kept `published/` folders, copy failures, artifacts-only archives |
-| `e2e/` | Real extension in Chromium against a mock claude.ai, and the viewer page over `file://` (`viewer.e2e.js`: rendering, previews, `sanitizeHtml`; `colors.e2e.js`: syntax colors; `parts.e2e.js`: upload and file text in `viewer-files/`; `navigation.e2e.js`: version switching by keyboard, search highlights, the phone panel header; `search.e2e.js`: sidebar search; `files.e2e.js`: the Files list; `stepper.e2e.js`: the match bar; `webimages.e2e.js`: web-search images, mosaic and gallery; `steps.e2e.js`: the step groups; `prompts.e2e.js`: long prompts; `cards.e2e.js`: product cards; `published.e2e.js`: published-page cards; `artifacts.e2e.js`: an Export Artifacts `index.html`; `artifacts-viewer.e2e.js`: the artifacts viewer, grid, tabs, routing, sandboxed previews, hostile pages; `combined.e2e.js`: an Export All viewer with artifacts, In chats, links, the guard frame; `download.e2e.js`: Download and Download ZIP; `design.e2e.js`: the Design canvas) (optional, see below). `archive.e2e.js` opens a viewer the old-archive tool built |
+| `e2e/` | Real extension in Chromium against a mock claude.ai, and viewer pages over `file://` (optional, see below). Each file is listed in CLAUDE.md's file map; `hostile.js` holds hostile-input fixtures and `make-viewer.js` builds a viewer to check by eye |
 
 `test_replay_bash.py` makes real attempts to escape the sandbox, so its replay tests run only where `sandbox-exec` exists.
 
@@ -47,22 +52,25 @@ PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/panel.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/viewer.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/archive.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/colors.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/parts.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/webimages.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/steps.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/prompts.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/cards.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/published.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/artifacts.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/artifacts-viewer.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/artifacts.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/cards.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/colors.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/combined.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/download.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/design.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/navigation.e2e.js
-PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/search.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/download.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/files.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/navigation.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/parts.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/projects.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/prompts.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/published.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/search.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/sessions.e2e.js
 PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/stepper.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/steps.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/webimages.e2e.js
+PW=/path/to/node_modules/playwright-core CHROME_EXE=/path/to/Chromium node tests/e2e/zoom.e2e.js
 ```
 
 `combined.e2e.js` covers an Export All's viewer with artifacts, and `design.e2e.js` the Design canvas. Both launch Chromium with `--disable-features=IsolateSandboxedIframes`: Chrome gives sandboxed frames processes of their own, and Playwright doesn't attach to a sandboxed frame inside another (the preview in its guard frame), so its console, requests and frame would go unseen. In one process they are seen; the sandbox, origin and policies are the same either way.
