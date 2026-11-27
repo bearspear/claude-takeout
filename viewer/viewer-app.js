@@ -1700,7 +1700,33 @@ let panelPicture = null; // { fileKey, kind, controller }
 let panelZoom = null; // { fileKey, kind, state }
 
 // Keeps the zoom of the picture or page the panel shows, then lets it go. Called before the panel body changes.
+// The panel's embedded artifacts app: stopped (its canvas frames and listeners) whenever the panel body changes.
+function releasePanelArtifact() {
+  if (!panelArtifact) return;
+  try { panelArtifact.app.route(''); } catch (e) { /* already gone */ }
+  panelArtifact = null;
+}
+
+// A Design's canvas in the side panel (v1.25.3): the Artifacts screen's own page for that one artifact, embedded, at the
+// panel's version. Null when it can't be (no app, no such artifact, not a Design).
+function panelCanvas(file, version) {
+  if (!window.CTArtifactsApp || !artifactsData || typeof file.artifact !== 'string') return null;
+  const view = allArtifactViews.find(v => v && String(v.id) === file.artifact);
+  if (!view || view.kind !== 'Design' || view.notExported) return null;
+  const host = el('div', 'panel-canvas');
+  const app = window.CTArtifactsApp.mount(host, { data: { ...artifactsData, artifacts: [view], chats: [] }, loadPart, onOpenChat: openChatAt, embedded: true });
+  panelArtifact = { app, id: view.id };
+  // Mounted once it is on the page, so the canvas fits the panel's size.
+  queueMicrotask(() => {
+    if (!panelArtifact || panelArtifact.app !== app || !host.isConnected) return;
+    app.route('#a=' + view.id);
+    if (version && typeof version.ver === 'string') app.pickVersion(version.ver);
+  });
+  return host;
+}
+
 function releasePanelPicture() {
+  releasePanelArtifact();
   if (!panelPicture) return;
   const { fileKey, kind, controller } = panelPicture;
   panelPicture = null;
@@ -1855,7 +1881,10 @@ function renderPanelBody(chat, file, version, shape) {
     if (file.published && version.same) body.prepend(el('div', 'file-note', 'Same as published: claude.ai published this file as Claude wrote it.'));
   };
   if (shape.missing) body.replaceChildren(el('div', 'file-missing', 'This file is not in this export.'));
-  else if (typed && (panelView === 'preview' || !shape.views.length)) body.replaceChildren(typedArtifactNote(file, typed), fileDetails(file, version));
+  else if (typed && (panelView === 'preview' || !shape.views.length)) {
+    const canvas = panelCanvas(file, version);
+    body.replaceChildren(...(canvas ? [canvas] : [typedArtifactNote(file, typed), fileDetails(file, version)]));
+  }
   else if (!shape.views.length) body.replaceChildren(fileDetails(file, version));
   else if (panelView === 'preview') body.replaceChildren(...previewNodes(chat, file, version));
   else {
@@ -2074,6 +2103,8 @@ function onHashChange() {
 // ---- The Artifacts screen: the artifacts app (artifacts-app.js) in #artifacts-screen, in place of the chat ----
 // #artifacts is its grid, #a=<id> an artifact and #ac=<chat>.<file> an In chats file; every other hash is the chat viewer's.
 let artifactsApp = null; // the mounted app, only when the data has artifacts
+let artifactsData = null; // the ViewerData it was mounted with, for the side panel's embedded one
+let panelArtifact = null; // { app, id }: the artifacts app embedded in the side panel (a Design's canvas), while shown
 let artifactsOn = false;
 // The chat's page and top bar titles, taken when leaving the chat for either screen (Artifacts or the lists screen) and
 // put back only on returning to a chat, so going Projects -> Artifacts -> a chat still ends on the chat's titles.
@@ -2102,6 +2133,7 @@ function setupArtifacts(data) {
     if (location.hash !== '#artifacts') location.hash = '#artifacts';
     else routeArtifacts('#artifacts');
   });
+  artifactsData = data;
   artifactsApp = window.CTArtifactsApp.mount(document.getElementById('artifacts-screen'), { data, loadPart, onOpenChat: openChatAt });
 }
 

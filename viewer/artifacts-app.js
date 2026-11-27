@@ -9,6 +9,9 @@
 //     onOpenChat(chatIndex, messageUuid) opens a chat. The host calls route(hash) on each hash change: it returns
 //     whether the hash is the Artifacts screen's (#artifacts, #a=<id>, #ac=<chat>.<file>), and on any other hash it lets
 //     go of an open artifact. show() shows the grid without touching the hash.
+//   Embedded (hosted, and options.embedded true; v1.25.3): one artifact's page in the chat viewer's side panel. No
+//     grid, home button, title or kind (the panel's head has them); it never sets the page's title, takes focus or
+//     touches the hash. pickVersion(ver) shows that version, as the version menu would; route('') stops it.
 // The home page: a grid of cards like claude.ai/artifacts, with tabs (All / Yours / Shared with you) and a title search.
 // Hosted, a fourth tab, In chats, has a card per file Claude made in the chats (inChatsFiles), kind filters and a
 // search on file names; a card sets #ac=<chat index>.<file id>, which opens the file's page: "Made in" its chat
@@ -67,6 +70,14 @@
 #page { height: 100%; }
 `;
 
+  // Embedded: only the artifact's page, filling the side panel; the panel's head names it and picks its version.
+  const EMBEDDED_CSS = `
+:host { height: 100%; }
+#home, #home-button, #page-title, #page-kind { display: none !important; }
+#page-from .version-menu { display: none !important; }
+#page .topbar { min-height: 0; padding-top: 6px; padding-bottom: 6px; }
+`;
+
   // A hosted preview sits in a guard frame whose own policy is frame-src 'none': the preview's navigations are
   // checked against its parent's policy, and the chat viewer's page allows file: frames (for PDFs). Both frames
   // carry the same sandbox; the guard runs nothing.
@@ -86,6 +97,7 @@
 
   function mount(container, options) {
     const hosted = !!(options && options.data);
+    const embedded = hosted && options.embedded === true;
     const data = hosted ? (Array.isArray(options.data.artifacts) ? options.data : { artifacts: [] }) : readData();
     const views = data.artifacts.filter(v => v && typeof v === 'object');
     // Where the app's elements are: the page itself, or the screen's shadow root.
@@ -95,7 +107,7 @@
       const style = document.createElement('style');
       const source = document.getElementById('artifacts-style');
       const css = source ? (source.content ? source.content.textContent : source.textContent) : '';
-      style.textContent = css.replace(/:root\b/g, ':host') + HOSTED_CSS;
+      style.textContent = css.replace(/:root\b/g, ':host') + HOSTED_CSS + (embedded ? EMBEDDED_CSS : '');
       root.append(style);
       root.append(document.createRange().createContextualFragment(shell('div', true)));
     } else {
@@ -1342,7 +1354,7 @@
       pageTitle.textContent = title;
       pageTitle.title = title;
       pageKind.textContent = String(v.kind || 'Page');
-      document.title = `${title} - Artifacts`;
+      if (!embedded) document.title = `${title} - Artifacts`;
       pageBadges.replaceChildren(...pageBadgesOf(v));
       clearNote();
       artifactLinks(v);
@@ -1412,7 +1424,10 @@
     // preview when it has one (part, key), and Open file opens its file in its version folder (or, for one the same
     // as a chat's file, that file).
     // Standalone too since v1.21 (an Export Artifacts export keeps every version); a version's chat copy is hosted only.
+    // The open page's version menu, as a function of a version id (embedded: the panel's version buttons).
+    let pickVersionOf = null;
     function versionMenu(v) {
+      pickVersionOf = null;
       const list = Array.isArray(v.versions) ? v.versions.filter(e => e && typeof e === 'object') : [];
       // One version, the current one: nothing to choose.
       if (!list.length || (list.length === 1 && list[0].current === true)) return null;
@@ -1433,6 +1448,13 @@
         now.selected = true;
         select.append(now);
       }
+      pickVersionOf = ver => {
+        const at = list.findIndex(e => e.ver === ver);
+        const value = at < 0 ? null : list[at].current === true ? 'current' : String(at);
+        if (value === null || value === select.value) return;
+        select.value = value;
+        select.dispatchEvent(new Event('change'));
+      };
       select.addEventListener('change', () => {
         stopCanvas();
         clearNote();
@@ -1640,7 +1662,7 @@
           if (tab !== 'chats') { tab = 'chats'; render(); }
           showFilePage(f, changed ? -1 : fileVersion);
         }
-        if (changed) pageTitle.focus({ preventScroll: true });
+        if (changed && !embedded) pageTitle.focus({ preventScroll: true });
         return true;
       }
       const was = openId;
@@ -1702,7 +1724,8 @@
       show() { route(HOME_HASH); },
       // The host calls it once the screen is visible: route() focuses the page title while the screen may still be
       // hidden, which a browser ignores.
-      refocus() { if (!page.hidden) pageTitle.focus({ preventScroll: true }); },
+      refocus() { if (!page.hidden && !embedded) pageTitle.focus({ preventScroll: true }); },
+      pickVersion(ver) { if (pickVersionOf && !page.hidden) pickVersionOf(ver); },
     };
   }
 
