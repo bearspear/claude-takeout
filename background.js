@@ -20,59 +20,23 @@ async function applySidePanelPreference() {
 // Apply preference when service worker starts
 applySidePanelPreference();
 
-// Listen for messages to toggle side panel mode
+// The popup's side panel checkbox asks for the new behaviour at once; the
+// storage listener below applies it too. Any other message is not ours.
+const SIDE_PANEL_MODES = { enableSidePanelMode: true, disableSidePanelMode: false };
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  const action = message && message.action;
+  if (!Object.prototype.hasOwnProperty.call(SIDE_PANEL_MODES, action)) return false;
   if (!hasSidePanel) {
-    if (message.action === 'openSidePanel' ||
-        message.action === 'enableSidePanelMode' ||
-        message.action === 'disableSidePanelMode' ||
-        message.action === 'checkSidePanelStatus') {
-      sendResponse({ status: 'unsupported', error: 'Side Panel requires Chrome 114+' });
-      return true;
-    }
+    sendResponse({ status: 'unsupported', error: 'Side Panel requires Chrome 114+' });
+    return false;
   }
-
-  if (message.action === 'openSidePanel') {
-    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
-      if (tabs[0]) {
-        try {
-          await chrome.sidePanel.open({ tabId: tabs[0].id });
-          sendResponse({ status: 'opened' });
-        } catch (error) {
-          sendResponse({ status: 'error', error: error.message });
-        }
-      }
-    });
-    return true; // Keep channel open for async response
-  }
-
-  if (message.action === 'enableSidePanelMode') {
-    chrome.sidePanel
-      .setPanelBehavior({ openPanelOnActionClick: true })
-      .then(() => sendResponse({ status: 'enabled' }))
-      .catch((error) => sendResponse({ status: 'error', error: error.message }));
-    return true;
-  }
-
-  if (message.action === 'disableSidePanelMode') {
-    chrome.sidePanel
-      .setPanelBehavior({ openPanelOnActionClick: false })
-      .then(() => sendResponse({ status: 'disabled' }))
-      .catch((error) => sendResponse({ status: 'error', error: error.message }));
-    return true;
-  }
-
-  if (message.action === 'checkSidePanelStatus') {
-    // Re-apply preference and respond with current status
-    applySidePanelPreference().then(() => {
-      chrome.storage.local.get(['useSidePanel'], (result) => {
-        sendResponse({ status: 'ok', useSidePanel: result.useSidePanel === true });
-      });
-    });
-    return true;
-  }
-
-  return true;
+  const open = SIDE_PANEL_MODES[action];
+  chrome.sidePanel
+    .setPanelBehavior({ openPanelOnActionClick: open })
+    .then(() => sendResponse({ status: open ? 'enabled' : 'disabled' }))
+    .catch((error) => sendResponse({ status: 'error', error: error.message }));
+  return true; // answered after setPanelBehavior settles
 });
 
 // On install/update, apply stored preference

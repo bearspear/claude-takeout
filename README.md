@@ -425,6 +425,12 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.25.7
+
+- **Versions saved counts files only** - The Done screen's count of artifact versions saved no longer includes Claude Docs documents, which have no files to save.
+- **Smaller background worker** - The service worker answers only the side panel setting and leaves every other message alone; two unused messages are gone.
+- **Tests** - New tests for the background worker and for asking for the card-picture permission; `tests/README.md` lists every test file.
+
 ### v1.25.6
 
 - **View-only artifacts say so** - An artifact shared with you to view only can't be downloaded: claude.ai lists its files but refuses them to viewers. The export now asks for one file, stops at the refusal, and gives one plain warning (make your own copy on claude.ai, or ask the owner for edit access) instead of an "HTTP 403" line per file. Its older versions aren't asked for, and its row says "view only".
