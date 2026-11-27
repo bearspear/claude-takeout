@@ -5018,7 +5018,7 @@ test('Export Artifacts writes <ver>.zip for a multi-file current version, and no
   assert.strictEqual(views.find((x) => x.title === 'Single').zip, null);
 });
 
-test('an incomplete multi-file version zips what was saved; with one file saved, no ZIP', async () => {
+test('an incomplete multi-file version gets no ZIP', async () => {
   const fail = { body: 'x', error: { error: 'HTTP 500', status: 500 } };
   const frames = [art(U(1), 'Three'), art(U(2), 'Two')];
   const pages = {
@@ -5026,15 +5026,13 @@ test('an incomplete multi-file version zips what was saved; with one file saved,
     [U(2)]: livePage('Two', { 'index.html': 'a', 'b.js': fail }),
   };
   const { files, raw } = await runArtifacts({ frames, pages });
-  const three = artFolder('Three', U(1));
-  const two = artFolder('Two', U(2));
-  const v3 = JSON.parse(files[`${three}/artifact.json`]).versions[LIVE];
-  assert.strictEqual(v3.incomplete, true);
-  assert.strictEqual(v3.zip, `${LIVE}.zip`);
-  assert.deepStrictEqual((await zipEntries(raw[`${three}/${LIVE}.zip`])).map((e) => e.name), ['index.html', 'b.js']);
-  const v2 = JSON.parse(files[`${two}/artifact.json`]).versions[LIVE];
-  assert.ok(!('zip' in v2));
-  assert.ok(!(`${two}/${LIVE}.zip` in raw));
+  for (const [title, u] of [['Three', U(1)], ['Two', U(2)]]) {
+    const dir = artFolder(title, u);
+    const v = JSON.parse(files[`${dir}/artifact.json`]).versions[LIVE];
+    assert.strictEqual(v.incomplete, true, title);
+    assert.ok(!('zip' in v), title);
+    assert.ok(!(`${dir}/${LIVE}.zip` in raw), title);
+  }
 });
 
 test('Export All zips the listed current version a chat published, not older or unlisted ones', async () => {

@@ -425,6 +425,15 @@ See [USAGE.md](USAGE.md) for full CLI documentation, and [docs/WASM_REPLAY_APPRO
 
 ## Changelog
 
+### v1.25.5
+
+- **Count follows the org** - Count's numbers are kept under the org the claude.ai tab answered for. A count that finishes after you switched org, or that the tab answered for another org, isn't shown ("organization changed").
+- **Nothing changed no longer blocks Export selected** - The summary still says it, but the button stays enabled, so a chat made right after a Count can be exported without waiting 10 minutes.
+- **Stop is quicker during artifacts** - Stop now ends a version's file downloads before the next file, not after the whole version. The version is left incomplete and fetched again next time.
+- **No ZIP of part of a version** - A version with a file that couldn't be saved no longer gets a `<ver>.zip` beside its folder, which looked complete.
+- **Settings stay in step** - A change made in the popup reaches an open side panel, and the other way round.
+- **No names in console messages** - The extension's console messages no longer carry chat, file or project names.
+
 ### v1.25.4
 
 - **Privacy & Security rewritten for beta testers** - What the extension reads, where data goes, what it keeps in Chrome, and why it asks for each permission.
