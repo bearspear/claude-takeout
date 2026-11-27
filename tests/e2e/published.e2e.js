@@ -111,6 +111,12 @@ const ctxOf = (folder, dir, needsRuntime) => c => {
   const megaData = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(fs.readFileSync(mega, 'utf8'))[1]);
   const href = Object.values(megaData.chats[0].files).find(f => f.published).versions[1].href;
   check('mega layout: the version links artifacts/ at the root', href === 'artifacts/Guide_ShortA/v2/index.html', href);
+  // A version that can't open from the viewer names the folder it is really in: artifacts/ in Export All.
+  const details = await page.evaluate(file => fileDetails(file, file.versions[1]).textContent, Object.values(megaData.chats[0].files).find(f => f.published));
+  check('mega layout: details say the artifacts folder', details.includes('the artifacts folder') && !details.includes('published folder'), details);
+  const singleData = JSON.parse(/<script id="data" type="application\/json">([\s\S]*?)<\/script>/.exec(fs.readFileSync(single, 'utf8'))[1]);
+  const singleDetails = await page.evaluate(file => fileDetails(file, file.versions[1]).textContent, Object.values(singleData.chats[0].files).find(f => f.published));
+  check('single chat: details say the published folder', singleDetails.includes('the published folder'), singleDetails);
   check('no network requests', requests.length === 0, requests.join());
   check('no page errors', errors.length === 0, errors.join(' | '));
 

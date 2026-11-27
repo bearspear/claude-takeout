@@ -1783,7 +1783,10 @@ function fileDetails(file, version) {
   } else if (file.added && !file.tooLarge) {
     box.append(el('p', '', "This file can't open from the viewer. It's in this archive's folder."), el('small', 'file-path', file.path));
   } else if (!file.added) {
-    const where = file.published && !version.same ? 'the published folder' : 'the artefacts folder';
+    // A published version is in the root artifacts/ store in Export All (and a session's card), in published/ in
+    // a single chat's ZIP; its href says which.
+    const store = typeof version.href === 'string' && version.href.startsWith('artifacts/');
+    const where = file.published && !version.same ? (store ? 'the artifacts folder' : 'the published folder') : 'the artefacts folder';
     box.append(el('p', '', `This file can't open from the viewer. It's in ${where} of this export.`));
   }
   return box;
