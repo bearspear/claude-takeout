@@ -215,7 +215,10 @@
     const files = (Array.isArray(body.files) ? body.files : [])
       .filter((f) => f && typeof f.path === 'string' && f.path)
       .map((f) => ({ path: f.path, contentType: typeof f.contentType === 'string' ? f.contentType : '' }));
-    const entry = { token, expires: publishedExpiry(token, Date.now()), ver: resolved, files };
+    // A page shared with the account to view only (perm.level "view", observed 2026-11-27): claude.ai lists its files
+    // but refuses them (HTTP 403 on _src), showing the page only in its own frame.
+    const viewOnly = !!(body.perm && typeof body.perm === 'object' && body.perm.level === 'view');
+    const entry = { token, expires: publishedExpiry(token, Date.now()), ver: resolved, files, viewOnly };
     publishedTokens.set(uuid + ':' + resolved, entry);
     publishedTokens.set(uuid + ':' + ver, entry);
     // claude.ai lists history newest first (observed 2026-11-23); everything after this reads it oldest first.
@@ -314,7 +317,8 @@
       const f = listing[p] || {};
       files.push({ path: p, size: f.size, contentType: f.contentType, sha256: f.sha256 });
     }
-    return { ver: info.entry.ver, title: info.title, history: info.history, files, rejected, runtimeSkipped, ...(listing.fromLive ? { listFromLive: true } : {}) };
+    return { ver: info.entry.ver, title: info.title, history: info.history, files, rejected, runtimeSkipped, ...(listing.fromLive ? { listFromLive: true } : {}),
+      ...(info.entry.viewOnly ? { viewOnly: true } : {}) };
   }
 
   // Every artifact claude.ai lists for the account. Only the fields an export keeps leave this function

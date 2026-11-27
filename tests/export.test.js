@@ -6581,3 +6581,46 @@ test('Stop inside the current version notes the stop, not errors.txt', async () 
   assert.strictEqual(out.warnings, 0);
   assert.deepStrictEqual(out.whole, [false]);
 });
+
+test('a view-only shared artifact: one plain warning, its files asked once, no older versions fetched', async () => {
+  const sb = exportPopup().sandbox;
+  const refused = { error: 'HTTP 403', status: 403 };
+  const fetcher = publishedFetcher({ [U(1)]: histPage('Wireframes', {
+    v1: { files: { 'index.html': { body: 'one', error: refused } } },
+    [LIVE]: { files: { 'index.html': { body: 'live', error: refused }, 'a.html': { body: 'a', error: refused }, 'b.html': { body: 'b', error: refused } } },
+  }, { viewOnly: true }) });
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Wireframes')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return JSON.stringify({ rows: step.rows, warnings: step.collector.warnings, whole: step.whole });
+  })()`, sb));
+  assert.strictEqual(fetcher.count('publishedPageFile'), 1, 'the first refusal ends the asking');
+  assert.ok(!fetcher.calls.some((c) => c.ver === 'v1'), 'older versions are not asked for');
+  assert.strictEqual(out.warnings.length, 1);
+  const w = JSON.stringify(out.warnings[0]);
+  assert.match(w, /view only/);
+  assert.doesNotMatch(w, /HTTP 403|index\.html/);
+  const rows = JSON.stringify(out.rows);
+  assert.match(rows, /view only/);
+  assert.doesNotMatch(rows, /see errors\.txt/);
+  assert.deepStrictEqual(out.whole, [false]);
+});
+
+test('a view-only artifact whose files load is saved as usual', async () => {
+  const sb = exportPopup().sandbox;
+  const fetcher = publishedFetcher({ [U(1)]: histPage('Guide', { [LIVE]: { files: { 'index.html': 'live', 'b.js': 'b' } } }, { viewOnly: true }) });
+  const root = zipStub();
+  sb.setTimeout = (fn) => setTimeout(fn, 0);
+  Object.assign(sb, { __root: root, __fetch: fetcher.fetch, __arts: [art(U(1), 'Guide')] });
+  const out = JSON.parse(await vm.runInContext(`(async () => {
+    const store = artifactStore(__root, { prefix: 'artifacts/' });
+    const step = await runArtifactStep(__root, { store, artifacts: __arts, listed: 1, fetchPublished: __fetch, picturesAllowed: false, parts: null });
+    return JSON.stringify({ warnings: step.collector.warnings.length, whole: step.whole });
+  })()`, sb));
+  assert.strictEqual(fetcher.count('publishedPageFile'), 2);
+  assert.strictEqual(out.warnings, 0);
+  assert.deepStrictEqual(out.whole, [true]);
+});

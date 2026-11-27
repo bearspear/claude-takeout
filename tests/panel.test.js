@@ -504,6 +504,14 @@ const tests = {
     assert.deepStrictEqual(res.files.map((f) => f.path), ['index.html']);
   },
 
+  'publishedPageInfo says view only when claude.ai gives the account view access, and nothing else': async () => {
+    const perm = (p) => publishedHarness({ info: (body) => (p ? { ...body, perm: p } : body) }).call({ action: 'publishedPageInfo', uuid: PUB, ver: '' });
+    assert.strictEqual((await perm({ role: 'commenter', level: 'view' })).viewOnly, true);
+    assert.ok(!('viewOnly' in await perm({ role: 'editor', level: 'edit' })));
+    assert.ok(!('viewOnly' in await perm(null)));
+    assert.ok(!('viewOnly' in await perm('view')));
+  },
+
   'listArtifacts sends X-Frame-CP, returns only allowed fields and codes on failure': async () => {
     const frame = { slug: PUB, title: 'T', type_slug: 'ts', type_title: 'Tt', source_surface: 'chat', rel: 'mine', live: 'v1', updatedAt: 'u', created_at: 'c',
       owner_email: 'o@x.y', thumbImgURL: 'https://t/x.png', owner_account: { a: 1 } };

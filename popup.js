@@ -3635,6 +3635,8 @@ function cleanPublishedInfo(r) {
     files, rejected, runtimeSkipped,
     // An older version whose list is the live version's (content.js): its files are fetched unverified.
     listFromLive: r.listFromLive === true,
+    // Shared with the account to view only: claude.ai may refuse its files (fetchPublishedFiles).
+    viewOnly: r.viewOnly === true,
   };
 }
 
@@ -3743,7 +3745,9 @@ const publishedSignedOutReply = (r) => !!(r && (r.status === 401 || r.error === 
 // (see previewKind); otherwise both are empty. Chat exports ignore them. With zip ({ date }: the current version of an
 // artifact in the store), two or more saved files are also written as <version folder>.zip beside the folder
 // (versionZip); zipped says whether it was.
-async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished, collect = false, zip = null, stopped = null }) {
+// viewOnly (the page is shared with the account to view only): a 403 for a file means claude.ai keeps the files from
+// viewers, so the rest are not asked for, none is listed as a problem, and the result has refused: true.
+async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, names, state = {}, onSignedOut = null, fetchPublished, collect = false, zip = null, stopped = null, viewOnly = false }) {
   const start = publishedStart(files);
   const missing = [];
   const problems = [];
@@ -3759,6 +3763,7 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   // Preview candidates, kept after the loop: the start file first, so other files never crowd it out.
   const candidates = [];
   const zipped = [];
+  let refused = false;
   const keep = (f, bytes) => {
     const kind = previewKind(f.path);
     if (!kind || bytes.length > PREVIEW_ITEM_MAX) return;
@@ -3777,7 +3782,7 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
     // Unverified only when the listing has neither size nor checksum (claude.ai's frame info list).
     const checked = !(f.size == null && !f.sha256);
     if (!checked) unverified.set(f.path, null);
-    if (state.publishedSignedOut) { fail(null); continue; }
+    if (state.publishedSignedOut || refused) { fail(null); continue; }
     // Stop: the files not asked for yet are missing, so the version is incomplete and asked for again next time.
     if (typeof stopped === 'function' && stopped()) { fail(null); continue; }
     if (checked && (f.size == null || !f.sha256)) { fail('bad listing'); continue; }
@@ -3793,6 +3798,7 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
       fail(null);
       continue;
     }
+    if (viewOnly && reply && reply.status === 403) { refused = true; fail(null); continue; }
     if (!reply || reply.error || reply.connectionError || typeof reply.base64 !== 'string') { fail(publishedCode(reply)); continue; }
     let bytes;
     try { bytes = base64ToBytes(reply.base64); } catch (e) { fail('bad response'); continue; }
@@ -3819,7 +3825,7 @@ async function fetchPublishedFiles({ target, prefix = '', uuid, ver, files, name
   // Only a version saved whole gets its ZIP: a ZIP of part of a version would pass for all of it.
   const wroteZip = zip && !missing.length ? await writeVersionZip(target, prefix, zipped, zip.date) : false;
   return {
-    saved: written > 0, zipped: wroteZip, missing, problems, incomplete: missing.length > 0,
+    saved: written > 0, zipped: wroteZip, missing, problems, incomplete: missing.length > 0, refused,
     start: startOk ? start.path : null, startSaved: startOk ? names.get(start.path) : null, startSize: startOk ? startSize : null,
     startText, needsRuntime: publishedNeedsRuntime(startText), unverified, texts, images,
   };
@@ -6260,7 +6266,7 @@ async function saveArtifact(root, a, ctx) {
         warn(name, `Artifact "${name}": file names changed to stay inside its folder: ${parts.join('; ')}.`, openNote);
       }
       got = await fetchPublishedFiles({ target: root, prefix: store.versionFolder(rec, info.ver), uuid, ver: info.ver, files, names, state, onSignedOut: signOut, fetchPublished, collect: true,
-        zip: { date: rec.meta.updatedAt }, stopped: ctx.stopped });
+        zip: { date: rec.meta.updatedAt }, stopped: ctx.stopped, viewOnly: info.viewOnly });
       meta.missing = got.missing;
       meta.incomplete = got.incomplete;
       markUnverified(files, got.unverified);
@@ -6290,12 +6296,16 @@ async function saveArtifact(root, a, ctx) {
       }
       meta.needsRuntime = info.runtimeSkipped > 0 || typeSlug !== '' || got.needsRuntime;
       if (!files.length) notes.push(typeSlug || info.runtimeSkipped > 0 ? 'open on claude.ai' : 'no files; open on claude.ai');
+      if (got.refused) {
+        warn(name, `Artifact "${name}" is shared with you to view only: claude.ai doesn't let a viewer download its files, so ${got.saved ? 'only some were' : 'none was'} saved. Make your own copy on claude.ai, or ask its owner for edit access, and export again.`, openNote);
+      }
       if (got.problems.length) {
         warn(name, `Artifact "${name}" (${info.ver}): ${artifactCount(got.problems.length, 'file')} could not be saved: ${got.problems.join(', ')}.`, openNote);
       }
       // A stop leaves files unasked, with nothing in errors.txt about them.
-      const cutByStop = meta.missing.length && !got.problems.length && typeof ctx.stopped === 'function' && ctx.stopped();
-      if (cutByStop) notes.push('export stopped before all its files were saved');
+      const cutByStop = meta.missing.length && !got.problems.length && !got.refused && typeof ctx.stopped === 'function' && ctx.stopped();
+      if (got.refused) notes.push("view only: claude.ai keeps its files from viewers");
+      else if (cutByStop) notes.push('export stopped before all its files were saved');
       else if (meta.missing.length) notes.push(`${artifactCount(meta.missing.length, 'file')} not saved (see errors.txt)`);
       if ([...got.unverified.values()].some(Boolean)) notes.push("files not checked against claude.ai's checksum");
     }
@@ -6312,7 +6322,8 @@ async function saveArtifact(root, a, ctx) {
   // Every older version claude.ai keeps (v1.21), after the current one, oldest to newest, whichever way the current
   // one was saved (fetched, kept whole from the store, or a chat's own file). A failure here leaves the current
   // version saved: only the older versions count as not saved.
-  if (!docs && !failed && rec.current) {
+  // A view-only artifact's older versions are refused like its current one: not asked for.
+  if (!docs && !failed && rec.current && !(got && got.refused)) {
     try {
       if (!state.publishedSignedOut && !rec.history.includes(rec.current)) {
         const reply = await fetchPublished({ action: 'publishedPageInfo', uuid, ver: rec.current });
@@ -6405,7 +6416,7 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
     const { names } = publishedSavedNames(info.files.map((f) => f.path));
     const files = info.files.map((f) => ({ path: f.path, savedAs: names.get(f.path), size: f.size, contentType: f.contentType, sha256: f.sha256 }));
     const got = await fetchPublishedFiles({ target: root, prefix: store.versionFolder(rec, ver), uuid: rec.uuid, ver, files, names, state,
-      onSignedOut: ctx.signOut, fetchPublished, collect: true, stopped: ctx.stopped });
+      onSignedOut: ctx.signOut, fetchPublished, collect: true, stopped: ctx.stopped, viewOnly: info.viewOnly });
     markUnverified(files, got.unverified);
     if (info.listFromLive) for (const f of files) f.verified = false;
     const v = {
@@ -6419,7 +6430,7 @@ async function saveHistory(root, rec, ctx, { skip = new Set(), name = '', openNo
     // Stopped inside this version's files: it stays as far as it got, incomplete, and is asked for again next time.
     if (got.missing.length && typeof ctx.stopped === 'function' && ctx.stopped()) { leftOut(i); break; }
     if (got.saved && !v.incomplete && (info.listFromLive || !got.missing.length)) out.saved.push(ver);
-    else { out.failed.push(ver); problems.push(...(got.problems.length ? got.problems : ['not saved'])); }
+    else { out.failed.push(ver); problems.push(...(got.refused ? ['view only'] : got.problems.length ? got.problems : ['not saved'])); }
   }
   if (out.failed.length) {
     warn(name, `Artifact "${name}": ${artifactCount(out.failed.length, 'older version')} could not be saved: ${[...new Set(problems)].join(', ')}.`, openNote);
